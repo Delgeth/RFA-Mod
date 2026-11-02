@@ -37,14 +37,15 @@ public sealed class GuerrillaTextures
             if (!File.Exists(path)) continue;
             var archive = Packfile.Open(path);
             Index(name, null, archive);
-            foreach (var e in archive.Entries.Where(e => e.IsContainer)) Index(name, e.Name, Packfile.FromBytes(e.Name, archive.Read(e)));
+            foreach (var e in archive.Entries.Where(e => e.IsContainer)) Index(name, e.Name, archive.OpenContainer(e));
         }
     }
 
     void Index(string archive, string? container, Packfile pack)
     {
-        foreach (var e in pack.Entries.Where(e => IsHeader(e.Name)))
-            foreach (string texture in PegFile.TextureNames(pack.Read(e)))
+        var headers = pack.Entries.Where(e => IsHeader(e.Name)).ToList();
+        foreach (var (e, header) in headers.Zip(pack.ReadAll(headers)))
+            foreach (string texture in PegFile.TextureNames(header))
                 where.TryAdd(Stem(texture), (archive, container, e.Name));
         foreach (var e in pack.Entries.Where(e => e.Name.EndsWith(".cefct_pc", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".gefct_pc", StringComparison.OrdinalIgnoreCase)))
             effectFiles.TryAdd(e.Name, (archive, container));
@@ -58,8 +59,11 @@ public sealed class GuerrillaTextures
     {
         if (!effectFiles.TryGetValue(file, out var at)) return null;
         var pack = Open(at.Archive, at.Container);
-        return pack.Find(file) is { } e ? pack.Read(e) : null;
+        return pack.Find(file) is { } e ? pack.ReadAll([e])[0] : null;
     }
+
+    /// <summary>Whether Guerrilla has an effect file (its .cefct_pc or .gefct_pc, by its file name).</summary>
+    public bool HasEffectFile(string file) => effectFiles.ContainsKey(file);
 
     /// <summary>How many textures were found.</summary>
     public int Count => where.Count;
@@ -73,7 +77,8 @@ public sealed class GuerrillaTextures
         if (!where.TryGetValue(texture, out var at)) return null;
         var pack = Open(at.Archive, at.Container);
         var dataFile = pack.Find(PegFile.DataFileName(at.Header) ?? "") ?? throw new InvalidDataException($"{at.Header} has no data file");
-        var peg = PegFile.Read(pack.Read(pack.Find(at.Header)!), pack.Read(dataFile));
+        var pegFiles = pack.ReadAll([pack.Find(at.Header)!, dataFile]);
+        var peg = PegFile.Read(pegFiles[0], pegFiles[1]);
         var t = peg.Textures.First(x => string.Equals(Stem(x.Name), texture, StringComparison.OrdinalIgnoreCase));
         int levels = t.MipLevels;
         if (t.Format.IsBlockCompressed())
@@ -90,7 +95,7 @@ public sealed class GuerrillaTextures
     {
         if (lastPack is { } last && last.Archive == archive && last.Container == container) return last.Pack;
         var pack = Packfile.Open(Path.Combine(folder, archive));
-        if (container != null) pack = Packfile.FromBytes(container, pack.Read(pack.Find(container)!));
+        if (container != null) pack = pack.OpenContainer(pack.Find(container)!);
         lastPack = (archive, container, pack);
         return pack;
     }

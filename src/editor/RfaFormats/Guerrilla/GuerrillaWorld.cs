@@ -65,6 +65,9 @@ public static class GuerrillaWorld
     // sizes; its own containers hold at most 19 MB of them. Guerrilla's busiest zone, all in one
     // container, asked for 26 MB and stopped the game.
     const long ChunkBudget = 14L << 20;
+    // Guerrilla's containers kept open while the world is built: more than the 20 a zone has in its
+    // two layers (its own and its nine sub-zones') and the few of chunks.vpp_pc.
+    const int ContainersKept = 32;
     static readonly GroundLayout Layout = GroundLayout.Whole;
 
     static Vector2 Corner(int col, int row) => new((col - 8) * ZoneWidth, (7 - row) * ZoneWidth);
@@ -104,7 +107,7 @@ public static class GuerrillaWorld
         {
             var pack = Packfile.Open(Path.Combine(guerrillaCache, archive));
             foreach (var entry in pack.Entries.Where(e => e.Name.StartsWith("1h_c") && e.Name.EndsWith(".str2_pc")))
-                foreach (var file in Packfile.FromBytes(entry.Name, pack.Read(entry)).Entries)
+                foreach (var file in pack.OpenContainer(entry).Entries)
                 {
                     var name = Path.GetFileNameWithoutExtension(file.Name).Split('_');
                     if (file.Name.EndsWith(".cterrain_pc") && name.Length == 3 && name[0] == "terr01" && int.TryParse(name[1], out int col) && int.TryParse(name[2], out int row))
@@ -131,16 +134,24 @@ public static class GuerrillaWorld
         var precache = Packfile.Open(Path.Combine(cache, "dlc01_precache.vpp_pc"));
         byte[] Pre(string name) => precache.Read(precache.Find(name) ?? throw new InvalidDataException($"no {name} in dlc01_precache.vpp_pc"));
 
-        // ---- Guerrilla's files: in a zone's own containers (both layers), else its precache.
+        // ---- Guerrilla's files: in a zone's own containers (both layers), else its precache. The
+        // containers are opened where they lie, and only the last ContainersKept are kept open (with
+        // their files unpacked): a zone's files are asked for together, zone after zone, and all of
+        // Guerrilla's world's containers would take GBs.
         var rfgL0 = Packfile.Open(Path.Combine(rfgCache, "terr01_l0.vpp_pc"));
         var rfgL1 = Packfile.Open(Path.Combine(rfgCache, "terr01_l1.vpp_pc"));
         var rfgPrecache = Packfile.Open(Path.Combine(rfgCache, "terr01_precache.vpp_pc"));
         var containers = new Dictionary<string, Packfile?>();
+        var opened = new Queue<string>();
         Packfile? Container(Packfile archive, string name)
         {
             string key = archive.Name + "/" + name;
             if (!containers.TryGetValue(key, out var c))
-                containers[key] = c = archive.Find(name + ".str2_pc") is { } e ? Packfile.FromBytes(name, archive.Read(e)) : null;
+            {
+                containers[key] = c = archive.Find(name + ".str2_pc") is { } e ? archive.OpenContainer(e, name) : null;
+                opened.Enqueue(key);
+                if (opened.Count > ContainersKept) containers.Remove(opened.Dequeue());
+            }
             return c;
         }
         byte[]? RfgFile(int col, int row, string file, int minSize = 2)
@@ -198,20 +209,29 @@ public static class GuerrillaWorld
         }
         log($"Rocks: {rocksIn.Values.Sum(r => r.Count)} placed, {rockPieces.Count} pieces, {rockTextures.Count} textures");
 
-        // ---- The ground, sampled whole from Guerrilla's sub-zones of each zone and those around it.
+        // ---- The ground, sampled whole from Guerrilla's sub-zones of each zone and those around it. A
+        // zone's sub-zones are read for the first zone sampled around it and let go after the last (all
+        // of them would take GBs); their road decals are kept for the roads below.
         int S = Layout.Samples, last = S - 1;
         var heights = new Dictionary<(int, int), float[]>();
         var holes = new Dictionary<(int, int), SquareCut[]>();
         var subzoneCache = new Dictionary<(int, int, int), TerrainSubzone?>();
+        var roadDecals = new Dictionary<(int, int, int), IReadOnlyList<GuerrillaRoadDecal>>();
         TerrainSubzone? Subzone(int col, int row, int n)
         {
             if (subzoneCache.TryGetValue((col, row, n), out var cached)) return cached;
             string stem = $"terr01_{col:00}_{row:00}_{n}";
             var read = RfgFile(col, row, stem + ".ctmesh_pc") is { } h && RfgFile(col, row, stem + ".gtmesh_pc", 1) is { } g ? TerrainSubzone.Read(h, g) : null;
+            roadDecals[(col, row, n)] = read?.RoadDecals ?? [];
             return subzoneCache[(col, row, n)] = read;
         }
-        foreach (var (col, row) in zones)
+        var lastSampledBy = new Dictionary<(int, int), int>();  // a zone whose sub-zones are read: the last zone (its number) sampled around it
+        for (int i = 0; i < zones.Count; i++)
+            for (int dc = -1; dc <= 1; dc++)
+                for (int dr = -1; dr <= 1; dr++) lastSampledBy[(zones[i].Col + dc, zones[i].Row + dr)] = i;
+        for (int i = 0; i < zones.Count; i++)
         {
+            var (col, row) = zones[i];
             var subzones = new List<TerrainSubzone>();
             for (int dc = -1; dc <= 1; dc++)
                 for (int dr = -1; dr <= 1; dr++)
@@ -222,6 +242,9 @@ public static class GuerrillaWorld
                                            s.Positions.Max(p => p.Z) >= corner.Y - 1 && s.Positions.Min(p => p.Z) <= corner.Y + ZoneWidth + 1);
             heights[(col, row)] = GuerrillaGround.Sample(over, corner, Layout, RockCorners(col, row)) ?? throw new InvalidDataException($"no Guerrilla ground for terr01_{col:00}_{row:00}");
             holes[(col, row)] = GuerrillaGround.RoadHoles(over, corner, Layout);
+            foreach (var ((doneCol, doneRow), lastBy) in lastSampledBy)
+                if (lastBy == i)
+                    for (int n = 0; n < 9; n++) subzoneCache.Remove((doneCol, doneRow, n));
         }
         log($"Ground: {zones.Count} zones sampled, {S} × {S} samples each");
         // The triangles (in the world) of the rocks placed in a zone and those around it: where the
@@ -314,7 +337,7 @@ public static class GuerrillaWorld
             var corner = Corner(col, row);
             var lists = Enumerable.Range(0, 9).Select(_ => new List<RoadDecalToWrite>()).ToArray();
             for (int n = 0; n < 9; n++)
-                foreach (GuerrillaRoadDecal decal in Subzone(col, row, n)?.RoadDecals ?? [])
+                foreach (GuerrillaRoadDecal decal in roadDecals[(col, row, n)])
                 {
                     Vector3 middle = decal.Corners.Length > 0 ? decal.Corners.Aggregate(Vector3.Add) / decal.Corners.Length : decal.Position;
                     int part = Math.Clamp((int)((middle.X - corner.X) / third), 0, 2) + 3 * Math.Clamp((int)((middle.Z - corner.Y) / third), 0, 2);
@@ -433,7 +456,7 @@ public static class GuerrillaWorld
         var rfgFiles = new GuerrillaTextures(rfgCache, GuerrillaTextures.EffectArchives);
         var placedProps = propsIn.Values.SelectMany(p => p).Select(o => o.Text("Props")).OfType<string>().Where(n => n.Length > 0)
             .GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
-        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.EffectFile(file + ".cefct_pc") != null);
+        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"));
         File.WriteAllBytes(Path.Combine(modFolder, "vfx.xtbl"), effectTables.Visuals);
         File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
         File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
@@ -479,7 +502,6 @@ public static class GuerrillaWorld
         // The marker that names the world's precache (rfg_precache.vpp_pc; see the precache below): four
         // zero bytes, as every one of the game's is.
         var layer = new List<(string Name, byte[] Data)> { (World + "_precache.precache", new byte[4]) };
-        var pending = new List<PendingContainer>();
         var layer1 = new List<(string Name, byte[] Data)>();
         var zonescript = new List<(string Name, byte[] Data)>();
         uint Class(string name) => NameHashes.ClassHash(name);
@@ -507,6 +529,195 @@ public static class GuerrillaWorld
                 if (starts.Count > 0) guerrillaStarts[(col, row)] = starts[0];
             }
             log($"Player starts: Guerrilla's own in {guerrillaStarts.Count} of {zones.Count} zones, the zone's middle in the rest");
+        }
+
+        // ---- The files the zones share (the ground's layers, roads, rocks, chunk files and their
+        // textures, effects), placed in every zone's containers first: the precache (below) is chosen
+        // from them, so each zone's containers are made and packed as soon as its own files are (see
+        // Pack), not all the zones' files held to the end (GBs).
+        void AddChunks(List<(string Name, byte[] Data)> to, IEnumerable<string> names)
+        {
+            foreach (string name in names)
+            {
+                var chunk = chunkFiles[name];
+                to.Add((name + ".cchk_pc", chunk.Header));
+                to.Add((name + ".gchk_pc", chunk.Data));
+                foreach (string texture in chunk.Textures) to.AddRange(chunkTextures[texture]);
+            }
+        }
+        var sharedIn = new Dictionary<(int, int), (List<(string Name, byte[] Data)> Zone, List<(string Name, byte[] Data)>[] Parts)>();
+        foreach (var (col, row) in zones)
+        {
+            string zone = $"{World}_{col:00}_{row:00}";
+            var corner = Corner(col, row);
+
+            // The chunk files go where Armageddon keeps them, in the container of the sub-zone each object
+            // stands in (its third of the zone each way), each container's share kept within ChunkBudget;
+            // what doesn't fit goes into the zone's container, which loads with the whole zone, and if
+            // that is full too, into the nearest of the zone's other sub-zones with room. A general_mover
+            // that others are attached to (Guerrilla's substations, its reactor core) goes in the zone's
+            // container first: one whose chunk isn't loaded yet isn't made, and the objects attached to
+            // it, made when the zone streams in, lose it ("Invalidating parent handle ...").
+            var chunksIn = Enumerable.Range(0, 9).Select(_ => new List<string>()).ToArray();
+            var zoneChunks = new List<string>();
+            {
+                var placedHere = propsIn[(col, row)];
+                var parentHandles = placedHere.Select(p => p.Parent).ToHashSet();
+                var parentChunks = placedHere.Where(p => p.ClassHash == generalMover && parentHandles.Contains(p.Handle))
+                    .Select(p => Path.GetFileNameWithoutExtension(p.Text("chunk_name")!)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var wanted = Enumerable.Range(0, 9).Select(_ => new HashSet<string>(StringComparer.OrdinalIgnoreCase)).ToArray();
+                foreach (var p in placedHere)
+                {
+                    byte[] placement = p.Value("oP")!;
+                    float x = BitConverter.ToSingle(placement, 0) - corner.X, z = BitConverter.ToSingle(placement, 8) - corner.Y;
+                    string chunk = Path.GetFileNameWithoutExtension(p.Text("chunk_name")!);
+                    if (!parentChunks.Contains(chunk)) wanted[Math.Clamp((int)(x / third), 0, 2) + 3 * Math.Clamp((int)(z / third), 0, 2)].Add(chunk);
+                }
+                long Cost(string name) => chunkFiles[name].Header.Length + (long)chunkFiles[name].Data.Length;
+                long zoneCost = 0;
+                foreach (string name in parentChunks)
+                {
+                    zoneChunks.Add(name);
+                    zoneCost += Cost(name);
+                }
+                var partCost = new long[9];
+                foreach (int n in Enumerable.Range(0, 9).OrderByDescending(n => wanted[n].Sum(Cost)))
+                    foreach (string name in wanted[n].OrderByDescending(Cost))
+                    {
+                        if (zoneChunks.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+                        int to = n;
+                        if (partCost[n] + Cost(name) > ChunkBudget)
+                        {
+                            if (zoneCost + Cost(name) <= ChunkBudget)
+                            {
+                                zoneChunks.Add(name);
+                                zoneCost += Cost(name);
+                                continue;
+                            }
+                            int nearest = Enumerable.Range(0, 9).Where(m => m != n && partCost[m] + Cost(name) <= ChunkBudget)
+                                .OrderBy(m => Math.Abs(m % 3 - n % 3) + Math.Abs(m / 3 - n / 3)).ThenBy(m => partCost[m]).DefaultIfEmpty(n).First();
+                            if (nearest != n) log($"  {zone}: {name} (for sub-zone {n}) put in sub-zone {nearest}, the nearest with room");
+                            to = nearest;
+                        }
+                        if (chunksIn[to].Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+                        chunksIn[to].Add(name);
+                        partCost[to] += Cost(name);
+                    }
+                for (int n = 0; n < 9; n++)
+                    if (partCost[n] > ChunkBudget)
+                        log($"  {zone}: sub-zone {n} holds {partCost[n] / (1 << 20):0} MB of chunk files, more than the {ChunkBudget >> 20} MB a container is given; it may not load");
+            }
+
+            // The zone's container: its ground's layers, roads, rocks, chunk files and the effects its
+            // objects show (with the zone, as Guerrilla's own world's are with its level); each
+            // sub-zone's: its chunk files.
+            var files = new List<(string Name, byte[] Data)>();
+            foreach (string texture in looks[(col, row)].TerrainTextures) files.AddRange(layerFiles[texture]);
+            foreach (string texture in roadTexturesIn[(col, row)]) files.AddRange(roadTextures[texture]);
+            foreach (string name in rocksIn[(col, row)].Select(r => r.Name).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var piece = rockPieces[name];
+                files.Add((name + ".cstch_pc", piece.Header));
+                files.Add((name + ".gstch_pc", piece.Data));
+                foreach (string texture in piece.Textures) files.AddRange(rockTextures[texture]);
+            }
+            AddChunks(files, zoneChunks);
+            foreach (string file in propsIn[(col, row)].Select(o => o.Text("Props")).OfType<string>()
+                         .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Distinct(StringComparer.OrdinalIgnoreCase))
+                files.AddRange(effectFiles[file]);
+            var parts = chunksIn.Select(names =>
+            {
+                var partFiles = new List<(string Name, byte[] Data)>();
+                AddChunks(partFiles, names);
+                return partFiles.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            }).ToArray();
+            sharedIn[(col, row)] = (files.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList(), parts);
+        }
+
+        // ---- The precache: every file more than one container holds (the ground's layers, roads,
+        // rocks, chunk files and their textures) is kept once, loose, in the world's precache archive
+        // (rfg_precache.vpp_pc), and each cell's precache group in the asset list (0p_cXXYY for a
+        // sub-zone, 1p_cXXYY for a zone: type 17, flags 0x200, no data, a primitive for each header
+        // file) names those it needs: the game loads each of them once, while any cell that names it
+        // is loaded. So Guerrilla keeps its shared files (terr01_precache.vpp_pc and a precache group
+        // for every cell) and Armageddon its areas' (surface_precache.vpp_pc, 0p_ and 1p_ groups in
+        // world_l0.asm_pc). The guerrilla_world mod has the game mount it (its area for our worlds).
+        // (The zones' own files, their ground's, terrain and zone files, are each in one container, so
+        // only the shared ones are counted.)
+        var holders = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var lengths = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var differing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (zoneFiles, parts) in sharedIn.Values)
+            foreach (var (name, data) in parts.Prepend(zoneFiles).SelectMany(files => files))
+            {
+                holders[name] = holders.GetValueOrDefault(name) + 1;
+                if (lengths.TryGetValue(name, out int length) && length != data.Length) differing.Add(name);
+                lengths[name] = data.Length;
+            }
+        // Which of them: the game reads the directories of a level's archives into one pool of
+        // 225,280 bytes ("temp packfile"; 0xCB5B40 asks it for an archive's directory and names and
+        // 16 bytes, else stops with "Out of space in temp packfile"), and our first and second layers
+        // and zone archive take about 52 KB of it. So the precache's directory (24 bytes a file) and
+        // names are kept within PrecacheDirectoryBudget: the files that save the most memory go first
+        // (their size times the containers past the first that would hold them), each with its data
+        // file; the rest stay in their containers.
+        static string UnitOf(string name)
+        {
+            string ext = Path.GetExtension(name);
+            return ext.Length > 2 && (ext[1] is 'g' or 'G') ? Path.ChangeExtension(name, ".c" + ext[2..]) : name;
+        }
+        var inPrecache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int directory = 16, left = 0;
+        foreach (var unit in holders.Keys.Where(n => holders[n] > 1 && !differing.Contains(n))
+                                         .GroupBy(UnitOf, StringComparer.OrdinalIgnoreCase)
+                                         .OrderByDescending(u => (long)(u.Max(n => holders[n]) - 1) * u.Sum(n => (long)lengths[n])))
+        {
+            int cost = unit.Sum(n => 24 + n.Length + 1);
+            if (directory + cost > PrecacheDirectoryBudget)
+            {
+                left += unit.Count();
+                continue;
+            }
+            directory += cost;
+            inPrecache.UnionWith(unit);
+        }
+        bool Shared(string name) => inPrecache.Contains(name);
+        var precacheFiles = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        var textureFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);  // every texture file in the world's containers
+        long before = 0, after = 0;
+        // A container of the world (0h_cXXYY for a sub-zone, 1h_cXXYY for a zone, which goes in the
+        // zones' layer) with its files, packed: those the precache holds left out, and its asset list
+        // entries made.
+        void Pack(string name, bool zoneLayer, IReadOnlyList<(string Name, byte[] Data)> files)
+        {
+            var kept = files.Where(f => !Shared(f.Name)).ToList();
+            var fromPrecache = files.Where(f => Shared(f.Name)).ToList();
+            before += files.Sum(f => (long)f.Data.Length);
+            after += kept.Sum(f => (long)f.Data.Length);
+            textureFiles.UnionWith(files.Select(f => f.Name).Where(n => n.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase)));
+            foreach (var (file, data) in fromPrecache) precacheFiles.TryAdd(file, data);
+            byte[] bytes = Packfile.CreateContainer(kept);
+            var own = ContainerEntry(name, bytes, kept);
+            var precacheGroup = new AsmContainer { Name = name[..1] + "p" + name[2..], Type = 17, Flags = 0x200 };
+            precacheGroup.Primitives.AddRange(fromPrecache.Where(f => IsHeader(f.Name)).Select(f => PrimitiveOf(f.Name, fromPrecache)));
+            if (precacheGroup.Primitives.Count > 0) asm.Containers.Add(precacheGroup);  // all in layer 0's list, as Guerrilla's
+            if (zoneLayer)
+            {
+                asm1.Containers.Add(own);
+                layer1.Add((name + ".str2_pc", bytes));
+                // The zone's group: everything the zone needs, its container's and its precache group's.
+                var group = new AsmContainer { Name = "1_" + name[3..], Type = 17, Flags = 0x2300 };
+                group.Primitives.AddRange(own.Primitives.Concat(precacheGroup.Primitives).Select(p => new AsmPrimitive
+                {
+                    Name = p.Name, Type = p.Type, Allocator = p.Allocator, Flags = p.Flags, SplitIndex = p.SplitIndex, HeaderSize = p.HeaderSize, DataSize = p.DataSize,
+                }));
+                asm.Containers.Add(group);  // the groups stay in layer 0's list, as Guerrilla's
+            }
+            else
+            {
+                asm.Containers.Add(own);
+                layer.Add((name + ".str2_pc", bytes));
+            }
         }
 
         foreach (var (col, row) in zones)
@@ -590,187 +801,27 @@ public static class GuerrillaWorld
             var boxes = rocks.Select(r => StitchList.PlacedBox(rockPieces[r.Name].CollisionMin, rockPieces[r.Name].CollisionMax, r.Rotation, r.Position)).ToList();
             byte[] stitch = StitchList.Write(rocks, zoneMiddle, boxes);
 
-            // The chunk files go where Armageddon keeps them, in the container of the sub-zone each object
-            // stands in (its third of the zone each way), each container's share kept within ChunkBudget;
-            // what doesn't fit goes into the zone's container, which loads with the whole zone, and if
-            // that is full too, into the nearest of the zone's other sub-zones with room. A general_mover
-            // that others are attached to (Guerrilla's substations, its reactor core) goes in the zone's
-            // container first: one whose chunk isn't loaded yet isn't made, and the objects attached to
-            // it, made when the zone streams in, lose it ("Invalidating parent handle ...").
-            var chunksIn = Enumerable.Range(0, 9).Select(_ => new List<string>()).ToArray();
-            var zoneChunks = new List<string>();
-            {
-                var placedHere = propsIn[(col, row)];
-                var parentHandles = placedHere.Select(p => p.Parent).ToHashSet();
-                var parentChunks = placedHere.Where(p => p.ClassHash == generalMover && parentHandles.Contains(p.Handle))
-                    .Select(p => Path.GetFileNameWithoutExtension(p.Text("chunk_name")!)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var wanted = Enumerable.Range(0, 9).Select(_ => new HashSet<string>(StringComparer.OrdinalIgnoreCase)).ToArray();
-                foreach (var p in placedHere)
-                {
-                    byte[] placement = p.Value("oP")!;
-                    float x = BitConverter.ToSingle(placement, 0) - corner.X, z = BitConverter.ToSingle(placement, 8) - corner.Y;
-                    string chunk = Path.GetFileNameWithoutExtension(p.Text("chunk_name")!);
-                    if (!parentChunks.Contains(chunk)) wanted[Math.Clamp((int)(x / third), 0, 2) + 3 * Math.Clamp((int)(z / third), 0, 2)].Add(chunk);
-                }
-                long Cost(string name) => chunkFiles[name].Header.Length + (long)chunkFiles[name].Data.Length;
-                long zoneCost = 0;
-                foreach (string name in parentChunks)
-                {
-                    zoneChunks.Add(name);
-                    zoneCost += Cost(name);
-                }
-                var partCost = new long[9];
-                foreach (int n in Enumerable.Range(0, 9).OrderByDescending(n => wanted[n].Sum(Cost)))
-                    foreach (string name in wanted[n].OrderByDescending(Cost))
-                    {
-                        if (zoneChunks.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
-                        int to = n;
-                        if (partCost[n] + Cost(name) > ChunkBudget)
-                        {
-                            if (zoneCost + Cost(name) <= ChunkBudget)
-                            {
-                                zoneChunks.Add(name);
-                                zoneCost += Cost(name);
-                                continue;
-                            }
-                            int nearest = Enumerable.Range(0, 9).Where(m => m != n && partCost[m] + Cost(name) <= ChunkBudget)
-                                .OrderBy(m => Math.Abs(m % 3 - n % 3) + Math.Abs(m / 3 - n / 3)).ThenBy(m => partCost[m]).DefaultIfEmpty(n).First();
-                            if (nearest != n) log($"  {zone}: {name} (for sub-zone {n}) put in sub-zone {nearest}, the nearest with room");
-                            to = nearest;
-                        }
-                        if (chunksIn[to].Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
-                        chunksIn[to].Add(name);
-                        partCost[to] += Cost(name);
-                    }
-                for (int n = 0; n < 9; n++)
-                    if (partCost[n] > ChunkBudget)
-                        log($"  {zone}: sub-zone {n} holds {partCost[n] / (1 << 20):0} MB of chunk files, more than the {ChunkBudget >> 20} MB a container is given; it may not load");
-            }
-            void AddChunks(List<(string Name, byte[] Data)> to, IEnumerable<string> names)
-            {
-                foreach (string name in names)
-                {
-                    var chunk = chunkFiles[name];
-                    to.Add((name + ".cchk_pc", chunk.Header));
-                    to.Add((name + ".gchk_pc", chunk.Data));
-                    foreach (string texture in chunk.Textures) to.AddRange(chunkTextures[texture]);
-                }
-            }
-
-            // Its containers and asset list entries.
-            var files = new List<(string Name, byte[] Data)>();
-            foreach (string texture in look.TerrainTextures) files.AddRange(layerFiles[texture]);
-            foreach (string texture in roadTexturesIn[(col, row)]) files.AddRange(roadTextures[texture]);
-            foreach (string name in rocks.Select(r => r.Name).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                var piece = rockPieces[name];
-                files.Add((name + ".cstch_pc", piece.Header));
-                files.Add((name + ".gstch_pc", piece.Data));
-                foreach (string texture in piece.Textures) files.AddRange(rockTextures[texture]);
-            }
-            AddChunks(files, zoneChunks);
-            // The effects its objects show (with the zone, as Guerrilla's own world's are with its level).
-            foreach (string file in propsIn[(col, row)].Select(o => o.Text("Props")).OfType<string>()
-                         .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Distinct(StringComparer.OrdinalIgnoreCase))
-                files.AddRange(effectFiles[file]);
-            files = files.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
-            files.AddRange(new (string Name, byte[] Data)[]
+            // Its containers (packed now: see Pack) and asset list entries: the shared files placed for
+            // it (above), with its own.
+            var (sharedFiles, sharedParts) = sharedIn[(col, row)];
+            var files = new List<(string Name, byte[] Data)>(sharedFiles)
             {
                 (blendName + ".cvbm_pc", PegFile.SingleHeader(blendName + ".tga", blend.Width, blend.Height, TextureFormat.Argb8888, 1, PegFile.DataFlag)), (blendName + ".gvbm_pc", blendData),
                 (colourName + ".cvbm_pc", PegFile.SingleHeader(colourName + ".tga", look.Colour.Width, look.Colour.Height, TextureFormat.Dxt1, colourLevels, 0)), (colourName + ".gvbm_pc", colourData),
                 (zone + ".cterrain_pc", terrainFile), (zone + ".gterrain_pc", terrainData),
                 (zone + ".navdata_pc", navigation[(col, row)].ToBytes()), (zone + ".stchlst_pc", stitch), (zone + ".rfgzone_pc", zoneBytes),
-            });
-            pending.Add(new PendingContainer($"1h_c{col:00}{15 - row:00}", ZoneLayer: true, files));
+            };
+            Pack($"1h_c{col:00}{15 - row:00}", zoneLayer: true, files);
             for (int n = 0; n < 9; n++)
-            {
-                var partFiles = new List<(string Name, byte[] Data)> { ($"{zone}_{n}.ctmesh_pc", subzones[n].Header), ($"{zone}_{n}.gtmesh_pc", subzones[n].Data) };
-                AddChunks(partFiles, chunksIn[n]);
-                pending.Add(new PendingContainer($"0h_c{col * 3 + n % 3:00}{(15 - row) * 3 + n / 3:00}", ZoneLayer: false,
-                                                 partFiles.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList()));
-            }
+                Pack($"0h_c{col * 3 + n % 3:00}{(15 - row) * 3 + n / 3:00}", zoneLayer: false,
+                     [($"{zone}_{n}.ctmesh_pc", subzones[n].Header), ($"{zone}_{n}.gtmesh_pc", subzones[n].Data), .. sharedParts[n]]);
             log($"{zone}{(isStart ? " (start)" : "")}: ground {h.Min():0} to {h.Max():0} m, {rocks.Count} rocks, {propsIn[(col, row)].Count} destructible objects ({links.Length / ZoneFile.DestructionLinkSize} links), {files.Sum(f => (long)f.Data.Length) / 1024:N0} KB of files in the zone's container");
+            // What was made for this zone alone isn't needed again.
+            heights.Remove((col, row));
+            looks.Remove((col, row));
+            navigation.Remove((col, row));
         }
-
-        // ---- The precache: every file more than one container holds (the ground's layers, roads,
-        // rocks, chunk files and their textures) is kept once, loose, in the world's precache archive
-        // (rfg_precache.vpp_pc), and each cell's precache group in the asset list (0p_cXXYY for a
-        // sub-zone, 1p_cXXYY for a zone: type 17, flags 0x200, no data, a primitive for each header
-        // file) names those it needs: the game loads each of them once, while any cell that names it
-        // is loaded. So Guerrilla keeps its shared files (terr01_precache.vpp_pc and a precache group
-        // for every cell) and Armageddon its areas' (surface_precache.vpp_pc, 0p_ and 1p_ groups in
-        // world_l0.asm_pc). The guerrilla_world mod has the game mount it (its area for our worlds).
-        var holders = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var lengths = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var differing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var c in pending)
-            foreach (var (name, data) in c.Files)
-            {
-                holders[name] = holders.GetValueOrDefault(name) + 1;
-                if (lengths.TryGetValue(name, out int length) && length != data.Length) differing.Add(name);
-                lengths[name] = data.Length;
-            }
-        // Which of them: the game reads the directories of a level's archives into one pool of
-        // 225,280 bytes ("temp packfile"; 0xCB5B40 asks it for an archive's directory and names and
-        // 16 bytes, else stops with "Out of space in temp packfile"), and our first and second layers
-        // and zone archive take about 52 KB of it. So the precache's directory (24 bytes a file) and
-        // names are kept within PrecacheDirectoryBudget: the files that save the most memory go first
-        // (their size times the containers past the first that would hold them), each with its data
-        // file; the rest stay in their containers.
-        static string UnitOf(string name)
-        {
-            string ext = Path.GetExtension(name);
-            return ext.Length > 2 && (ext[1] is 'g' or 'G') ? Path.ChangeExtension(name, ".c" + ext[2..]) : name;
-        }
-        var inPrecache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        int directory = 16, left = 0;
-        foreach (var unit in holders.Keys.Where(n => holders[n] > 1 && !differing.Contains(n))
-                                         .GroupBy(UnitOf, StringComparer.OrdinalIgnoreCase)
-                                         .OrderByDescending(u => (long)(u.Max(n => holders[n]) - 1) * u.Sum(n => (long)lengths[n])))
-        {
-            int cost = unit.Sum(n => 24 + n.Length + 1);
-            if (directory + cost > PrecacheDirectoryBudget)
-            {
-                left += unit.Count();
-                continue;
-            }
-            directory += cost;
-            inPrecache.UnionWith(unit);
-        }
-        bool Shared(string name) => inPrecache.Contains(name);
-        var precacheFiles = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        long before = 0;
-        foreach (var c in pending)
-        {
-            before += c.Files.Sum(f => (long)f.Data.Length);
-            var kept = c.Files.Where(f => !Shared(f.Name)).ToList();
-            var fromPrecache = c.Files.Where(f => Shared(f.Name)).ToList();
-            foreach (var (name, data) in fromPrecache) precacheFiles.TryAdd(name, data);
-            byte[] bytes = Packfile.CreateContainer(kept);
-            var own = ContainerEntry(c.Name, bytes, kept);
-            var precacheGroup = new AsmContainer { Name = c.Name[..1] + "p" + c.Name[2..], Type = 17, Flags = 0x200 };
-            precacheGroup.Primitives.AddRange(fromPrecache.Where(f => IsHeader(f.Name)).Select(f => PrimitiveOf(f.Name, fromPrecache)));
-            if (precacheGroup.Primitives.Count > 0) asm.Containers.Add(precacheGroup);  // all in layer 0's list, as Guerrilla's
-            if (c.ZoneLayer)
-            {
-                asm1.Containers.Add(own);
-                layer1.Add((c.Name + ".str2_pc", bytes));
-                // The zone's group: everything the zone needs, its container's and its precache group's.
-                var group = new AsmContainer { Name = "1_" + c.Name[3..], Type = 17, Flags = 0x2300 };
-                group.Primitives.AddRange(own.Primitives.Concat(precacheGroup.Primitives).Select(p => new AsmPrimitive
-                {
-                    Name = p.Name, Type = p.Type, Allocator = p.Allocator, Flags = p.Flags, SplitIndex = p.SplitIndex, HeaderSize = p.HeaderSize, DataSize = p.DataSize,
-                }));
-                asm.Containers.Add(group);  // the groups stay in layer 0's list, as Guerrilla's
-            }
-            else
-            {
-                asm.Containers.Add(own);
-                layer.Add((c.Name + ".str2_pc", bytes));
-            }
-        }
-        long sharedBytes = precacheFiles.Values.Sum(d => (long)d.Length), after = pending.Sum(c => c.Files.Where(f => !Shared(f.Name)).Sum(f => (long)f.Data.Length));
-        log($"Precache: {precacheFiles.Count} files ({sharedBytes / 1048576:N0} MB) held by more than one container, kept once (its directory " +
+        log($"Precache: {precacheFiles.Count} files ({precacheFiles.Values.Sum(d => (long)d.Length) / 1048576:N0} MB) held by more than one container, kept once (its directory " +
             $"{directory / 1024:N0} KB of the {PrecacheDirectoryBudget / 1024:N0} KB it may take; {left} more such files stay in their containers); " +
             $"the containers' files {before / 1048576:N0} MB → {after / 1048576:N0} MB");
         foreach (var (name, piece) in rockPieces)
@@ -790,17 +841,20 @@ public static class GuerrillaWorld
             group.Primitives.AddRange(chunkGroupFiles.Where(f => f.Name.EndsWith(".cchk_pc") || f.Name.EndsWith(".cvbm_pc")).Select(f => PrimitiveOf(f.Name, chunkGroupFiles)));
             asm.Containers.Add(group);
         }
-        // Each effect file a group of its own named after it (type 2, as Armageddon lists its effects in
-        // effects.vpp_pc's asset list): the game makes an effect object only when the streaming system
-        // knows a group by the visual's file name (rfg_<name>.cefct_pc), which the object then holds while
-        // it plays; its files are the ones the zones and the precache hold.
+        // Each effect file a group of its own named after it (type 2, as Armageddon's effects): the game
+        // makes an effect object only when the streaming system knows a group by the visual's file name
+        // (rfg_<name>.cefct_pc), which the object then holds while it plays; its files are the ones the
+        // zones and the precache hold. Listed where Armageddon lists its own (below, effects.vpp_pc's
+        // asset list, read once and kept), not in the world's: the world's list is read again at every
+        // level load, and with effect groups in it a second load broke the game's container records.
+        var effectGroups = new List<AsmContainer>();
         foreach (var files in effectFiles.Values)
         {
             var groupFiles = files.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
             var group = new AsmContainer { Name = groupFiles[0].Name, Type = 2, Flags = 0x300 };
             group.Primitives.AddRange(groupFiles.Where(f => f.Name.EndsWith(".cefct_pc") || f.Name.EndsWith(".cvbm_pc")).Select(f => PrimitiveOf(f.Name, groupFiles)));
             foreach (var primitive in group.Primitives) primitive.Allocator = 0;  // as Armageddon's effect groups
-            asm.Containers.Add(group);
+            effectGroups.Add(group);
         }
         layer.Add((World + "_l0.asm_pc", asm.ToBytes()));
         layer1.Add((World + "_l1.asm_pc", asm1.ToBytes()));
@@ -826,17 +880,22 @@ public static class GuerrillaWorld
         log($"Districts: {string.Join(", ", districts.Select(d => $"{d.Guerrilla} ({d.Name})"))}, each with Guerrilla's time of day ({World}_<name>.dtodx), " +
             $"in the territory {World} (table.vpp_pc\\territories.xtbl)");
         // Room for the world's textures in the game's texture name table (see GuerrillaBitmaps): a slot
-        // for every texture file the world has, and some to spare (the HUD's, other mods').
-        var textureFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var container in pending)
-            foreach (var file in container.Files.Where(f => f.Name.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase))) textureFiles.Add(file.Name);
-        foreach (string name in precacheFiles.Keys.Where(n => n.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase))) textureFiles.Add(name);
+        // for every texture file the world has (textureFiles, from its containers), and some to spare
+        // (the HUD's, other mods').
         int extraSlots = (textureFiles.Count + SpareTextureSlots + 499) / 500 * 500;
         var gameMisc = Packfile.Open(Path.Combine(cache, "misc.vpp_pc"));
         byte[] bitmaps = gameMisc.Read(gameMisc.Find("bitmaps_pc") ?? throw new InvalidDataException("no bitmaps_pc in misc.vpp_pc"));
         string miscFolder = Path.Combine(output, "misc.vpp_pc");
         Directory.CreateDirectory(miscFolder);
         File.WriteAllBytes(Path.Combine(miscFolder, "bitmaps_pc"), GuerrillaBitmaps.WithRoom(bitmaps, extraSlots));
+        // The effects' groups (above), added to Armageddon's effects asset list, as an override of it.
+        var gameEffects = Packfile.Open(Path.Combine(cache, "effects.vpp_pc"));
+        var effectsList = AsmFile.Read(gameEffects.Read(gameEffects.Find("vfx_containers.asm_pc") ?? throw new InvalidDataException("no vfx_containers.asm_pc in effects.vpp_pc")));
+        effectsList.Containers.AddRange(effectGroups);
+        string effectsFolder = Path.Combine(output, "effects.vpp_pc");
+        Directory.CreateDirectory(effectsFolder);
+        File.WriteAllBytes(Path.Combine(effectsFolder, "vfx_containers.asm_pc"), effectsList.ToBytes());
+        log($"Effects: {effectGroups.Count} effect groups added to Armageddon's effects asset list ({effectsList.Containers.Count} groups; effects.vpp_pc\\vfx_containers.asm_pc)");
         log($"Textures: {textureFiles.Count:N0} texture files; the game's texture name table gets {extraSlots:N0} more slots " +
             $"({GuerrillaBitmaps.Capacity(bitmaps):N0} → {GuerrillaBitmaps.Capacity(bitmaps) + extraSlots:N0}; misc.vpp_pc\\bitmaps_pc)");
         log($"World {World}: {zones.Count} zones, start {World}_{start.Col:00}_{start.Row:00}; written into {output}");
@@ -1119,9 +1178,6 @@ public static class GuerrillaWorld
         string e = Path.GetExtension(name).ToLowerInvariant();
         return e is ".rfgzone_pc" or ".navdata_pc" or ".stchlst_pc" || e.StartsWith(".c");
     }
-
-    /// <summary>A container of the world before its shared files go to the precache: its name (0h_cXXYY or 1h_cXXYY), whether it is in the zones' layer, and its files.</summary>
-    sealed record PendingContainer(string Name, bool ZoneLayer, List<(string Name, byte[] Data)> Files);
 
     /// <summary>A file's asset list primitive: its kind's type, allocator, flags and split index (as the game's), and its and its data file's sizes.</summary>
     static AsmPrimitive PrimitiveOf(string name, IReadOnlyList<(string Name, byte[] Data)> files)

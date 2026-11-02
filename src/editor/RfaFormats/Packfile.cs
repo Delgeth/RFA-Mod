@@ -118,6 +118,18 @@ public sealed class Packfile
         return new Packfile(name, (offset, length) => data.AsSpan((int)offset, length).ToArray());
     }
 
+    /// <summary>
+    /// Opens a container (.str2_pc) inside this archive, as <see cref="FromBytes"/> does with its bytes
+    /// read out, but where it lies if the archive isn't compressed (as the levels' aren't): only its
+    /// header, directory and names are read now, its data when a file is read, so the container's
+    /// bytes aren't held.
+    /// </summary>
+    public Packfile OpenContainer(PackfileEntry entry, string? name = null)
+    {
+        if (IsCompressed) return FromBytes(name ?? entry.Name, Read(entry));
+        return new Packfile(name ?? entry.Name, (offset, length) => readBytes(entry.StoredAt + offset, length));
+    }
+
     /// <summary>The bytes of one file, decompressed.</summary>
     public byte[] Read(PackfileEntry entry)
     {
@@ -129,6 +141,37 @@ public sealed class Packfile
 
         condensedData ??= Inflate(readBytes(DataStart, (int)CompressedDataSize), (int)DataSize);
         return condensedData.AsSpan((int)entry.Offset, (int)entry.Size).ToArray();
+    }
+
+    /// <summary>
+    /// The bytes of several files, decompressed, in the order given. From a condensed packfile they
+    /// are read in one pass over its stream, as far as the last of them, and its data block isn't
+    /// kept (as <see cref="Read"/> keeps it for the next file): for a few files of many containers.
+    /// </summary>
+    public byte[][] ReadAll(IReadOnlyList<PackfileEntry> entries)
+    {
+        if (!IsCondensed || condensedData != null) return [.. entries.Select(Read)];
+        var files = new byte[entries.Count][];
+        using var zlib = new ZLibStream(new MemoryStream(readBytes(DataStart, (int)CompressedDataSize)), CompressionMode.Decompress);
+        var passed = new byte[0x10000];
+        long at = 0;
+        foreach (int i in Enumerable.Range(0, entries.Count).OrderBy(i => entries[i].Offset))
+        {
+            var entry = entries[i];
+            if (entry.Offset < at) throw new ArgumentException($"{entry.Name} is given twice, or overlaps another file", nameof(entries));
+            while (at < entry.Offset) at += ReadSome(zlib, passed.AsSpan(0, (int)Math.Min(entry.Offset - at, passed.Length)));
+            files[i] = new byte[entry.Size];
+            for (int done = 0; done < files[i].Length;) done += ReadSome(zlib, files[i].AsSpan(done));
+            at += entry.Size;
+        }
+        return files;
+    }
+
+    /// <summary>Some bytes from a stream (the game's have no end marker, so it is read by size), at least one.</summary>
+    static int ReadSome(Stream stream, Span<byte> into)
+    {
+        int read = stream.Read(into);
+        return read > 0 ? read : throw new InvalidDataException("compressed data ended before the files it holds");
     }
 
     public PackfileEntry? Find(string fileName) =>
@@ -359,24 +402,34 @@ public sealed class Packfile
     {
         var names = new MemoryStream();
         var directory = new MemoryStream();
-        var plain = new MemoryStream();
-        var offsets = new List<uint>();
+        long dataSize = 0;
         foreach (var (name, bytes) in files)
         {
-            offsets.Add((uint)plain.Length);
             directory.Write(BitConverter.GetBytes((uint)names.Length));
             directory.Write(BitConverter.GetBytes(0u));
-            directory.Write(BitConverter.GetBytes((uint)plain.Length));
+            directory.Write(BitConverter.GetBytes((uint)dataSize));
             directory.Write(BitConverter.GetBytes((uint)bytes.Length));
             directory.Write(BitConverter.GetBytes(0xFFFFFFFFu));  // the stored size, below
             directory.Write(BitConverter.GetBytes(0u));
             names.Write(Encoding.Latin1.GetBytes(name));
             names.WriteByte(0);
-            plain.Write(bytes);
+            dataSize += bytes.Length;
         }
-        byte[] data = plain.ToArray(), block = data;
         byte[] dir = directory.ToArray();
-        if (compressed)
+        // The data block: the files one after another, or (compressed) the stream of them; a plain copy
+        // of them is made only when it is what's stored.
+        byte[] block;
+        if (!compressed)
+        {
+            block = new byte[dataSize];
+            long at = 0;
+            foreach (var (_, bytes) in files)
+            {
+                bytes.CopyTo(block, at);
+                at += bytes.Length;
+            }
+        }
+        else
         {
             var output = new MemoryStream();
             var zlib = new ZLibStream(output, CompressionLevel.SmallestSize, leaveOpen: true);
@@ -398,7 +451,7 @@ public sealed class Packfile
         BitConverter.TryWriteBytes(packfile.AsSpan(0x158), (uint)packfile.Length);
         BitConverter.TryWriteBytes(packfile.AsSpan(0x15C), (uint)dir.Length);
         BitConverter.TryWriteBytes(packfile.AsSpan(0x160), (uint)names.Length);
-        BitConverter.TryWriteBytes(packfile.AsSpan(0x164), (uint)data.Length);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x164), (uint)dataSize);
         BitConverter.TryWriteBytes(packfile.AsSpan(0x168), compressed ? (uint)block.Length : 0xFFFFFFFFu);
         dir.CopyTo(packfile, HeaderSize);
         names.ToArray().CopyTo(packfile, namesStart);
