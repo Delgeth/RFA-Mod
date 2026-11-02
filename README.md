@@ -16,8 +16,9 @@ single-player.
   settings every launch. Now they're kept in `video_settings.cfg`.
 - **A better developer console** (`console`): easy to read, with a dark backing, bigger text and
   a clear caret; it keeps all its output (not just the last 256 lines) for you to scroll back
-  through, and it gets out of the way of the render debug panel. Console settings apply
-  automatically from `console.ini`.
+  through, shows the game's hidden debug output and RFA-Mod's log, takes pasted commands, and gets
+  out of the way of the render debug panel. Console settings apply automatically from
+  `console.ini`.
 - **Red Faction: Guerrilla's world, a first look** (`guerrilla_world`, beta): Guerrilla's whole map
   as a new world, with its sky, clouds, day and night, and a longer view. You build it from your
   own copy of Guerrilla.
@@ -133,11 +134,23 @@ Things to know:
   there), or hold the middle button and move up or down to scroll, faster the further you go (a
   quick middle click keeps it scrolling until your next click). Clicking the line you type moves
   the caret there.
+- It also shows what you'd otherwise never see: the game's own debug output and the error reports
+  it flashes on the screen (marked `[game]`; blue-grey, errors red, warnings yellow), and RFA-Mod's
+  log as it's written (each line starts with the mod's name, in teal). So when something doesn't
+  load or a command fails, the reason is usually right there.
+- Ctrl+V (or Shift+Insert) pastes. The text is cleaned up so the console can run it: curly quotes
+  and dashes become plain ones, tabs become spaces, a `]` copied in front of a command is dropped,
+  and anything it can't type is left out (it tells you). Paste several lines and they run one at a
+  time: the first goes in the line you type, and each Enter runs it and brings up the next (Esc
+  drops the rest).
+- Tab completes a command's name and lists the matches with what each one does. With arguments
+  already typed, Tab leaves your line alone and tells you what the command is. `help` lists every
+  command, and `? <setting>` shows a setting's value.
 - It keeps 10000 lines, so long lists such as `search <text>` (finds commands) can be read in
-  full. Everything it prints is also in `logs\console.log`, and `print_to_file` writes every
+  full. Everything it shows is also in `logs\console.log`, and `print_to_file` writes every
   command to `console_commands.txt`.
-- Its height, text sizes, darkness, history length, the notify lines and the build stamp are
-  under `[Console]` in `rfa_mods.ini`.
+- Its height, text sizes, darkness, history length, the notify lines, the build stamp and the
+  extra logs are under `[Console]` in `rfa_mods.ini`.
 - The render debug panel (`` ` `` + X) takes the mouse while the console is open. While the panel
   is up, the console moves to the bottom of the screen, below the panel, so you can click its
   options and still type commands.

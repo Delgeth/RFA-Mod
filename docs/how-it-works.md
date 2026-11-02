@@ -201,6 +201,38 @@ game's registry code never runs for these settings, and nothing in the mod calls
   own colour. Lines with "error", "unknown command", "invalid" or "failed" in them are drawn red.
   The same line printed again straight after itself is counted rather than added, and shown once
   with `(x<count>)`.
+- *The game's hidden output* (`GameLog=1`): the game's debug print (`0xCA9F10`), its failed checks
+  (`<file>(<line>): V_ERROR: ...`, `0xC7B1D0` through `0xCA9DA0`) and one library's errors end in
+  Windows' `OutputDebugStringA`, which only a debugger sees. The mod points the exe's import of it
+  at its own function, which passes each call on and adds its lines to the console, marked `[game]`
+  and drawn blue-grey; mods that hook those game functions themselves aren't disturbed. The error
+  reports the game flashes on the screen (`0x545D40` → `0x545BD0`: `GENERAL-ERROR: ...`,
+  `ART-WARNING: ...`) wait in a queue of 164 (`0x1308780`, 256 bytes each, the count at
+  `0x13130D0`) until shown for a while and emptied; the mod reads the new ones each frame and adds
+  them, `[game]` too, errors red and warnings yellow. Neither shows in the notify lines.
+- *RFA-Mod's log* (`ModLog=1`): `logs\rfa_mods.log`, which the launcher starts afresh and the loader
+  and every mod append to, is read ten times a second as it grows; each new line is added without
+  its time, starting with the module's name (`[guerrilla_world] ...`), drawn teal.
+- *Pasting*: Ctrl+V or Shift+Insert, taken out of the key queue like the scrolling keys. The
+  clipboard's text (Unicode) is made into what the console can type: printable ASCII as it is, tabs
+  and other spaces a space, typographic quotes, dashes and the ellipsis their ASCII forms, control
+  and invisible characters dropped, anything else left out (and counted in a warning). Each line is
+  trimmed, a leading `]` (a line copied from the console or `console.log`) dropped, and empty and
+  comment lines (`;`, `#`, `//`) skipped. The first line goes in at the caret, as far as the typed
+  line's 124 characters allow; the rest wait, shown on the right of the typed line. When Enter has
+  run a line (the next time the key queue is read), the next waiting line is put in its place; Esc
+  drops them. So a paste never runs anything until you press Enter.
+- *Running a line*: Enter hands the typed line to the game's command runner (`0xC7BDB0`, which is
+  printf-style) as its format, so a `%` in it was read as a format. The mod wraps the runner: the
+  typed line is run as text, and other callers' formats are written out first (into the 256 bytes
+  the game uses, no further).
+- *Tab* (in place of the game's `0xC7D200`): the game matched the whole typed line against the
+  command names, so with arguments typed it found nothing, and it listed matches by name alone. The
+  mod's completes the first word: one match is completed with a space after it; several are listed
+  with their descriptions (from the command list at `0x28FBA88`, as `help` prints them), and the
+  line is lengthened as far as they all agree. With arguments typed the line stays as it is, and
+  the console says what the command is (its description, and for a setting what it takes and that
+  `? <name>` shows its value, the game's own status query).
 - *Scrolling*: while the console is open the wheel scrolls its output, 3 lines per notch, and
   doesn't reach the game, so it no longer switches weapons behind the console (the mod wraps the
   game's mouse message handler, `0xCDF220`). The console's key handling (`0xC7C580`) reads keys

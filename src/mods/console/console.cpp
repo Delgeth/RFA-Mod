@@ -24,12 +24,22 @@
 // doesn't reach the game, so it no longer switches weapons behind it. The mouse works on it too
 // (see "The mouse" below): drag the scroll bar, or hold or click the middle button to autoscroll.
 //
+// What the console shows besides its own output (see "What the game keeps to itself" below):
+//   - the game's hidden output, marked [game]: its debug output, which only a debugger saw, and the
+//     error reports it flashes on the screen for a moment;
+//   - RFA-Mod's own log (logs\rfa_mods.log) as it grows, each line marked with the module's name.
+//
+// Typing (see "Typing" below): Ctrl+V or Shift+Insert pastes, cleaned up into something the console
+// can run; several lines are run one at a time, each with Enter. Tab completes only the command's
+// name, lists the matches with what each does, and with arguments typed says what the command is.
+// A % in a line you run is now taken as it is (the game read it as a format).
+//
 // The render debug panel (` + X): it takes the mouse only while the console is open (the game frees
 // the mouse for the console). While the panel is up, the console moves to the bottom of the screen,
 // below the panel's windows, and is drawn under them, so its text no longer covers them.
 //
 // [Console] in rfa_mods.ini: its height, text sizes, darkness, history length, the log file, the
-// notify lines and the build stamp.
+// notify lines, the build stamp, and whether it shows the game's hidden output and RFA-Mod's log.
 //
 // console.ini: console settings this mod applies for you, as <console name>=<value>:
 //   [Startup]   once, when the game has finished starting (right after its own gamestart.txt)
@@ -72,6 +82,8 @@ struct Settings {
     bool logToFile = true;        // also write them to logs\console.log
     bool notify = true;           // keep what it prints while shut, and show the newest lines for a moment
     bool buildStamp = true;       // the build stamp in its corner
+    bool gameLog = true;          // also show the game's hidden output: its debug output and error reports
+    bool modLog = true;           // also show logs\rfa_mods.log
 };
 Settings g_settings;
 
@@ -88,6 +100,8 @@ void ReadSettings() {
     g_settings.logToFile = rfa::IniInt(L"Console", L"LogToFile", 1) != 0;
     g_settings.notify = rfa::IniInt(L"Console", L"Notify", 1) != 0;
     g_settings.buildStamp = rfa::IniInt(L"Console", L"BuildStamp", 1) != 0;
+    g_settings.gameLog = rfa::IniInt(L"Console", L"GameLog", 1) != 0;
+    g_settings.modLog = rfa::IniInt(L"Console", L"ModLog", 1) != 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -108,8 +122,8 @@ auto& g_offsetX = *reinterpret_cast<int*>(0x11212FC);          //   console_offs
 auto& g_screenWidth = *reinterpret_cast<int*>(0x28FF1E8);
 auto& g_screenHeight = *reinterpret_cast<int*>(0x28FF1EC);
 auto& g_background = *reinterpret_cast<Colour*>(0x290767C);    // console_set_bg_color sets it
-auto& g_typed = *reinterpret_cast<const char(*)[0x400]>(0x28FB640);  // the line being typed (up to 124 characters)
-auto& g_prompted = *reinterpret_cast<const char(*)[0x80]>(0x29075F8);  // "] " and that line: what Enter echoes
+auto& g_typed = *reinterpret_cast<char(*)[0x400]>(0x28FB640);     // the line being typed (up to 124 characters)
+auto& g_prompted = *reinterpret_cast<char(*)[0x80]>(0x29075F8);   // "] " and that line: what Enter echoes
 auto& g_caret = *reinterpret_cast<int*>(0x28FF1D0);            // where in the typed line the caret is
 auto& g_caretShown = *reinterpret_cast<BYTE*>(0x28F723D);      // blinks every 300 ms
 auto& g_caretTimer = *reinterpret_cast<int*>(0x28FF1F4);       // a timer of the game's: when to blink next
@@ -175,25 +189,44 @@ Colour Brighter(Colour colour, int amount, BYTE minimumAlpha) {
 // ---------------------------------------------------------------------------------------------
 // The history: every line the console printed, and how far back the view is scrolled
 
-enum class Kind : BYTE { Output, Command, Error };
+enum class Kind : BYTE {
+    Output,   // what the console printed
+    Command,  // what you typed, as Enter echoes it
+    Error,
+    Warning,
+    Info,     // the mod's own messages in the console (pasting, Tab): drawn as output, never taken for errors
+    Hidden,   // the game's hidden output
+    Mod,      // RFA-Mod's log
+};
 
 struct Line {
     std::string text;
     Kind kind;
+    bool fromConsole;  // the console's own output (only these are notify lines)
     int repeats;       // printed this many times in a row
     ULONGLONG printed; // when it was last printed (GetTickCount64), for the notify lines
 };
 
 constexpr Colour kOutputColour = {225, 225, 225, 255};
-constexpr Colour kCommandColour = {255, 196, 80, 255};  // what you typed, as Enter echoes it
+constexpr Colour kCommandColour = {255, 196, 80, 255};
 constexpr Colour kErrorColour = {255, 112, 96, 255};
+constexpr Colour kWarningColour = {240, 205, 100, 255};
+constexpr Colour kHiddenColour = {150, 172, 205, 255};
+constexpr Colour kModColour = {110, 205, 185, 255};
 constexpr Colour kTypedColour = {255, 255, 255, 255};
 constexpr Colour kAccentColour = {90, 170, 255, 255};  // the prompt, the edge line and the scroll bar
 constexpr Colour kDimColour = {160, 160, 160, 255};
 constexpr Colour kCaretColour = {255, 196, 80, 255};
 
 Colour LineColour(Kind kind) {
-    return kind == Kind::Command ? kCommandColour : kind == Kind::Error ? kErrorColour : kOutputColour;
+    switch (kind) {
+    case Kind::Command: return kCommandColour;
+    case Kind::Error: return kErrorColour;
+    case Kind::Warning: return kWarningColour;
+    case Kind::Hidden: return kHiddenColour;
+    case Kind::Mod: return kModColour;
+    default: return kOutputColour;
+    }
 }
 
 // The game prints from other threads too (loading), so the history is only touched under this lock.
@@ -204,7 +237,9 @@ int g_maxBack = 0;   // the most it can be: the oldest line at the top (worked o
 int g_pageLines = 1; // lines on screen, for Page Up / Page Down
 bool g_drawsConsole = false;  // the mod draws the console, so the keys and the wheel move its history
 
+// The game's help lists commands indented (" name - what it does"), so those are never errors.
 bool LooksLikeError(const std::string& text) {
+    if (!text.empty() && text[0] == ' ') return false;
     std::string lower = text;
     for (char& c : lower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     for (const char* word : {"error", "unknown command", "invalid", "failed"})
@@ -226,21 +261,22 @@ void WriteToLog(const std::string& text) {
     WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
 }
 
-void AddLine(std::string text, Kind kind) {
+void AddLine(std::string text, Kind kind, bool fromConsole = true) {
     std::string clean;  // the font draws no tabs or other control characters
     for (char c : text) {
         if (c == '\t') clean += "    ";
         else if (static_cast<unsigned char>(c) >= 0x20) clean += c;
     }
-    if (kind == Kind::Output && LooksLikeError(clean)) kind = Kind::Error;
+    if ((kind == Kind::Output || kind == Kind::Hidden || kind == Kind::Mod) && LooksLikeError(clean)) kind = Kind::Error;
     std::lock_guard<std::mutex> lock(g_historyLock);
-    if (!clean.empty() && !g_history.empty() && g_history.back().text == clean && g_history.back().kind == kind) {
+    if (!clean.empty() && !g_history.empty() && g_history.back().text == clean && g_history.back().kind == kind &&
+        g_history.back().fromConsole == fromConsole) {
         ++g_history.back().repeats;  // the same line again: counted, not added
         g_history.back().printed = GetTickCount64();
         return;
     }
     WriteToLog(clean);
-    g_history.push_back({std::move(clean), kind, 1, GetTickCount64()});
+    g_history.push_back({std::move(clean), kind, fromConsole, 1, GetTickCount64()});
     if (g_back > 0) ++g_back;  // while scrolled back, the view stays on the same lines
     while (g_history.size() > g_settings.historyLines) g_history.pop_front();
     g_back = std::min(g_back, static_cast<int>(g_history.size()) - 1);
@@ -294,6 +330,98 @@ void __cdecl ConsoleEcho(char c) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// What the game keeps to itself, and RFA-Mod's log
+//
+// The game's debug print (0xCA9F10: what it loads, what it couldn't), its failed checks ("<file>(<line>):
+// V_ERROR: ...", 0xC7B1D0 through 0xCA9DA0) and one library's errors (0xA6B000) all end in Windows'
+// OutputDebugStringA, which only a debugger sees. The mod takes the exe's import of it, so mods that
+// hook those functions themselves are left alone.
+//
+// Its error reports (0x545D40, through 0x545BD0: "GENERAL-ERROR: ...", "ART-WARNING: ...") go into a
+// queue of 164 (0x1308780, 256 bytes each, the count at 0x13130D0) that is drawn on the screen for a
+// while and then emptied (0x545DD0, 0x545BB0). The mod reads the new ones each frame.
+//
+// logs\rfa_mods.log is what the launcher, the loader and every mod write (started afresh by the
+// launcher each time); the mod reads what has been added to it ten times a second.
+
+// Lines of hidden output: one per '\n', empty ones left out, each marked with where it came from.
+void AddHidden(const char* tag, const char* text, Kind kind) {
+    const char* end = text + strlen(text);
+    while (text < end) {
+        const char* newline = strchr(text, '\n');
+        if (!newline) newline = end;
+        std::string line(text, newline);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) AddLine(tag + line, kind, false);
+        text = newline + 1;
+    }
+}
+
+using OutputDebugStringFn = void(WINAPI*)(LPCSTR);
+OutputDebugStringFn g_outputDebugString;
+
+void WINAPI GameDebugString(LPCSTR text) {
+    g_outputDebugString(text);
+    if (text) AddHidden("[game] ", text, Kind::Hidden);
+}
+
+constexpr int kMaxReports = 0xA4;
+auto& g_reports = *reinterpret_cast<const char(*)[kMaxReports][0x100]>(0x1308780);
+auto& g_reportCount = *reinterpret_cast<const int*>(0x13130D0);
+int g_reportsRead = 0;
+
+void ReadReports() {
+    const int count = g_reportCount;
+    if (count < 0 || count > kMaxReports) return;
+    if (count < g_reportsRead) g_reportsRead = 0;  // shown and emptied since
+    for (; g_reportsRead < count; ++g_reportsRead) {
+        const char* report = g_reports[g_reportsRead];
+        const std::string text(report, strnlen(report, sizeof(g_reports[0])));
+        AddHidden("[game] ", text.c_str(), text.find("-ERROR:") != std::string::npos ? Kind::Error : Kind::Warning);
+    }
+}
+
+HANDLE g_modLog = INVALID_HANDLE_VALUE;
+LONGLONG g_modLogRead = 0;  // how much of it the console has
+std::string g_modLogRest;   // the start of a line still being written
+
+// "[12:34:56.789] [module] text" without the time, which the console doesn't show for its own lines.
+void AddModLine(std::string line) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.size() > 15 && line[0] == '[' && line[13] == ']' && line[14] == ' ') line.erase(0, 15);
+    if (!line.empty()) AddLine(line, Kind::Mod, false);
+}
+
+void ReadModLog() {
+    if (g_modLog == INVALID_HANDLE_VALUE) {
+        g_modLog = CreateFileW(rfa::LogPath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (g_modLog == INVALID_HANDLE_VALUE) return;
+    }
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(g_modLog, &size)) return;
+    if (size.QuadPart < g_modLogRead) {  // started afresh
+        g_modLogRead = 0;
+        g_modLogRest.clear();
+    }
+    while (g_modLogRead < size.QuadPart) {
+        char buffer[16384];
+        LARGE_INTEGER at;
+        at.QuadPart = g_modLogRead;
+        DWORD read = 0;
+        if (!SetFilePointerEx(g_modLog, at, nullptr, FILE_BEGIN) || !ReadFile(g_modLog, buffer, sizeof(buffer), &read, nullptr) ||
+            read == 0)
+            return;
+        g_modLogRead += read;
+        g_modLogRest.append(buffer, read);
+        for (size_t newline; (newline = g_modLogRest.find('\n')) != std::string::npos;) {
+            AddModLine(g_modLogRest.substr(0, newline));
+            g_modLogRest.erase(0, newline + 1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Keys and the mouse wheel
 
 // The console's key handling (0xC7C580), each frame while it is open: it takes keys from the
@@ -305,7 +433,14 @@ constexpr DWORD kNextKey = 0xCADA40;        // int(): the next key pressed, 0 wh
 constexpr size_t kNextKeyPrologue = 8;      // push ebp / mov ebp,esp / mov al,byte ptr [0293AC0Ch]
 constexpr int kShift = 0x1000, kCtrl = 0x4000, kGraveHeld = 0x8000;
 constexpr int kHome = 0xC7, kPageUp = 0xC9, kEnd = 0xCF, kPageDown = 0xD1;
+constexpr int kEscape = 0x01, kEnter = 0x1C, kNumpadEnter = 0x9C, kV = 0x2F, kInsert = 0xD2;
 constexpr int kLinesPerNotch = 3;
+
+// Pasting (see "Typing" below): the pasted lines still to come after the one in the typed line.
+std::deque<std::string> g_pasted;
+bool g_nextPastedAfterEnter = false;
+void Paste();
+bool TypeIn(const std::string& text, bool replaceLine);
 
 using VoidFn = void(__cdecl*)();
 using NextKeyFn = int(__cdecl*)();
@@ -340,11 +475,29 @@ void __cdecl ConsoleKeys() {
     g_scrollLine = -1;
 }
 
+// Also takes Ctrl+V and Shift+Insert (paste), and after Enter has run a pasted line, puts the next
+// one in its place.
 int __cdecl NextKey() {
+    if (!g_readingConsoleKeys || !g_consoleOpen) return g_nextKey();
+    if (g_nextPastedAfterEnter) {  // the game has run the line Enter sent
+        g_nextPastedAfterEnter = false;
+        if (!g_pasted.empty()) {
+            TypeIn(g_pasted.front(), true);
+            g_pasted.pop_front();
+        }
+    }
     for (;;) {
         const int key = g_nextKey();
-        if (!key || !g_drawsConsole || !g_readingConsoleKeys || !g_consoleOpen || !ScrollKey(key & ~kGraveHeld))
-            return key;
+        const int pressed = key & ~kGraveHeld;
+        if (!key) return 0;
+        if (pressed == (kV | kCtrl) || pressed == (kInsert | kShift)) {
+            Paste();
+            continue;
+        }
+        if (g_drawsConsole && ScrollKey(pressed)) continue;
+        if (pressed == kEnter || pressed == kNumpadEnter) g_nextPastedAfterEnter = !g_pasted.empty();
+        if (pressed == kEscape) g_pasted.clear();  // the game clears the line; the rest of a paste goes too
+        return key;
     }
 }
 
@@ -551,7 +704,7 @@ void DrawNotify(const Metrics& m) {
         const ULONGLONG now = GetTickCount64();
         for (auto line = g_history.rbegin(); line != g_history.rend() && recent.size() < kNotifyLines; ++line) {
             if (now - line->printed > kNotifyMilliseconds) break;
-            recent.push_back(*line);
+            if (line->fromConsole) recent.push_back(*line);  // not the logs it also shows
         }
     }
     int y = 2 * m.padding;
@@ -927,7 +1080,15 @@ void DrawConsole() {
     const char* typed = g_typed;
     const int length = static_cast<int>(strnlen(typed, sizeof(g_typed)));
     const int caret = std::clamp(g_caret, 0, length);
-    const float room = static_cast<float>(width - left - promptWidth - 3 * m.scrollBarWidth) / inputScale;
+    int hintWidth = 0;  // while pasted lines wait, how many, on the right
+    if (!g_pasted.empty()) {
+        char hint[96];
+        snprintf(hint, sizeof(hint), "%u more pasted - Enter: run this, Esc: drop them", static_cast<unsigned>(g_pasted.size()));
+        hintWidth = static_cast<int>(TextWidth(hint) * textScale) + 2 * padding;
+        const float hintY = inputTop + (m.inputHeight - m.fontHeight * textScale) / 2;
+        DrawString(static_cast<float>(width - 2 * m.scrollBarWidth - hintWidth + 2 * padding), hintY, hint, textScale, kDimColour);
+    }
+    const float room = static_cast<float>(width - left - promptWidth - 3 * m.scrollBarWidth - hintWidth) / inputScale;
     int first = 0;
     while (first < caret && TextWidth(typed + first, caret - first) > room) ++first;
     const int typedX = left + promptWidth;
@@ -1072,6 +1233,214 @@ GameplayStartFn g_gameplayStart;
 void __cdecl GameplayStart() {
     g_gameplayStart();
     ApplySection("Gameplay");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Typing: pasting, Tab, and a % in what you run
+
+constexpr size_t kTypedRoom = 124;      // the game stops typing there (the echo "] <line>" fills 0x80 bytes)
+constexpr size_t kMostPastedLines = 100;
+constexpr size_t kMostPasted = 65536;   // characters read from the clipboard
+
+// Puts `text` into the typed line at the caret (or in place of the line), as much as fits, as the
+// game's typing does; false if some didn't fit.
+bool TypeIn(const std::string& text, bool replaceLine) {
+    std::string line = replaceLine ? "" : std::string(g_typed, strnlen(g_typed, sizeof(g_typed)));
+    const size_t caret = replaceLine ? 0 : std::min(static_cast<size_t>(std::max(g_caret, 0)), line.size());
+    const size_t room = line.size() < kTypedRoom ? kTypedRoom - line.size() : 0;
+    const std::string fits = text.substr(0, room);
+    line.insert(caret, fits);
+    strcpy_s(g_typed, line.c_str());
+    g_caret = static_cast<int>(caret + fits.size());
+    snprintf(g_prompted, sizeof(g_prompted), "] %s", g_typed);  // as the game remakes it after each key
+    g_caretShown = 1;
+    TimerStart(&g_caretTimer, nullptr, 300);
+    return fits.size() == text.size();
+}
+
+// Pasting (Ctrl+V or Shift+Insert). The console can only type plain ASCII on one line, so what is
+// pasted is cleaned up first: tabs and other spaces become a space, typographic quotes, dashes and
+// the ellipsis their ASCII forms, invisible and control characters go, and anything else it can't
+// type is left out (and said so). Each line is trimmed, a "]" in front (a line copied from the
+// console or console.log) is dropped, and empty and comment lines (; # //) are skipped. The first
+// line goes in at the caret; the others wait, and each Enter runs the line and brings up the next
+// (Esc drops them), so nothing pasted runs without you pressing Enter.
+
+// Adds what the console can type of `c` to `line`; false if it can't type it at all.
+bool AppendTypeable(wchar_t c, std::string& line) {
+    if (c >= 0x20 && c < 0x7F) line += static_cast<char>(c);
+    else if (c == L'\t' || c == 0xA0 || (c >= 0x2000 && c <= 0x200A) || c == 0x202F || c == 0x3000) line += ' ';
+    else if (c == 0x2018 || c == 0x2019 || c == 0x201A || c == 0x2032) line += '\'';
+    else if (c == 0x201C || c == 0x201D || c == 0x201E || c == 0x2033) line += '"';
+    else if ((c >= 0x2010 && c <= 0x2015) || c == 0x2212) line += '-';
+    else if (c == 0x2026) line += "...";
+    else if (c < 0x20 || c == 0x7F || (c >= 0x200B && c <= 0x200D) || c == 0x2060 || c == 0xFEFF) {}  // nothing to see
+    else return false;
+    return true;
+}
+
+std::wstring ClipboardText() {
+    std::wstring text;
+    if (!OpenClipboard(g_gameWindow)) return text;
+    if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+        if (auto characters = static_cast<const wchar_t*>(GlobalLock(data))) {
+            const size_t most = std::min<size_t>(GlobalSize(data) / sizeof(wchar_t), kMostPasted);
+            text.assign(characters, wcsnlen(characters, most));
+            GlobalUnlock(data);
+        }
+    }
+    CloseClipboard();
+    return text;
+}
+
+std::vector<std::string> PastedLines(const std::wstring& text, int& leftOut) {
+    std::vector<std::string> lines;
+    std::string line;
+    auto finish = [&] {
+        std::string command = Trim(line);
+        line.clear();
+        if (!command.empty() && command[0] == ']') command = Trim(command.substr(1));
+        if (command.empty() || command[0] == ';' || command[0] == '#' || command.rfind("//", 0) == 0) return;
+        lines.push_back(command);
+    };
+    for (wchar_t c : text) {
+        if (c == L'\r' || c == L'\n') finish();
+        else if (!AppendTypeable(c, line)) ++leftOut;
+    }
+    finish();
+    return lines;
+}
+
+void Paste() {
+    int leftOut = 0;
+    std::vector<std::string> lines = PastedLines(ClipboardText(), leftOut);
+    if (leftOut > 0)
+        AddLine("Pasted without " + std::to_string(leftOut) + " character(s) the console can't type", Kind::Warning);
+    if (lines.empty()) {
+        if (!leftOut) AddLine("Nothing to paste: the clipboard holds no text the console can run", Kind::Info);
+        return;
+    }
+    if (lines.size() > kMostPastedLines) {
+        AddLine("Pasted the first " + std::to_string(kMostPastedLines) + " of " + std::to_string(lines.size()) + " lines",
+                Kind::Warning);
+        lines.resize(kMostPastedLines);
+    }
+    bool cut = !TypeIn(lines[0], false);
+    g_pasted.assign(lines.begin() + 1, lines.end());
+    for (std::string& waiting : g_pasted) {
+        if (waiting.size() <= kTypedRoom) continue;
+        waiting.resize(kTypedRoom);
+        cut = true;
+    }
+    if (cut)
+        AddLine("A command line holds " + std::to_string(kTypedRoom) + " characters; the rest of a longer pasted line was left out",
+                Kind::Warning);
+    if (!g_pasted.empty())
+        AddLine("Pasted " + std::to_string(lines.size()) + " lines: Enter runs each in turn, Esc drops the rest", Kind::Info);
+    RFA_LOG_FIRST(3, "Pasted %u line(s) into the console", static_cast<unsigned>(lines.size()));
+}
+
+// Tab (in place of the game's 0xC7D200). The game matched the whole line against the command names,
+// so with arguments typed it found nothing ("No console command found to match '<line>'"), and it
+// listed matches by name alone. This completes the first word only, lists the matches with what
+// each does, and with arguments typed leaves the line as it is and says what the command is.
+constexpr DWORD kCompleteCommand = 0xC7D200;  // void(), from the key handling (0xC7CEF3)
+
+void SayWhatItIs(const ConsoleCommand& command) {
+    std::string line = std::string("  ") + command.name;
+    if (command.description && *command.description) line += std::string(" - ") + command.description;
+    AddLine(line, Kind::Info);
+}
+
+// What a setting takes (commands take whatever their own code reads).
+void SayWhatItTakes(const ConsoleCommand& command) {
+    const std::string name = command.name;
+    switch (command.type) {
+    case kOnOff: AddLine("  " + name + " on, " + name + " off, or " + name + " alone to switch it; ? " + name + " shows it", Kind::Info); break;
+    case kWholeNumber: AddLine("  " + name + " <whole number>; ? " + name + " shows it", Kind::Info); break;
+    case kNumber: AddLine("  " + name + " <number>; ? " + name + " shows it", Kind::Info); break;
+    case kVector: AddLine("  a colour or vector setting; ? " + name + " shows it", Kind::Info); break;
+    }
+}
+
+bool AsksAbout(const std::string& word) {  // the game's status (?) and help (help, man) words
+    return word == "?" || _stricmp(word.c_str(), "help") == 0 || _stricmp(word.c_str(), "man") == 0;
+}
+
+void __cdecl CompleteCommand() {
+    const std::string typed(g_typed, strnlen(g_typed, sizeof(g_typed)));
+    // The command's name: the first word, or the next one after ?, help or man.
+    size_t start = typed.find_first_not_of(' ');
+    std::string lead;
+    if (start != std::string::npos) {
+        const size_t end = std::min(typed.find(' ', start), typed.size());
+        if (end < typed.size() && AsksAbout(typed.substr(start, end - start))) {
+            lead = typed.substr(start, end - start) + " ";
+            start = typed.find_first_not_of(' ', end);
+        }
+    }
+    if (start == std::string::npos) {
+        AddLine("Tab completes a command's name: type how it starts first (help lists them all)", Kind::Info);
+        return;
+    }
+    const size_t end = std::min(typed.find(' ', start), typed.size());
+    const std::string word = typed.substr(start, end - start);
+    std::vector<const ConsoleCommand*> matches;
+    for (int i = 0; i < g_commandCount; ++i) {
+        const ConsoleCommand* command = g_commands[i];
+        if (command && command->name && _strnicmp(command->name, word.c_str(), word.size()) == 0) matches.push_back(command);
+    }
+
+    if (end < typed.size()) {  // arguments typed: the line stays, and what the command is
+        if (const ConsoleCommand* command = FindCommand(word)) {
+            SayWhatItIs(*command);
+            SayWhatItTakes(*command);
+            return;
+        }
+        AddLine("No console command is named '" + word + "'", Kind::Error);
+        if (!matches.empty() && matches.size() <= 20) {
+            AddLine("Commands starting with '" + word + "':", Kind::Info);
+            for (const ConsoleCommand* command : matches) SayWhatItIs(*command);
+        }
+        return;
+    }
+
+    if (matches.empty()) {
+        AddLine("No console command starts with '" + word + "'", Kind::Error);
+        return;
+    }
+    if (matches.size() == 1) {
+        TypeIn(lead + matches[0]->name + " ", true);
+        return;
+    }
+    AddLine("Commands starting with '" + word + "' (" + std::to_string(matches.size()) + "):", Kind::Info);
+    size_t common = strlen(matches[0]->name);  // as far as they all start the same
+    for (const ConsoleCommand* command : matches) {
+        SayWhatItIs(*command);
+        size_t same = 0;
+        while (same < common && command->name[same] &&
+               tolower(static_cast<unsigned char>(command->name[same])) == tolower(static_cast<unsigned char>(matches[0]->name[same])))
+            ++same;
+        common = same;
+    }
+    if (common > word.size()) TypeIn(lead + std::string(matches[0]->name, common), true);
+}
+
+// The game's command runner (0xC7BDB0) is printf-style, and Enter hands it the typed line as its
+// format, so a % in the line was read as a format (rubbish, or a crash). The typed line is now run
+// as text; other callers' formats are written out first, into the 256 bytes the game uses.
+constexpr size_t kRunConsoleCommandPrologue = 9;  // push ebp / mov ebp,esp / sub esp,128h
+using RunConsoleCommandFn = int(__cdecl*)(const char* format, ...);
+RunConsoleCommandFn g_runConsoleCommand;
+
+int __cdecl RunCommandAsText(const char* format, ...) {
+    if (format == g_typed) return g_runConsoleCommand("%s", format);
+    char line[256];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(line, sizeof(line), format ? format : "", arguments);
+    va_end(arguments);
+    return g_runConsoleCommand("%s", line);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1372,9 +1741,11 @@ FrameUpdateFn g_frameUpdate;
 void __cdecl FrameUpdate() {
     g_frameUpdate();
     ShowEditor();
+    if (g_drawsConsole && g_settings.gameLog) ReadReports();
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastCheck < kCheckEveryMs) return;
     g_lastCheck = now;
+    if (g_drawsConsole && g_settings.modLog) ReadModLog();
     if (GetFileAttributesW(LinkFolder().c_str()) == INVALID_FILE_ATTRIBUTES) return;  // the editor's link isn't set up
     RunEditorCommands();
     AnswerWhereWanted();
@@ -1414,8 +1785,25 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_mouseMessage = reinterpret_cast<MouseMessageFn>(
         rfa::HookFunction(kMouseMessage, kMouseMessagePrologue, reinterpret_cast<void*>(&MouseMessage)));
     rfa::Log(g_consoleKeys && g_nextKey && g_mouseMessage
-                 ? "The mouse wheel, Page Up / Page Down, Ctrl+Home and End scroll the console (open it with the ` key)"
-                 : "Could not hook the game's keys or mouse handler; console scrolling may be off");
+                 ? "The mouse wheel, Page Up / Page Down, Ctrl+Home and End scroll the console, and Ctrl+V pastes (open it with the ` key)"
+                 : "Could not hook the game's keys or mouse handler; console scrolling and pasting may be off");
+    g_runConsoleCommand = reinterpret_cast<RunConsoleCommandFn>(
+        rfa::HookFunction(kRunConsoleCommand, kRunConsoleCommandPrologue, reinterpret_cast<void*>(&RunCommandAsText)));
+    if (!g_runConsoleCommand) rfa::Log("Could not hook the console's command runner; a %% in a typed line is still read as a format");
+    if (g_drawsConsole) {
+        if (rfa::ReplaceFunction(kCompleteCommand, reinterpret_cast<void*>(&CompleteCommand)))
+            rfa::Log("Tab completes the first word of a console line and lists what each match does");
+        else
+            rfa::Log("Could not replace the console's Tab completion; it is the game's own");
+    }
+
+    if (g_drawsConsole && g_settings.gameLog) {
+        rfa::Log(rfa::HookImport(GetModuleHandleW(nullptr), "KERNEL32.dll", "OutputDebugStringA", &GameDebugString,
+                                 &g_outputDebugString)
+                     ? "The console also shows the game's debug output and error reports, marked [game]"
+                     : "Could not take the game's debug output; the console shows its error reports only");
+    }
+    if (g_drawsConsole && g_settings.modLog) rfa::Log("The console also shows logs\\rfa_mods.log as it grows");
 
     g_runScriptFile = reinterpret_cast<RunScriptFileFn>(
         rfa::HookFunction(kRunScriptFile, kRunScriptFilePrologue, reinterpret_cast<void*>(&RunScriptFile)));
