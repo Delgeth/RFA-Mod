@@ -299,7 +299,13 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   and height from the G-buffer's depth (noted during the light pass), and the fog worked out there
   as Guerrilla's shaders do per vertex, `1 − 2^−(term × distance × density − offset)` with
   `term = (1 − e^−k·dy)/(k·dy)`. As in Guerrilla's world, the fog's ground follows the camera (131 m
-  below it), so the density at the camera stays the same. `Fog=` scales it, live.
+  below it), so the density at the camera stays the same. `Fog=` scales it, live. Guerrilla fogs its
+  sky the same way, and so does the mod: the dome, the clouds and the far mountains each stand in for
+  a surface stretched across to Guerrilla's far clip (1,000 m) and up to the time of day's fog scale,
+  raised by its fog offset (`fog_skybox_`, `fog_clouds_` and `fog_matte_` offset and scale), less the
+  camera's height; the sky's colour is mixed toward the fog's there. That is what turns the sky near
+  the horizon into the district's haze. The clouds also get the time of day's ambient light, as
+  Guerrilla's cloud shader adds it.
 - **The tone mapping** (`ToneMapping=`): Armageddon turns its picture into what's shown with a
   fixed exposure held between its time of day's limits, a curve that glares on bright light, and
   its colour grading. In our worlds the mod holds Armageddon's exposure at 1 (wrapping the call
@@ -308,9 +314,22 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   scene (4.5 × its luminance) and eased toward at the district's `iris_rate`; the exposure
   `E = range / max(1 + offset × (base + amount × (L − base)), 0.1)` from the time of day's
   `tonemap_lum_range`, `tonemap_lum_offset`, `eye_adaption_base` and `eye_adaption_amount`, which
-  the world builder writes; then `1 − e^(−E × (colour + bloom))` and the sRGB curve. `Exposure=`
+  the world builder writes; then `1 − e^(−E × (colour + bloom + sun shafts))` and the sRGB curve. `Exposure=`
   scales `E` (1 is Guerrilla's). The sky's brightness setting is a fifth under it, since Guerrilla's
   sky goes through the same exposure.
+- **The sun** (`SunShafts=`): Armageddon draws no sun in our worlds. Guerrilla's sun is an orbital of
+  the world's global time of day (`terr01.gtodx`, which the world builder writes as `rfg.gtodx`): a
+  texture, a size, a colour and an opacity, each a curve over the day, along the sun's path (the same
+  path the mod lights the world from). The mod draws it at the sky step, before the clouds, as
+  Guerrilla's skybox does: a square facing the camera one unit toward the sun, as many units across
+  as twice its scale ÷ 100 (about half a degree), its texture's alpha times the colour (times its
+  brightness, 32) and the opacity, added to the sky. With the tone mapping it draws Guerrilla's sun
+  shafts, from Guerrilla's own shaders, at half the picture's size: the sky round the sun (where the
+  G-buffer's depth is at the far plane) under a round fall-off, a small Gaussian blur, then 16
+  samples from each pixel toward the sun, nearer ones counting more, weighted by the distance from
+  the sun across the screen; added to the picture with the bloom. The settings are Re-Mars-tered's
+  starting values (sun size 300, radius 5, fall-off curve −4, 1.6, −0.02); where Guerrilla lays a
+  texture of its own round the sun, a smooth disc stands in.
 - **The colour correction**: Guerrilla multiplies its whole picture by its time of day's tint
   (`color_correct_tint`, divided by its brightest channel); its light is pink and the tint bluish,
   so its colours need both. Armageddon doesn't colour its picture by that tint, so the mod
@@ -337,7 +356,8 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   has written `mods\guerrilla_world\gameplay_properties.xtbl`, the mod hands the game that table
   at the copy's lookup and gives the names 64 KB of its own. Without the file, or with the mod
   off, the game keeps its own table, and a name it doesn't have is its Default entry. The draw
-  distances (`lod_properties.xtbl`, read the same way) are handed over likewise.
+  distances (`lod_properties.xtbl`, read the same way) are handed over likewise, and so are the
+  effects' three tables (`vfx.xtbl`, `effects.xtbl`, `level_objects.xtbl`, below).
 
 The world itself is built by `editor\GuerrillaWorld.exe` (code in `src\editor\GuerrillaWorld\` and
 `src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
@@ -404,6 +424,24 @@ converts:
   Guerrilla's to Armageddon's `lod_properties.xtbl` (`rfg_1_clutter_extra_small` ... at
   Guerrilla's distances), and each object names its class. Guerrilla switches an object off at
   once; ours fade out over half a second there, so they don't pop.
+- **Their effects** (what an object shows when it breaks, is hit or stands burning). An object names
+  its entry of `level_objects.xtbl` (its Props), which names effects of `effects.xtbl` (death,
+  impact, custom and script point effects), each naming a visual effect of `vfx.xtbl`, which names
+  its file and how it is loaded: the ones the world's objects use are loaded with the level, from
+  its files. Armageddon's `level_objects.xtbl` still names most of Guerrilla's entries, with its own
+  settings and effects. So the builder (`GuerrillaEffectTables`) adds Guerrilla's level objects,
+  effects and visual effects the objects use to Armageddon's three tables under `rfg_` names, for
+  the mod to hand the game, and each object names its `rfg_` level object. Sounds are left out
+  (Guerrilla's are XACT cues; Armageddon uses Wwise). Each visual effect's file is converted
+  (`GuerrillaEffects`: Guerrilla's effect format, versions 21 to 26, written as Armageddon's
+  version 36: its emitters, lights, meshes and coronas reworked, its meshes' materials on
+  Armageddon's shaders, and the fixes Guerrilla's loader makes to its older files), with its
+  textures (`GuerrillaTextures`: found in Guerrilla's effect archives, flip-book tiles kept), into
+  the container of each zone whose objects show it, and the world's asset list names a group of its
+  own after each file (`rfg_<name>.cefct_pc`, as Armageddon's effects archive lists its effects):
+  the game makes an effect only when the streaming system knows a group by its visual's file name. The game keeps at most 950 visual effects, of
+  which Armageddon's own take 904, so the 46 shown by the most placed objects are added (over 92%
+  of what the world's objects show) and the other 41 wait for more room.
 - **The precache**: every file more than one container would hold (the ground's texture layers,
   roads, rocks, chunk files and their textures) goes once into `rfg_precache.vpp_pc`, and each
   zone's and sub-zone's precache group in the asset list (`0p_cXXYY`, `1p_cXXYY`) names the ones

@@ -10,7 +10,7 @@ namespace RfaFormats.Guerrilla;
 /// effects' own containers (in effects.vpp_pc and the world's terr01_l0/l1.vpp_pc), and loose beside
 /// the destroyed objects' effects in terr01_precache.vpp_pc (its top holds both); this looks in every
 /// texture file of the archives given, at their top and in their containers, the first of a name
-/// winning. A texture keeps its entry (its flip-book tiles among it: an effect's particles step
+/// winning (and the effect files beside them, see <see cref="EffectFile"/>). A texture keeps its entry (its flip-book tiles among it: an effect's particles step
 /// through them) and, compressed, its mip levels down to 4 × 4 (Guerrilla sizes the smaller ones by
 /// their pixels, Armageddon by whole blocks). Of the 187 textures Guerrilla's effects name, 3 are its
 /// built-ins (see <see cref="GuerrillaBuiltIns"/>) and 14 it never shipped (in a few multiplayer,
@@ -46,6 +46,19 @@ public sealed class GuerrillaTextures
         foreach (var e in pack.Entries.Where(e => IsHeader(e.Name)))
             foreach (string texture in PegFile.TextureNames(pack.Read(e)))
                 where.TryAdd(Stem(texture), (archive, container, e.Name));
+        foreach (var e in pack.Entries.Where(e => e.Name.EndsWith(".cefct_pc", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".gefct_pc", StringComparison.OrdinalIgnoreCase)))
+            effectFiles.TryAdd(e.Name, (archive, container));
+    }
+
+    /// <summary>Where each effect file (.cefct_pc, .gefct_pc) is, by its name: its archive and the container in it (null at its top).</summary>
+    readonly Dictionary<string, (string Archive, string? Container)> effectFiles = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>One of Guerrilla's effect files (its .cefct_pc or .gefct_pc, by its file name), or null if it hasn't it.</summary>
+    public byte[]? EffectFile(string file)
+    {
+        if (!effectFiles.TryGetValue(file, out var at)) return null;
+        var pack = Open(at.Archive, at.Container);
+        return pack.Find(file) is { } e ? pack.Read(e) : null;
     }
 
     /// <summary>How many textures were found.</summary>

@@ -62,12 +62,12 @@ public static class GuerrillaMovers
     /// <param name="placed">The movers to place, in the zone's order (written in it, but each parent before its children).</param>
     /// <param name="all">Every object of their Guerrilla zone, by handle (to follow attachments through).</param>
     /// <param name="schema">The game's schema (obj_chunk_ref's defaults and building types).</param>
-    /// <param name="isProps">Whether Armageddon's level_objects table has a Props name.</param>
+    /// <param name="propsOf">The level_objects entry for one of Guerrilla's Props names (Guerrilla's own, added: see <see cref="GuerrillaEffectTables"/>; or Armageddon's of that name), or null for the default.</param>
     /// <param name="gameplayPropsOf">The gameplay_properties entry with the settings of one of Guerrilla's names (see <see cref="GuerrillaGameplay"/>), or null.</param>
     /// <param name="lodPropsOf">The lod_properties entry for the LOD class of one of Guerrilla's gameplay_props names (see <see cref="GuerrillaLod"/>), or null for none.</param>
     /// <param name="checksumOf">A chunk file's destruction checksum (its header's 0x24), by its name without extension.</param>
     public static (List<ZoneObject> Objects, byte[] Links) Convert(IReadOnlyList<GuerrillaZoneObject> placed, IReadOnlyDictionary<uint, GuerrillaZoneObject> all,
-        ZoneSchema schema, Func<string, bool> isProps, Func<string, string?> gameplayPropsOf, Func<string, string?> lodPropsOf, Func<string, uint> checksumOf,
+        ZoneSchema schema, Func<string, string?> propsOf, Func<string, string?> gameplayPropsOf, Func<string, string?> lodPropsOf, Func<string, uint> checksumOf,
         ISet<uint> taken)
     {
         // Handles: Guerrilla's, unless taken.
@@ -174,7 +174,7 @@ public static class GuerrillaMovers
                 "world_anchors" => anchors,
                 "anchor_data" => anchors == null ? null : new byte[8],
                 "dynamic_links" => linkList,
-                "Props" => Text(o.Text("Props") is { } props && isProps(props) ? props : null) ?? Default("Props"),
+                "Props" => Text(o.Text("Props") is { } props ? propsOf(props) : null) ?? Default("Props"),
                 "gameplay_props" => Text(o.Text("gameplay_props") is { } g ? gameplayPropsOf(g) : null) ?? Default("gameplay_props"),
                 // (Left out with none, as the tools did.)
                 "building_type" => types.Length > 0 ? Text(SchemaProperty.FlagsText(types)) : null,

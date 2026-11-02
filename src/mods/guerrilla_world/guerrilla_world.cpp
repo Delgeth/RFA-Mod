@@ -66,13 +66,19 @@
 // fog curves without drawing with them. Guerrilla's is height fog, thicker low down and far away,
 // from its districts' curves. In our worlds the mod draws Guerrilla's over what the world has drawn,
 // before the sky, from the depth the light pass reads (Fog=, thickness; the world builder turns the
-// boxes' own fog off there).
+// boxes' own fog off there), and over the sky, the clouds and the backdrop as Guerrilla's sky shaders
+// fog them, with the clouds' ambient light as Guerrilla adds it.
 //
 // The tone mapping: Armageddon turns its picture into the final one with an exposure the environment
 // box sets (3 in our zones), a curve that clips its highlights and a colour table. In our worlds the
 // mod holds that exposure at 1 and draws Guerrilla's tone mapping over the result instead: its eye
 // adapting to the picture's brightness, its exposure from the time of day's curves, and its curve that
 // rolls the highlights off (ToneMapping=, Exposure=).
+//
+// The sun: Armageddon draws none in our worlds. The mod draws Guerrilla's: the sun orbital of the
+// world's global time of day (its texture, size, colour and opacity over the day) as a small bright
+// disc behind the clouds, along the sun's path; and with the tone mapping, Guerrilla's sun shafts, the
+// glow streaming from the sky round the sun past whatever stands in front of it (SunShafts=).
 //
 // And it leaves out the game's "invalid mission info hash" report for our worlds' zones, which
 // carry no mission (one line a zone at every load).
@@ -93,7 +99,9 @@
 // builder's table there, and gives the table's names more room than the game's 24 KB, which
 // Armageddon's own nearly fill. Without that file the game keeps its own table. The draw distances
 // (lod_properties.xtbl: the LOD class an object names, Guerrilla's switch-off distances added) are
-// handed over the same way.
+// handed over the same way, and so are the effects: level_objects.xtbl (what a destructible object
+// shows when it breaks or is hit), effects.xtbl and vfx.xtbl (the visual effects and their files),
+// each Armageddon's with Guerrilla's entries the world uses added under "rfg_" names.
 #define RFA_MOD_NAME "guerrilla_world"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -101,6 +109,7 @@
 #include <d3dcompiler.h>
 #include <math.h>
 #include <stdarg.h>
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -115,6 +124,8 @@ const char* WorldName() { return reinterpret_cast<const char*>(0x1870630 + 0x29E
 // forward; +0xC0, its vertical field of view in degrees (as the console and FOV mods read them).
 auto& g_cameraRotation = *reinterpret_cast<float(*)[9]>(0x11B9C90);
 auto& g_cameraFov = *reinterpret_cast<float*>(0x11B9D00);
+// Where it is (+0x2C).
+auto& g_cameraPosition = *reinterpret_cast<float(*)[3]>(0x11B9C6C);
 
 // The time of day's light direction this frame: the time of day's update (0x52D6E0) hands the
 // renderer a block of particle lighting each frame (0x1973924, by 0x7686E0): an ambient colour, a
@@ -258,8 +269,10 @@ constexpr size_t kNamePoolInitPrologue = 6;  // push ebp / mov ebp,esp / sub esp
 using NamePoolInitFn = void(__fastcall*)(void* pool, void* unused, void* buffer, DWORD size, const char* name);
 NamePoolInitFn g_namePoolInit;
 
-// The tables the world builder writes for the mod to hand the game: the gameplay properties and the
-// draw distances (LOD classes), each read at start-up.
+// The tables the world builder writes for the mod to hand the game: the gameplay properties, the draw
+// distances (LOD classes), and the effects (visual effects, effects, level objects), each read at
+// start-up (the visual effects before the effects, which name them, and those before the level
+// objects, which name the effects).
 struct BuiltTable {
     const char* name;         // its file name, in mods\guerrilla_world\ and as the game asks for it
     const char* what;         // for the log
@@ -268,6 +281,9 @@ struct BuiltTable {
 BuiltTable g_builtTables[] = {
     {"gameplay_properties.xtbl", "Gameplay properties", {}},
     {"lod_properties.xtbl", "Draw distances", {}},
+    {"vfx.xtbl", "Visual effects", {}},
+    {"effects.xtbl", "Effects", {}},
+    {"level_objects.xtbl", "Level objects", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";
@@ -465,6 +481,15 @@ constexpr size_t kFogColour = 0x2700, kFogGround = 0x30C0, kFogAtmosphereScale =
 float g_fog = 1.0f;
 bool g_tellFog = true;  // log the fog at its next draw
 
+// Guerrilla fogs its sky too: the dome, the clouds and the backdrop, each as if it were a surface
+// stretched across to Guerrilla's far clip (1,000 m at full detail, game_render_set_lod_level) and up
+// to the time of day's fog scale, raised by its fog offset (fog_skybox_, fog_clouds_ and fog_matte_
+// offset and scale; Guerrilla's defaults 100 and 100, the backdrop's offset 10). Guerrilla's world
+// has its fog follow the camera (fog_camera_follow), which takes the camera's height off the offsets.
+constexpr size_t kSkyFogOffset = 0x6FEC, kSkyFogScale = 0x70E0, kCloudsFogOffset = 0x71D4, kCloudsFogScale = 0x72C8,
+                 kMatteFogOffset = 0x73BC, kMatteFogScale = 0x74B0;
+constexpr float kSkyFogFar = 1000;
+
 void ReadFog() {
     const float fog = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"Fog", L"1").c_str()));
     g_fog = fog >= 0 ? fog : 1.0f;
@@ -488,6 +513,18 @@ void ReadToneMapping() {
 }
 
 bool GuerrillaToneMapping() { return g_toneMapping && !g_toneMappingFailed; }
+
+// Guerrilla's sun shafts, drawn with its tone mapping: how strong, times Guerrilla's own (SunShafts=;
+// 0: none; read again whenever rfa_mods.ini is saved).
+float g_sunShafts = 1.0f;
+bool g_shaftsFailed = false;
+
+void ReadSunShafts() {
+    const float shafts = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"SunShafts", L"1").c_str()));
+    g_sunShafts = shafts >= 0 ? shafts : 1.0f;
+}
+
+bool SunShaftsOn() { return GuerrillaToneMapping() && g_sunShafts > 0 && !g_shaftsFailed; }
 
 // How bright the sky, clouds and backdrop are drawn: their time-of-day colours times Brightness=; with
 // Guerrilla's tone mapping the picture holds Guerrilla's own values, so there the default 5 is
@@ -516,7 +553,7 @@ void FogNumbers(float (&out)[4]) {
 }
 
 // Once a second: if rfa_mods.ini was saved since, read the brightness, ambient light, sun, colour
-// correction, fog, exposure and clock speed again.
+// correction, fog, exposure, sun shafts and clock speed again.
 void CheckSettings() {
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastIniCheck < 1000) return;
@@ -565,6 +602,9 @@ void CheckSettings() {
         g_tellColours = true;
     }
     if (g_exposure != exposureBefore) rfa::Log("Tone mapping: exposure times %.3g (was %.3g)", g_exposure, exposureBefore);
+    const float shaftsBefore = g_sunShafts;
+    ReadSunShafts();
+    if (g_sunShafts != shaftsBefore) rfa::Log("Sun shafts: times %.3g (was %.3g)", g_sunShafts, shaftsBefore);
     const float clockBefore = g_clockSpeed;
     ReadClockSpeed();
     if (g_clockSpeed != clockBefore && g_clockOurs) {
@@ -584,10 +624,11 @@ bool InOurWorld() {
     return false;
 }
 
-// The sun's path, our own model of Guerrilla's (its orbitals file gives the sun an orbit plane
-// turned 118° and fades it in from 7:30 to 19:30): it rises in the east (+x, where the sky's
-// morning colours are), crosses at 13:30 at 62° up, leaning south (-z), and sets in the west.
-// Toward the sun, in the world.
+// The sun's path, as Guerrilla's time of day works it out (tod_shared_calculate_orbital_position with
+// the sun orbital of its terr01.gtodx: a circle turned 118° about x and 180° about y, 4.5 hours on,
+// which comes to this): it rises in the east (+x, where the sky's morning colours are) at 7:30,
+// crosses at 13:30 at 62° up, leaning south (-z), and sets in the west at 19:30. Toward the sun, in
+// the world.
 void SunToward(float (&out)[3]) {
     const float pi = 3.14159265f;
     const float turn = 2 * pi * (g_timeOfDay - 13.5f) / 24.0f;  // 0 when highest, ±90° at rising and setting
@@ -841,6 +882,92 @@ bool __fastcall TableCacheFind(void* cache, void* unused, const char* name, Cach
     return g_tableCacheFind(cache, unused, name, out);
 }
 
+// The effect files, as the game streams them in: the streaming system's load handler for its VFX
+// files (.cefct_pc with .gefct_pc; 0x4EAD30, registered at 0x5295D8), cdecl (the file's name, -, its
+// data, -, its data file), true once the effect is in the game's map of loaded effects (0x11E9EF8; its
+// lookup 0x4EB430 by the file's name), where playing an effect looks for its visual's file (the
+// table's Filename, with .cefct_pc for its extension). Wrapped to write to the log, for the effects
+// the world builder adds (rfg_), whether each loaded, and how many the game loads in all.
+constexpr DWORD kEffectFileLoad = 0x4EAD30;
+constexpr size_t kEffectFileLoadPrologue = 6;  // push ebp / mov ebp,esp / sub esp,8
+using EffectFileLoadFn = bool(__cdecl*)(const char* name, void* unused1, void* data, void* unused2, void* dataFile);
+EffectFileLoadFn g_effectFileLoad;
+using LoadedEffectFn = void*(__cdecl*)(const char* name);
+auto const LoadedEffect = reinterpret_cast<LoadedEffectFn>(0x4EB430);
+int g_effectFilesLoaded = 0, g_ourEffectFilesLogged = 0;
+
+bool __cdecl EffectFileLoad(const char* name, void* unused1, void* data, void* unused2, void* dataFile) {
+    const bool loaded = g_effectFileLoad(name, unused1, data, unused2, dataFile);
+    if (++g_effectFilesLoaded % 100 == 1) rfa::Log("Effects: the game has loaded %d effect files (now %s)", g_effectFilesLoaded, name ? name : "?");
+    if (name && _strnicmp(name, "rfg_", 4) == 0 && g_ourEffectFilesLogged < 100) {
+        ++g_ourEffectFilesLogged;
+        rfa::Log("Effects: the game loads %s: %s, %s in its map of loaded effects", name, loaded ? "loaded" : "NOT LOADED",
+                 LoadedEffect(name) ? "now" : "NOT");
+    }
+    return loaded;
+}
+
+// Playing an effect: the worker (0x4EB4B0; cdecl, ten arguments: the effect's entry in effects.xtbl,
+// where, and eight more), which returns the effect object's handle or -1. Before making the object it
+// may leave the visual out: with <LOD> (+0x9C) it drops it past the spawning distance (+0xA4) or, with
+// View (+0x9D), out of the camera's view (0x768400(where, radius +0x84)); without a visual or a sound
+// (the effect's +0x48) it gives up; and it gives up while a count it reads (0xD15220) is under 20.
+// Wrapped to write to the log, for visuals the world builder adds (rfg_), each of those and the result
+// (each visual's first try, and its first success after failing; up to 60 lines).
+constexpr DWORD kPlayEffect = 0x4EB4B0;
+constexpr size_t kPlayEffectPrologue = 6;  // push ebp / mov ebp,esp / sub esp,3Ch
+using PlayEffectFn = int(__cdecl*)(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWORD a5, DWORD a6, DWORD a7, DWORD a8,
+                                   DWORD a9, DWORD a10);
+PlayEffectFn g_playEffect;
+using VisualFn = BYTE*(__cdecl*)(int index);
+auto const Visual = reinterpret_cast<VisualFn>(0x4EF3F0);
+using InViewFn = bool(__cdecl*)(const float* where, float radius);
+auto const InView = reinterpret_cast<InViewFn>(0x768400);
+using PlayCountFn = int(__cdecl*)();
+auto const PlayCount = reinterpret_cast<PlayCountFn>(0xD15220);
+int g_ourPlaysLogged = 0;
+std::vector<std::string> g_visualsFailing, g_visualsPlayed;
+
+int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWORD a5, DWORD a6, DWORD a7, DWORD a8, DWORD a9, DWORD a10) {
+    const int handle = g_playEffect(effect, where, a3, a4, a5, a6, a7, a8, a9, a10);
+    BYTE* visual = effect ? Visual(*reinterpret_cast<int*>(effect + 0x44)) : nullptr;
+    const char* name = visual ? reinterpret_cast<const char*>(visual) : "";
+    if (_strnicmp(name, "rfg_", 4) != 0 || g_ourPlaysLogged >= 60 || !where) return handle;
+    auto seen = [name](const std::vector<std::string>& names) { return std::find(names.begin(), names.end(), name) != names.end(); };
+    if (seen(g_visualsPlayed) || (handle == -1 && seen(g_visualsFailing))) return handle;
+    (handle == -1 ? g_visualsFailing : g_visualsPlayed).push_back(name);
+    {
+        ++g_ourPlaysLogged;
+        const float radius = *reinterpret_cast<float*>(visual + 0x84), spawning = *reinterpret_cast<float*>(visual + 0xA4);
+        float away = 0;
+        for (int i = 0; i < 3; ++i) away += (where[i] - g_cameraPosition[i]) * (where[i] - g_cameraPosition[i]);
+        rfa::Log("Effects: play %s at %.1f %.1f %.1f (%.1f m from the camera): handle %d; LOD %d, spawning %.0f m, view %d (in view: %d), "
+                 "radius %.1f, flags 0x%X, category %d, file %s (%s), sound %d, count %d",
+                 name, where[0], where[1], where[2], sqrtf(away), handle, visual[0x9C], spawning, visual[0x9D], InView(where, radius) ? 1 : 0,
+                 radius, *reinterpret_cast<DWORD*>(visual + 0x88), *reinterpret_cast<int*>(visual + 0x94),
+                 reinterpret_cast<const char*>(visual + 0x41), LoadedEffect(reinterpret_cast<const char*>(visual + 0x41)) ? "loaded" : "NOT loaded",
+                 *reinterpret_cast<int*>(effect + 0x48), PlayCount());
+    }
+    return handle;
+}
+
+// Making an object in the world (0x6D44E0; the world in ECX, then its type, its zone and one more):
+// none when its type's pool has none free (0x6D4650). Wrapped to write any failure to the log.
+constexpr DWORD kMakeObject = 0x6D44E0;
+constexpr size_t kMakeObjectPrologue = 6;  // push ebp / mov ebp,esp / sub esp,10h
+using MakeObjectFn = void*(__fastcall*)(void* world, void* unused, void* type, void* zone, DWORD a3);
+MakeObjectFn g_makeObject;
+int g_objectFailuresLogged = 0;
+
+void* __fastcall MakeObject(void* world, void* unused, void* type, void* zone, DWORD a3) {
+    void* object = g_makeObject(world, unused, type, zone, a3);
+    if (!object && g_objectFailuresLogged < 40) {
+        ++g_objectFailuresLogged;
+        rfa::Log("Objects: the game could not make an object (type %p, zone %p)", type, zone);
+    }
+    return object;
+}
+
 // Gives the gameplay properties' name pool kGameplayNameRoom bytes of the mod's own when the mod hands
 // the game its table (the game's own buffer is left unused); every other pool is the game's.
 void __fastcall NamePoolInit(void* pool, void* unused, void* buffer, DWORD size, const char* name) {
@@ -857,7 +984,11 @@ void __fastcall NamePoolInit(void* pool, void* unused, void* buffer, DWORD size,
 
 // Guerrilla's sky, as its shader works it out, over the whole screen. The vertex shader makes one
 // triangle that covers the screen, at the far plane; the pixel shader turns each pixel back into
-// the direction it looks in and colours it.
+// the direction it looks in and colours it, and lays Guerrilla's fog over it as its dome's shaders do
+// (rfg-skybox_s): the dome (rfg_skybox, 150 m across, from 23.2 m below its middle to 75 m above)
+// stretched across to the far clip and up to the fog scale (its height from the bottom times the scale
+// ÷ its half-height, less that half-height), raised by the fog offset, and fogged there as the world's
+// surfaces are (Guerrilla's height fog, as kFogShader); the sky's colour then mixed toward the fog's.
 constexpr char kSkyShader[] = R"(
 cbuffer Sky : register(b0)
 {
@@ -865,7 +996,20 @@ cbuffer Sky : register(b0)
     float4 Right;           // the camera's axes in the world; Right.w: tan of half the horizontal field of view
     float4 Up;              // Up.w: tan of half the vertical field of view
     float4 Forward;         // Forward.w: the far plane's depth (1, or 0 if the game's depth runs the other way)
+    float4 FogColour;       // the fog's colour (times the colour correction and the sky's brightness)
+    float4 FogNumbers;      // as the world's fog: x the fall-off with height, y the density at the camera's height, w the offset
+    float4 DomeFog;         // x the far clip, y the fog scale, z the fog offset less the camera's height
 };
+
+static const float kDomeRadius = 75, kDomeHalfHeight = 49.088144;  // (75 + 23.176287) ÷ 2
+
+// Guerrilla's height fog at a point (from the camera): 1 − min(2^(−(term × distance × density − offset)), 1).
+float HeightFog(float3 at)
+{
+    float kh = at.y * FogNumbers.x;
+    float term = abs(at.y) > 0.01 ? (1 - exp2(kh * -1.442695)) / kh : 1;
+    return 1 - min(exp2(-(term * length(at) * FogNumbers.y - FogNumbers.w)), 1);
+}
 
 struct Pixel
 {
@@ -895,13 +1039,21 @@ float4 SkyPixel(Pixel p) : SV_Target
     float between = band - below;
     float3 west = lerp(Hemisphere[below].rgb, Hemisphere[below + 1].rgb, between);
     float3 east = lerp(Hemisphere[below + 5].rgb, Hemisphere[below + 6].rgb, between);
-    return float4(lerp(west, east, across), 1);
+    float3 dome = look * kDomeRadius;
+    float3 fogAt = float3(dome.x / kDomeRadius * DomeFog.x,
+                          (dome.y + kDomeHalfHeight) * DomeFog.y / kDomeHalfHeight - kDomeHalfHeight + DomeFog.z,
+                          dome.z / kDomeRadius * DomeFog.x);
+    return float4(lerp(lerp(west, east, across), FogColour.rgb, HeightFog(fogAt)), 1);
 }
 )";
 
 // Guerrilla's clouds, as its cloud shader draws them. The model's points are directions from the
 // eye; they go just in front of the far plane (so behind everything the world has drawn), and come
 // out with their colour already times their cover (laid over the sky with "one, one minus alpha").
+// Fogged as Guerrilla's cloud and backdrop shaders fog them, each point of the model: its part
+// stretched across to the far clip (its point across times the far clip ÷ the part's half-width) and
+// up to the fog scale ((its height + the part's half-height) × the scale ÷ that half-height), raised
+// by the fog offset, and fogged there as the world's surfaces are.
 constexpr char kCloudShader[] = R"(
 cbuffer Clouds : register(b0)
 {
@@ -914,7 +1066,19 @@ cbuffer Clouds : register(b0)
     float4 Strengths;  // the four layers' strengths
     float4 Shape;      // x: the height they fade in from, y: the height they are full at, z: rim light strength, w: rim light power
     float4 Drift;      // x: layers 0-1's sideways offset, y: layers 2-3's
+    float4 Ambient;    // the time of day's ambient light (added to the clouds' light)
+    float4 FogColour;  // the fog's colour
+    float4 FogNumbers; // as the world's fog: x the fall-off with height, y the density at the camera's height, w the offset
+    float4 FogScale;   // x the far clip ÷ the part's half-width, y the fog scale ÷ its half-height, z the far clip ÷ its half-depth, w its half-height
+    float4 FogRaise;   // x the fog offset less the camera's height
 };
+
+float HeightFog(float3 at)
+{
+    float kh = at.y * FogNumbers.x;
+    float term = abs(at.y) > 0.01 ? (1 - exp2(kh * -1.442695)) / kh : 1;
+    return 1 - min(exp2(-(term * length(at) * FogNumbers.y - FogNumbers.w)), 1);
+}
 
 Texture2D Layers01 : register(t0);
 Texture2D Layers23 : register(t1);
@@ -926,6 +1090,7 @@ struct CloudPoint
     float3 normal : TEXCOORD0;
     float3 look : TEXCOORD1;
     float4 layers : TEXCOORD2;  // xy: where layers 0-1 are read, zw: layers 2-3
+    float fog : TEXCOORD3;
 };
 
 CloudPoint CloudVertex(float3 position : POSITION, float3 normal : NORMAL, float2 uv : TEXCOORD)
@@ -937,6 +1102,7 @@ CloudPoint CloudVertex(float3 position : POSITION, float3 normal : NORMAL, float
     p.normal = normal;
     p.look = look;
     p.layers = float4(uv.x + Drift.x, uv.y, uv.x + Drift.y, uv.y);
+    p.fog = HeightFog(float3(position.x * FogScale.x, (position.y + FogScale.w) * FogScale.y + FogRaise.x, position.z * FogScale.z));
     return p;
 }
 
@@ -959,7 +1125,8 @@ float4 CloudPixel(CloudPoint p) : SV_Target
     float towardsSun = pow(saturate(dot(normalize(p.look), Light.xyz)), 30);
     lit += Front.rgb * Shape.z * rim * towardsSun;
     float alpha = covered * covered;
-    return min(float4(light * lit * alpha, alpha), 32);
+    float3 colour = lerp(light * lit + Ambient.rgb, FogColour.rgb, p.fog);
+    return min(float4(colour * alpha, alpha), 32);
 }
 
 // The backdrop, as Guerrilla's backdrop shader (rfg-skybox-matte_s) draws it. With it the buffer's
@@ -969,7 +1136,7 @@ float4 BackdropPixel(CloudPoint p) : SV_Target
 {
     float4 picture = Layers01.Sample(Wrapped, p.layers.xy);
     float3 mountain = lerp(Rear.rgb, Front.rgb, dot(normalize(p.normal), Light.xyz) * 0.5 + 0.5);
-    float3 colour = lerp(picture.rgb, Strengths.rgb, Strengths.a) * mountain;
+    float3 colour = lerp(lerp(picture.rgb, Strengths.rgb, Strengths.a) * mountain, FogColour.rgb, p.fog);
     return min(float4(colour * picture.a, picture.a), 32);
 }
 )";
@@ -1078,19 +1245,22 @@ float4 FogPixel(float4 position : SV_Position) : SV_Target
 // luminance_min-max, averaged over a grid, and the eye's brightness eased toward it, by
 // 1 − 2^(−0.8744 × the frame's time × iris_rate). ToneMapPixel: the exposure, lum_range ÷ max(1 +
 // lum_offset × (base + amount × (adapted − base)), 0.1) (eye_adaption_base, _amount), times Exposure=;
-// the picture 1 − e^(−exposure × (scene + bloom × bloom_amount)), encoded for the screen (sRGB:
-// Guerrilla's display gamma, 2.4).
+// the picture 1 − e^(−exposure × (scene + (bloom + sun shafts) × bloom_amount)), encoded for the
+// screen (sRGB: Guerrilla's display gamma, 2.4). Guerrilla draws its sun shafts into the texture its
+// bloom is then laid into, so they go with the bloom.
 constexpr char kToneMappingShader[] = R"(
 cbuffer ToneMapping : register(b0)
 {
     float4 Adapt;     // x how far the eye moves toward the measure this frame (1: all the way), y z the range each sample is held to
     float4 Exposure;  // x lum_range, y lum_offset, z eye_adaption_base, w eye_adaption_amount
     float4 Picture;   // x Exposure=, y bloom_amount, z w the picture's width and height
+    float4 Shafts;    // x how strong the sun shafts are (SunShafts=; 0 when none were drawn)
 };
 
 Texture2D Scene : register(t0);
 Texture2D Bloom : register(t1);
 Texture2D Adapted : register(t2);  // 1 x 1: the brightness the eye has adapted to
+Texture2D SunShafts : register(t3);
 SamplerState Smooth : register(s0);
 
 float4 ToneVertex(uint id : SV_VertexID) : SV_Position
@@ -1118,11 +1288,126 @@ float4 TonePixel(float4 position : SV_Position) : SV_Target
 {
     float3 colour = max(Scene.Load(int3(position.xy, 0)).rgb, 0);
     float3 bloom = max(Bloom.Sample(Smooth, position.xy / Picture.zw).rgb, 0) * Picture.y;
+    float3 shafts = max(SunShafts.Sample(Smooth, position.xy / Picture.zw).rgb, 0) * Picture.y * Shafts.x;
     float adapted = Adapted.Load(int3(0, 0, 0)).r;
     float exposure = Exposure.x / max(1 + Exposure.y * (Exposure.z + Exposure.w * (adapted - Exposure.z)), 0.1) * Picture.x;
-    float3 picture = saturate(1 - exp(-exposure * (colour + bloom)));
+    float3 picture = saturate(1 - exp(-exposure * (colour + bloom + shafts)));
     float3 encoded = picture <= 0.0031308 ? picture * 12.92 : 1.055 * pow(picture, 1 / 2.4) - 0.055;
     return float4(encoded, 1);
+}
+)";
+
+// The sun, as Guerrilla's sky draws its orbitals (rl_skybox_renderable_instance::render_orbital_object):
+// a square facing the camera, centred one unit from the eye toward the sun and as many units across
+// as twice its scale, behind everything the world has drawn; its texture's alpha times its colour,
+// added to what is there.
+constexpr char kSunShader[] = R"(
+cbuffer Sun : register(b0)
+{
+    float4 Right;    // as the sky's
+    float4 Up;
+    float4 Forward;
+    float4 Centre;   // toward the sun (xyz), and its half-size one unit away (w)
+    float4 Colour;   // its colour, times its brightness and opacity
+};
+
+Texture2D Disc : register(t0);
+SamplerState Clamped : register(s0);
+
+struct SunPoint
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+SunPoint SunVertex(uint id : SV_VertexID)
+{
+    // A strip of two triangles: (-1, -1), (1, -1), (-1, 1), (1, 1).
+    float2 corner = float2(id & 1, id >> 1) * 2 - 1;
+    float3 look = Centre.xyz + (Right.xyz * corner.x + Up.xyz * corner.y) * Centre.w;
+    float depth = dot(look, Forward.xyz);
+    SunPoint p;
+    p.position = float4(dot(look, Right.xyz) / Right.w, dot(look, Up.xyz) / Up.w, depth * lerp(0.000001, 0.999999, Forward.w), depth);
+    p.uv = corner * float2(0.5, -0.5) + 0.5;
+    return p;
+}
+
+float4 SunPixel(SunPoint p) : SV_Target
+{
+    return float4(Colour.rgb * Disc.Sample(Clamped, p.uv).a, 0);
+}
+)";
+
+// Guerrilla's sun shafts (its rl_hdr passes 27 and 15 with their vertex shaders 10 and 4; the steps
+// between as Re-Mars-tered's rl_hdr_compositor::render_sun_shafts takes them), each at half the
+// picture's size. SourcePixel: the sky round the sun, the picture averaged over 4 × 4 samples where
+// nothing was drawn (the depth at the far plane), times a round fall-off the sun's size across
+// (Guerrilla lays a texture there whose picture isn't known; a smooth disc stands in). BlurPixel: a
+// 5 × 5 Gaussian. RadialPixel: 16 samples on the way from the pixel toward the sun, the nearer the
+// pixel the more each counts (base − k × step ÷ 16), all times a fall-off with the distance from the
+// sun across the screen, e^(curve base × (min(distance, radius) ÷ radius)^exponent) + shift (never
+// below 0), and the strength ÷ 16.
+constexpr char kShaftShader[] = R"(
+cbuffer Shafts : register(b0)
+{
+    float4 Sun;       // xy the sun's place on the picture (0 to 1, down is +y), z the picture's width ÷ height, w the depth at the far plane
+    float4 Texel;     // xy one texel of the half-size targets, zw one texel of the picture
+    float4 Strength;  // x the strength, y the base, z the step; w the sun's size in half-size texels
+    float4 Curve;     // x the radius, y the curve's base, z its exponent, w its shift
+    float4 Blur;      // the Gaussian's weights 0, 1 and 2 texels off (x, y, z)
+};
+
+Texture2D Source : register(t0);
+Texture2D Depth : register(t1);
+SamplerState Smooth : register(s0);
+
+static const float kTowardSun[16] = {1, 0.84375, 0.779029, 0.729367, 0.6875, 0.650614, 0.617267, 0.586601,
+                                     0.558058, 0.53125, 0.505894, 0.481777, 0.458734, 0.436633, 0.415366, 0.394846};
+
+float4 ShaftVertex(uint id : SV_VertexID) : SV_Position
+{
+    float2 corner = float2((id << 1) & 2, id & 2);
+    return float4(corner * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+
+float4 SourcePixel(float4 position : SV_Position) : SV_Target
+{
+    float2 at = position.xy * Texel.xy;
+    float3 sky = 0;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+        {
+            float2 tap = at + (float2(x, y) - 1.5) * Texel.zw;
+            float depth = Depth.Load(int3(tap / Texel.zw, 0)).x;
+            if (abs(depth - Sun.w) < 0.0000001)
+                sky += max(Source.SampleLevel(Smooth, tap, 0).rgb, 0);
+        }
+    float fromSun = length(position.xy - Sun.xy / Texel.xy) / Strength.w;  // in the sun's sizes
+    float disc = saturate(1 - 2 * fromSun);
+    return float4(sky / 16 * disc * disc, 1);
+}
+
+float4 BlurPixel(float4 position : SV_Position) : SV_Target
+{
+    float2 at = position.xy * Texel.xy;
+    float weights[3] = {Blur.x, Blur.y, Blur.z};
+    float3 sum = 0;
+    for (int y = -2; y <= 2; ++y)
+        for (int x = -2; x <= 2; ++x)
+            sum += Source.SampleLevel(Smooth, at + float2(x, y) * Texel.xy, 0).rgb * weights[abs(x)] * weights[abs(y)];
+    return float4(sum, 1);
+}
+
+float4 RadialPixel(float4 position : SV_Position) : SV_Target
+{
+    float2 at = position.xy * Texel.xy;
+    float2 toSun = Sun.xy - at;
+    float distance = length(float2(toSun.x * Sun.z, toSun.y));
+    float falloff = max(exp(Curve.y * pow(min(distance, Curve.x) / Curve.x, Curve.z)) + Curve.w, 0);
+    float3 sum = 0;
+    for (int k = 0; k < 16; ++k)
+        sum += Source.SampleLevel(Smooth, lerp(Sun.xy, at, kTowardSun[k]), 0).rgb * (Strength.y - k * Strength.z / 16);
+    return float4(sum * falloff * Strength.x / 16, 1);
 }
 )";
 
@@ -1149,6 +1434,9 @@ struct SkyConstants {
     float right[4];
     float up[4];
     float forward[4];
+    float fogColour[4];
+    float fogNumbers[4];
+    float domeFog[4];
 };
 
 struct CloudConstants {
@@ -1161,15 +1449,22 @@ struct CloudConstants {
     float strengths[4];
     float shape[4];
     float drift[4];
+    float ambient[4];
+    float fogColour[4];
+    float fogNumbers[4];
+    float fogScale[4];
+    float fogRaise[4];
 };
 
-// A cloud part from clouds.bin (see the world builder, rfgsky): which indices, overhead (0) or along
-// the horizon (1), where its clouds fade in, and its two textures.
+// A cloud part from clouds.bin (see the world builder, rfgsky): which indices, overhead (0), along
+// the horizon (1) or the backdrop (2), where its clouds fade in, its two textures, and half its size
+// across, up and deep (from its points; Guerrilla's fog takes its part's box).
 struct CloudPart {
     UINT first = 0, count = 0;
     int kind = 0;
     float fade = 0, full = 1;
     ID3D11ShaderResourceView* layers[2] = {};
+    float half[3] = {1, 1, 1};
 };
 
 ID3D11Device* g_device = nullptr;
@@ -1382,6 +1677,7 @@ struct ToneConstants {
     float adapt[4];
     float exposure[4];
     float picture[4];
+    float shafts[4];
 };
 
 ID3D11VertexShader* g_toneVertex = nullptr;
@@ -1518,6 +1814,247 @@ ID3D11ShaderResourceView* LoadTexture(const std::wstring& path) {
     return view;
 }
 
+// The sun as Guerrilla's sky draws it: the orbital named "Sun" in the world's global time of day
+// (<world>.gtodx, which the world builder writes from Guerrilla's terr01.gtodx and the game finds among
+// the overrides), read once a world. Its texture (map_name, in mods\guerrilla_world\ as .dds) and three
+// curves over the day: scale (its half-size, in hundredths of its distance), tint (red, green, blue
+// and a brightness) and opacity. A curve's keys are half-hour slots, with a straight line between them
+// round the clock, as Guerrilla's time of day fills its slots (and its game_time_of_day_get_orbital_params
+// reads them: the colour times its brightness, the opacity apart, the scale ÷ 100).
+struct CurveKey {
+    float slot = 0;
+    float value[4] = {};
+};
+
+struct Orbital {
+    std::string world;  // the world it was read for
+    bool found = false;
+    std::string map;
+    std::vector<CurveKey> scale, tint, opacity;
+};
+
+Orbital g_sunOrbital;
+
+// The text between <tag> and </tag>, looked for from `from` and ending before `limit`.
+bool Between(const std::string& text, const char* tag, size_t from, size_t limit, size_t& start, size_t& end) {
+    const std::string open = std::string("<") + tag + ">", close = std::string("</") + tag + ">";
+    start = text.find(open, from);
+    if (start == std::string::npos || start >= limit) return false;
+    start += open.size();
+    end = text.find(close, start);
+    return end != std::string::npos && end <= limit;
+}
+
+std::vector<CurveKey> ReadKeys(const std::string& text, const char* tag, size_t from, size_t limit) {
+    std::vector<CurveKey> keys;
+    size_t start, end;
+    if (!Between(text, tag, from, limit, start, end)) return keys;
+    size_t at = start, keyStart, keyEnd;
+    while (Between(text, "key", at, end, keyStart, keyEnd)) {
+        CurveKey key;
+        size_t s, e;
+        if (Between(text, "time", keyStart, keyEnd, s, e)) key.slot = static_cast<float>(atof(text.substr(s, e - s).c_str()));
+        if (Between(text, "value", keyStart, keyEnd, s, e))
+            sscanf_s(text.substr(s, e - s).c_str(), "%f %f %f %f", &key.value[0], &key.value[1], &key.value[2], &key.value[3]);
+        keys.push_back(key);
+        at = keyEnd;
+    }
+    std::sort(keys.begin(), keys.end(), [](const CurveKey& a, const CurveKey& b) { return a.slot < b.slot; });
+    return keys;
+}
+
+// A curve at a time (in hours): its first `count` numbers, `otherwise` when it has no keys.
+void CurveAt(const std::vector<CurveKey>& keys, float hours, int count, float otherwise, float* out) {
+    for (int i = 0; i < count; ++i) out[i] = otherwise;
+    if (keys.empty()) return;
+    float slot = fmodf(hours * 2, 48.0f);
+    if (slot < 0) slot += 48;
+    size_t next = 0;  // the first key after now; the one before it, round the clock
+    while (next < keys.size() && keys[next].slot <= slot) ++next;
+    const CurveKey& after = keys[next % keys.size()];
+    const CurveKey& before = keys[(next + keys.size() - 1) % keys.size()];
+    float from = before.slot, to = after.slot;
+    if (from > slot) from -= 48;
+    if (to <= slot) to += 48;
+    const float t = to > from ? (slot - from) / (to - from) : 0;
+    for (int i = 0; i < count; ++i) out[i] = before.value[i] + (after.value[i] - before.value[i]) * t;
+}
+
+void ReadSunOrbital() {
+    const char* world = WorldName();
+    if (g_sunOrbital.world == world) return;
+    g_sunOrbital = Orbital();
+    g_sunOrbital.world = world;
+    const std::wstring name(world, world + strlen(world));
+    std::vector<BYTE> bytes;
+    if (!ReadWholeFile(rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\" + name + L".gtodx", bytes)) {
+        rfa::Log("Sun: no overrides\\build\\pc\\cache\\%s.gtodx (the world builder writes it); no sun drawn", world);
+        return;
+    }
+    const std::string text(bytes.begin(), bytes.end());
+    size_t at = 0, start, end;
+    while (Between(text, "orbital", at, text.size(), start, end)) {
+        size_t s, e;
+        if (Between(text, "name", start, end, s, e) && text.compare(s, e - s, "Sun") == 0) {
+            g_sunOrbital.found = true;
+            if (Between(text, "map_name", start, end, s, e)) g_sunOrbital.map = text.substr(s, e - s);
+            g_sunOrbital.scale = ReadKeys(text, "scale", start, end);
+            g_sunOrbital.tint = ReadKeys(text, "tint", start, end);
+            g_sunOrbital.opacity = ReadKeys(text, "opacity", start, end);
+            break;
+        }
+        at = end;
+    }
+    if (g_sunOrbital.found)
+        rfa::Log("Sun: Guerrilla's sun orbital from %s.gtodx: texture %s, %zu scale, %zu tint and %zu opacity keys", world,
+                 g_sunOrbital.map.c_str(), g_sunOrbital.scale.size(), g_sunOrbital.tint.size(), g_sunOrbital.opacity.size());
+    else
+        rfa::Log("Sun: %s.gtodx has no orbital named Sun; no sun drawn", world);
+}
+
+struct SunConstants {
+    float right[4];
+    float up[4];
+    float forward[4];
+    float centre[4];
+    float colour[4];
+};
+
+ID3D11VertexShader* g_sunVertex = nullptr;
+ID3D11PixelShader* g_sunPixel = nullptr;
+ID3D11Buffer* g_sunConstants = nullptr;
+ID3D11ShaderResourceView* g_sunDisc = nullptr;
+ID3D11BlendState* g_sunBlend = nullptr;
+ID3D11SamplerState* g_sunSampler = nullptr;
+std::string g_sunDiscMap;  // the texture loaded (or tried)
+bool g_sunFailed = false;
+
+// The sun's shaders and states, and its texture (mods\guerrilla_world\<map_name>.dds, which the world
+// builder writes); without the texture, no sun (logged).
+bool MakeSunObjects() {
+    if (!g_sunVertex) {
+        ID3DBlob* vertex = Compile(kSunShader, sizeof(kSunShader) - 1, "SunVertex", "vs_4_0");
+        ID3DBlob* pixel = Compile(kSunShader, sizeof(kSunShader) - 1, "SunPixel", "ps_4_0");
+        bool ok = vertex && pixel &&
+                  SUCCEEDED(g_device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &g_sunVertex)) &&
+                  SUCCEEDED(g_device->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &g_sunPixel));
+        for (ID3DBlob* blob : {vertex, pixel})
+            if (blob) blob->Release();
+        D3D11_BUFFER_DESC buffer = {};
+        buffer.ByteWidth = sizeof(SunConstants);
+        buffer.Usage = D3D11_USAGE_DYNAMIC;
+        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ok = ok && SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_sunConstants));
+        D3D11_BLEND_DESC blend = {};  // added to the sky's red, green and blue
+        blend.RenderTarget[0].BlendEnable = TRUE;
+        blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+        blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+        ok = ok && SUCCEEDED(g_device->CreateBlendState(&blend, &g_sunBlend));
+        D3D11_SAMPLER_DESC sampler = {};
+        sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        ok = ok && SUCCEEDED(g_device->CreateSamplerState(&sampler, &g_sunSampler));
+        if (!ok) {
+            rfa::Log("Could not make the sun's shaders or states; no sun");
+            return false;
+        }
+    }
+    if (g_sunDiscMap != g_sunOrbital.map) {
+        g_sunDiscMap = g_sunOrbital.map;
+        if (g_sunDisc) g_sunDisc->Release();
+        const std::wstring map(g_sunDiscMap.begin(), g_sunDiscMap.end());
+        g_sunDisc = g_sunDiscMap.empty() ? nullptr : LoadTexture(DataFolder() + map + L".dds");
+        if (!g_sunDisc) rfa::Log("Sun: no mods\\guerrilla_world\\%s.dds (the world builder writes it); no sun drawn", g_sunDiscMap.c_str());
+    }
+    return true;
+}
+
+// Guerrilla's sun shaft settings (Re-Mars-tered's Rl_sun_shafts_*, their starting values): the sun's
+// size in half-size texels, the strength (taken × 0.15625, and by a value already in the constants
+// whose meaning isn't known, taken as 1), base and step, the fall-off's radius and curve, and the
+// Gaussian's rho and multiplier.
+constexpr float kShaftSunSize = 300, kShaftScale = 1, kShaftBaseLum = 1, kShaftLumStep = 1, kShaftRadius = 5, kShaftCurveBase = -4,
+                kShaftCurveExponent = 1.6f, kShaftCurveShift = -0.02f, kShaftBlurRho = 0.75f, kShaftBlurMultiplier = 1;
+
+struct ShaftConstants {
+    float sun[4];
+    float texel[4];
+    float strength[4];
+    float curve[4];
+    float blur[4];
+};
+
+ID3D11VertexShader* g_shaftVertex = nullptr;
+ID3D11PixelShader* g_shaftSource = nullptr;
+ID3D11PixelShader* g_shaftBlur = nullptr;
+ID3D11PixelShader* g_shaftRadial = nullptr;
+ID3D11Buffer* g_shaftConstants = nullptr;
+ID3D11Texture2D* g_shaft[2] = {};  // half the picture's size, 16-bit float: drawn into in turn
+ID3D11RenderTargetView* g_shaftTarget[2] = {};
+ID3D11ShaderResourceView* g_shaftView[2] = {};
+UINT g_shaftWidth = 0, g_shaftHeight = 0;
+ID3D11ShaderResourceView* g_shaftDepth = nullptr;  // the G-buffer's depth, kept from the light pass for the shafts
+float g_farDepth = 1;                              // the depth buffer's value at the far plane (from the sky step)
+
+bool MakeShaftObjects() {
+    if (!LoadCompiler()) return false;
+    ID3DBlob* vertex = Compile(kShaftShader, sizeof(kShaftShader) - 1, "ShaftVertex", "vs_4_0");
+    ID3DBlob* source = Compile(kShaftShader, sizeof(kShaftShader) - 1, "SourcePixel", "ps_4_0");
+    ID3DBlob* blur = Compile(kShaftShader, sizeof(kShaftShader) - 1, "BlurPixel", "ps_4_0");
+    ID3DBlob* radial = Compile(kShaftShader, sizeof(kShaftShader) - 1, "RadialPixel", "ps_4_0");
+    bool ok = vertex && source && blur && radial &&
+              SUCCEEDED(g_device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &g_shaftVertex)) &&
+              SUCCEEDED(g_device->CreatePixelShader(source->GetBufferPointer(), source->GetBufferSize(), nullptr, &g_shaftSource)) &&
+              SUCCEEDED(g_device->CreatePixelShader(blur->GetBufferPointer(), blur->GetBufferSize(), nullptr, &g_shaftBlur)) &&
+              SUCCEEDED(g_device->CreatePixelShader(radial->GetBufferPointer(), radial->GetBufferSize(), nullptr, &g_shaftRadial));
+    for (ID3DBlob* blob : {vertex, source, blur, radial})
+        if (blob) blob->Release();
+    D3D11_BUFFER_DESC buffer = {};
+    buffer.ByteWidth = sizeof(ShaftConstants);
+    buffer.Usage = D3D11_USAGE_DYNAMIC;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ok = ok && SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_shaftConstants));
+    if (!ok) rfa::Log("Could not make the sun shafts' shaders; no sun shafts");
+    return ok;
+}
+
+// The two half-size targets, made again when the picture's size changes.
+bool ShaftTargets(UINT width, UINT height) {
+    if (g_shaft[0] && g_shaftWidth == width && g_shaftHeight == height) return true;
+    for (int i = 0; i < 2; ++i) {
+        if (g_shaftView[i]) g_shaftView[i]->Release();
+        if (g_shaftTarget[i]) g_shaftTarget[i]->Release();
+        if (g_shaft[i]) g_shaft[i]->Release();
+        g_shaftView[i] = nullptr;
+        g_shaftTarget[i] = nullptr;
+        g_shaft[i] = nullptr;
+    }
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    bool ok = true;
+    for (int i = 0; i < 2 && ok; ++i)
+        ok = SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &g_shaft[i])) &&
+             SUCCEEDED(g_device->CreateRenderTargetView(g_shaft[i], nullptr, &g_shaftTarget[i])) &&
+             SUCCEEDED(g_device->CreateShaderResourceView(g_shaft[i], nullptr, &g_shaftView[i]));
+    g_shaftWidth = ok ? width : 0;
+    g_shaftHeight = ok ? height : 0;
+    if (ok) rfa::Log("Sun shafts: drawn at half the picture's size, %u x %u", width, height);
+    return ok;
+}
+
 // Loads the cloud model and textures (mods\guerrilla_world\) and makes what the clouds draw with.
 // Without them, no clouds (logged).
 void MakeCloudObjects() {
@@ -1564,6 +2101,20 @@ void MakeCloudObjects() {
     const UINT indexCount = ReadAt<UINT>(file, at);
     at += 4;
     if (at + size_t(indexCount) * 4 > file.size() || parts.empty()) { rfa::Log("Clouds: clouds.bin has no usable parts"); return; }
+    // Each part's box (for its fog), from the points its triangles use.
+    for (CloudPart& part : parts) {
+        float low[3] = {1e30f, 1e30f, 1e30f}, high[3] = {-1e30f, -1e30f, -1e30f};
+        for (UINT i = part.first; i < part.first + part.count && i < indexCount; ++i) {
+            const UINT index = ReadAt<UINT>(file, at + size_t(i) * 4);
+            if (index >= vertexCount) continue;
+            const float* point = reinterpret_cast<const float*>(vertices + size_t(index) * 32);
+            for (int a = 0; a < 3; ++a) {
+                if (point[a] < low[a]) low[a] = point[a];
+                if (point[a] > high[a]) high[a] = point[a];
+            }
+        }
+        for (int a = 0; a < 3; ++a) part.half[a] = high[a] > low[a] ? (high[a] - low[a]) / 2 : 1;
+    }
 
     ID3DBlob* vertex = Compile(kCloudShader, sizeof(kCloudShader) - 1, "CloudVertex", "vs_4_0");
     ID3DBlob* pixel = Compile(kCloudShader, sizeof(kCloudShader) - 1, "CloudPixel", "ps_4_0");
@@ -1672,6 +2223,12 @@ void DrawClouds(const SkyConstants& sky) {
     constants.shape[3] = TodNumber(kBacklightPower);
     constants.drift[0] = g_drift[0];
     constants.drift[1] = g_drift[1];
+    // The ambient light and the fog's colour and numbers, as the sky's (its own scale and offset each part).
+    float correction[3];
+    ColourCorrection(correction);
+    for (int i = 0; i < 3; ++i) constants.ambient[i] = g_worldAmbient[i] * correction[i] * SkyBrightness();
+    memcpy(constants.fogColour, sky.fogColour, sizeof(constants.fogColour));
+    memcpy(constants.fogNumbers, sky.fogNumbers, sizeof(constants.fogNumbers));
 
     UINT stride = 32, offset = 0;
     g_context->IASetInputLayout(g_cloudLayout);
@@ -1689,6 +2246,13 @@ void DrawClouds(const SkyConstants& sky) {
     ColourCorrection(tint);
     for (const CloudPart& part : g_cloudParts) {
         float colour[3];
+        const float fogScale = TodNumber(part.kind == 2 ? kMatteFogScale : kCloudsFogScale);
+        const float fogOffset = TodNumber(part.kind == 2 ? kMatteFogOffset : kCloudsFogOffset);
+        constants.fogScale[0] = kSkyFogFar / part.half[0];
+        constants.fogScale[1] = fogScale / part.half[1];
+        constants.fogScale[2] = kSkyFogFar / part.half[2];
+        constants.fogScale[3] = part.half[1];
+        constants.fogRaise[0] = fogOffset - g_cameraPosition[1];
         if (part.kind == 2) {
             TodColour(kMountainFront, colour);
             for (int i = 0; i < 3; ++i) constants.front[i] = colour[i] * SkyBrightness() * tint[i];
@@ -1723,6 +2287,54 @@ void DrawClouds(const SkyConstants& sky) {
         g_context->PSSetShaderResources(0, 2, part.layers);
         g_context->DrawIndexed(part.count, part.first, 0);
     }
+}
+
+// The sun over the sky, before the clouds: toward the sun, its scale, colour and opacity from the sun
+// orbital's curves now, the colour (times its brightness and Guerrilla's light scale, 1) times the
+// opacity, the colour correction and the sky's brightness.
+void DrawSun(const SkyConstants& sky) {
+    ReadSunOrbital();
+    if (!g_sunOrbital.found || g_sunFailed) return;
+    if (!MakeSunObjects()) {
+        g_sunFailed = true;
+        return;
+    }
+    if (!g_sunDisc) return;
+    float scale, opacity, tint[4], correction[3], toward[3];
+    CurveAt(g_sunOrbital.scale, g_timeOfDay, 1, 0, &scale);
+    CurveAt(g_sunOrbital.opacity, g_timeOfDay, 1, 0, &opacity);
+    CurveAt(g_sunOrbital.tint, g_timeOfDay, 4, 1, tint);
+    if (opacity <= 0 || scale <= 0) return;
+    ColourCorrection(correction);
+    SunToward(toward);
+    SunConstants constants = {};
+    memcpy(constants.right, sky.right, sizeof(constants.right));
+    memcpy(constants.up, sky.up, sizeof(constants.up));
+    memcpy(constants.forward, sky.forward, sizeof(constants.forward));
+    for (int i = 0; i < 3; ++i) {
+        constants.centre[i] = toward[i];
+        constants.colour[i] = tint[i] * tint[3] * opacity * correction[i] * SkyBrightness();
+    }
+    constants.centre[3] = scale / 100;
+    if (g_tellColours)
+        rfa::Log("Sun at %.2f h: toward %.2f %.2f %.2f, %.4f across, colour %.3f %.3f %.3f (opacity %.2f)", g_timeOfDay, toward[0], toward[1],
+                 toward[2], 2 * constants.centre[3], constants.colour[0], constants.colour[1], constants.colour[2], opacity);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(g_context->Map(g_sunConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    memcpy(mapped.pData, &constants, sizeof(constants));
+    g_context->Unmap(g_sunConstants, 0);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    g_context->IASetInputLayout(nullptr);
+    g_context->VSSetShader(g_sunVertex, nullptr, 0);
+    g_context->PSSetShader(g_sunPixel, nullptr, 0);
+    g_context->VSSetConstantBuffers(0, 1, &g_sunConstants);
+    g_context->PSSetConstantBuffers(0, 1, &g_sunConstants);
+    g_context->PSSetShaderResources(0, 1, &g_sunDisc);
+    g_context->PSSetSamplers(0, 1, &g_sunSampler);
+    const float noFactor[4] = {1, 1, 1, 1};
+    g_context->OMSetBlendState(g_sunBlend, noFactor, 0xFFFFFFFF);
+    g_context->Draw(4, 0);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
 const char* FormatName(DXGI_FORMAT format) {
@@ -1809,6 +2421,7 @@ void DrawSky() {
     gameDepthDesc.DepthFunc = D3D11_COMPARISON_LESS;  // what no state means
     if (gameDepth) gameDepth->GetDesc(&gameDepthDesc);
     const bool reversed = gameDepthDesc.DepthFunc == D3D11_COMPARISON_GREATER || gameDepthDesc.DepthFunc == D3D11_COMPARISON_GREATER_EQUAL;
+    g_farDepth = reversed ? 0.0f : 1.0f;
     D3D11_VIEWPORT viewport = {};
     UINT viewports = 1;
     g_context->RSGetViewports(&viewports, &viewport);
@@ -1842,6 +2455,21 @@ void DrawSky() {
         constants.right[3] = tanHalfVertical * viewport.Width / viewport.Height;
         constants.up[3] = tanHalfVertical;
         constants.forward[3] = reversed ? 0.0f : 1.0f;
+        // Guerrilla's fog over the sky: the world's fog colour and numbers, the dome's scale and offset.
+        float fogColour[3], correction[3];
+        TodColour(kFogColour, fogColour);
+        ColourCorrection(correction);
+        for (int i = 0; i < 3; ++i) constants.fogColour[i] = fogColour[i] * correction[i] * SkyBrightness();
+        FogNumbers(constants.fogNumbers);
+        constants.domeFog[0] = kSkyFogFar;
+        constants.domeFog[1] = TodNumber(kSkyFogScale);
+        constants.domeFog[2] = TodNumber(kSkyFogOffset) - g_cameraPosition[1];
+        if (g_tellColours)
+            rfa::Log("Sky's fog at %.2f h: dome scale %.0f offset %.0f, clouds %.0f %.0f, backdrop %.0f %.0f (camera at %.0f m); fog colour "
+                     "%.3f %.3f %.3f, fall-off %.4f, density %.5f, offset %.3f",
+                     g_timeOfDay, constants.domeFog[1], TodNumber(kSkyFogOffset), TodNumber(kCloudsFogScale), TodNumber(kCloudsFogOffset),
+                     TodNumber(kMatteFogScale), TodNumber(kMatteFogOffset), g_cameraPosition[1], constants.fogColour[0], constants.fogColour[1],
+                     constants.fogColour[2], constants.fogNumbers[0], constants.fogNumbers[1], constants.fogNumbers[3]);
         D3D11_MAPPED_SUBRESOURCE mapped;
         if (SUCCEEDED(g_context->Map(g_skyConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
             memcpy(mapped.pData, &constants, sizeof(constants));
@@ -1861,6 +2489,7 @@ void DrawSky() {
             g_context->OMSetDepthStencilState(g_skyDepth[reversed ? 1 : 0], 0);
             g_context->RSSetState(g_skyRaster);
             g_context->Draw(3, 0);
+            DrawSun(constants);
             if (g_cloudsOn) DrawClouds(constants);
 
             saved.Restore();
@@ -2045,9 +2674,95 @@ void DrawFog() {
     if (gameDepth) gameDepth->Release();
 }
 
+// Where the sun is on the picture (0 to 1 across, and down): false while it is down or behind the camera.
+bool SunOnPicture(UINT width, UINT height, float (&at)[2]) {
+    float toward[3];
+    SunToward(toward);
+    if (toward[1] < 0 || height == 0) return false;
+    const float* axes[3] = {&g_cameraRotation[0], &g_cameraRotation[3], &g_cameraRotation[6]};  // right, up, forward
+    float along[3];
+    for (int a = 0; a < 3; ++a) along[a] = toward[0] * axes[a][0] + toward[1] * axes[a][1] + toward[2] * axes[a][2];
+    if (along[2] < 0.01f) return false;
+    const float tanUp = tanf(g_cameraFov * 3.14159265f / 360.0f), tanAcross = tanUp * width / height;
+    at[0] = 0.5f + 0.5f * along[0] / (along[2] * tanAcross);
+    at[1] = 0.5f - 0.5f * along[1] / (along[2] * tanUp);
+    return true;
+}
+
+// Guerrilla's sun shafts for this frame (see kShaftShader), from the scene and the G-buffer's depth,
+// into the first half-size target: the view to read them from, or none. Draws with the tone mapping's
+// sampler, depth and rasterizer states (set by the caller, who puts the device context back).
+ID3D11ShaderResourceView* DrawShafts(ID3D11ShaderResourceView* scene, UINT width, UINT height, const float (&sun)[2]) {
+    if (!g_shaftVertex && !MakeShaftObjects()) {
+        g_shaftsFailed = true;
+        return nullptr;
+    }
+    const UINT halfWidth = (width + 1) / 2, halfHeight = (height + 1) / 2;
+    if (!ShaftTargets(halfWidth, halfHeight)) {
+        g_shaftsFailed = true;
+        return nullptr;
+    }
+    ShaftConstants constants = {};
+    constants.sun[0] = sun[0];
+    constants.sun[1] = sun[1];
+    constants.sun[2] = static_cast<float>(width) / height;
+    constants.sun[3] = g_farDepth;
+    constants.texel[0] = 1.0f / halfWidth;
+    constants.texel[1] = 1.0f / halfHeight;
+    constants.texel[2] = 1.0f / width;
+    constants.texel[3] = 1.0f / height;
+    constants.strength[0] = kShaftScale * 0.15625f;
+    constants.strength[1] = kShaftBaseLum;
+    constants.strength[2] = kShaftLumStep;
+    constants.strength[3] = kShaftSunSize;
+    constants.curve[0] = kShaftRadius;
+    constants.curve[1] = kShaftCurveBase;
+    constants.curve[2] = kShaftCurveExponent;
+    constants.curve[3] = kShaftCurveShift;
+    // The Gaussian, each way: e^(−x² ÷ 2rho²) for 0, 1 and 2 texels off, the five adding to 1, with the
+    // multiplier shared between the two ways.
+    float weights[3], total = 0;
+    for (int i = 0; i < 3; ++i) {
+        weights[i] = expf(-static_cast<float>(i * i) / (2 * kShaftBlurRho * kShaftBlurRho));
+        total += i ? 2 * weights[i] : weights[i];
+    }
+    for (int i = 0; i < 3; ++i) constants.blur[i] = weights[i] / total * sqrtf(kShaftBlurMultiplier);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(g_context->Map(g_shaftConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return nullptr;
+    memcpy(mapped.pData, &constants, sizeof(constants));
+    g_context->Unmap(g_shaftConstants, 0);
+    RFA_LOG_FIRST(1, "Sun shafts: Guerrilla's, toward the sun in world \"%s\" (SunShafts=%.3g)", WorldName(), g_sunShafts);
+
+    const float noFactor[4] = {1, 1, 1, 1};
+    const D3D11_VIEWPORT half = {0, 0, static_cast<float>(halfWidth), static_cast<float>(halfHeight), 0, 1};
+    g_context->RSSetViewports(1, &half);
+    g_context->VSSetShader(g_shaftVertex, nullptr, 0);
+    g_context->PSSetConstantBuffers(0, 1, &g_shaftConstants);
+    g_context->OMSetBlendState(g_eyeBlend, noFactor, 0xFFFFFFFF);
+    ID3D11ShaderResourceView* none[2] = {};
+    struct Pass {
+        ID3D11PixelShader* shader;
+        ID3D11RenderTargetView* target;
+        ID3D11ShaderResourceView* inputs[2];
+    };
+    const Pass passes[3] = {{g_shaftSource, g_shaftTarget[0], {scene, g_shaftDepth}},
+                            {g_shaftBlur, g_shaftTarget[1], {g_shaftView[0], nullptr}},
+                            {g_shaftRadial, g_shaftTarget[0], {g_shaftView[1], nullptr}}};
+    for (const Pass& pass : passes) {
+        g_context->PSSetShaderResources(0, 2, none);
+        g_context->OMSetRenderTargets(1, &pass.target, nullptr);
+        g_context->PSSetShaderResources(0, 2, pass.inputs);
+        g_context->PSSetShader(pass.shader, nullptr, 0);
+        g_context->Draw(3, 0);
+    }
+    g_context->PSSetShaderResources(0, 2, none);
+    g_context->OMSetRenderTargets(0, nullptr, nullptr);
+    return g_shaftView[0];
+}
+
 // Guerrilla's tone mapping, drawn over Armageddon's final picture (its target, 8-bit) from the scene it
 // was made from (16-bit float, at exposure 1) and its bloom: the eye's brightness eased toward this
-// frame's measure, then the picture. Puts the device context back as it was.
+// frame's measure, the sun shafts, then the picture. Puts the device context back as it was.
 int g_eyeNow = 0;           // which of the two textures holds the eye's brightness
 bool g_eyeFresh = true;     // start the eye at the measure (the first frame, or after a gap)
 LARGE_INTEGER g_toneLast = {};
@@ -2077,6 +2792,9 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     constants.picture[1] = TodNumber(kBloomAmount);
     constants.picture[2] = static_cast<float>(width);
     constants.picture[3] = static_cast<float>(height);
+    float sunAt[2] = {};
+    const bool shafts = SunShaftsOn() && g_shaftDepth && SunOnPicture(width, height, sunAt);
+    constants.shafts[0] = shafts ? g_sunShafts : 0.0f;
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(g_context->Map(g_toneConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     memcpy(mapped.pData, &constants, sizeof(constants));
@@ -2116,18 +2834,28 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     g_context->OMSetBlendState(g_eyeBlend, noFactor, 0xFFFFFFFF);
     g_context->Draw(3, 0);
 
+    // The sun shafts (with none drawn the shader reads nothing there).
+    ID3D11ShaderResourceView* sunShafts = nullptr;
+    if (shafts) {
+        ID3D11ShaderResourceView* eyeNone[3] = {};
+        g_context->PSSetShaderResources(0, 3, eyeNone);
+        sunShafts = DrawShafts(scene, width, height, sunAt);
+        g_context->VSSetShader(g_toneVertex, nullptr, 0);
+        g_context->PSSetConstantBuffers(0, 1, &g_toneConstants);
+    }
+
     // The picture, over Armageddon's.
     const D3D11_VIEWPORT whole = {0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
     g_context->OMSetRenderTargets(1, &target, nullptr);
     g_context->RSSetViewports(1, &whole);
-    ID3D11ShaderResourceView* pictureInputs[3] = {scene, bloom, g_eyeView[next]};
-    g_context->PSSetShaderResources(0, 3, pictureInputs);
+    ID3D11ShaderResourceView* pictureInputs[4] = {scene, bloom, g_eyeView[next], sunShafts};
+    g_context->PSSetShaderResources(0, 4, pictureInputs);
     g_context->PSSetShader(g_tonePixel, nullptr, 0);
     g_context->OMSetBlendState(g_toneBlend, noFactor, 0xFFFFFFFF);
     g_context->Draw(3, 0);
 
-    ID3D11ShaderResourceView* none[3] = {};
-    g_context->PSSetShaderResources(0, 3, none);
+    ID3D11ShaderResourceView* none[4] = {};
+    g_context->PSSetShaderResources(0, 4, none);
     g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, gameTargets, gameDepthView);
     g_context->RSSetViewports(viewportCount, gameViewports);
     g_context->OMSetDepthStencilState(gameDepth, stencilRef);
@@ -2201,6 +2929,8 @@ void ToneMapAfterComposite() {
     }
     for (ID3D11View* view : {static_cast<ID3D11View*>(target), static_cast<ID3D11View*>(scene), static_cast<ID3D11View*>(bloom)})
         if (view) view->Release();
+    if (g_shaftDepth) g_shaftDepth->Release();
+    g_shaftDepth = nullptr;
 }
 
 // During the light pass in our worlds, the first time its check runs (all is bound by then), the
@@ -2226,7 +2956,9 @@ void __fastcall LightPass(void* renderer, void* unused) {
     const bool ours = g_context && InOurWorld();
     g_inLightPass = ours && g_lightOn && !g_lightFailed;
     DropFogInputs();
-    g_noteFog = ours && g_fog > 0 && !g_fogFailed;
+    if (g_shaftDepth) g_shaftDepth->Release();
+    g_shaftDepth = nullptr;
+    g_noteFog = ours && ((g_fog > 0 && !g_fogFailed) || SunShaftsOn());
     g_lightPass(renderer, unused);
     g_noteFog = false;
     if (g_inLightPass) {
@@ -2267,6 +2999,11 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
             RFA_LOG_FIRST(1, "Fog: drawing Guerrilla's fog in world \"%s\"", WorldName());
             DrawFog();
         }
+    }
+    // The depth stays for the sun shafts, drawn with the tone mapping at the end of the frame.
+    if (ours && SunShaftsOn() && g_fogDepth && !g_shaftDepth) {
+        g_shaftDepth = g_fogDepth;
+        g_shaftDepth->AddRef();
     }
     DropFogInputs();
     if (!ours || !g_skyOn || g_drawingFailed || !g_context) return;
@@ -2412,6 +3149,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadColourCorrection();
     ReadFog();
     ReadToneMapping();
+    ReadSunShafts();
     // Our worlds' zone size (and a physics world wide enough for them), and the streaming radii held
     // to what the game can track.
     if (g_zoneWidth > 0) {
@@ -2435,7 +3173,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_debugPrint) rfa::Log("Could not hook the game's debug print; what it says while loading our worlds isn't logged");
     g_precacheArea = reinterpret_cast<PrecacheAreaFn>(rfa::HookFunction(kPrecacheArea, kPrecacheAreaPrologue, reinterpret_cast<void*>(&PrecacheArea)));
     if (!g_precacheArea) rfa::Log("Could not hook the game's precache areas; our worlds' shared files won't be found");
-    // Guerrilla's gameplay properties and draw distances, if the world builder has written them (the
+    // Guerrilla's gameplay properties, draw distances and effects, if the world builder has written them (the
     // game reads the tables while it starts, before any world).
     bool anyTable = false;
     for (BuiltTable& table : g_builtTables) {
@@ -2454,9 +3192,15 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         g_tableCacheFind = reinterpret_cast<TableCacheFindFn>(
             rfa::HookFunction(kTableCacheFind, kTableCacheFindPrologue, reinterpret_cast<void*>(&TableCacheFind)));
         if (!g_namePoolInit || !g_tableCacheFind) {
-            rfa::Log("Could not hook the game's table reading; the game keeps its own gameplay properties and draw distances");
+            rfa::Log("Could not hook the game's table reading; the game keeps its own tables (gameplay properties, draw distances, effects)");
             for (BuiltTable& table : g_builtTables) table.bytes.clear();  // (a hook that did go in only passes through)
         }
+        g_effectFileLoad = reinterpret_cast<EffectFileLoadFn>(
+            rfa::HookFunction(kEffectFileLoad, kEffectFileLoadPrologue, reinterpret_cast<void*>(&EffectFileLoad)));
+        if (!g_effectFileLoad) rfa::Log("Could not watch the game's effect files loading (the log won't say which load)");
+        g_playEffect = reinterpret_cast<PlayEffectFn>(rfa::HookFunction(kPlayEffect, kPlayEffectPrologue, reinterpret_cast<void*>(&PlayEffect)));
+        g_makeObject = reinterpret_cast<MakeObjectFn>(rfa::HookFunction(kMakeObject, kMakeObjectPrologue, reinterpret_cast<void*>(&MakeObject)));
+        if (!g_playEffect || !g_makeObject) rfa::Log("Could not watch the game's effects playing (the log won't say why one doesn't)");
     }
     if (!g_skyOn && !g_lightOn && g_fog <= 0 && g_clockSpeed <= 0) {
         rfa::Log("Guerrilla's sky, light, fog and clock are off (Sky=0, Light=0, Fog=0, ClockSpeed=0)");

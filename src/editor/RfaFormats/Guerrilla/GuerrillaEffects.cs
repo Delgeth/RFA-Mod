@@ -56,9 +56,10 @@ public static class GuerrillaEffects
     /// The Armageddon effect for a Guerrilla one: its c-file, its g-file (null when it has none), and the
     /// textures it uses by Guerrilla's names (without ".tga"; the built-ins its meshes' materials are
     /// given among them, see <see cref="GuerrillaBuiltIns"/>). <paramref name="rename"/> gives each
-    /// texture's name as the converted textures will be called.
+    /// texture's name as the converted textures will be called; <paramref name="effectName"/>, if
+    /// given, is the effect's own (without ".effectx"; as its file and its visual effect entry name it).
     /// </summary>
-    public static (byte[] C, byte[]? G, IReadOnlyList<string> Textures) Convert(byte[] c, byte[]? g, Func<string, string> rename)
+    public static (byte[] C, byte[]? G, IReadOnlyList<string> Textures) Convert(byte[] c, byte[]? g, Func<string, string> rename, string? effectName = null)
     {
         if (c.Length < 0x50 || BitConverter.ToUInt32(c, 0) != EffectFile.Signature) throw new InvalidDataException("not an effect file");
         int version = BitConverter.ToInt32(c, 4);
@@ -76,7 +77,8 @@ public static class GuerrillaEffects
         var source = new Source(c, version);
         var header = new Piece(c[..0x50]);
         BitConverter.TryWriteBytes(header.Bytes.AsSpan(4), EffectFile.Version);
-        var name = source.Field(0x10) ?? throw new InvalidDataException("the effect has no name");
+        var name = effectName != null ? new Piece([.. Encoding.ASCII.GetBytes(effectName + ".effectx"), 0])
+            : source.Field(0x10) ?? throw new InvalidDataException("the effect has no name");
         header.Link(0x10, name);
         void List(int countAt, int count, Piece? piece)
         {
@@ -228,7 +230,7 @@ public static class GuerrillaEffects
     /// One emitter: Guerrilla's (at <paramref name="e"/>) as Armageddon's head (in <paramref name="heads"/>
     /// at <paramref name="head"/>), data block and particle material. Head: +0x00 name, +0x04 a mesh
     /// particle's data (Armageddon's own; none), +0x08 the shape's class id, +0x0C..+0x0F half res,
-    /// quarter res, always on top, soft, +0x10 parent index, +0x18 the block, +0x1C the material. The
+    /// quarter res (made half res), always on top, soft, +0x10 parent index, +0x18 the block, +0x1C the material. The
     /// block as <see cref="BlockCopy"/> says, its 28 key curves (count, offset) from +0x200 (Guerrilla's
     /// 27 with the texture animation rate after speed), emit-node emitters (+0x1D8, +0x1DC), unique
     /// data (+0x2E0 size, +0x2E4 offset: the shape's; Armageddon's cylinder-or-plane 0xFAA8D302 has a
@@ -242,6 +244,10 @@ public static class GuerrillaEffects
         heads.Link(head + 0x04, null);
         Array.Copy(c, e + 0x38, heads.Bytes, head + 0x08, 4);
         Array.Copy(c, e + 0x3E, heads.Bytes, head + 0x0C, 4);
+        // Armageddon's renderer has no quarter-res particle pass (Guerrilla's draws those at a quarter
+        // and composites them onto the half-res one; none of Armageddon's own emitters sets it), so a
+        // quarter-res emitter is drawn at half res, the nearest it has.
+        if (heads.Bytes[head + 0x0D] != 0) (heads.Bytes[head + 0x0C], heads.Bytes[head + 0x0D]) = (1, 0);
         Array.Copy(c, e + 0x2C8, heads.Bytes, head + 0x10, 4);
 
         var material = new Piece(c[(e + 0x04)..(e + 0x34)]);

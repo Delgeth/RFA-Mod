@@ -22,7 +22,9 @@ namespace RfaFormats.Guerrilla;
 /// places them (see <see cref="GuerrillaRocks"/>); the
 /// destructible objects asked for (its rfg_movers: buildings, walls, pipes; and general_movers: crates,
 /// boxes) where its zone places them, attached and linked as there (see <see cref="GuerrillaMovers"/>),
-/// each chunk file converted (see <see cref="GuerrillaChunks"/>); a stitch list of the
+/// each chunk file converted (see <see cref="GuerrillaChunks"/>), each naming Guerrilla's level object
+/// with the effects it shows (see <see cref="GuerrillaEffectTables"/>; the effects converted, see
+/// <see cref="GuerrillaEffects"/>, in the containers of the zones placing them); a stitch list of the
 /// rocks with a collision tree over them (empty in zones without rocks); an environment box over the
 /// whole zone; Guerrilla's navigation meshes, for people and
 /// vehicles (see <see cref="GuerrillaNavigation"/>; none in the scenery zones, as in Guerrilla). And
@@ -42,7 +44,8 @@ namespace RfaFormats.Guerrilla;
 /// (build\pc\cache\); Armageddon's territories.xtbl with Guerrilla's districts added (an override in
 /// build\pc\cache\table.vpp_pc\; see <see cref="GuerrillaTerritory"/>); Armageddon's texture name table
 /// with room for the world's textures (an override in build\pc\cache\misc.vpp_pc\; see
-/// <see cref="GuerrillaBitmaps"/>); and the mod's cloud files.
+/// <see cref="GuerrillaBitmaps"/>); and the mod's cloud files and tables (gameplay properties, draw
+/// distances, visual effects, effects and level objects, which the guerrilla_world mod hands the game).
 /// Guerrilla's files are only read, and what is made from them stays on your machine.
 /// </summary>
 public static class GuerrillaWorld
@@ -423,6 +426,51 @@ public static class GuerrillaWorld
         File.WriteAllBytes(Path.Combine(modFolder, "lod_properties.xtbl"), lod.Text);
         log($"Draw distances: {lod.EntryOf.Count} of Guerrilla's LOD classes on the objects, {lod.Added} added to Armageddon's table (mods\\guerrilla_world\\lod_properties.xtbl)");
         string? LodProps(string name) => gameplay.LodOf.GetValueOrDefault(name) is { } c ? lod.EntryOf.GetValueOrDefault(c) : null;
+        // Guerrilla's effects (see GuerrillaEffectTables): the level objects the objects name, their effects
+        // and the visual effects those show, added to Armageddon's tables for the mod to hand the game; each
+        // object names its level object there. The visual effects' files, converted (see GuerrillaEffects),
+        // and their textures go with the zones whose objects show them.
+        var rfgFiles = new GuerrillaTextures(rfgCache, GuerrillaTextures.EffectArchives);
+        var placedProps = propsIn.Values.SelectMany(p => p).Select(o => o.Text("Props")).OfType<string>().Where(n => n.Length > 0)
+            .GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.EffectFile(file + ".cefct_pc") != null);
+        File.WriteAllBytes(Path.Combine(modFolder, "vfx.xtbl"), effectTables.Visuals);
+        File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
+        File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
+        var effectFiles = new Dictionary<string, List<(string Name, byte[] Data)>>(StringComparer.OrdinalIgnoreCase);
+        var effectTextures = new Dictionary<string, (string Name, byte[] Data)[]>(StringComparer.OrdinalIgnoreCase);
+        var unshipped = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        (string Name, byte[] Data)[] Unshipped(string texture)
+        {
+            // An 8 x 8 texture of no colour and no cover.
+            unshipped.Add(texture);
+            string alias = Alias(texture);
+            return [(alias + ".cvbm_pc", PegFile.SingleHeader(alias + ".tga", 8, 8, TextureFormat.Argb8888, 1, 0)), (alias + ".gvbm_pc", new byte[8 * 8 * 4])];
+        }
+        foreach (string file in effectTables.Files)
+        {
+            string name = GuerrillaEffectTables.Added(file);
+            var (c, g, textures) = GuerrillaEffects.Convert(rfgFiles.EffectFile(file + ".cefct_pc")!, rfgFiles.EffectFile(file + ".gefct_pc"), Alias, name);
+            var list = new List<(string Name, byte[] Data)> { (name + ".cefct_pc", c) };
+            if (g != null) list.Add((name + ".gefct_pc", g));
+            foreach (string texture in textures)
+            {
+                // The destructible objects' own where they share one (the same file under the same name),
+                // else Guerrilla's; one Guerrilla never shipped (14 of its effects' textures) draws nothing.
+                if (!effectTextures.ContainsKey(texture))
+                    effectTextures[texture] = chunkTextures.GetValueOrDefault(texture) ?? GuerrillaBuiltIns.Files(texture, Alias(texture)) ?? rfgFiles.Files(texture, Alias(texture))
+                        ?? Unshipped(texture);
+                list.AddRange(effectTextures[texture]);
+            }
+            effectFiles[file] = list;
+        }
+        log($"Effects: {effectTables.PropsOf.Count} of Guerrilla's level objects, {effectTables.EffectsAdded} effects and {effectTables.VisualsAdded} visual effects added to Armageddon's tables " +
+            $"(mods\\guerrilla_world\\level_objects.xtbl, effects.xtbl, vfx.xtbl); {effectFiles.Count} effect files converted with {effectTextures.Count} textures, " +
+            $"{effectFiles.Values.Sum(l => l.Sum(f => (long)f.Data.Length)) / 1024:N0} KB" +
+            (effectTables.VisualsLeft.Count > 0 ? $"; {effectTables.VisualsLeft.Count} visual effects past the game's room of {GuerrillaEffectTables.VisualLimit} left out: {string.Join(", ", effectTables.VisualsLeft)}" : "") +
+            (effectTables.ExplosionsLeft.Count > 0 ? $"; explosions Armageddon hasn't left out: {string.Join(", ", effectTables.ExplosionsLeft)}" : "") +
+            (unshipped.Count > 0 ? $"; textures Guerrilla never shipped, drawn as nothing: {string.Join(", ", unshipped)}" : ""));
+        string? PropsOf(string name) => effectTables.PropsOf.GetValueOrDefault(name) ?? (levelObjects.Contains(name) ? name : null);
 
         var schema = ZoneSchema.FromGame(game) ?? throw new InvalidDataException($"no {ZoneSchema.FileName} in the game's {ZoneSchema.ArchiveName}");
 
@@ -522,7 +570,7 @@ public static class GuerrillaWorld
             {
                 var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
                 (var movers, links) = GuerrillaMovers.Convert(propsIn[(col, row)], guerrillaObjects[(col, row)], schema,
-                                                               levelObjects.Contains, GameplayProps, LodProps,
+                                                               PropsOf, GameplayProps, LodProps,
                                                                chunk => BitConverter.ToUInt32(chunkFiles[chunk].Header, 0x24), taken);
                 foreach (var mover in movers) zoneFile.Insert(zoneFile.Objects.Count, mover);
             }
@@ -621,6 +669,10 @@ public static class GuerrillaWorld
                 foreach (string texture in piece.Textures) files.AddRange(rockTextures[texture]);
             }
             AddChunks(files, zoneChunks);
+            // The effects its objects show (with the zone, as Guerrilla's own world's are with its level).
+            foreach (string file in propsIn[(col, row)].Select(o => o.Text("Props")).OfType<string>()
+                         .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Distinct(StringComparer.OrdinalIgnoreCase))
+                files.AddRange(effectFiles[file]);
             files = files.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
             files.AddRange(new (string Name, byte[] Data)[]
             {
@@ -736,6 +788,18 @@ public static class GuerrillaWorld
             chunkGroupFiles = chunkGroupFiles.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
             var group = new AsmContainer { Name = name + ".rfgchunkx", Type = 14, Flags = 0x300 };
             group.Primitives.AddRange(chunkGroupFiles.Where(f => f.Name.EndsWith(".cchk_pc") || f.Name.EndsWith(".cvbm_pc")).Select(f => PrimitiveOf(f.Name, chunkGroupFiles)));
+            asm.Containers.Add(group);
+        }
+        // Each effect file a group of its own named after it (type 2, as Armageddon lists its effects in
+        // effects.vpp_pc's asset list): the game makes an effect object only when the streaming system
+        // knows a group by the visual's file name (rfg_<name>.cefct_pc), which the object then holds while
+        // it plays; its files are the ones the zones and the precache hold.
+        foreach (var files in effectFiles.Values)
+        {
+            var groupFiles = files.DistinctBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            var group = new AsmContainer { Name = groupFiles[0].Name, Type = 2, Flags = 0x300 };
+            group.Primitives.AddRange(groupFiles.Where(f => f.Name.EndsWith(".cefct_pc") || f.Name.EndsWith(".cvbm_pc")).Select(f => PrimitiveOf(f.Name, groupFiles)));
+            foreach (var primitive in group.Primitives) primitive.Allocator = 0;  // as Armageddon's effect groups
             asm.Containers.Add(group);
         }
         layer.Add((World + "_l0.asm_pc", asm.ToBytes()));
