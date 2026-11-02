@@ -466,12 +466,17 @@ converts:
   the mod to hand the game, and each object names its `rfg_` level object. Sounds are left out
   (Guerrilla's are XACT cues; Armageddon uses Wwise). Each visual effect's file is converted
   (`GuerrillaEffects`: Guerrilla's effect format, versions 21 to 26, written as Armageddon's
-  version 36: its emitters, lights, meshes and coronas reworked, its meshes' materials on
-  Armageddon's shaders, and the fixes Guerrilla's loader makes to its older files), with its
+  version 36: its emitters, lights, meshes and coronas reworked, each emitter's material given the
+  values Armageddon keeps after it (taken from Guerrilla's emitter: self-illumination, ambient and
+  diffuse colours and the rest), its meshes' materials on Armageddon's shaders, and the fixes
+  Guerrilla's loader makes to its older files), with its
   textures (`GuerrillaTextures`: found in Guerrilla's effect archives, flip-book tiles kept), into
-  the container of each zone whose objects show it, and the world's asset list names a group of its
-  own after each file (`rfg_<name>.cefct_pc`, as Armageddon's effects archive lists its effects):
-  the game makes an effect only when the streaming system knows a group by its visual's file name. The game keeps at most 950 visual effects, of
+  the container of each zone whose objects show it, and a group of its own is named after each file
+  (`rfg_<name>.cefct_pc`) in Armageddon's effects asset list (an override of `effects.vpp_pc`'s
+  `vfx_containers.asm_pc`, the player's own with these added), where Armageddon lists its own
+  effects: the game makes an effect only when the streaming system knows a group by its visual's
+  file name, and that list is read once and kept (in the world's own list, read again at every level
+  load, the groups broke a second load). The game keeps at most 950 visual effects, of
   which Armageddon's own take 904, so the 46 shown by the most placed objects are added (over 92%
   of what the world's objects show) and the other 41 wait for more room.
 - **The precache**: every file more than one container would hold (the ground's texture layers,

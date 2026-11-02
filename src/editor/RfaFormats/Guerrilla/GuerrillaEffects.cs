@@ -17,7 +17,8 @@ namespace RfaFormats.Guerrilla;
 ///   the header      version 36; the lists pointed at their new places
 ///   texture names   the effect's bitmaps' names and the meshes' name list renamed as asked
 ///   emitters        0x2D4 bytes each → a 0x40-byte head, a 0x2E8-byte data block and the particle
-///                   material (inline in Guerrilla's, pointed to in Armageddon's); see <see cref="Emitter"/>
+///                   material (inline in Guerrilla's, pointed to in Armageddon's, and 0x78 bytes longer
+///                   there); see <see cref="Emitter"/>
 ///   lights          0x3C → 0x94: Guerrilla's first, the type numbered as Armageddon does, then
 ///                   Armageddon's commonest values and two key lists of its own (one key: 0 and 1)
 ///   meshes          0x78 → 0x80 (8 bytes more at +0x28: a list of Armageddon's, none); the mesh
@@ -29,8 +30,8 @@ namespace RfaFormats.Guerrilla;
 /// Guerrilla's loader takes some values otherwise in older files, which Armageddon's (refusing anything
 /// under 36) doesn't, so this does: under 23 no coronas; under 25 every mesh's type 1 (normal); under
 /// 26 each corona's position offset one key of 0 (and in 26 a single key of 1 made 0); under 22 the
-/// emitters' self-illumination 1 and ambient and diffuse colours black (Armageddon's emitters have
-/// neither: it gives every one of its own 1).
+/// emitters' self-illumination 1 and ambient and diffuse colours black (Armageddon keeps them after
+/// the emitter's material; see <see cref="MaterialTail"/>).
 ///
 /// The g-file: each mesh's part in turn (its block's checksum, 12 zeros, the indices, the vertices
 /// from a multiple of 16, the checksum), each part from a multiple of 16, the block's offsets inside
@@ -250,7 +251,7 @@ public static class GuerrillaEffects
         if (heads.Bytes[head + 0x0D] != 0) (heads.Bytes[head + 0x0C], heads.Bytes[head + 0x0D]) = (1, 0);
         Array.Copy(c, e + 0x2C8, heads.Bytes, head + 0x10, 4);
 
-        var material = new Piece(c[(e + 0x04)..(e + 0x34)]);
+        var material = new Piece([.. c.AsSpan(e + 0x04, 0x30), .. MaterialTail(c, e)]);
         foreach (var (o, _, _) in MaterialOffsets) material.Link(o, source.Field(e + 0x04 + o));
         heads.Link(head + 0x1C, material);
 
@@ -355,6 +356,32 @@ public static class GuerrillaEffects
     /// 0, written in <see cref="Emitter"/>).
     /// </summary>
     static readonly (int At, float Value)[] Fixed = [(0x168, 0.25f), (0x170, 0.75f), (0x190, 0.25f), (0x198, 0.75f), (0x15C, 1f), (0x1F0, 1f)];
+
+    /// <summary>
+    /// The 0x78 bytes that follow an emitter's material in Armageddon's files (its materials lie 0xA8
+    /// apart; the game reads them as part of the material), from Guerrilla's emitter at <paramref name="e"/>,
+    /// which keeps the same values (equal in nearly all the emitters both games have): +0x38 and +0x3C
+    /// (Guerrilla's +0x1B8, +0x1BC; −1 for none), +0x40 the self-illumination (+0x1C4), the ambient and
+    /// diffuse colours at +0x44 and +0x50 (+0x1C8, +0x1D4), +0x5C and +0x60 (+0x1E0, +0x1E4; the latter
+    /// new in version 25, 0.8 in Armageddon's ports of older ones). Under version 22 Guerrilla's loader
+    /// takes the self-illumination as 1 and the colours as black. +0x30 a count and +0x34 the offset of
+    /// a list of Armageddon's own: none (0, as in most of its own); then zeros. Without these the game
+    /// took the texture list after Guerrilla's 0x30 bytes for them, and turned a texture's handle into
+    /// a pointer as an offset.
+    /// </summary>
+    static byte[] MaterialTail(byte[] c, int e)
+    {
+        var tail = new byte[0x78];
+        int version = BitConverter.ToInt32(c, 4);
+        void Copy(int at, int from, int size) => Array.Copy(c, e + from, tail, at - 0x30, size);
+        Copy(0x38, 0x1B8, 8);
+        if (version < 22) BitConverter.TryWriteBytes(tail.AsSpan(0x40 - 0x30), 1f);
+        else Copy(0x40, 0x1C4, 0x1C);  // the self-illumination, ambient and diffuse colours
+        Copy(0x5C, 0x1E0, 4);
+        if (version < 25) BitConverter.TryWriteBytes(tail.AsSpan(0x60 - 0x30), 0.8f);
+        else Copy(0x60, 0x1E4, 4);
+        return tail;
+    }
 
     /// <summary>A key list of one float key: its time and value.</summary>
     static Piece Key(float time, float value) => new([.. BitConverter.GetBytes(time), .. BitConverter.GetBytes(value)]);

@@ -24,7 +24,10 @@ namespace RfaFormats.Effects;
 ///   expression 0x14 bytes: a list at +0x10 (count at +0x0C) of 0x0C-byte parameters, each with an
 ///     offset at +0x08
 /// The materials (a corona's at its +0x04, an emitter's where its +0x1C points) hold offsets too,
-/// which the loader leaves (see <see cref="MaterialOffsetFields"/>).
+/// which the loader turns into pointers as it loads each material (0xB6F820), not in its walk (see
+/// <see cref="MaterialOffsetFields"/>). An emitter's material is 0xA8 bytes, Guerrilla's 0x30 and
+/// 0x78 of Armageddon's own (its own files' materials lie 0xA8 apart), which the game reads as part
+/// of it: a count at +0x30 and an offset at +0x34 (0 for none, else turned into a pointer too).
 /// </summary>
 public sealed class EffectFile
 {
@@ -132,9 +135,9 @@ public sealed class EffectFile
     }
 
     /// <summary>
-    /// The offsets in the materials: from the file's start as the others, −1 for none, but left by the
-    /// loader (the game resolves them as it uses them; Re-Mars-tered's et_ptr_offset counts from the
-    /// field itself, its own files' change). A material (rl_particle_material_data, 0x30 bytes): +0x06
+    /// The offsets in the materials: from the file's start as the others, −1 for none, but turned into
+    /// pointers as each material loads rather than in the loader's walk (Re-Mars-tered's et_ptr_offset
+    /// counts from the field itself, its own files' change). A material (rl_particle_material_data, 0x30 bytes): +0x06
     /// its textures' count and +0x08 their offset (12 bytes each), +0x0C its shader constants' count and
     /// +0x10 their offset (32 bytes each, each with its keyframes' offset at +0x18 and count at +0x1C),
     /// the vertex shader's constants' references and engine constants (+0x14, +0x1C, counts at +0x18,
@@ -150,6 +153,14 @@ public sealed class EffectFile
             uint at = BitConverter.ToUInt32(bytes, material + 0x10);
             if (constants == 0 || at == None || at + (long)constants * 32 > bytes.Length) continue;
             for (int k = 0; k < constants; k++) fields.Add((int)at + k * 32 + 0x18);
+        }
+        // An emitter's material's own offset at +0x34 (0 for none, below anything Insert moves).
+        int emitters = BitConverter.ToInt32(bytes, 0x30);
+        uint heads = BitConverter.ToUInt32(bytes, 0x34);
+        for (int k = 0; k < emitters && heads != None; k++)
+        {
+            uint material = BitConverter.ToUInt32(bytes, (int)heads + k * 0x40 + 0x1C);
+            if (material != None && material + 0x38L <= bytes.Length) fields.Add((int)material + 0x34);
         }
         return fields;
     }
