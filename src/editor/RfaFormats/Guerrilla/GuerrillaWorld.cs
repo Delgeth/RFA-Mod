@@ -418,6 +418,11 @@ public static class GuerrillaWorld
         log($"Gameplay properties: {gameplay.EntryOf.Count} of Guerrilla's entries named by the objects, {gameplay.Added} added to Armageddon's table with Guerrilla's settings " +
             $"(the rest are Armageddon entries with the same settings); names {gameplay.PoolBytes:N0} bytes of the mod's {GuerrillaGameplay.NamePool:N0} (mods\\guerrilla_world\\gameplay_properties.xtbl)");
         string? GameplayProps(string name) => gameplay.EntryOf.GetValueOrDefault(name);
+        // Guerrilla's draw distances (see GuerrillaLod): the LOD classes those gameplay entries name.
+        var lod = GuerrillaLod.Build(misc, rfgTables, gameplay.LodOf.Values);
+        File.WriteAllBytes(Path.Combine(modFolder, "lod_properties.xtbl"), lod.Text);
+        log($"Draw distances: {lod.EntryOf.Count} of Guerrilla's LOD classes on the objects, {lod.Added} added to Armageddon's table (mods\\guerrilla_world\\lod_properties.xtbl)");
+        string? LodProps(string name) => gameplay.LodOf.GetValueOrDefault(name) is { } c ? lod.EntryOf.GetValueOrDefault(c) : null;
 
         var schema = ZoneSchema.FromGame(game) ?? throw new InvalidDataException($"no {ZoneSchema.FileName} in the game's {ZoneSchema.ArchiveName}");
 
@@ -517,7 +522,7 @@ public static class GuerrillaWorld
             {
                 var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
                 (var movers, links) = GuerrillaMovers.Convert(propsIn[(col, row)], guerrillaObjects[(col, row)], schema,
-                                                               levelObjects.Contains, GameplayProps,
+                                                               levelObjects.Contains, GameplayProps, LodProps,
                                                                chunk => BitConverter.ToUInt32(chunkFiles[chunk].Header, 0x24), taken);
                 foreach (var mover in movers) zoneFile.Insert(zoneFile.Objects.Count, mover);
             }

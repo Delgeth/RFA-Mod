@@ -25,7 +25,8 @@ namespace RfaFormats.Guerrilla;
 ///   - the schema's defaults: Props and gameplay_props otherwise ("Default"), and the switches
 ///     Armageddon added (no_magnet_gun, suppress_salvage, no_repair, ignore_shape_cutters,
 ///     mp_unimportant: all off)
-///   - lod_props "None" (below), and the destruction checksum the chunk file's own (its header's
+///   - lod_props: the draw distance of its gameplay entry's LOD class (see <see cref="GuerrillaLod"/>),
+///     else "None" (never switched off), and the destruction checksum the chunk file's own (its header's
 ///     0x24), as in all of Armageddon's zones: Guerrilla's zones have it too, but for two
 ///     smokestacks (campaign targets) an older one than their files.
 /// Guerrilla's chunk_flags (dynamic_link, world_anchor) aren't written: Armageddon's chunk flags are
@@ -63,9 +64,11 @@ public static class GuerrillaMovers
     /// <param name="schema">The game's schema (obj_chunk_ref's defaults and building types).</param>
     /// <param name="isProps">Whether Armageddon's level_objects table has a Props name.</param>
     /// <param name="gameplayPropsOf">The gameplay_properties entry with the settings of one of Guerrilla's names (see <see cref="GuerrillaGameplay"/>), or null.</param>
+    /// <param name="lodPropsOf">The lod_properties entry for the LOD class of one of Guerrilla's gameplay_props names (see <see cref="GuerrillaLod"/>), or null for none.</param>
     /// <param name="checksumOf">A chunk file's destruction checksum (its header's 0x24), by its name without extension.</param>
     public static (List<ZoneObject> Objects, byte[] Links) Convert(IReadOnlyList<GuerrillaZoneObject> placed, IReadOnlyDictionary<uint, GuerrillaZoneObject> all,
-        ZoneSchema schema, Func<string, bool> isProps, Func<string, string?> gameplayPropsOf, Func<string, uint> checksumOf, ISet<uint> taken)
+        ZoneSchema schema, Func<string, bool> isProps, Func<string, string?> gameplayPropsOf, Func<string, string?> lodPropsOf, Func<string, uint> checksumOf,
+        ISet<uint> taken)
     {
         // Handles: Guerrilla's, unless taken.
         var handleOf = new Dictionary<uint, uint>();
@@ -175,10 +178,9 @@ public static class GuerrillaMovers
                 "gameplay_props" => Text(o.Text("gameplay_props") is { } g ? gameplayPropsOf(g) : null) ?? Default("gameplay_props"),
                 // (Left out with none, as the tools did.)
                 "building_type" => types.Length > 0 ? Text(SchemaProperty.FlagsText(types)) : null,
-                // Armageddon's fade-out class (lod_properties.xtbl): Guerrilla's objects have none and
-                // don't fade by size; a clutter class (2_clutter_small, as Armageddon's crates and
-                // props have) faded every crate and prop out from 25 m.
-                "lod_props" => Text("None"),
+                // The draw distance: Guerrilla's object takes its gameplay entry's LOD class; one
+                // with none is never switched off (Armageddon's None).
+                "lod_props" => Text(o.Text("gameplay_props") is { } g ? lodPropsOf(g) : null) ?? Text(GuerrillaLod.Never),
                 _ => Default(name),  // Armageddon's switches
             };
             var properties = new List<NewProperty>();

@@ -336,7 +336,8 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   fill (`0xC97AF0`, "Gameplay Property Names"; a full pool stops the game). When the world builder
   has written `mods\guerrilla_world\gameplay_properties.xtbl`, the mod hands the game that table
   at the copy's lookup and gives the names 64 KB of its own. Without the file, or with the mod
-  off, the game keeps its own table, and a name it doesn't have is its Default entry.
+  off, the game keeps its own table, and a name it doesn't have is its Default entry. The draw
+  distances (`lod_properties.xtbl`, read the same way) are handed over likewise.
 
 The world itself is built by `editor\GuerrillaWorld.exe` (code in `src\editor\GuerrillaWorld\` and
 `src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
@@ -397,6 +398,11 @@ converts:
   (Guerrilla's flags but two Armageddon has no bit for), and an object names an Armageddon entry
   with the same settings where there is one, else a new `rfg_` entry (139). Armageddon's own
   entries are left as they are.
+- **Their draw distances** (`GuerrillaLod`): Guerrilla switches an object off at the distance of
+  its gameplay entry's LOD class (25, 50, 100, 150 or 200 m; most have none, and are always
+  drawn). Armageddon's classes of the same names fade out much nearer, so the builder adds
+  Guerrilla's to Armageddon's `lod_properties.xtbl` (`rfg_1_clutter_extra_small` ... at
+  Guerrilla's distances), and each object names its class.
 - **The precache**: every file more than one container would hold (the ground's texture layers,
   roads, rocks, chunk files and their textures) goes once into `rfg_precache.vpp_pc`, and each
   zone's and sub-zone's precache group in the asset list (`0p_cXXYY`, `1p_cXXYY`) names the ones

@@ -16,8 +16,9 @@ namespace RfaFormats.Guerrilla;
 /// So the table is Armageddon's own with Guerrilla's settings added: each Guerrilla entry the world's
 /// objects name is converted to Armageddon's fields (its flags but force_dynamic and
 /// child_gives_control, which Armageddon has no bit for; its other fields as they are; salvage_chance
-/// 1, as every one of Armageddon's entries has it; its LOD_Properties and value left out, Armageddon's
-/// entries having neither); where an Armageddon entry has the same settings the object names that
+/// 1, as every one of Armageddon's entries has it; its value left out, Armageddon's entries having
+/// none, and its LOD_Properties given to the object itself, see <see cref="GuerrillaLod"/>); where an
+/// Armageddon entry has the same settings the object names that
 /// entry, else a new entry "rfg_" and Guerrilla's name (one for each distinct setting, after the
 /// most used of its names). Armageddon's own entries stay as they are, so its own levels are as
 /// before.
@@ -49,10 +50,11 @@ public static class GuerrillaGameplay
 
     /// <summary>
     /// The table (Armageddon's gameplay_properties.xtbl with Guerrilla's settings added), each of
-    /// <paramref name="used"/> (Guerrilla's names) to the entry its objects name now, how many entries
-    /// were added, and the names' room in the game's pool.
+    /// <paramref name="used"/> (Guerrilla's names) to the entry its objects name now and to its
+    /// Guerrilla entry's LOD class (LOD_Properties, see <see cref="GuerrillaLod"/>; none if it has
+    /// none), how many entries were added, and the names' room in the game's pool.
     /// </summary>
-    public sealed record Table(byte[] Text, IReadOnlyDictionary<string, string> EntryOf, int Added, int PoolBytes);
+    public sealed record Table(byte[] Text, IReadOnlyDictionary<string, string> EntryOf, IReadOnlyDictionary<string, string> LodOf, int Added, int PoolBytes);
 
     /// <summary>Armageddon's table (from its misc.vpp_pc) with the settings of Guerrilla's entries (from its misc.vpp_pc) that <paramref name="used"/> names.</summary>
     public static Table Build(Packfile armageddonMisc, Packfile guerrillaMisc, IEnumerable<string> used)
@@ -69,10 +71,12 @@ public static class GuerrillaGameplay
         // Each name's settings in Armageddon's fields, and how many objects name it.
         var counts = used.GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
         var entryOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var lodOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var added = new Dictionary<string, Entry>();  // by settings
         foreach (var (name, count) in counts.OrderByDescending(c => c.Value).ThenBy(c => c.Key, StringComparer.OrdinalIgnoreCase))
         {
             if (!guerrilla.TryGetValue(name, out var theirs)) continue;  // not in Guerrilla's table either: the game's Default
+            if (theirs.Lod is { } lod) lodOf[name] = lod;
             var converted = theirs.ForArmageddon();
             if (bySettings.TryGetValue(converted.Key, out string? same))
             {
@@ -107,14 +111,14 @@ public static class GuerrillaGameplay
         int at = ours.LastIndexOf('\n', end) + 1;
         string newline = ours.Contains("\r\n") ? "\r\n" : "\n";
         byte[] table = Encoding.Latin1.GetBytes(ours[..at] + text.ToString().Replace("\n", newline) + ours[at..]);
-        return new Table(table, entryOf, added.Count, pool);
+        return new Table(table, entryOf, lodOf, added.Count, pool);
     }
 
     /// <summary>What a name takes in the game's pool: its length and its end, rounded up to even, and 1 or 2 more.</summary>
     static int NameRoom(string name) => name.Length + 1 + (name.Length % 2 == 0 ? 1 : 2);
 
-    /// <summary>An entry: its name, flags (in its order), its other fields as written, its editor category and salvage_chance (null where it has none).</summary>
-    sealed record Entry(string Name, IReadOnlyList<string> Flags, IReadOnlyDictionary<string, string> Values, string Category, string? SalvageChance)
+    /// <summary>An entry: its name, flags (in its order), its other fields as written, its editor category, salvage_chance and LOD class (Guerrilla's LOD_Properties; each null where it has none).</summary>
+    sealed record Entry(string Name, IReadOnlyList<string> Flags, IReadOnlyDictionary<string, string> Values, string Category, string? SalvageChance, string? Lod)
     {
         /// <summary>Guerrilla's entry in Armageddon's fields: the flags Armageddon knows, salvage_chance 1.</summary>
         public Entry ForArmageddon() =>
@@ -147,7 +151,7 @@ public static class GuerrillaGameplay
             foreach (string field in Fields)
                 values[field] = Field(field) ?? throw new InvalidDataException($"gameplay property {name} has no {field}");
             string category = Regex.Match(body, @"<_Editor>\s*<Category>([^<]*)</Category>") is { Success: true } k ? k.Groups[1].Value.Trim() : "Entries";
-            entries.Add(new Entry(name, flags, values, category, Field("salvage_chance")));
+            entries.Add(new Entry(name, flags, values, category, Field("salvage_chance"), Field("LOD_Properties") is { Length: > 0 } lod ? lod : null));
         }
         return entries;
     }
