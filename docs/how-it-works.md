@@ -403,8 +403,12 @@ converts:
   like the world (nine sets at most). So the builder adds Guerrilla's districts to Armageddon's
   table as the territory `rfg` (`GuerrillaTerritory`; an override in
   `overrides\build\pc\cache\table.vpp_pc\`) and writes a set for each district and the default
-  (`GuerrillaTimeOfDay`): Armageddon's own curves where the games' scales differ, the district's
-  sky, clouds, light, ambient, fog colour and colour correction. The districts are named by two
+  (`GuerrillaTimeOfDay`). Both games keep a set as the same 68 curves in the same file format, and
+  give a curve a set leaves empty the same default, so each set is the district's own, written
+  from code curve by curve. Only the ambient light is converted, because Armageddon caps its
+  brightness at `ldr_max` where Guerrilla doesn't: each key's brightness goes into its colour, and
+  `ldr_min`/`ldr_max` are 0 and 3 in every set, as Guerrilla's districts that set them have them.
+  The districts are named by two
   letters (`Eo` for Eos, `rfg_eo.dtodx`, ...): Armageddon keeps district names in 32 bytes, and
   Guerrilla's full names stopped the game at start-up ("Length of string pool exceeded").
 - **Room for the world's textures**: the game names every texture it loads by a slot in its

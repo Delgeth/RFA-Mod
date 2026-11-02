@@ -29,11 +29,12 @@ namespace RfaFormats.Guerrilla;
 /// the time of day (<see cref="GuerrillaTimeOfDay"/>) and the clouds and backdrop for the mod (<see
 /// cref="GuerrillaSky"/>).
 ///
-/// What still comes from Armageddon's levels, written over: the time of day's base (world_default.dtodx;
-/// see <see cref="GuerrillaTimeOfDay"/>). Terrain files (see ZoneTerrain), zone files (their objects, the destructible ones too, made from the
-/// game's schema), navigation files (Guerrilla's own meshes: see GuerrillaNavigation), sub-zones,
-/// textures, containers, archives, stitch lists, asset lists and every material (the ground's, the
-/// cliffs', the roads', the rocks' and the destructible objects') are written from nothing.
+/// Nothing is taken from Armageddon's levels and written over. Terrain files (see ZoneTerrain), zone
+/// files (their objects, the destructible ones too, made from the game's schema), navigation files
+/// (Guerrilla's own meshes: see GuerrillaNavigation), sub-zones, textures, containers, archives,
+/// stitch lists, asset lists, the time of day's sets (Guerrilla's own curves) and every material (the
+/// ground's, the cliffs', the roads', the rocks' and the destructible objects') are written from
+/// nothing.
 ///
 /// Out: rfg_l0.vpp_pc (the sub-zones' containers and the asset list), rfg_l1.vpp_pc (the zones'),
 /// rfg_precache.vpp_pc, zonescript_rfg.vpp_pc, rfg.gtodx and a time of day for each district
@@ -757,7 +758,7 @@ public static class GuerrillaWorld
         string tables = Path.Combine(output, "table.vpp_pc");
         Directory.CreateDirectory(tables);
         File.WriteAllBytes(Path.Combine(tables, "territories.xtbl"), territories);
-        var (orbitals, sets) = GuerrillaTimeOfDay.Build(Packfile.Open(Path.Combine(cache, "misc.vpp_pc")), rfgMisc, districts);
+        var (orbitals, sets) = GuerrillaTimeOfDay.Build(rfgMisc, districts);
         File.WriteAllBytes(Path.Combine(output, World + ".gtodx"), orbitals);
         foreach (var (name, set) in sets) File.WriteAllBytes(Path.Combine(output, $"{World}_{name.Replace(' ', '_').ToLowerInvariant()}.dtodx"), set);
         log($"Districts: {string.Join(", ", districts.Select(d => $"{d.Guerrilla} ({d.Name})"))}, each with Guerrilla's time of day ({World}_<name>.dtodx), " +

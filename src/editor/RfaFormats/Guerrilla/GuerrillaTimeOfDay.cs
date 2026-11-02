@@ -16,176 +16,134 @@ namespace RfaFormats.Guerrilla;
 /// The sets: Guerrilla gives each district its own (terr01_oasis, _eos, _badlands, ...; terr01_default
 /// where no district is) and blends those of the zone you are in and its neighbours by where you stand
 /// in it; Armageddon does the same with the districts of its territory (see <see cref="GuerrillaTerritory"/>),
-/// loading &lt;world&gt;_&lt;district&gt;.dtodx for each. The games read most curves on other scales (Guerrilla's
-/// fog density 15 where Armageddon's are 0.0001, its sky colours about a twentieth of Armageddon's):
-/// a Guerrilla set as it is gave a black world. So each set is Armageddon's own (world_default:
-/// exposure), with the district's sky and clouds as they are (the guerrilla_world mod draws them,
-/// and sets their brightness itself), its sun's light (which the mod draws; world_default's is black
-/// at noon), its ambient light from above and below with each key's brightness folded into its colour
-/// (see <see cref="Linear"/>), which the mod's light pass lights the ground with, the colour of its
-/// colour correction, which the mod applies and which turns Guerrilla's coloured light into its
-/// colours (see <see cref="GuerrillaTint"/>), and its fog as it is: colour, density, fall-off with
-/// height, ground and offset (see <see cref="Fog"/>), and its tone mapping (see <see cref="ToneMapping"/>).
-/// Armageddon keeps those fog curves but never draws with them (its fog is the environment boxes', by
-/// distance); the mod draws Guerrilla's height fog and its tone mapping from them.
+/// loading &lt;world&gt;_&lt;district&gt;.dtodx for each. Both games keep a set as the same 68 curves (each
+/// 48 half-hour slots filled in between keys the same way), read from the same file format, and give a
+/// curve a set leaves empty or out the same default (their set_defaults: the same value for every
+/// curve). So each set is written from code as Guerrilla's own: every curve in the games' order
+/// (<see cref="Curves"/>), with Guerrilla's keys as they are. The guerrilla_world mod draws the sky, the
+/// clouds, the backdrop, the sun's light, the height fog and the tone mapping from them as Guerrilla
+/// does; Armageddon itself reads the ambient, the sun's and the fog's colours, the particles' light,
+/// the bloom and the colour correction. Only where Armageddon reads a curve otherwise than Guerrilla is
+/// it converted:
+/// - the ambient light from above and below: Armageddon turns a key's brightness b into
+///   (b − ldr_min) / ldr_max held to 0–1, where Guerrilla (its HDR on) uses it as it is, so each key's
+///   brightness is folded into its colour and set to ldr_max (see <see cref="Linear"/>);
+/// - ldr_min and ldr_max themselves: Guerrilla's districts that key them have 0 and 3 all day; Badlands
+///   and Eos leave them empty, which Guerrilla never reads but Armageddon would take as the default 0
+///   to 32 (dividing the brightness of the ambient, the sun's and the fog's colours and the
+///   environment boxes' ambient by 32), so those two get 0 and 3 too.
 /// </summary>
 public static class GuerrillaTimeOfDay
 {
-    static readonly string[] Sky = ["east0", "east1", "east2", "east3", "west0", "west1", "west2", "west3", "zenith"];
-    static readonly string[] WithSky = ["clouds_horizon_front_light_color", "clouds_horizon_rear_light_color", "horizon_mountain_color",
-                                        "horizon_mountain_color_back", "horizon_mountain_fog_color", "clouds_front_light_color", "clouds_rear_light_color"];
-    static readonly string[] AsTheyAre = ["cloud_layer01_speed", "cloud_layer23_speed", "cloud_backlight_power", "cloud_backlight_strength",
-                                          "overhead_layer0_strength", "overhead_layer1_strength", "overhead_layer2_strength", "overhead_layer3_strength",
-                                          "horizon_layer0_strength", "horizon_layer1_strength", "horizon_layer2_strength", "horizon_layer3_strength"];
+    /// <summary>A set's curves, in the order every set of both games has them (Guerrilla's default set, an older one, lacks ten, which are written empty).</summary>
+    public static readonly IReadOnlyList<string> Curves =
+    [
+        "east0", "east1", "east2", "east3", "west0", "west1", "west2", "west3", "zenith",
+        "fog_ground", "fog_atmosphere_scale", "fog_density_new", "fog_density_offset", "fog_color",
+        "ambient_color", "back_ambient_color", "tod_light_color", "particle_ambient_color", "particle_tod_light_color",
+        "ldr_min", "ldr_max", "bloom_exposure", "iris_rate", "luminance_max", "luminance_min", "luminance_mask_max",
+        "eye_adaption_base", "eye_adaption_amount", "eye_fade_min", "eye_fade_max", "brightpass_threshold_new", "brightpass_offset_new",
+        "bloom_amount", "bloom_theta", "bloom_slope_A", "bloom_slope_B", "tonemap_lum_range", "tonemap_lum_offset",
+        "fog_camera_min", "fog_camera_max", "fog_skybox_offset", "fog_skybox_scale", "fog_clouds_offset", "fog_clouds_scale",
+        "fog_matte_offset", "fog_matte_scale", "color_correct_saturation", "color_correct_tint",
+        "clouds_front_light_color", "clouds_rear_light_color", "clouds_horizon_front_light_color", "clouds_horizon_rear_light_color",
+        "horizon_mountain_color", "horizon_mountain_color_back", "horizon_mountain_fog_color", "horizon_mountain_fog_density",
+        "horizon_layer0_strength", "horizon_layer1_strength", "horizon_layer2_strength", "horizon_layer3_strength",
+        "overhead_layer0_strength", "overhead_layer1_strength", "overhead_layer2_strength", "overhead_layer3_strength",
+        "cloud_backlight_strength", "cloud_backlight_power", "cloud_layer01_speed", "cloud_layer23_speed",
+    ];
+
+    /// <summary>ldr_min and ldr_max as Guerrilla's districts that key them have them, all day.</summary>
+    const float LdrMin = 0, LdrMax = 3;
 
     /// <summary>
-    /// Guerrilla's fog numbers, and Guerrilla's own value for one a set leaves empty or out (its
-    /// tod_district_parameters::set_defaults): the density, its fall-off with height (atmosphere scale),
-    /// the fog's ground below the camera, an offset into the distance, and the range that ground is
-    /// held to. Its districts all have density 15, fall-off 0.057 and ground −131, and leave the range
-    /// empty (−1000 to 3).
+    /// The orbitals file and the sets of curves, from Guerrilla's misc.vpp_pc: one named Default
+    /// (Guerrilla's terr01_default) and one for each of the districts, by their names in the territory,
+    /// from their sets in Guerrilla (terr01_ and Guerrilla's name in lower case, spaces as _).
     /// </summary>
-    static readonly (string Name, float Default)[] Fog =
-        [("fog_density_new", 0.007f), ("fog_atmosphere_scale", 0.001f), ("fog_ground", 0), ("fog_density_offset", 0), ("fog_camera_min", -1000), ("fog_camera_max", 3)];
-
-    /// <summary>
-    /// Guerrilla's tone mapping, which the guerrilla_world mod draws the picture with: the exposure's
-    /// range and offset (every district leaves them empty: 3 and 10), the eye's adaption base and
-    /// amount, how fast it adapts (iris rate), the range each measured sample is held to, and the
-    /// bloom; Guerrilla's own value where a set leaves one empty or out.
-    /// </summary>
-    static readonly (string Name, float Default)[] ToneMapping =
-        [("tonemap_lum_range", 3), ("tonemap_lum_offset", 10), ("eye_adaption_base", 0.2f), ("eye_adaption_amount", 0.3f), ("iris_rate", 3),
-         ("luminance_min", 0.001f), ("luminance_max", 4), ("bloom_amount", 1)];
-
-    /// <summary>
-    /// The orbitals file and the sets of curves, from Armageddon's and Guerrilla's misc.vpp_pc: one
-    /// named Default (Guerrilla's terr01_default) and one for each of the districts, by their names in
-    /// the territory, from their sets in Guerrilla (terr01_ and Guerrilla's name in lower case, spaces as _).
-    /// </summary>
-    public static (byte[] Orbitals, IReadOnlyList<(string Name, byte[] Set)> Sets) Build(Packfile armageddonMisc, Packfile guerrillaMisc,
-                                                                                       IEnumerable<(string Name, string Guerrilla)> districts)
+    public static (byte[] Orbitals, IReadOnlyList<(string Name, byte[] Set)> Sets) Build(Packfile guerrillaMisc, IEnumerable<(string Name, string Guerrilla)> districts)
     {
-        string Text(Packfile archive, string name) =>
-            Encoding.Latin1.GetString(archive.Read(archive.Find(name) ?? throw new InvalidDataException($"no {name} in {archive.Name}")));
-        string orbitals = Text(guerrillaMisc, "terr01.gtodx")
+        string Text(string name) =>
+            Encoding.Latin1.GetString(guerrillaMisc.Read(guerrillaMisc.Find(name) ?? throw new InvalidDataException($"no {name} in {guerrillaMisc.Name}")));
+        string orbitals = Text("terr01.gtodx")
             .Replace("<effect_name>env_sun_corona_a</effect_name>", "<effect_name>env_sun_corona</effect_name>")
             .Replace(".cvbm_pc</map_name>", "</map_name>");
-        string armageddon = Text(armageddonMisc, "world_default.dtodx");
         var sets = new List<(string, byte[])>();
         foreach (var (name, theirs) in districts.Prepend(("Default", "Default")))
         {
-            string guerrilla = Text(guerrillaMisc, $"terr01_{theirs.ToLowerInvariant().Replace(' ', '_')}.dtodx");
-            sets.Add((name, Encoding.Latin1.GetBytes(Set(armageddon, guerrilla))));
+            string file = $"terr01_{theirs.ToLowerInvariant().Replace(' ', '_')}.dtodx";
+            sets.Add((name, Encoding.Latin1.GetBytes(Set(Read(Text(file), file)))));
         }
         return (Encoding.Latin1.GetBytes(orbitals), sets);
     }
 
-    /// <summary>One district's set: Armageddon's world_default with the district's curves as above.</summary>
-    static string Set(string armageddon, string guerrilla)
+    /// <summary>A key: its time (a half hour, 0–47) and its value (one number, or red, green, blue and a brightness that multiplies them), as the file writes them.</summary>
+    record struct Key(string Time, string Value);
+
+    /// <summary>A Guerrilla set's curves by name, each its keys as written; a curve not of the games' set may only be empty (Guerrilla's default set's old brightpass_threshold and _offset).</summary>
+    static Dictionary<string, List<Key>> Read(string text, string file)
     {
-        string day = armageddon;
-        foreach (string curve in Sky.Concat(WithSky).Concat(AsTheyAre).Append("tod_light_color")) day = Replace(day, curve, Block(guerrilla, curve));
-        float ldrMax = Constant(day, "ldr_max") ?? throw new InvalidDataException("world_default's ldr_max changes over the day");
-        if (Constant(day, "ldr_min") != 0) throw new InvalidDataException("world_default's ldr_min isn't 0");
-        foreach (string curve in new[] { "ambient_color", "back_ambient_color" }) day = Replace(day, curve, Linear(guerrilla, curve, ldrMax));
-        day = Replace(day, "fog_color", Block(guerrilla, "fog_color"));
-        foreach (var (curve, value) in Fog.Concat(ToneMapping)) day = Replace(day, curve, NumberOr(guerrilla, curve, value));
-        day = Replace(day, "color_correct_tint", GuerrillaTint(day, guerrilla));
-        return day;
+        var curves = new Dictionary<string, List<Key>>();
+        string root = Regex.Match(text, @"<root>(.*)</root>", RegexOptions.Singleline) is { Success: true } m ? m.Groups[1].Value
+                      : throw new InvalidDataException($"{file} isn't a time of day set");
+        foreach (Match curve in Regex.Matches(root, @"<(\w+)>(.*?)</\1>", RegexOptions.Singleline))
+        {
+            var keys = Regex.Matches(curve.Groups[2].Value, @"<key>\s*<time>([^<]*)</time>\s*<value>([^<]*)</value>\s*</key>")
+                            .Select(k => new Key(k.Groups[1].Value.Trim(), k.Groups[2].Value.Trim())).ToList();
+            string name = curve.Groups[1].Value;
+            if (!Curves.Contains(name) && keys.Count > 0) throw new InvalidDataException($"{file} keys a curve no set has: {name}");
+            curves[name] = keys;
+        }
+        return curves;
     }
 
-    /// <summary>A number curve as a set has it, or, if the set leaves it empty or out, one key holding <paramref name="value"/> all day.</summary>
-    static string NumberOr(string file, string name, float value) =>
-        Pattern(name).Match(file) is { Success: true } m && m.Value.Contains("<key>") ? m.Value
-            : $"<{name}>\n\t\t<key>\n\t\t\t<time>24</time>\n\t\t\t<value>{value.ToString("F6", CultureInfo.InvariantCulture)}</value>\n\t\t</key>\n\t</{name}>";
-
-    // Curves in a set: <name><key><time>t</time><value>...</value></key>...</name>. A colour's value is
-    // red, green, blue and a brightness that multiplies them.
-    static Regex Pattern(string name) => new($@"<{name}>.*?</{name}>", RegexOptions.Singleline);
-
-    static string Block(string file, string name) =>
-        Pattern(name).Match(file) is { Success: true } m ? m.Value : throw new InvalidDataException($"no {name} curve in the time of day set");
-
-    static string Replace(string file, string name, string block)
+    /// <summary>One district's set: Guerrilla's curves in the games' order, converted as above.</summary>
+    static string Set(Dictionary<string, List<Key>> guerrilla)
     {
-        Block(file, name);
-        return Pattern(name).Replace(file, _ => block, 1);
+        List<Key> Of(string name) => guerrilla.GetValueOrDefault(name) ?? [];
+        List<Key> Ldr(string name, float value)
+        {
+            var keys = Of(name);
+            if (keys.Count == 0) return [new Key("24", Number(value))];
+            if (keys.Any(k => Values(k.Value)[0] != value)) throw new InvalidDataException($"Guerrilla's {name} isn't {value} all day");
+            return keys;
+        }
+        var text = new StringBuilder("<root>\r\n");
+        foreach (string name in Curves)
+        {
+            var keys = name switch
+            {
+                "ambient_color" or "back_ambient_color" => Linear(Of(name), name, LdrMax),
+                "ldr_min" => Ldr(name, LdrMin),
+                "ldr_max" => Ldr(name, LdrMax),
+                _ => Of(name),
+            };
+            text.Append($"\t<{name}>\r\n");
+            foreach (var (time, value) in keys)
+                text.Append($"\t\t<key>\r\n\t\t\t<time>{time}</time>\r\n\t\t\t<value>{value}</value>\r\n\t\t</key>\r\n");
+            text.Append($"\t</{name}>\r\n");
+        }
+        return text.Append("</root>\r\n").ToString();
     }
-
-    static float[] Values(string text) => text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
-
-    /// <summary>A number curve's value, if it is the same all day (else null).</summary>
-    static float? Constant(string file, string name) =>
-        Regex.Matches(Block(file, name), @"<value>([^<]*)</value>").Select(m => Values(m.Groups[1].Value)[0]).Distinct().ToList() is { Count: 1 } one ? one[0] : null;
 
     /// <summary>
-    /// A colour curve's block with each key's brightness folded into its colour, and the brightness
+    /// A colour curve's keys with each key's brightness folded into its colour, and the brightness
     /// set to the given one. For the ambient light: Armageddon (without Tod_hdr_enabled) turns an
     /// ambient brightness b into (b − ldr_min) / ldr_max held to 0–1, so a colour is never brighter
     /// than its own red, green and blue; Guerrilla used the brightness as it is.
     /// </summary>
-    static string Linear(string file, string name, float brightness) =>
-        Regex.Replace(Block(file, name), @"<value>([^<]*)</value>", m =>
+    static List<Key> Linear(List<Key> keys, string name, float brightness) =>
+        [.. keys.Select(k =>
         {
-            float[] v = Values(m.Groups[1].Value);
+            float[] v = Values(k.Value);
             if (v.Length != 4) throw new InvalidDataException($"{name} isn't a colour curve");
             for (int i = 0; i < 3; i++) v[i] *= v[3];
             v[3] = brightness;
-            return "<value>" + string.Join(" ", v.Select(x => x.ToString("F6", CultureInfo.InvariantCulture))) + "</value>";
-        });
+            return k with { Value = string.Join(" ", v.Select(Number)) };
+        })];
 
-    /// <summary>
-    /// The colour correction, color_correct_tint: Guerrilla's red, green and blue with Armageddon's
-    /// fourth number. Guerrilla multiplies its whole picture by the tint, divided by its brightest
-    /// channel, and ignores the fourth number; its light is pink (the Oasis sun at noon 2.4, 1.0, 1.8)
-    /// and its tint cyan (0.35, 0.71, 1), so only the two together give its colours. Armageddon
-    /// doesn't colour its picture by this tint (its own sets all carry the same grey), so the
-    /// guerrilla_world mod reads it from here and multiplies what it draws by it. Armageddon does
-    /// divide the tint by its brightest channel too, fourth number included, so each half hour gets
-    /// the fourth number that, divided so, is world_default's divided so: whatever Armageddon reads
-    /// from this curve besides the colour stays as it was. Every one of the day's 48 half hours is
-    /// written, each as the games work it out between keys.
-    /// </summary>
-    static string GuerrillaTint(string armageddon, string guerrilla)
-    {
-        const string name = "color_correct_tint";
-        var ours = Keys(Block(armageddon, name));
-        var theirs = Keys(Block(guerrilla, name));
-        var text = new StringBuilder($"<{name}>\n");
-        for (int slot = 0; slot < 48; slot++)
-        {
-            // A set without the curve (End Game's) has Guerrilla's default, white: no correction.
-            float[] colour = theirs.Count > 0 ? At(theirs, slot) : [1, 1, 1, 1], own = At(ours, slot);
-            float brightest = Math.Max(colour[0], Math.Max(colour[1], colour[2]));
-            float ownBrightest = Math.Max(own[0], Math.Max(own[1], own[2]));
-            if (brightest <= 0 || ownBrightest <= 0) throw new InvalidDataException($"a black {name} at {slot}");
-            colour[3] = own[3] * brightest / ownBrightest;
-            text.Append($"\t\t<key>\n\t\t\t<time>{slot}</time>\n\t\t\t<value>")
-                .Append(string.Join(" ", colour.Select(x => x.ToString("F6", CultureInfo.InvariantCulture))))
-                .Append("</value>\n\t\t</key>\n");
-        }
-        return text.Append($"\t</{name}>").ToString();
-    }
+    static float[] Values(string text) => text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
 
-    // A curve's keys by time: half hours, 0-47.
-    static List<(float Time, float[] Value)> Keys(string block) =>
-        [.. Regex.Matches(block, @"<time>([^<]*)</time>.*?<value>([^<]*)</value>", RegexOptions.Singleline)
-                 .Select(m => (Values(m.Groups[1].Value)[0], Values(m.Groups[2].Value))).OrderBy(k => k.Item1)];
-
-    /// <summary>
-    /// A curve's value at a half hour as the games fill it in: straight from the key before to the
-    /// key after, round the clock (after the last key toward the first; tod_interpolated_var's
-    /// build_unkeyed_values).
-    /// </summary>
-    static float[] At(List<(float Time, float[] Value)> keys, int slot)
-    {
-        if (keys.Count == 0) throw new InvalidDataException("a curve without keys");
-        int after = keys.FindIndex(k => k.Time >= slot);
-        if (after >= 0 && keys[after].Time == slot) return [.. keys[after].Value];
-        var (nextTime, next) = after >= 0 ? keys[after] : (keys[0].Time + 48, keys[0].Value);
-        var (lastTime, last) = after > 0 ? keys[after - 1] : (keys[^1].Time - (after == 0 ? 48 : 0), keys[^1].Value);
-        float t = nextTime == lastTime ? 0 : (slot - lastTime) / (nextTime - lastTime);
-        return [.. last.Zip(next, (a, b) => a + (b - a) * t)];
-    }
+    /// <summary>A number as the games' files write them: six decimals.</summary>
+    static string Number(float value) => value.ToString("F6", CultureInfo.InvariantCulture);
 }
