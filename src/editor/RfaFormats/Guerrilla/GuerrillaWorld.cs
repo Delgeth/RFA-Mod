@@ -29,10 +29,11 @@ namespace RfaFormats.Guerrilla;
 /// the time of day (<see cref="GuerrillaTimeOfDay"/>) and the clouds and backdrop for the mod (<see
 /// cref="GuerrillaSky"/>).
 ///
-/// What still comes from Armageddon's files, written over: the roads' material (world_10_07_2's).
-/// Terrain files (see ZoneTerrain), zone files (their objects, the destructible ones too, made from the
+/// What still comes from Armageddon's levels, written over: the time of day's base (world_default.dtodx;
+/// see <see cref="GuerrillaTimeOfDay"/>). Terrain files (see ZoneTerrain), zone files (their objects, the destructible ones too, made from the
 /// game's schema), navigation files (Guerrilla's own meshes: see GuerrillaNavigation), sub-zones,
-/// textures, containers, archives, stitch lists and asset lists are written from nothing.
+/// textures, containers, archives, stitch lists, asset lists and every material (the ground's, the
+/// cliffs', the roads', the rocks' and the destructible objects') are written from nothing.
 ///
 /// Out: rfg_l0.vpp_pc (the sub-zones' containers and the asset list), rfg_l1.vpp_pc (the zones'),
 /// rfg_precache.vpp_pc, zonescript_rfg.vpp_pc, rfg.gtodx and a time of day for each district
@@ -123,14 +124,8 @@ public static class GuerrillaWorld
         if (zones.Count == 0) throw new ArgumentException("no zones to build");
         if (!zones.Contains(start)) start = zones[0];
         string cache = Path.Combine(game, "build", "pc", "cache"), rfgCache = Path.Combine(guerrilla, "build", "pc", "cache");
-        var worldL0 = Packfile.Open(Path.Combine(cache, "world_l0.vpp_pc"));
         var precache = Packfile.Open(Path.Combine(cache, "dlc01_precache.vpp_pc"));
         byte[] Pre(string name) => precache.Read(precache.Find(name) ?? throw new InvalidDataException($"no {name} in dlc01_precache.vpp_pc"));
-        // Armageddon's road decal material (world_10_07's, in one of its sub-zones), for Guerrilla's road decals.
-        var roadContainer = Packfile.FromBytes("0h_c3224.str2_pc", worldL0.Read(worldL0.Find("0h_c3224.str2_pc") ?? throw new InvalidDataException("no 0h_c3224 in world_l0.vpp_pc")));
-        var (roadMap, roadMaterial) = TerrainSubzone.RoadMaterials(roadContainer.Read(roadContainer.Find("world_10_07_2.ctmesh_pc")
-                                          ?? throw new InvalidDataException("no world_10_07_2.ctmesh_pc in world_l0.vpp_pc's 0h_c3224"))).FirstOrDefault();
-        if (roadMap == null || roadMaterial == null) throw new InvalidDataException("world_10_07_2 has no road decal");
 
         // ---- Guerrilla's files: in a zone's own containers (both layers), else its precache.
         var rfgL0 = Packfile.Open(Path.Combine(rfgCache, "terr01_l0.vpp_pc"));
@@ -319,7 +314,7 @@ public static class GuerrillaWorld
                 {
                     Vector3 middle = decal.Corners.Length > 0 ? decal.Corners.Aggregate(Vector3.Add) / decal.Corners.Length : decal.Position;
                     int part = Math.Clamp((int)((middle.X - corner.X) / third), 0, 2) + 3 * Math.Clamp((int)((middle.Z - corner.Y) / third), 0, 2);
-                    lists[part].Add(GuerrillaRoads.Convert(decal, roadMap, roadMaterial, RoadTexture));
+                    lists[part].Add(GuerrillaRoads.Convert(decal, RoadTexture));
                     foreach (string texture in decal.Names.Select(Path.GetFileNameWithoutExtension).OfType<string>().Where(t => !IsBlendMap(t)))
                     {
                         roadTexturesIn[(col, row)].Add(texture);
@@ -434,8 +429,9 @@ public static class GuerrillaWorld
 
         var asm = new AsmFile();
         var asm1 = new AsmFile();
-        // The marker that names the world's precache (rfg_precache.vpp_pc; see the precache below).
-        var layer = new List<(string Name, byte[] Data)> { (World + "_precache.precache", worldL0.Read(worldL0.Find("world_precache.precache")!)) };
+        // The marker that names the world's precache (rfg_precache.vpp_pc; see the precache below): four
+        // zero bytes, as every one of the game's is.
+        var layer = new List<(string Name, byte[] Data)> { (World + "_precache.precache", new byte[4]) };
         var pending = new List<PendingContainer>();
         var layer1 = new List<(string Name, byte[] Data)>();
         var zonescript = new List<(string Name, byte[] Data)>();

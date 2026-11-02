@@ -16,7 +16,10 @@ namespace RfaFormats.Meshes;
 /// Terrain_layer0_xform and _1, Specular_Power, Diffuse_color_0), or two blended (25A64557: _xform 0
 /// to 3, Specular_Power, Diffuse_color_0 and _1); both with the blend map (its alpha mixes the two),
 /// the colour map and the dither texture, the one-texture kind's second texture slots left empty. The
-/// far meshes: the colour map alone (6748866B again, flags 0x140).
+/// far meshes: the colour map alone (6748866B again, flags 0x140). The road decals (8A68E8F0, the road
+/// shader ir_terrain_road_layer2, every one of the game's road decals'): the ground's four layers'
+/// colour and normal maps (the fourth the road's own) and the blend map; the first three layers'
+/// scale and offset, the four tints, Specular_Power and three more (E3218939, B92F865F, 57CB7618).
 /// </summary>
 public static class TerrainMaterials
 {
@@ -102,4 +105,33 @@ public static class TerrainMaterials
         var (names, at) = TerrainFile.NamesBlock([colourMap]);
         return (names, TerrainFile.Material(0x6748866B, 0x7D45CBD6, 0x140, 10, [(at[0], DiffuseMap0)], []));
     }
+
+    /// <summary>The road shader's texture slots, in its order: the four layers' colour and normal maps (the fourth the road's own), the blend map.</summary>
+    public static readonly IReadOnlyList<uint> RoadSlots = [DiffuseMap0, NormalMap0, DiffuseMap1, NormalMap1, DiffuseMap2, NormalMap2, DiffuseMap3, NormalMap3, AlphaMap0];
+
+    /// <summary>
+    /// A road decal's material. <paramref name="textures"/>: where each of the <see cref="RoadSlots"/>'
+    /// names starts in the decal's own name list; <paramref name="scaleOffsets"/>: the first three
+    /// layers' Terrain_layerN_scale_offset (the road's own layer has none); <paramref name="tints"/>:
+    /// the four layers' Diffuse_color_N; then Specular_Power and three more constants.
+    /// </summary>
+    public static byte[] Road(IReadOnlyList<int> textures, IReadOnlyList<Vector4> scaleOffsets, IReadOnlyList<Vector4> tints,
+                              Vector4 specularPower, Vector4 e3218939, Vector4 b92f865f, Vector4 x57cb7618)
+    {
+        var constants = new List<(uint, Vector4[])>();
+        for (int k = 0; k < 3; k++)
+        {
+            constants.Add((NameHashes.PropertyHash($"Terrain_layer{k}_scale_offset"), [scaleOffsets[k]]));
+            constants.Add((NameHashes.PropertyHash($"Diffuse_color_{k}"), [tints[k]]));
+        }
+        constants.Add((NameHashes.PropertyHash("Diffuse_color_3"), [tints[3]]));
+        constants.Add((NameHashes.PropertyHash("Specular_Power"), [specularPower]));
+        constants.Add((0xE3218939, [e3218939]));
+        constants.Add((0xB92F865F, [b92f865f]));
+        constants.Add((0x57CB7618, [x57cb7618]));
+        return TerrainFile.Material(0x8A68E8F0, 0x9252A41B, 0x40, 21, [.. RoadSlots.Select((slot, k) => (textures[k], slot))], constants);
+    }
+
+    /// <summary>A road decal's material map: its one material's, padded to 16 bytes.</summary>
+    public static byte[] RoadMap() => [.. TerrainFile.MaterialMap(1), 0, 0, 0, 0];
 }

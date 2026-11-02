@@ -338,8 +338,10 @@ converts:
   roads, and the ground around its rocks (skirts), out of the ground and lays them in as separate
   meshes in the same sub-zone files (`TerrainSubzone.Paving`); their heights are sampled with the
   ground's. The roads (road decals) are laid into our sub-zones as Armageddon lays its own
-  (`GuerrillaRoads`: the mesh and Guerrilla's road textures, with Armageddon's road shader), and
-  the ground is left out under them (`GuerrillaGround.RoadHoles`). Where a rock closes the ground
+  (`GuerrillaRoads`: the mesh and Guerrilla's road textures, with a material written from code on
+  Armageddon's road shader, `TerrainMaterials.Road`, checked against all 13 of the game's own road
+  materials, and Guerrilla's values), and the ground is left out under them
+  (`GuerrillaGround.RoadHoles`). Where a rock closes the ground
   itself (a cap on a pillar, a cover on a slope), the ground is laid half a metre under the rock's
   surface.
 - **The terrain files**, written from code part by part as the game reads them (`TerrainFile`; each

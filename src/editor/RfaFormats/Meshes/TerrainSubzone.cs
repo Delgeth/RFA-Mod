@@ -276,7 +276,7 @@ public sealed class TerrainSubzone
 
     /// <summary>
     /// An Armageddon sub-zone's road decals' material maps (16 bytes) and material blocks, in order;
-    /// none if it has no road. (world_10_07_2's are the road shader's, ir_terrain_road_layer2.)
+    /// none if it has no road. (Every one of the game's is the road shader's: see <see cref="TerrainMaterials.Road"/>.)
     /// </summary>
     public static IReadOnlyList<(byte[] Map, byte[] Material)> RoadMaterials(byte[] header)
     {

@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Text;
 using RfaFormats.Meshes;
+using RfaFormats.Zones;
 
 namespace RfaFormats.Guerrilla;
 
@@ -14,26 +15,20 @@ namespace RfaFormats.Guerrilla;
 ///   the texture name list with each name renamed (the ground's layers and the road's textures
 ///     under their new names, the zone's blend map ours), each name followed by two zeros and padded
 ///     to an even length, as both games' are
-///   the material map and material Armageddon's own road decal's (ir_terrain_road_layer2, from one
-///     of its sub-zones), which has the same nine texture slots as Guerrilla's road shader and, by
-///     name hash, the same constants but one renamed and the zone's centre (26CE49CD), which
-///     Armageddon's hasn't: each slot pointed at its texture's name and each constant given
-///     Guerrilla's value.
+///   the material map and material written from code (<see cref="TerrainMaterials.Road"/>):
+///     Armageddon's road shader has the same nine texture slots as Guerrilla's and, by name hash,
+///     the same constants but one Guerrilla names otherwise and the zone's centre (26CE49CD), which
+///     Armageddon's hasn't; each slot is given its texture's name and each constant Guerrilla's value.
 /// </summary>
 public static class GuerrillaRoads
 {
     const byte GuerrillaVertexFormat = 25, VertexFormat = 36;
 
-    /// <summary>Armageddon's road shader's constant name hashes that Guerrilla's names otherwise (the value (1, 1, 1, 50) in both).</summary>
-    static readonly Dictionary<uint, uint> GuerrillaNameOf = new() { [0x08CC10EF] = 0x984BB1F3 };
+    /// <summary>Guerrilla's name hash for Armageddon's Specular_Power (the value (1, 1, 1, 50) in both).</summary>
+    const uint GuerrillaSpecularPower = 0x984BB1F3;
 
-    /// <summary>
-    /// A road decal as Armageddon's sub-zones hold it, with <paramref name="map"/> and
-    /// <paramref name="material"/> one of Armageddon's road decals' (see
-    /// <see cref="TerrainSubzone.RoadMaterials"/>) and <paramref name="rename"/> giving each texture's
-    /// new name (without ".tga").
-    /// </summary>
-    public static RoadDecalToWrite Convert(GuerrillaRoadDecal decal, byte[] map, byte[] material, Func<string, string> rename)
+    /// <summary>A road decal as Armageddon's sub-zones hold it, with <paramref name="rename"/> giving each texture's new name (without ".tga").</summary>
+    public static RoadDecalToWrite Convert(GuerrillaRoadDecal decal, Func<string, string> rename)
     {
         byte[] mesh = MeshBlockConversion.FromVersion6(decal.MeshBlock, 0);
         if (mesh[0x21] != GuerrillaVertexFormat) throw new InvalidDataException($"a road decal with vertex format {mesh[0x21]}, not {GuerrillaVertexFormat}");
@@ -51,29 +46,17 @@ public static class GuerrillaRoads
         }
         byte[] list = [.. BitConverter.GetBytes((int)names.Length), .. names.ToArray()];
 
-        // The material: its textures from +0x24 (12 bytes each: where the name starts, the slot's hash,
-        // an index), the constants' hashes, and from the next multiple of 16 their values.
-        byte[] m = (byte[])material.Clone();
-        int textures = BitConverter.ToUInt16(m, 0x10), constants = m[0x12];
-        for (int t = 0; t < textures; t++)
-        {
-            int slot = 0x24 + t * 12;
-            uint hash = BitConverter.ToUInt32(m, slot + 4);
-            string texture = decal.Slots.FirstOrDefault(s => s.Slot == hash).Texture
-                             ?? throw new InvalidDataException($"Guerrilla's road decal has no texture for slot {hash:X8}");
-            BitConverter.TryWriteBytes(m.AsSpan(slot), nameAt[texture]);
-        }
-        int hashes = 0x24 + textures * 12, values = (hashes + constants * 4 + 15) & ~15;
-        for (int c = 0; c < constants; c++)
-        {
-            uint hash = BitConverter.ToUInt32(m, hashes + c * 4);
-            if (!decal.Constants.TryGetValue(GuerrillaNameOf.GetValueOrDefault(hash, hash), out Vector4 value)) continue;
-            BitConverter.TryWriteBytes(m.AsSpan(values + c * 16), value.X);
-            BitConverter.TryWriteBytes(m.AsSpan(values + c * 16 + 4), value.Y);
-            BitConverter.TryWriteBytes(m.AsSpan(values + c * 16 + 8), value.Z);
-            BitConverter.TryWriteBytes(m.AsSpan(values + c * 16 + 12), value.W);
-        }
+        // The material: each slot given the texture Guerrilla's slot of the same hash has, each constant
+        // Guerrilla's value.
+        int[] textures = [.. TerrainMaterials.RoadSlots.Select(slot => nameAt[decal.Slots.FirstOrDefault(s => s.Slot == slot).Texture
+                             ?? throw new InvalidDataException($"Guerrilla's road decal has no texture for slot {slot:X8}")])];
+        Vector4 Constant(uint hash) => decal.Constants.TryGetValue(hash, out Vector4 value) ? value
+                                       : throw new InvalidDataException($"Guerrilla's road decal has no constant {hash:X8}");
+        Vector4 Named(string name) => Constant(NameHashes.PropertyHash(name));
+        byte[] material = TerrainMaterials.Road(textures, [.. Enumerable.Range(0, 3).Select(k => Named($"Terrain_layer{k}_scale_offset"))],
+            [.. Enumerable.Range(0, 4).Select(k => Named($"Diffuse_color_{k}"))], Constant(GuerrillaSpecularPower),
+            Constant(0xE3218939), Constant(0xB92F865F), Constant(0x57CB7618));
 
-        return new RoadDecalToWrite(decal.Record, mesh, BitConverter.ToInt32(decal.Record, 0), list, map, m, decal.MeshData);
+        return new RoadDecalToWrite(decal.Record, mesh, BitConverter.ToInt32(decal.Record, 0), list, TerrainMaterials.RoadMap(), material, decal.MeshData);
     }
 }
