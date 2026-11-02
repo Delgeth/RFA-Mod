@@ -13,8 +13,10 @@ namespace RfaFormats.Guerrilla;
 /// (15 to 80 m) lasting a second.
 ///
 /// So the table is Armageddon's own with an entry "rfg_" and the class's name for each of Guerrilla's
-/// classes the world's objects have, starting its fade at Guerrilla's distance and lasting 1 ms (as
-/// Armageddon's own None: Guerrilla switches the object off at once). An object with no class, or
+/// classes the world's objects have, starting its fade at Guerrilla's distance. Guerrilla switches the
+/// object off at once there (its renderer has no fade, and its fog is no thicker than ours); ours
+/// fades over <see cref="FadeMilliseconds"/>, so objects go at Guerrilla's distances without
+/// popping. An object with no class, or
 /// Guerrilla's 0, keeps Armageddon's None (never). The game reads this table at start-up as it does
 /// the gameplay properties, so the guerrilla_world mod hands it the game the same way (see
 /// <see cref="GuerrillaGameplay"/>); its name lookup holds 64.
@@ -23,6 +25,9 @@ public static class GuerrillaLod
 {
     /// <summary>Armageddon's class that never fades.</summary>
     public const string Never = "None";
+
+    /// <summary>How long an object takes to fade out past its distance (Armageddon's own small props take 1,000).</summary>
+    const int FadeMilliseconds = 500;
 
     /// <summary>How many classes the game's lookup holds.</summary>
     const int LookupRoom = 64;
@@ -53,7 +58,7 @@ public static class GuerrillaLod
             string entry = "rfg_" + name;
             if (!taken.Add(entry)) throw new InvalidDataException($"Armageddon's lod_properties.xtbl already has an entry {entry}");
             entryOf[name] = entry;
-            text.Append($"\t<LOD>\n\t\t<Name>{entry}</Name>\n\t\t<lod_fade_duration>1</lod_fade_duration>\n\t\t<_Editor>\n\t\t\t<Category>Entries</Category>\n\t\t\t</_Editor>\n")
+            text.Append($"\t<LOD>\n\t\t<Name>{entry}</Name>\n\t\t<lod_fade_duration>{FadeMilliseconds}</lod_fade_duration>\n\t\t<_Editor>\n\t\t\t<Category>Entries</Category>\n\t\t\t</_Editor>\n")
                 .Append($"\t\t<lod_start_fade_distance>{distance.ToString("0.###", CultureInfo.InvariantCulture)}</lod_start_fade_distance>\n\t\t</LOD>\n");
         }
         if (taken.Count > LookupRoom) throw new InvalidDataException($"{taken.Count} LOD classes; the game's lookup holds {LookupRoom}");

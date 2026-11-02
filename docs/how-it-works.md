@@ -402,7 +402,8 @@ converts:
   its gameplay entry's LOD class (25, 50, 100, 150 or 200 m; most have none, and are always
   drawn). Armageddon's classes of the same names fade out much nearer, so the builder adds
   Guerrilla's to Armageddon's `lod_properties.xtbl` (`rfg_1_clutter_extra_small` ... at
-  Guerrilla's distances), and each object names its class.
+  Guerrilla's distances), and each object names its class. Guerrilla switches an object off at
+  once; ours fade out over half a second there, so they don't pop.
 - **The precache**: every file more than one container would hold (the ground's texture layers,
   roads, rocks, chunk files and their textures) goes once into `rfg_precache.vpp_pc`, and each
   zone's and sub-zone's precache group in the asset list (`0p_cXXYY`, `1p_cXXYY`) names the ones
