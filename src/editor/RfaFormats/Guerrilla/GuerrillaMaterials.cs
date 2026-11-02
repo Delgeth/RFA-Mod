@@ -80,6 +80,61 @@ public static class GuerrillaMaterials
     static readonly Shader Glass = new("ir_carglass", [DiffuseMap, PatternMap, ReflectionMap],
         ["Diffuse_color", "Dust_Amount", "reflection_brightness", "reflection_contrast", "Dust_Color", "Main_Opacity"]);
 
+    static readonly uint GlowMap = H("Glow_Map"), Decal1NormalMap = H("Decal1_Normal_Map"), GuerrillaDiffuse2 = H("Diffuse_Map2");
+
+    /// <summary>
+    /// Armageddon's shaders for Guerrilla's effect meshes (the constants in the order Armageddon's own
+    /// effect materials list them, with room for 10 more as theirs have). ir_nl_carglow, unlit: the
+    /// colour map × Diffuse_Color, fogged, plus a glow map × Glow_Color × Self_Illumination.
+    /// ir_nl_vfxmask, unlit: a bend map (Decal1_Normal_Map) shifts the look-ups of the colour (×
+    /// Diffuse_Color), glow (× Glow_Color × Self_Illumination × 4) and mask (the specular map's green,
+    /// its alpha) maps; its vertex shader scrolls the colour map by Main_Scroll and the glow map by
+    /// Glow_Scroll. ir_defaultglow: lit, with a glow map scrolled by Glow_Scroll.
+    /// </summary>
+    static readonly Shader CarGlow = new("ir_nl_carglow", [DiffuseMap, GlowMap],
+        ["Self_Illumination", "Glow_ScrollV", "Glow_ScrollU", "Glow_Color", "Diffuse_Color"]);
+    static readonly Shader VfxMask = new("ir_nl_vfxmask", [DiffuseMap, GlowMap, SpecularMap, Decal1NormalMap],
+        ["SSS_Falloff_Amt", "Specular_Power", "Specular_Amount", "Specular_Alpha", "Self_Illumination", "Main_ScrollV", "Main_ScrollU",
+         "Main_Opacity", "Glow_ScrollV", "Glow_ScrollU", "Glow_Falloff_Power", "Glow_Falloff_Inversion", "Glow_Color", "Diffuse_Color",
+         "Decal1_TilingV", "Decal1_TilingU", "Decal1_Normal_Height"]);
+    static readonly Shader DefaultGlow = new("ir_defaultglow", [NormalMap, DiffuseMap, SpecularMap, GlowMap],
+        ["Specular_Power", "Specular_Color", "Self_Illumination", "Normal_Height", "Glow_ScrollV", "Glow_ScrollU", "Glow_Falloff_Power",
+         "Glow_Falloff_Inversion", "Glow_Color", "Diffuse_TilingV", "Diffuse_TilingU", "Diffuse_Color"]);
+
+    enum EffectKind { Glow, Glow2, LightCone, AnimFade, SniperScope, MaskScroll, Shield, Animated }
+
+    /// <summary>
+    /// Guerrilla's effect shaders (read from its compiled shaders), which have no shader of Armageddon's
+    /// to match by textures. glow2: the colour map × Diffuse_Color blended towards Diffuse_Color2 by
+    /// Diffuse_Alpha, × 10 × Self_Illumination, unlit, alpha × Diffuse_Alpha (glow: the blend by a
+    /// vertex value); light-cone: the colour map × Diffuse_Color × Diffuse_Map_Luminosity × 10 × the
+    /// view's angle to the surface, alpha 1; anim-fade: the colour map × Diffuse_Color, alpha faded by
+    /// a vertex value; sniper-scope: no texture, alpha 0. These are ir_nl_carglow with the colour
+    /// scaled the same (what's lost: the cone's fall-off with the angle, the vertex fades). mask-scroll
+    /// and shield: a scrolling map bends the look-ups of a coloured one, pulsing, × 100 ×
+    /// Self_Illumination: ir_nl_vfxmask (the pulse lost; brightness and bend strength guessed).
+    /// animated (the news kiosks' screens): a lit model shader whose colour map scrolls:
+    /// ir_defaultglow, the screen in its glow map.
+    /// </summary>
+    static readonly Dictionary<uint, EffectKind> EffectShaders = new()
+    {
+        [H("rfg-vfx-glow")] = EffectKind.Glow, [H("rfg-vfx-glow2")] = EffectKind.Glow2, [H("rfg-vfx-light-cone")] = EffectKind.LightCone,
+        [H("rfg-vfx-anim-fade")] = EffectKind.AnimFade, [H("rfg-sniper-scope")] = EffectKind.SniperScope,
+        [H("rfg-vfx-mask-scroll-a")] = EffectKind.MaskScroll, [H("rfg-vfx-mask-scroll-b")] = EffectKind.MaskScroll,
+        [H("rfg-vfx-shield")] = EffectKind.Shield, [H("rfg-animated")] = EffectKind.Animated,
+    };
+
+    /// <summary>
+    /// Guerrilla scrolls a map by its speed × the game's time; Armageddon's ir_nl_vfxmask by 10 × its
+    /// speed × the fraction of a second (so it starts over each second, smooth only where 10 × the speed
+    /// is whole, as Armageddon's own are). Guerrilla's speeds / 10 move as fast (assumed: both times in
+    /// seconds).
+    /// </summary>
+    const float ScrollScale = 10;
+
+    /// <summary>Guerrilla's mask shaders end × 100 × Self_Illumination; Armageddon's glow layer × 4 × it: 25 × as bright (a guess, to tune in the game).</summary>
+    const float MaskBrightness = 25;
+
     /// <summary>Whether the Guerrilla material block at <paramref name="at"/> is glass (one of Guerrilla's glass shaders).</summary>
     internal static bool IsGlass(byte[] file, int at) => GuerrillaGlass.Contains(BitConverter.ToUInt32(file, at + 0x04));
 
@@ -114,33 +169,140 @@ public static class GuerrillaMaterials
             : textures.ContainsKey(SpecularMap) ? NoNormal
             : ColourOnly;
 
-        int room = shader.Constants.Length * 2;
+        return Block(shader, file, at, 0x40u | (glass ? 1u : cutOut ? 2u : 0u), shader.Constants.Length * 2,
+            slot => textures.TryGetValue(slot, out int n) && slot != ReflectionMap ? n : names.Add(BuiltIn(slot) + ".tga"),
+            constant => Value(constant, constants, glass));
+    }
+
+    /// <summary>The built-in texture filling a slot a material hasn't.</summary>
+    static string BuiltIn(uint slot) => slot == NormalMap ? FlatNormal : slot == SpecularMap ? NoSpecular : slot == ReflectionMap ? GlassReflection : White;
+
+    /// <summary>
+    /// An Armageddon material block for <paramref name="shader"/>: the Guerrilla block at <paramref name="at"/>'s
+    /// own name hash and run-time words, the flags given, room for <paramref name="room"/> constants, each
+    /// slot's texture (where its name starts) and each constant's value as the functions give them.
+    /// </summary>
+    static byte[] Block(Shader shader, byte[] file, int at, uint flags, int room, Func<uint, int> texture, Func<string, Vector4> value)
+    {
         int hashes = 0x24 + shader.Slots.Length * 12, values = Align(hashes + shader.Constants.Length * 4, 16), size = values + room * 16;
         var block = new byte[size];
         void Put(int o, uint v) => BitConverter.TryWriteBytes(block.AsSpan(o), v);
         Put(0x00, (uint)size);
         Put(0x04, H(shader.Name));
         Array.Copy(file, at + 0x08, block, 0x08, 4);   // the material's own name hash
-        Put(0x0C, 0x40u | (glass ? 1u : cutOut ? 2u : 0u));
+        Put(0x0C, flags);
         BitConverter.TryWriteBytes(block.AsSpan(0x10), (ushort)shader.Slots.Length);
         block[0x12] = (byte)shader.Constants.Length;
         block[0x13] = (byte)room;
         Array.Copy(file, at + 0x14, block, 0x14, 12);  // run-time words
         for (int t = 0; t < shader.Slots.Length; t++)
         {
-            uint slot = shader.Slots[t];
-            int name = textures.TryGetValue(slot, out int n) && slot != ReflectionMap ? n
-                : names.Add((slot == NormalMap ? FlatNormal : slot == SpecularMap ? NoSpecular : slot == ReflectionMap ? GlassReflection : White) + ".tga");
-            Put(0x24 + t * 12, (uint)name);
-            Put(0x28 + t * 12, slot);
+            Put(0x24 + t * 12, (uint)texture(shader.Slots[t]));
+            Put(0x28 + t * 12, shader.Slots[t]);
             Put(0x2C + t * 12, (uint)t);
         }
         for (int c = 0; c < shader.Constants.Length; c++)
         {
             Put(hashes + c * 4, H(shader.Constants[c]));
-            Write(block, values + c * 16, Value(shader.Constants[c], constants, glass));
+            Write(block, values + c * 16, value(shader.Constants[c]));
         }
         return block;
+    }
+
+    /// <summary>
+    /// Armageddon's material block for an effect mesh's Guerrilla one at <paramref name="at"/>: Guerrilla's
+    /// effect shaders (see <see cref="EffectShaders"/>) rebuilt for Armageddon's, its model shaders as
+    /// <see cref="Convert"/> does. Its textures' names are in <paramref name="names"/>.
+    /// </summary>
+    internal static byte[] ConvertForEffect(byte[] file, int at, TextureNameList names)
+    {
+        if (!EffectShaders.TryGetValue(BitConverter.ToUInt32(file, at + 0x04), out var kind)) return Convert(file, at, names);
+        int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
+        uint flags = 0x40u | (BitConverter.ToUInt32(file, at + 0x0C) & 3);
+        var textures = new Dictionary<uint, int>();  // Guerrilla's slot → where its name starts
+        for (int t = 0; t < textureCount; t++)
+        {
+            int e = at + 0x20 + t * 12;
+            if (!IsEmpty(names.At(BitConverter.ToInt32(file, e)))) textures.TryAdd(BitConverter.ToUInt32(file, e + 4), BitConverter.ToInt32(file, e));
+        }
+        var constants = new Dictionary<uint, Vector4>();
+        int hashesAt = at + 0x20 + textureCount * 12, valuesAt = at + Align(0x20 + textureCount * 12 + constantCount * 4, 16);
+        for (int c = 0; c < constantCount; c++)
+            constants[BitConverter.ToUInt32(file, hashesAt + c * 4)] = Read(file, valuesAt + c * 16);
+        Vector4 Get(string name, Vector4 otherwise) => constants.TryGetValue(H(name), out var v) ? v : otherwise;
+        float X(string name, float otherwise) => constants.TryGetValue(H(name), out var v) ? v.X : otherwise;
+        int Texture(uint guerrillaSlot, uint slot) => textures.TryGetValue(guerrillaSlot, out int n) ? n : names.Add(BuiltIn(slot) + ".tga");
+        static Vector4 V(float x) => new(x, 0, 0, 0);
+        var colour = Get("Diffuse_Color", Vector4.One);
+        float selfLit = X("Self_Illumination", 1);
+
+        switch (kind)
+        {
+            case EffectKind.MaskScroll or EffectKind.Shield:
+            {
+                // The scrolling map (Guerrilla's colour map) bends the look-ups of the coloured one
+                // (Diffuse_Map2): Armageddon's bend map (Decal1_Normal_Map) and its colour and glow maps.
+                var glow = kind == EffectKind.Shield ? Get("Diffuse_Color2", colour) : colour;
+                float scrollU = X("Diffuse_Scroll_Speed_U", 0) / ScrollScale, scrollV = X("Diffuse_Scroll_Speed_V", 0) / ScrollScale;
+                return Block(VfxMask, file, at, flags, VfxMask.Constants.Length + 10,
+                    slot => slot == DiffuseMap || slot == GlowMap ? Texture(GuerrillaDiffuse2, DiffuseMap)
+                        : slot == Decal1NormalMap ? Texture(DiffuseMap, DiffuseMap) : names.Add(White + ".tga"),
+                    constant => constant switch
+                    {
+                        "Diffuse_Color" => colour,
+                        "Glow_Color" => glow,
+                        "Self_Illumination" => V(selfLit * MaskBrightness),
+                        "Main_ScrollU" or "Glow_ScrollU" => V(scrollU),
+                        "Main_ScrollV" or "Glow_ScrollV" => V(scrollV),
+                        "Decal1_Normal_Height" => V(0.1f),
+                        "Decal1_TilingU" or "Decal1_TilingV" or "Main_Opacity" or "SSS_Falloff_Amt" or "Glow_Falloff_Power" => V(1),
+                        "Specular_Power" => V(100),
+                        _ => V(0),  // Specular_Amount, Specular_Alpha, Glow_Falloff_Inversion
+                    });
+            }
+            case EffectKind.Animated:
+            {
+                // A lit screen whose colour map scrolls: Armageddon's scrolling layer is the glow map.
+                var scroll = new Vector2(X("Diffuse_Map_OffsetU", 0), X("Diffuse_Map_OffsetV", 0)) / ScrollScale;
+                return Block(DefaultGlow, file, at, flags, DefaultGlow.Constants.Length + 10,
+                    slot => slot == GlowMap ? Texture(DiffuseMap, DiffuseMap) : slot == DiffuseMap ? names.Add(White + ".tga") : Texture(slot, slot),
+                    constant => constant switch
+                    {
+                        "Diffuse_Color" => new Vector4(0, 0, 0, colour.W),
+                        "Glow_Color" => colour,
+                        "Self_Illumination" => V(selfLit),
+                        "Glow_ScrollU" => V(scroll.X),
+                        "Glow_ScrollV" => V(scroll.Y),
+                        "Glow_Falloff_Power" => V(0.001f),
+                        "Glow_Falloff_Inversion" or "Normal_Height" or "Diffuse_TilingU" or "Diffuse_TilingV" => V(1),
+                        "Specular_Power" => V(Math.Clamp(X("Specular_Power", 100) / (4 * 5.12f), 0, 50)),
+                        "Specular_Color" => Get("Specular_Color", Vector4.One) * X("Specular_Alpha", 1),
+                        _ => throw new InvalidOperationException($"no value for {constant}"),
+                    });
+            }
+            default:
+            {
+                // Unlit: the colour map × a colour, Armageddon's glow layer off.
+                Vector4 diffuse = kind switch
+                {
+                    EffectKind.Glow2 => Vector4.Lerp(colour, Get("Diffuse_Color2", colour), X("Diffuse_Alpha", 1)) with { W = X("Diffuse_Alpha", 1) },
+                    EffectKind.Glow => colour with { W = X("Diffuse_Alpha", 1) },
+                    EffectKind.LightCone => colour with { W = 1 },
+                    EffectKind.SniperScope => Vector4.Zero,
+                    _ => colour,
+                };
+                float bright = kind switch
+                {
+                    EffectKind.Glow or EffectKind.Glow2 => 10 * selfLit,
+                    EffectKind.LightCone => 10 * X("Diffuse_Map_Luminosity", 1),
+                    _ => 1,
+                };
+                diffuse = new Vector4(diffuse.X * bright, diffuse.Y * bright, diffuse.Z * bright, diffuse.W);
+                return Block(CarGlow, file, at, flags, CarGlow.Constants.Length + 10,
+                    slot => slot == DiffuseMap ? Texture(DiffuseMap, DiffuseMap) : names.Add(White + ".tga"),
+                    constant => constant == "Diffuse_Color" ? diffuse : Vector4.Zero);
+            }
+        }
     }
 
     /// <summary>

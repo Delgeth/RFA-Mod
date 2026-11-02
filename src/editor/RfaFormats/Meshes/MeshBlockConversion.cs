@@ -1,8 +1,9 @@
 namespace RfaFormats.Meshes;
 
 /// <summary>
-/// Red Faction: Guerrilla's mesh blocks (version 6, in its destructible objects and stitch pieces)
-/// written as Armageddon's (version 9). The vertex and index buffers (in the g-file) stay as they are:
+/// Red Faction: Guerrilla's mesh blocks (version 6, in its destructible objects and stitch pieces; most
+/// of its effects' meshes are version 4, laid out as 6) written as Armageddon's (version 9). The vertex
+/// and index buffers (in the g-file) stay as they are:
 /// both games use vertex format 2 (24, 28 or 32 bytes with 1 to 3 texture coordinate sets) and 2- or
 /// 4-byte strip indices (every Guerrilla world chunk's combination is also one of Armageddon's).
 ///
@@ -19,11 +20,11 @@ namespace RfaFormats.Meshes;
 /// </summary>
 public static class MeshBlockConversion
 {
-    /// <summary>The version-9 block for the version-6 block starting at <paramref name="at"/> in <paramref name="file"/>.</summary>
+    /// <summary>The version-9 block for the version-6 (or 4) block starting at <paramref name="at"/> in <paramref name="file"/>.</summary>
     public static byte[] FromVersion6(byte[] file, int at)
     {
         int I(int o) => BitConverter.ToInt32(file, at + o);
-        if (I(0) != 6) throw new InvalidDataException($"mesh block version {I(0)}, not 6");
+        if (I(0) is not (6 or 4)) throw new InvalidDataException($"mesh block version {I(0)}, not 6 or 4");
         int submeshes = I(0x10), table = I(0x14), blocks = BitConverter.ToUInt16(file, at + 0x2E);
         // The terrain's road decal and skirt meshes give 0 render blocks here and as many a submesh as
         // its first word says (Armageddon's own keep the 0): count them from the submeshes.
