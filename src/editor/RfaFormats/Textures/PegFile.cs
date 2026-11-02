@@ -102,6 +102,27 @@ public sealed class PegFile
         return stream.ToArray();
     }
 
+    /// <summary>
+    /// One texture of this file as a file pair of its own, under <paramref name="name"/> (with ".tga"):
+    /// its entry as it is (size, format, animation tiles and frames, flags, source size, frames a
+    /// second; an effect's flip-book textures need their tiles) but for its data at 0, its name and
+    /// its first <paramref name="mipLevels"/> levels; the data file those levels, up to a multiple of 16.
+    /// </summary>
+    public (byte[] Header, byte[] Data) Single(PegTexture texture, string name, int mipLevels)
+    {
+        int dataSize = 0;
+        for (int level = 0; level < mipLevels; level++) dataSize += texture.Format.LevelSize(Math.Max(1, texture.Width >> level), Math.Max(1, texture.Height >> level));
+        if (dataSize > texture.DataSize || texture.DataOffset + dataSize > data.Length)
+            throw new InvalidDataException($"{texture.Name}'s first {mipLevels} levels run past its data");
+        byte[] made = SingleHeader(name, texture.Width, texture.Height, texture.Format, mipLevels, texture.Flags);
+        int entry = HeaderSize + texture.Index * EntrySize;
+        Array.Copy(header, entry + 10, made, HeaderSize + 10, 8);  // source width, animation tiles across and down, frames
+        Array.Copy(header, entry + 24, made, HeaderSize + 24, 3);  // source height, frames a second
+        var d = new byte[(dataSize + 15) & ~15];
+        Array.Copy(data, texture.DataOffset, d, 0, dataSize);
+        return (made, d);
+    }
+
     /// <summary>The names of the textures in a header file, without needing its data file.</summary>
     public static IEnumerable<string> TextureNames(byte[] header)
     {

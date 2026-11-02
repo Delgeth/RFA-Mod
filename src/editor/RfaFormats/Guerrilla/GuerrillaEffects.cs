@@ -53,17 +53,25 @@ public static class GuerrillaEffects
     static readonly (int At, int Count, int Size)[] MeshKeyOffsets = [(0x00, 0, 0), (0x0C, 0x08, 4), (0x14, 0x10, 4), (0x1C, 0x18, 4), (0x24, 0x20, 4)];
 
     /// <summary>
-    /// The Armageddon effect for a Guerrilla one: its c-file, and its g-file (null when it has none).
-    /// <paramref name="rename"/> gives each texture's name (without ".tga") as the converted textures
-    /// will be called.
+    /// The Armageddon effect for a Guerrilla one: its c-file, its g-file (null when it has none), and the
+    /// textures it uses by Guerrilla's names (without ".tga"; the built-ins its meshes' materials are
+    /// given among them, see <see cref="GuerrillaBuiltIns"/>). <paramref name="rename"/> gives each
+    /// texture's name as the converted textures will be called.
     /// </summary>
-    public static (byte[] C, byte[]? G) Convert(byte[] c, byte[]? g, Func<string, string> rename)
+    public static (byte[] C, byte[]? G, IReadOnlyList<string> Textures) Convert(byte[] c, byte[]? g, Func<string, string> rename)
     {
         if (c.Length < 0x50 || BitConverter.ToUInt32(c, 0) != EffectFile.Signature) throw new InvalidDataException("not an effect file");
         int version = BitConverter.ToInt32(c, 4);
         if (version is < 21 or > 26) throw new NotSupportedException($"a Guerrilla effect of version {version}");
         int I(int at) => BitConverter.ToInt32(c, at);
         uint U(int at) => BitConverter.ToUInt32(c, at);
+        var used = new List<string>();
+        string Name(string texture)
+        {
+            string stem = texture.EndsWith(".tga", StringComparison.OrdinalIgnoreCase) ? texture[..^4] : texture;
+            if (!used.Contains(stem, StringComparer.OrdinalIgnoreCase)) used.Add(stem);
+            return Renamed(texture, rename);
+        }
 
         var source = new Source(c, version);
         var header = new Piece(c[..0x50]);
@@ -82,7 +90,7 @@ public static class GuerrillaEffects
         int bitmapCount = Math.Max(I(0x1C), 0);
         var bitmaps = new Piece(new byte[bitmapCount * 4]);
         for (int k = 0; k < bitmapCount; k++)
-            bitmaps.Link(k * 4, new Piece([.. Encoding.ASCII.GetBytes(Renamed(source.Text(U((int)U(0x20) + k * 4)), rename)), 0]));
+            bitmaps.Link(k * 4, new Piece([.. Encoding.ASCII.GetBytes(Name(source.Text(U((int)U(0x20) + k * 4)))), 0]));
         List(0x1C, bitmapCount, bitmaps);
 
         // Emitters.
@@ -198,7 +206,7 @@ public static class GuerrillaEffects
                 for (int t = 0; t < BitConverter.ToUInt16(piece.Bytes, at + 0x10); t++)
                 {
                     int e = at + 0x24 + t * 12;
-                    BitConverter.TryWriteBytes(piece.Bytes.AsSpan(e), final.Add(Renamed(names.At(BitConverter.ToInt32(piece.Bytes, e)), rename)));
+                    BitConverter.TryWriteBytes(piece.Bytes.AsSpan(e), final.Add(Name(names.At(BitConverter.ToInt32(piece.Bytes, e)))));
                 }
             meshNames = new Piece(final.ToArray());
         }
@@ -213,7 +221,7 @@ public static class GuerrillaEffects
             string Where(int at, string what) => $"{what} {BitConverter.ToInt32(file, at - 4)} at 0x{BitConverter.ToUInt32(file, at):X}";
             throw new InvalidDataException($"{x.Message} (a file of 0x{file.Length:X} bytes: {Where(0x2C, "meshes")}, {Where(0x34, "emitters")}, {Where(0x3C, "lights")}, {Where(0x4C, "coronas")})", x);
         }
-        return (file, gOut);
+        return (file, gOut, used);
     }
 
     /// <summary>
