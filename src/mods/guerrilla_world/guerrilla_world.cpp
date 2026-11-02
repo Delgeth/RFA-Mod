@@ -83,6 +83,15 @@
 // once at start-up from precache.xtbl (bio, ice, magma, natural, surface; elsewhere "world"). That
 // table knows only grid places, so our worlds would get the campaign's empty world_precache: for
 // them the mod answers the area as the world's own name, so a world rfg mounts rfg_precache.vpp_pc.
+//
+// The gameplay properties: a destructible object names an entry of gameplay_properties.xtbl (its
+// flags, such as shadows, a map icon or smoke when destroyed, and its importance, team and salvage).
+// Armageddon's table lacks many of Guerrilla's entries and has the rest with its own settings, so the
+// world builder writes Armageddon's table with Guerrilla's settings added
+// (mods\guerrilla_world\gameplay_properties.xtbl). The game reads that table once, at start-up, from
+// its copy of table.vpp_pc in memory, where the loader's overrides don't reach; the mod hands it the
+// builder's table there, and gives the table's names more room than the game's 24 KB, which
+// Armageddon's own nearly fill. Without that file the game keeps its own table.
 #define RFA_MOD_NAME "guerrilla_world"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -226,6 +235,32 @@ constexpr DWORD kPrecacheArea = 0x6B4710;
 constexpr size_t kPrecacheAreaPrologue = 6;  // push ebp / mov ebp,esp / sub esp,10h
 using PrecacheAreaFn = const char*(__cdecl*)(int column, int row, int gridSize);
 PrecacheAreaFn g_precacheArea;
+
+// While the game starts, it reads tables from its copy of table.vpp_pc in memory: the table reader
+// (0xC8E760) asks the copy for a table by its file name (0xC8FCD0, a method of the copy: true and the
+// table's bytes, or false, and the reader opens the file by name instead).
+constexpr DWORD kTableCacheFind = 0xC8FCD0;
+constexpr size_t kTableCacheFindPrologue = 6;  // push ebp / mov ebp,esp / sub esp,8
+struct CachedTable {
+    const void* data;
+    DWORD size;
+};
+using TableCacheFindFn = bool(__fastcall*)(void* cache, void* unused, const char* name, CachedTable* out);
+TableCacheFindFn g_tableCacheFind;
+
+// A pool of names (a method of the pool: the buffer, its size, the pool's name). The gameplay
+// properties' is "Gameplay Property Names", 0x6000 bytes, set up just before the table is read
+// (0x7A6E50); a name takes its length and 2 or 3 bytes more, and a full pool stops the game.
+constexpr DWORD kNamePoolInit = 0xC97AF0;
+constexpr size_t kNamePoolInitPrologue = 6;  // push ebp / mov ebp,esp / sub esp,8
+using NamePoolInitFn = void(__fastcall*)(void* pool, void* unused, void* buffer, DWORD size, const char* name);
+NamePoolInitFn g_namePoolInit;
+
+constexpr char kGameplayTable[] = "gameplay_properties.xtbl";
+constexpr char kGameplayNames[] = "Gameplay Property Names";
+constexpr DWORD kGameplayNameRoom = 0x10000;  // the world builder's GuerrillaGameplay.NamePool
+std::vector<BYTE> g_gameplayTable;  // the builder's table, with a 0 after it; empty if there is none
+std::vector<char> g_gameplayNames;
 
 // The scene renderer's sky step: a method (the renderer in ECX).
 constexpr DWORD kRenderSkybox = 0xD528E0;
@@ -774,6 +809,35 @@ const char* __cdecl PrecacheArea(int column, int row, int gridSize) {
     }
     rfa::Log("Precache: world \"%s\" mounts %s_precache.vpp_pc (the game's area there is \"%s\")", WorldName(), WorldName(), area);
     return WorldName();
+}
+
+// Answers the start-up table copy's lookup of gameplay_properties.xtbl (by its file name, whatever
+// folder it is asked with) with the world builder's table; every other table is the game's.
+bool __fastcall TableCacheFind(void* cache, void* unused, const char* name, CachedTable* out) {
+    if (!g_gameplayTable.empty() && name && out) {
+        const char* file = name;
+        for (const char* c = name; *c; ++c)
+            if (*c == '\\' || *c == '/') file = c + 1;
+        if (_stricmp(file, kGameplayTable) == 0) {
+            out->data = g_gameplayTable.data();
+            out->size = static_cast<DWORD>(g_gameplayTable.size() - 1);
+            rfa::Log("Gameplay properties: the game reads mods\\guerrilla_world\\gameplay_properties.xtbl (%lu bytes)", out->size);
+            return true;
+        }
+    }
+    return g_tableCacheFind(cache, unused, name, out);
+}
+
+// Gives the gameplay properties' name pool kGameplayNameRoom bytes of the mod's own when the mod hands
+// the game its table (the game's own buffer is left unused); every other pool is the game's.
+void __fastcall NamePoolInit(void* pool, void* unused, void* buffer, DWORD size, const char* name) {
+    if (!g_gameplayTable.empty() && name && strcmp(name, kGameplayNames) == 0) {
+        g_gameplayNames.assign(kGameplayNameRoom, 0);
+        rfa::Log("Gameplay properties: their names get %lu bytes (the game's %lu)", kGameplayNameRoom, size);
+        g_namePoolInit(pool, unused, g_gameplayNames.data(), kGameplayNameRoom, name);
+        return;
+    }
+    g_namePoolInit(pool, unused, buffer, size, name);
 }
 
 // ---- Shaders
@@ -2358,6 +2422,21 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_debugPrint) rfa::Log("Could not hook the game's debug print; what it says while loading our worlds isn't logged");
     g_precacheArea = reinterpret_cast<PrecacheAreaFn>(rfa::HookFunction(kPrecacheArea, kPrecacheAreaPrologue, reinterpret_cast<void*>(&PrecacheArea)));
     if (!g_precacheArea) rfa::Log("Could not hook the game's precache areas; our worlds' shared files won't be found");
+    // Guerrilla's gameplay properties, if the world builder has written them (the game reads the table
+    // while it starts, before any world).
+    if (ReadWholeFile(DataFolder() + L"gameplay_properties.xtbl", g_gameplayTable) && !g_gameplayTable.empty()) {
+        g_gameplayTable.push_back(0);
+        g_namePoolInit = reinterpret_cast<NamePoolInitFn>(rfa::HookFunction(kNamePoolInit, kNamePoolInitPrologue, reinterpret_cast<void*>(&NamePoolInit)));
+        g_tableCacheFind = reinterpret_cast<TableCacheFindFn>(
+            rfa::HookFunction(kTableCacheFind, kTableCacheFindPrologue, reinterpret_cast<void*>(&TableCacheFind)));
+        if (!g_namePoolInit || !g_tableCacheFind) {
+            rfa::Log("Could not hook the game's table reading; the game keeps its own gameplay properties");
+            g_gameplayTable.clear();  // (a hook that did go in only passes through)
+        }
+    } else {
+        g_gameplayTable.clear();
+        rfa::Log("Gameplay properties: no mods\\guerrilla_world\\gameplay_properties.xtbl (made by the world builder); the game keeps its own");
+    }
     if (!g_skyOn && !g_lightOn && g_fog <= 0 && g_clockSpeed <= 0) {
         rfa::Log("Guerrilla's sky, light, fog and clock are off (Sky=0, Light=0, Fog=0, ClockSpeed=0)");
         return;

@@ -328,6 +328,15 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   the one its start zone's grid place has in `precache.xtbl` (`bio`, `ice`, ... or `world`),
   read once at start-up. The mod wraps that lookup (`0x6B4710`) and answers the world's own name
   in our worlds, so `rfg` mounts `rfg_precache.vpp_pc`.
+- **The gameplay properties**: each destructible object names an entry of
+  `gameplay_properties.xtbl` (its shadows, map icon, smoke when destroyed, anchoring, importance,
+  team, salvage). The game reads that table once while it starts, from its own copy of
+  `table.vpp_pc` in memory, which the loader's overrides don't reach (`0xC8E760` asks the copy,
+  `0xC8FCD0`, before opening a table by name), and keeps the names in a 24 KB pool its own nearly
+  fill (`0xC97AF0`, "Gameplay Property Names"; a full pool stops the game). When the world builder
+  has written `mods\guerrilla_world\gameplay_properties.xtbl`, the mod hands the game that table
+  at the copy's lookup and gives the names 64 KB of its own. Without the file, or with the mod
+  off, the game keeps its own table, and a name it doesn't have is its Default entry.
 
 The world itself is built by `editor\GuerrillaWorld.exe` (code in `src\editor\GuerrillaWorld\` and
 `src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
@@ -380,6 +389,14 @@ converts:
   must fall for it to count as destroyed, and the header flag that keeps a free-standing building
   among the physics' fixed objects (`GuerrillaMovers`). Each chunk file goes into the container of
   the sub-zone its object stands in, as Armageddon keeps them.
+- **The gameplay properties** of those objects (`GuerrillaGameplay`): Armageddon's
+  `gameplay_properties.xtbl` still names most of Guerrilla's entries, but with its own settings
+  (it took the shadows off nearly all and keeps many props from anchoring), and lacks 121 that
+  Guerrilla's world uses. So the builder writes Armageddon's table with Guerrilla's settings added
+  for the guerrilla_world mod (above): each entry the objects name is put in Armageddon's fields
+  (Guerrilla's flags but two Armageddon has no bit for), and an object names an Armageddon entry
+  with the same settings where there is one, else a new `rfg_` entry (139). Armageddon's own
+  entries are left as they are.
 - **The precache**: every file more than one container would hold (the ground's texture layers,
   roads, rocks, chunk files and their textures) goes once into `rfg_precache.vpp_pc`, and each
   zone's and sub-zone's precache group in the asset list (`0p_cXXYY`, `1p_cXXYY`) names the ones

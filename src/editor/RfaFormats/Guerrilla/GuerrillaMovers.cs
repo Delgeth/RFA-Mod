@@ -20,8 +20,8 @@ namespace RfaFormats.Guerrilla;
 ///     campaign's targets), building_type (Bridge, Communications, Force_Field: flags both games
 ///     have), display_name (the name scripts find an object by, e.g. TRGT_EDF_PILLBOX: Armageddon's
 ///     object loader reads it from any object, as Guerrilla's does), Guerrilla's Props name where
-///     Armageddon's table has it (it holds most of Guerrilla's), and its gameplay_props name, or
-///     where Armageddon's table lacks it the entry the caller finds closest
+///     Armageddon's table has it (it holds most of Guerrilla's), and the gameplay_props entry with
+///     Guerrilla's settings (see <see cref="GuerrillaGameplay"/>)
 ///   - the schema's defaults: Props and gameplay_props otherwise ("Default"), and the switches
 ///     Armageddon added (no_magnet_gun, suppress_salvage, no_repair, ignore_shape_cutters,
 ///     mp_unimportant: all off)
@@ -62,7 +62,7 @@ public static class GuerrillaMovers
     /// <param name="all">Every object of their Guerrilla zone, by handle (to follow attachments through).</param>
     /// <param name="schema">The game's schema (obj_chunk_ref's defaults and building types).</param>
     /// <param name="isProps">Whether Armageddon's level_objects table has a Props name.</param>
-    /// <param name="gameplayPropsOf">Armageddon's gameplay_properties entry for one of Guerrilla's names (its own, or the closest), or null.</param>
+    /// <param name="gameplayPropsOf">The gameplay_properties entry with the settings of one of Guerrilla's names (see <see cref="GuerrillaGameplay"/>), or null.</param>
     /// <param name="checksumOf">A chunk file's destruction checksum (its header's 0x24), by its name without extension.</param>
     public static (List<ZoneObject> Objects, byte[] Links) Convert(IReadOnlyList<GuerrillaZoneObject> placed, IReadOnlyDictionary<uint, GuerrillaZoneObject> all,
         ZoneSchema schema, Func<string, bool> isProps, Func<string, string?> gameplayPropsOf, Func<string, uint> checksumOf, ISet<uint> taken)

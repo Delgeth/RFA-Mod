@@ -409,22 +409,15 @@ public static class GuerrillaWorld
         var misc = Packfile.Open(Path.Combine(cache, "misc.vpp_pc"));
         HashSet<string> TableNames(string table) => new(XtblFile.FromBytes(misc.Read(misc.Find(table) ?? throw new InvalidDataException($"no {table} in misc.vpp_pc"))).Entries.Select(XtblFile.EntryName), StringComparer.OrdinalIgnoreCase);
         var levelObjects = TableNames("level_objects.xtbl");
-        var gameplayProperties = TableNames("gameplay_properties.xtbl");
-        // Guerrilla's gameplay_props names that Armageddon's table lacks (121, on about 2,000 objects;
-        // nearly all cast shadows) get Armageddon's Default entry with the same shadows and anchoring as
-        // Guerrilla's entry: Default, Default_shadow, Default_Prevent_Anchor or Default_Shadow_and_Anchor.
+        // Guerrilla's gameplay properties (see GuerrillaGameplay): Armageddon's table with Guerrilla's
+        // settings added, for the guerrilla_world mod to hand the game; each object names its entry there.
         var rfgTables = Packfile.Open(Path.Combine(rfgCache, "misc.vpp_pc"));
-        var guerrillaGameplay = XtblFile.FromBytes(rfgTables.Read(rfgTables.Find("gameplay_properties.xtbl") ?? throw new InvalidDataException("no gameplay_properties.xtbl in Guerrilla's misc.vpp_pc")))
-            .Entries.GroupBy(XtblFile.EntryName, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-        string? GameplayProps(string name)
-        {
-            if (gameplayProperties.Contains(name)) return name;
-            if (!guerrillaGameplay.TryGetValue(name, out var entry)) return null;
-            var flags = (entry.Element("chunk_flags")?.ElementsNamed("Flag").Select(f => f.Value.Trim()) ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            bool shadows = flags.Contains("casts_shadows"), anchor = flags.Contains("prevent_anchor");
-            string closest = shadows && anchor ? "Default_Shadow_and_Anchor" : shadows ? "Default_shadow" : anchor ? "Default_Prevent_Anchor" : "Default";
-            return gameplayProperties.Contains(closest) ? closest : null;
-        }
+        var gameplay = GuerrillaGameplay.Build(misc, rfgTables, propsIn.Values.SelectMany(p => p).Select(o => o.Text("gameplay_props")).OfType<string>().Where(n => n.Length > 0));
+        Directory.CreateDirectory(modFolder);
+        File.WriteAllBytes(Path.Combine(modFolder, "gameplay_properties.xtbl"), gameplay.Text);
+        log($"Gameplay properties: {gameplay.EntryOf.Count} of Guerrilla's entries named by the objects, {gameplay.Added} added to Armageddon's table with Guerrilla's settings " +
+            $"(the rest are Armageddon entries with the same settings); names {gameplay.PoolBytes:N0} bytes of the mod's {GuerrillaGameplay.NamePool:N0} (mods\\guerrilla_world\\gameplay_properties.xtbl)");
+        string? GameplayProps(string name) => gameplay.EntryOf.GetValueOrDefault(name);
 
         var schema = ZoneSchema.FromGame(game) ?? throw new InvalidDataException($"no {ZoneSchema.FileName} in the game's {ZoneSchema.ArchiveName}");
 
