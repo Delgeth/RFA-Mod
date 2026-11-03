@@ -418,14 +418,33 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   their expression variables (set for every effect by `0xB63140`), the effect player (`0x4EB460`) and
   the world's raycast (`0x7993C0`). In our worlds the mod runs Guerrilla's after the game's effects
   update (`0x4F8E10`). Each frame it casts one of 26 rays round the camera, 50 m each, and counts its
-  direction blocked if it hits the world within 20 m. The share of the sky blocked, each direction
-  weighed as Guerrilla weighs them (up the most), dims the effects' variable `wind_los`: the wind's
-  speed in m/s times the share left open, so none indoors. Weather.xtbl's camera effect,
-  `env_dust_camera_a` (the world builder adds it to every zone), plays at the camera, turned as the
-  effects' wind blows and moved upwind by up to a quarter of its radius as the wind nears its top
-  speed. Its expressions show its haze, dust and grit as `wind_los` grows from 0 to 45. Guerrilla's
-  gusts along the ground round the player (each ground material's own) and its fading of the dust
-  right beside buildings aren't there yet.
+  direction blocked if it hits the world within 20 m. Guerrilla's one ray of the world is two in
+  Armageddon: one filter (`[0x1975F00]`) sees the terrain but goes through buildings, another
+  (`[0x1975EF0]`) sees the buildings, so a direction is cast with the second when the first misses.
+  The share of the sky blocked, each direction weighed as Guerrilla weighs them (up the most), dims
+  the effects' variable `wind_los`: the wind's speed in m/s times the share left open, so none
+  indoors. Weather.xtbl's camera effect, `env_dust_camera_a` (the world builder adds it to every
+  zone), plays at the camera, turned as the effects' wind blows and moved upwind by up to a quarter
+  of its radius as the wind nears its top speed. Its expressions fade its haze, dust and grit in as
+  `wind_los` grows from 0 to 45. Guerrilla's gusts along the ground round the player (each ground
+  material's own) and its fading of the dust right beside buildings aren't there yet.
+- **The wind**: Armageddon blows its wind from its environment boxes. Each frame the world update
+  blends the boxes' settings at the camera (`0x51BD30`) and applies them (`0x51D960`), and their
+  weather part (on at +0x150: the wind's speed and direction, a weather value and the weather camera
+  effects) is on even with no box about, with a wind of 0 mph. Guerrilla has no such boxes; its
+  weather wanders the wind itself (`weather_wind_update`): every 20 s a new speed at most 40 mph
+  from the present one, within the zone's `wind_min_speed` and `wind_max_speed`, reached over 10 s.
+  In our worlds the mod leaves the boxes' weather out (it clears +0x150 in the blend before
+  `0x51D960` applies it) and runs Guerrilla's wind before the effects update, setting it with
+  `0x6FB650`; it starts again whenever the game starts its wind (`0x6FB390`, also the `wind`
+  command), and stays still while the game's wind is off.
+- **Particles' opacity scale**: Guerrilla's effects can fade an emitter's particles by a variable
+  (`clerp_opacity_scale`: the camera dust's haze layers by `wind_los`, each from its own threshold),
+  and its renderer multiplies the emitter's colour keys' opacity by that scale each frame. Armageddon
+  keeps the function but not the multiplying (none of its own effects use it). So for the effects the
+  world builder adds, the mod works each emitter's scale out from its expressions on `wind_los` each
+  frame, as Guerrilla does, and gives its colour keys their opacity times it. Expressions on each
+  object's own variables (a vehicle's speed, an engine's smoke) aren't handled yet.
 - **The renderer's warnings**: when one of the renderer's pools runs out (GPU visibility queries,
   decals, render calls, ...) it sets a bit in a word (the renderer at `0x11BA7F0`, +0x60, then +4)
   and shows a "RENDER_LIB WARNINGS" box with a line a bit, two of them with no text. The box only

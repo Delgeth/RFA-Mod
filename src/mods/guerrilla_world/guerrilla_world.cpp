@@ -3722,22 +3722,157 @@ void __fastcall ParticleLast(void* renderer, void* unused) {
     g_particleLast(renderer, unused);
 }
 
+// ---- Guerrilla's wind
+
+// Armageddon blows its wind from its environment boxes: each frame the world update (0x768DF0, after
+// the effects update) blends the boxes' env_settings at the camera (0x51BD30) and applies them
+// (0x51D960, cdecl: the blend, the scene, where), and their weather part (+0x150 on; +0x154 a value of
+// its own, 0x86D140; +0x158 and +0x15C the wind's speed and direction, 0x6FB650; +0x160 and +0x164 the
+// weather camera effects, 0x6E45B0) is on even with no box about, with the defaults' wind of 0 mph from
+// 90°. So in our worlds the wind died a frame after the level started, and with it the dust. Guerrilla
+// has no such boxes: its weather wanders the wind by itself (weather_wind_update, every frame). Every
+// 20 s (WIND_RANDOM_CHANGE_INTERVAL) it takes the player's zone's wind_min_speed and wind_max_speed and
+// a new speed at most 40 mph either way from the present one, within them; over the first 10 s of
+// those 20 (WIND_RAMPUP_TIME) the speed it heads for moves from the old to the new, and the wind's speed
+// and direction follow what they head for at 30 a second (Wind_transition_rate). It starts at the
+// middle of the zone's limits (75 and 85 outside every zone) from 90° (weather_wind_start), as
+// Armageddon's own start does (0x6FB390: also when the `wind` command turns it on; the wind blows while
+// 0x18E15A8 is set). In our worlds the mod leaves the boxes' weather out and blows Guerrilla's wind
+// before the game's effects update, which turns it into the effects' wind.
+constexpr DWORD kApplyEnvSettings = 0x51D960;
+constexpr size_t kApplyEnvSettingsPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0F8h
+constexpr size_t kEnvWeatherOn = 0x150;
+using ApplyEnvSettingsFn = void(__cdecl*)(BYTE* settings, void* scene, const float* where);
+ApplyEnvSettingsFn g_applyEnvSettings;
+constexpr DWORD kWindStart = 0x6FB390;
+constexpr size_t kWindStartPrologue = 6;  // push ebp / mov ebp,esp / sub esp,8
+using WindStartFn = bool(__cdecl*)();
+WindStartFn g_windStart;
+
+// The weather's wind (0x6FB620: its speed in mph and its direction in degrees; set by 0x6FB650, whose
+// third value goes unused), whether it blows, and the zone's limits (0x10FF838 and 0x10FF83C, the
+// latter also Guerrilla's Wind_max_speed). The local player (0x8B92D0; where it is at +0x04) and the
+// zone at a point (0x6CB3C0, the world in ECX; wind_min_speed and wind_max_speed at +0xC8 and +0xCC).
+using WindFn = void(__cdecl*)(float* speed, float* direction);
+auto const Wind = reinterpret_cast<WindFn>(0x6FB620);
+using SetWindFn = void(__cdecl*)(float speed, float direction, float unused);
+auto const SetWind = reinterpret_cast<SetWindFn>(0x6FB650);
+auto& g_windBlows = *reinterpret_cast<bool*>(0x18E15A8);
+auto& g_windLowSpeed = *reinterpret_cast<float*>(0x10FF838);
+auto& g_windTopSpeed = *reinterpret_cast<float*>(0x10FF83C);
+using LocalPlayerFn = BYTE*(__cdecl*)();
+auto const LocalPlayer = reinterpret_cast<LocalPlayerFn>(0x8B92D0);
+using ZoneAtFn = BYTE*(__fastcall*)(void* world, void* unused, const float* where);
+auto const ZoneAt = reinterpret_cast<ZoneAtFn>(0x6CB3C0);
+constexpr size_t kPlayerPlace = 0x04, kZoneWindLow = 0xC8, kZoneWindTop = 0xCC;
+void* const kWorld = reinterpret_cast<void*>(0x1870630);
+
+constexpr float kWindChangeEvery = 20, kWindRampTime = 10, kWindMostChange = 40, kWindFollowRate = 30;
+constexpr float kWindStartDirection = 90;
+struct GuerrillaWind {
+    bool started = false;
+    float speed = 0, direction = 0;      // the wind's
+    float toSpeed = 0, toDirection = 0;  // what they head for
+    float rampFrom = 0, rampTo = 0;      // this change's old and new speed
+    float changeLeft = -1;               // seconds until the next change; below 0: one now
+};
+GuerrillaWind g_wind;
+unsigned g_windRandom = 0x2545F491u;
+
+// A random number from low to high (a xorshift of the mod's own).
+float WindRandom(float low, float high) {
+    g_windRandom ^= g_windRandom << 13;
+    g_windRandom ^= g_windRandom >> 17;
+    g_windRandom ^= g_windRandom << 5;
+    return low + (high - low) * static_cast<float>(g_windRandom & 0xFFFFFF) / static_cast<float>(0xFFFFFF);
+}
+
+// The player's zone's wind limits, if the player is in one.
+bool ZoneWindLimits(float& low, float& top) {
+    const BYTE* player = LocalPlayer();
+    const BYTE* zone = player ? ZoneAt(kWorld, nullptr, reinterpret_cast<const float*>(player + kPlayerPlace)) : nullptr;
+    if (!zone) return false;
+    low = *reinterpret_cast<const float*>(zone + kZoneWindLow);
+    top = *reinterpret_cast<const float*>(zone + kZoneWindTop);
+    return true;
+}
+
+void __cdecl ApplyEnvSettings(BYTE* settings, void* scene, const float* where) {
+    // (The blend is the caller's own copy, made each frame.)
+    if (settings && InOurWorld()) *reinterpret_cast<int*>(settings + kEnvWeatherOn) = 0;
+    g_applyEnvSettings(settings, scene, where);
+}
+
+bool __cdecl WindStart() {
+    g_wind.started = false;  // (started again as Guerrilla's at the next update in our worlds)
+    return g_windStart();
+}
+
+void GuerrillaWindUpdate(float seconds) {
+    if (!g_windBlows) {
+        g_wind = GuerrillaWind{};
+        return;
+    }
+    if (!g_wind.started) {
+        float low = 75, top = 85;
+        ZoneWindLimits(low, top);
+        g_windLowSpeed = low;
+        g_windTopSpeed = top;
+        g_wind = GuerrillaWind{};
+        g_wind.started = true;
+        g_wind.speed = g_wind.toSpeed = g_wind.rampFrom = g_wind.rampTo = (low + top) / 2;
+        g_wind.direction = g_wind.toDirection = kWindStartDirection;
+        rfa::Log("Wind: Guerrilla's in world \"%s\": %.0f mph from %.0f degrees, wandering within %.0f-%.0f mph",
+                 WorldName(), g_wind.speed, g_wind.direction, low, top);
+    }
+    if (g_wind.changeLeft < 0) {
+        // A new speed, at most 40 mph either way, within the zone's limits (outside every zone, the
+        // limits it had).
+        g_wind.changeLeft = kWindChangeEvery;
+        float low = g_windLowSpeed, top = g_windTopSpeed;
+        ZoneWindLimits(low, top);
+        if (low > top) std::swap(low, top);
+        g_windLowSpeed = low;
+        g_windTopSpeed = top;
+        const float up = std::clamp(top - g_wind.speed, 0.0f, kWindMostChange);
+        const float down = std::clamp(low - g_wind.speed, -kWindMostChange, 0.0f);
+        g_wind.rampFrom = g_wind.speed;
+        g_wind.rampTo = g_wind.speed + WindRandom(down, up);
+        RFA_LOG_FIRST(6, "Wind: heading from %.0f to %.0f mph over %.0f s (the zone's %.0f-%.0f)", g_wind.rampFrom, g_wind.rampTo,
+                      kWindRampTime, low, top);
+    } else {
+        g_wind.changeLeft -= seconds;
+        if (g_wind.changeLeft > kWindChangeEvery - kWindRampTime) {
+            const float t = (kWindChangeEvery - g_wind.changeLeft) / kWindRampTime;
+            g_wind.toSpeed = fabsf(g_wind.rampFrom + t * (g_wind.rampTo - g_wind.rampFrom));
+        } else if (g_wind.changeLeft <= 0) {
+            g_wind.changeLeft = -1;
+        }
+    }
+    const float follow = std::min(kWindFollowRate * seconds, 1.0f);
+    g_wind.speed += (g_wind.toSpeed - g_wind.speed) * follow;
+    g_wind.direction += (g_wind.toDirection - g_wind.direction) * follow;
+    SetWind(g_wind.speed, g_wind.direction, -1);
+}
+
 // ---- Guerrilla's dust
 
 // Guerrilla blows dust round the camera with a system of its own (dust_update, every frame), which
 // Armageddon has dropped (its dust_system_init is empty) though it keeps all it rests on: the weather's
 // wind, the effects' wind and expression variables, and the effect player. Each frame:
 //   - how much of the sky round the camera is blocked (gameaudio_update_listener_los): one 50 m ray a
-//     frame, in turn along 26 directions, each blocked if it hits the world within 20 m; the share
-//     blocked, each direction weighed (up 2, up and out 1, level 0.5, down 0.1);
+//     frame (two in Armageddon, see SkyBlocked), in turn along 26 directions, each blocked if it hits
+//     the world within 20 m; the share blocked, each direction weighed (up 2, up and out 1, level 0.5,
+//     down 0.1);
 //   - the effects' variable wind_los: the wind's speed in m/s times the share of the sky left open
-//     (so none indoors), set for every effect (the camera effect's expressions show its haze, its dust
-//     and then its grit as wind_los grows from 0 to 45);
+//     (so none indoors), set for every effect (the camera effect's expressions fade its haze, its dust
+//     and then its grit in as wind_los grows from 0 to 45; see OpacityScales);
 //   - the camera effect (weather.xtbl's first Dust_effects, env_dust_camera_a; the world builder adds
 //     it as rfg_env_dust_camera_a) kept playing at the camera, turned as the effects' wind blows and
 //     moved upwind by up to a quarter of its radius (Dust_max_offset) as the wind nears its top speed.
-// In our worlds the mod does the same after the game's own effects update (0x4F8E10, cdecl, the frame's
-// seconds; it turns the weather's wind into the effects' wind and ages the effects). Not done yet: Guerrilla's gusts of dust on the ground
+// In our worlds the mod does the same after the game's own effects update (0x4F8E10, cdecl, the
+// frame's seconds; it turns the weather's wind into the effects' wind and ages the effects), with
+// Guerrilla's wind (see GuerrillaWindUpdate). Not done yet: Guerrilla's gusts of dust on the ground
 // round the player (each ground material's own) and the fading of the dust right by buildings.
 constexpr DWORD kEffectsUpdate = 0x4F8E10;
 constexpr size_t kEffectsUpdatePrologue = 6;  // push ebp / mov ebp,esp / sub esp,5Ch
@@ -3767,15 +3902,9 @@ auto const ClearObjectFlagB = reinterpret_cast<ObjectFlagFn>(0x4F8DA0);
 using StopEffectFn = void(__fastcall*)(BYTE* object, void* unused, int style);
 auto const StopEffect = reinterpret_cast<StopEffectFn>(0x4F7AA0);
 constexpr size_t kObjectPlace = 0x04, kObjectTurn = 0x10, kObjectFlags = 0x57;
-void* const kWorld = reinterpret_cast<void*>(0x1870630);
 
-// The weather's wind (0x6FB620: its speed in mph and its direction in degrees; started at the middle
-// of the zone's wind_min_speed and wind_max_speed, 50 and 80 in all of Guerrilla's zones), its top
-// speed (0x10FF83C, the zone's wind_max_speed), and the effects' wind filter ([0x26BF284]: its turn at
-// +0x50, which the game's effects update sets from the wind's direction; Guerrilla's at +0x54).
-using WindFn = void(__cdecl*)(float* speed, float* direction);
-auto const Wind = reinterpret_cast<WindFn>(0x6FB620);
-auto& g_windTopSpeed = *reinterpret_cast<float*>(0x10FF83C);
+// The effects' wind filter ([0x26BF284]: its turn at +0x50, which the game's effects update sets from
+// the wind's direction; Guerrilla's at +0x54).
 BYTE* const* const kWindFilter = reinterpret_cast<BYTE* const*>(0x26BF284);
 constexpr size_t kWindFilterTurn = 0x50;
 
@@ -3817,6 +3946,7 @@ auto const RayInit = reinterpret_cast<RayInitFn>(0x424AD0);
 using CastRayFn = bool(__cdecl*)(const Ray* ray, RayHits* hits);
 auto const CastRay = reinterpret_cast<CastRayFn>(0x7993C0);
 auto& g_worldOnlyRays = *reinterpret_cast<DWORD*>(0x1975F00);
+auto& g_buildingRays = *reinterpret_cast<DWORD*>(0x1975EF0);
 
 // Guerrilla's 26 directions round the listener, in its order, and their weights.
 struct SkyDirection { float x, y, z, weight; };
@@ -3839,10 +3969,10 @@ int g_skyNext = 0;
 int g_dustHandle = -1;
 int g_dustEffect = -2;  // −2: not looked up yet; −1: the world has none
 bool g_dustLogged = false;
+float g_windLosNow = 0;  // wind_los as last set
 
-// One more of the 26 rays; the share of the sky blocked round the camera.
-float SkyBlocked() {
-    const SkyDirection& direction = kSkyDirections[g_skyNext];
+// How far a ray from the camera along one of the directions first hits, in metres, or −1.
+float CameraRayHit(const SkyDirection& direction, DWORD filter) {
     Ray ray;
     RayInit(&ray, nullptr);
     for (int i = 0; i < 3; ++i) ray.from[i] = g_cameraPosition[i];
@@ -3850,12 +3980,24 @@ float SkyBlocked() {
     ray.to[1] = g_cameraPosition[1] + direction.y * kSkyRayLength;
     ray.to[2] = g_cameraPosition[2] + direction.z * kSkyRayLength;
     ray.radius = 0.1f;
-    ray.filter = g_worldOnlyRays;
+    ray.filter = filter;
     ray.nearest = 0;
     RayHit hits[4] = {};
     RayHits found = {hits, 0, 0x80000000u | 4};
-    const bool hit = CastRay(&ray, &found) && found.count > 0 && found.hits;
-    g_skyBlocked[g_skyNext] = hit && found.hits[0].along * kSkyRayLength < kSkyBlockedWithin;
+    if (!CastRay(&ray, &found) || found.count <= 0 || !found.hits) return -1;
+    return found.hits[0].along * kSkyRayLength;
+}
+
+// One more of the 26 rays; the share of the sky blocked round the camera. Guerrilla's one ray of the
+// world (its terrain and buildings) is two in Armageddon: [0x1975F00] (layer 0x1C) sees the terrain
+// but goes through the buildings, which [0x1975EF0] (layer 0x31, Guerrilla's
+// COLLIDE_RAY_RFG_DESTROYABLE by its place in the list) sees; the camera's roof at 5.5-7 m was hit by
+// the latter and missed by the former.
+float SkyBlocked() {
+    const SkyDirection& direction = kSkyDirections[g_skyNext];
+    const float ground = CameraRayHit(direction, g_worldOnlyRays);
+    const float building = ground >= 0 && ground < kSkyBlockedWithin ? ground : CameraRayHit(direction, g_buildingRays);
+    g_skyBlocked[g_skyNext] = building >= 0 && building < kSkyBlockedWithin;
     g_skyNext = (g_skyNext + 1) % 26;
     float blocked = 0, all = 0;
     for (int i = 0; i < 26; ++i) {
@@ -3886,6 +4028,7 @@ void DustUpdate() {
     const float open = 1 - SkyBlocked();
     const float windLos = (open > 0 ? open : 0) * speed * kMphToMetresPerSecond;
     if (const BYTE* variable = kExpressionVariables[kWindLos]) SetEffectVariable(*reinterpret_cast<const DWORD*>(variable + 0x0C), windLos);
+    g_windLosNow = windLos;
 
     if (g_dustEffect == -2) {
         g_dustEffect = EffectNumber(kDustEffect);
@@ -3942,14 +4085,77 @@ constexpr DWORD kEffectSignature = 0x57423137, kEffectVersion = 36;
 constexpr size_t kEffectData = 0x0C, kEffectEmitterCount = 0x30, kEffectEmitters = 0x34, kEmitterHeadSize = 0x40,
                  kEmitterMaterial = 0x1C, kMaterialAmbient = 0x44;
 struct Colour3 { float r, g, b; };
-std::vector<std::pair<std::string, std::vector<Colour3>>> g_guerrillaAmbients;  // by file, emitter by emitter
+// An emitter as converted: its ambient colour, and its four colour keys' opacity (block +0x54, +0x64,
+// +0x78, +0x8C: start, mid A, mid B, end, each red, green, blue, opacity; taken as particles are made).
+struct EmitterOwn {
+    Colour3 ambient;
+    float opacity[4];
+};
+constexpr size_t kEmitterBlock = 0x18;
+constexpr size_t kBlockColours[4] = {0x54, 0x64, 0x78, 0x8C};
+std::vector<std::pair<std::string, std::vector<EmitterOwn>>> g_guerrillaAmbients;  // by file, emitter by emitter
 bool g_particleLightLogged = false;
+
+// Guerrilla's emitters' opacity scale (vfx_particle_system_emitter::m_opacity_scale): its effects'
+// clerp_opacity_scale expressions set it from a variable (wind_los for each haze layer of the camera
+// dust, each from its own threshold), and as it draws each frame its renderer takes the emitter's
+// colour keys' opacity times it (vfx_effect::update_render), so the particles fade at once. Armageddon
+// keeps the function (0xB63C30, writing a scale of its own) but not the multiplying (none of its own
+// effects use it): with the haze at full strength indoors, our rooms filled with dust. So the mod works
+// out each emitter's scale from those of its expressions on wind_los (the one variable the mod sets for
+// every effect alike; the others, such as a vehicle's speed, are each object's own) as Guerrilla's
+// clerp does, and gives its colour keys their opacity times it. A loaded effect's expressions: +0x08
+// their count, +0x0C (a pointer by then) 0x14 bytes each: the function's name's hash +0x00, the emitter
+// +0x08, the parameters' count +0x0C and (a pointer) +0x10, 0x0C bytes each: whether a variable +0x00,
+// its name's hash +0x04, else a pointer to the value +0x08 (the variable, the range it's taken from and
+// the one it's taken to).
+constexpr DWORD kClerpOpacityScale = 0x4B730832, kWindLosHash = 0x1F3D5446;
+constexpr size_t kEffectExpressionCount = 0x08, kEffectExpressions = 0x0C, kExpressionSize = 0x14, kParameterSize = 0x0C;
+
+// A pointer the game's loader made of a file's offset, or the offset still.
+template <typename T>
+const T* InEffect(const BYTE* data, const void* field) {
+    const BYTE* at = *reinterpret_cast<const BYTE* const*>(field);
+    if (at && at < data) at = data + reinterpret_cast<uintptr_t>(at);
+    return reinterpret_cast<const T*>(at);
+}
+
+// Guerrilla's clerp: the value from low to high (clamped) taken to from to to.
+float Clerp(float value, float low, float high, float from, float to) {
+    if (high <= low) return value < high ? from : to;
+    return from + (to - from) * std::clamp((value - low) / (high - low), 0.0f, 1.0f);
+}
+
+// Each emitter's opacity scale in a loaded effect, 1 where none is set.
+void OpacityScales(const BYTE* data, int emitters, std::vector<float>& scales) {
+    scales.assign(emitters, 1.0f);
+    const int count = *reinterpret_cast<const int*>(data + kEffectExpressionCount);
+    const BYTE* expressions = count > 0 && count <= 256 ? InEffect<BYTE>(data, data + kEffectExpressions) : nullptr;
+    for (int i = 0; expressions && i < count; ++i) {
+        const BYTE* expression = expressions + i * kExpressionSize;
+        const int emitter = *reinterpret_cast<const int*>(expression + 0x08);
+        const int parameterCount = *reinterpret_cast<const int*>(expression + 0x0C);
+        if (*reinterpret_cast<const DWORD*>(expression) != kClerpOpacityScale || emitter < 0 || emitter >= emitters || parameterCount < 5) continue;
+        const BYTE* parameters = InEffect<BYTE>(data, expression + 0x10);
+        if (!parameters || !parameters[0] || *reinterpret_cast<const DWORD*>(parameters + 4) != kWindLosHash) continue;
+        float value[4];
+        bool constants = true;
+        for (int k = 0; k < 4; ++k) {
+            const BYTE* parameter = parameters + (k + 1) * kParameterSize;
+            const float* number = parameter[0] ? nullptr : InEffect<float>(data, parameter + 8);
+            if (!number) constants = false;
+            else value[k] = *number;
+        }
+        if (constants) scales[emitter] = Clerp(g_windLosNow, value[0], value[1], value[2], value[3]);
+    }
+}
 
 void GuerrillaParticleLight() {
     float light[3];
     TodColour(kParticleAmbient, light);
-    if (light[0] == 0 && light[1] == 0 && light[2] == 0) return;
+    const bool lighting = light[0] != 0 || light[1] != 0 || light[2] != 0;
     int lit = 0;
+    std::vector<float> scales;
     for (const std::string& file : g_ourEffectFiles) {
         const BYTE* effect = static_cast<const BYTE*>(LoadedEffect(file.c_str()));
         BYTE* data = effect ? *reinterpret_cast<BYTE* const*>(effect + kEffectData) : nullptr;
@@ -3964,20 +4170,29 @@ void GuerrillaParticleLight() {
         auto kept = std::find_if(g_guerrillaAmbients.begin(), g_guerrillaAmbients.end(), [&](const auto& entry) { return entry.first == file; });
         if (kept == g_guerrillaAmbients.end()) {
             // First seen: as converted from Guerrilla's file.
-            std::vector<Colour3> own(count, Colour3{0, 0, 0});
-            for (int i = 0; i < count; ++i)
-                if (const BYTE* material = *reinterpret_cast<BYTE* const*>(heads + i * kEmitterHeadSize + kEmitterMaterial))
-                    own[i] = *reinterpret_cast<const Colour3*>(material + kMaterialAmbient);
+            std::vector<EmitterOwn> own(count, EmitterOwn{});
+            for (int i = 0; i < count; ++i) {
+                const BYTE* head = heads + i * kEmitterHeadSize;
+                if (const BYTE* material = *reinterpret_cast<BYTE* const*>(head + kEmitterMaterial))
+                    own[i].ambient = *reinterpret_cast<const Colour3*>(material + kMaterialAmbient);
+                if (const BYTE* block = *reinterpret_cast<BYTE* const*>(head + kEmitterBlock))
+                    for (int k = 0; k < 4; ++k) own[i].opacity[k] = *reinterpret_cast<const float*>(block + kBlockColours[k] + 12);
+            }
             g_guerrillaAmbients.emplace_back(file, std::move(own));
             kept = g_guerrillaAmbients.end() - 1;
         }
+        OpacityScales(data, count, scales);
         for (int i = 0; i < count && i < static_cast<int>(kept->second.size()); ++i) {
-            BYTE* material = *reinterpret_cast<BYTE* const*>(heads + i * kEmitterHeadSize + kEmitterMaterial);
-            if (!material) continue;
-            auto* ambient = reinterpret_cast<Colour3*>(material + kMaterialAmbient);
-            const Colour3& own = kept->second[i];
-            *ambient = Colour3{light[0] * own.r, light[1] * own.g, light[2] * own.b};
-            ++lit;
+            BYTE* head = heads + i * kEmitterHeadSize;
+            const EmitterOwn& own = kept->second[i];
+            BYTE* material = *reinterpret_cast<BYTE* const*>(head + kEmitterMaterial);
+            if (material && lighting) {
+                auto* ambient = reinterpret_cast<Colour3*>(material + kMaterialAmbient);
+                *ambient = Colour3{light[0] * own.ambient.r, light[1] * own.ambient.g, light[2] * own.ambient.b};
+                ++lit;
+            }
+            if (BYTE* block = *reinterpret_cast<BYTE* const*>(head + kEmitterBlock))
+                for (int k = 0; k < 4; ++k) *reinterpret_cast<float*>(block + kBlockColours[k] + 12) = own.opacity[k] * scales[i];
         }
     }
     if (lit && !g_particleLightLogged) {
@@ -3988,6 +4203,8 @@ void GuerrillaParticleLight() {
 }
 
 void __cdecl EffectsUpdate(float seconds) {
+    if (InOurWorld()) GuerrillaWindUpdate(seconds);
+    else g_wind.started = false;
     g_effectsUpdate(seconds);
     DustUpdate();
     if (InOurWorld()) GuerrillaParticleLight();
@@ -4145,7 +4362,12 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     }
     // Guerrilla's dust, after the game's effects update each frame.
     g_effectsUpdate = reinterpret_cast<EffectsUpdateFn>(rfa::HookFunction(kEffectsUpdate, kEffectsUpdatePrologue, reinterpret_cast<void*>(&EffectsUpdate)));
-    if (!g_effectsUpdate) rfa::Log("Could not hook the game's effects update; no dust");
+    if (!g_effectsUpdate) rfa::Log("Could not hook the game's effects update; no dust, and Armageddon's wind");
+    // Guerrilla's wind, in place of the environment boxes' weather.
+    g_applyEnvSettings = reinterpret_cast<ApplyEnvSettingsFn>(
+        rfa::HookFunction(kApplyEnvSettings, kApplyEnvSettingsPrologue, reinterpret_cast<void*>(&ApplyEnvSettings)));
+    g_windStart = reinterpret_cast<WindStartFn>(rfa::HookFunction(kWindStart, kWindStartPrologue, reinterpret_cast<void*>(&WindStart)));
+    if (!g_applyEnvSettings || !g_windStart) rfa::Log("Could not hook the environment boxes' weather or the wind's start; Armageddon's wind");
     g_toneMappingConstants = reinterpret_cast<ToneMappingConstantsFn>(
         rfa::HookFunction(kToneMappingConstants, kToneMappingConstantsPrologue, reinterpret_cast<void*>(&ToneMappingConstants)));
     g_finalComposite[0] = reinterpret_cast<FinalCompositeFn>(
