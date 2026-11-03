@@ -38,6 +38,19 @@ when they aren't set, since without an app id the game asks Steam to restart it,
 the mods. It never looks anything up in Steam or the registry. With `WaitForExit=1` it waits for
 the game to exit, which keeps Steam's playtime and overlay right.
 
+**4 GB of memory** (`LargeAddressAware=1`, the default): the game is a 32-bit program, and Windows
+gives one 4 GB of memory to work in (on 64-bit Windows) only if its exe is marked "large address
+aware", reading that mark as the process starts. The game's exe isn't marked (Guerrilla's are, in
+both the Steam Edition and Re-Mars-tered). So the launcher keeps a copy of the exe in
+`large_address\` in the mod folder with only that mark set, made again whenever the game's own exe
+changes (the copy carries its last-write time), and starts the game from the copy, in the game
+folder, with the game folder at the head of its `PATH` for the DLLs that sit beside the exe
+(`steam_api.dll`, `binkw32.dll`). The game asks where its own exe is: `WinMain` first makes that
+folder the current one, and the DLC search looks in its `build` folder. So the loader, before any
+game code runs, answers the game's `GetModuleFileNameA/W` for its own module with the installed
+exe (named by the launcher in `RFA_GAME_EXE`), and the game works from its own folder as usual. The
+log says how much address space the game got. `LargeAddressAware=0` starts the game's own exe.
+
 Nothing is tied to one PC: the launcher, loader, mods and editor find everything from where their
 own files are and from `GameDir=`. `rfa_mods.ini` and `console.ini` in `bin\` are your own
 settings; the templates others start from are in `config\`.
@@ -398,6 +411,21 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   copies that into a layer of its own and puts the scene back, so the distortion, the bloom and the
   eye see no particles; the tone mapping lays the layer over the picture. `Particles=0` leaves them
   to Armageddon.
+- **The dust** (`Dust=`): Guerrilla blows dust round the camera with a system of its own, run every
+  frame, which Armageddon has dropped (its start-up function is empty) while keeping what it rests on:
+  the weather's wind (`0x6FB620`: speed in mph and direction; started halfway between the zone's
+  `wind_min_speed` and `wind_max_speed`, 50 and 80 in all of Guerrilla's zones), the effects' wind and
+  their expression variables (set for every effect by `0xB63140`), the effect player (`0x4EB460`) and
+  the world's raycast (`0x7993C0`). In our worlds the mod runs Guerrilla's after the game's effects
+  update (`0x4F8E10`). Each frame it casts one of 26 rays round the camera, 50 m each, and counts its
+  direction blocked if it hits the world within 20 m. The share of the sky blocked, each direction
+  weighed as Guerrilla weighs them (up the most), dims the effects' variable `wind_los`: the wind's
+  speed in m/s times the share left open, so none indoors. Weather.xtbl's camera effect,
+  `env_dust_camera_a` (the world builder adds it to every zone), plays at the camera, turned as the
+  effects' wind blows and moved upwind by up to a quarter of its radius as the wind nears its top
+  speed. Its expressions show its haze, dust and grit as `wind_los` grows from 0 to 45. Guerrilla's
+  gusts along the ground round the player (each ground material's own) and its fading of the dust
+  right beside buildings aren't there yet.
 - **The renderer's warnings**: when one of the renderer's pools runs out (GPU visibility queries,
   decals, render calls, ...) it sets a bit in a word (the renderer at `0x11BA7F0`, +0x60, then +4)
   and shows a "RENDER_LIB WARNINGS" box with a line a bit, two of them with no text. The box only

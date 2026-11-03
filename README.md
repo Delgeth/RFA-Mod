@@ -24,6 +24,9 @@ single-player.
   own copy of Guerrilla.
 - **Guerrilla's HUD, a first piece** (`guerrilla_hud`, beta): Guerrilla's health meter and blood
   in that world, in place of Armageddon's health ring, red screen edges and compass bar.
+- **More memory** (the launcher): the game gets 4 GB to work in instead of 2, which the Guerrilla
+  world needs. The launcher starts it from a copy of its program, kept in `large_address\`, with
+  the mark Windows looks for; your game folder isn't touched.
 - **An editor** (`editor\RfaEditor.exe`): browse and extract the game's files, edit tables, replace
   textures, view models and animations, and edit levels.
 
@@ -77,7 +80,8 @@ starts, so to change what one does, change its value.
 ## Settings
 
 - **`rfa_mods.ini`**, next to the launcher, holds every setting, each explained in the file:
-  - `[Launcher]`: where your games are (`GameDir=`, and `GuerrillaDir=` for the Guerrilla tools);
+  - `[Launcher]`: where your games are (`GameDir=`, and `GuerrillaDir=` for the Guerrilla tools),
+    and `LargeAddressAware=` (set it to `0` to start the game's own program, with 2 GB);
   - `[Loader]`: crash reports and overrides;
   - `[Mods]`: set a mod to `0` to turn it off;
   - one section for each mod: `[Borderless]`, `[FOV]`, `[Console]`, `[GuerrillaWorld]` and

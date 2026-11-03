@@ -42,7 +42,10 @@ $parts = @(
     # The GPL asks that its text travels with the programs.
     @{ From = 'LICENSE';                To = 'LICENSE.txt' }
 )
+# Our own mods only (those built from src\mods\<name>\<name>.cpp): bin\mods may also hold mods
+# others made with the framework, which aren't ours to ship.
 foreach ($dll in Get-ChildItem -LiteralPath (Join-Path $bin 'mods') -Filter '*.dll') {
+    if (-not (Test-Path -LiteralPath (Join-Path $root "src\mods\$($dll.BaseName)\$($dll.BaseName).cpp"))) { continue }
     $parts += @{ From = "bin\mods\$($dll.Name)"; To = "mods\$($dll.Name)" }
 }
 # A mod's own scripts (guerrilla_hud's, which GuerrillaHud.exe packs with Guerrilla's documents),
