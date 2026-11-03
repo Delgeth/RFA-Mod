@@ -1,0 +1,58 @@
+// rfa_qol.dll: RFA-Mod's quality-of-life mods in one DLL, so mods\ holds fewer files. Its parts,
+// each in a source file of its own:
+//   borderless      borderless fullscreen and a clean alt-tab             [Borderless]
+//   console         the developer console, console.ini, the editor's link [Console]
+//   fov             a wider field of view                                 [FOV]
+//   video_settings  video settings kept in video_settings.cfg             (no settings)
+// Each works as it did when it was a DLL of its own: its settings section in rfa_mods.ini, its own
+// switch under [Mods] (borderless=, console=, fov=, video_settings=; 0 = off, on when missing) and
+// its own name in the log. They start in the order they loaded as separate DLLs.
+//
+// Those old DLLs (borderless.dll, console.dll, fov.dll, video_settings.dll) may still be in mods\
+// when an update was copied over an older install; the loader skips them while this DLL is there.
+#define RFA_MOD_NAME "rfa_qol"
+#include "rfa_mod.h"
+#include "rfa_qol.h"
+
+namespace {
+
+using InitFn = void (*)();
+
+// Catches a crash in one part's Init, so it ends up in the log and the other parts still start.
+bool CallInit(InitFn init) {
+    __try {
+        init();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Starts a part unless its switch under [Mods] is 0. Returns whether it is running.
+bool StartPart(const wchar_t* name, InitFn init) {
+    if (!rfa::IniInt(L"Mods", name, 1)) {
+        rfa::Log("Skipping %ls (disabled in [Mods])", name);
+        return false;
+    }
+    if (!CallInit(init)) {
+        rfa::Log("%ls crashed while starting", name);
+        return false;
+    }
+    return true;
+}
+
+bool g_fovRunning = false;
+
+}  // namespace
+
+extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    StartPart(L"borderless", borderless::Init);
+    StartPart(L"console", console::Init);
+    g_fovRunning = StartPart(L"fov", fov::Init);
+    StartPart(L"video_settings", video_settings::Init);
+}
+
+// The game's menus changed a setting: only fov listens.
+extern "C" __declspec(dllexport) void __cdecl RFAMod_SettingChanged(const char* section, const char* key) {
+    if (g_fovRunning) fov::SettingChanged(section, key);
+}

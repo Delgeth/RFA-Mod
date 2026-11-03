@@ -1,5 +1,6 @@
 // Shared helpers for RFA mods: paths, config, logging and hooking.
-// Header-only, so every mod DLL gets its own copy. Define RFA_MOD_NAME before including.
+// Header-only, so every mod DLL gets its own copy. Define RFA_MOD_NAME before including: it is the
+// name each line logged from that source file starts with.
 #pragma once
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -58,8 +59,8 @@ inline std::wstring IniString(const wchar_t* section, const wchar_t* key, const 
 
 inline std::wstring LogPath() { return RootDir() + L"\\logs\\rfa_mods.log"; }
 
-// Appends one line to logs\rfa_mods.log. Every module appends to the same file.
-inline void Log(const char* fmt, ...) {
+// Appends one line to logs\rfa_mods.log, starting with `module`. Every module appends to the same file.
+inline void LogAs(const char* module, const char* fmt, va_list ap) {
     static HANDLE file = [] {
         CreateDirectoryW((RootDir() + L"\\logs").c_str(), nullptr);
         return CreateFileW(LogPath().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -69,16 +70,25 @@ inline void Log(const char* fmt, ...) {
     SYSTEMTIME t;
     GetLocalTime(&t);
     int n = snprintf(line, sizeof(line), "[%02d:%02d:%02d.%03d] [%s] ", t.wHour, t.wMinute, t.wSecond,
-                     t.wMilliseconds, RFA_MOD_NAME);
-    va_list ap;
-    va_start(ap, fmt);
+                     t.wMilliseconds, module);
     vsnprintf(line + n, sizeof(line) - n - 2, fmt, ap);
-    va_end(ap);
     strcat_s(line, "\r\n");
     DWORD written;
     if (file != INVALID_HANDLE_VALUE) WriteFile(file, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
     OutputDebugStringA(line);
 }
+
+// Appends one line to logs\rfa_mods.log, starting with RFA_MOD_NAME. It is in an unnamed namespace
+// so that every source file has its own copy with its own name: a DLL made of several parts, each
+// in its own file (rfa_qol.dll), logs each part under that part's name.
+namespace {
+inline void Log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    LogAs(RFA_MOD_NAME, fmt, ap);
+    va_end(ap);
+}
+}  // namespace
 
 // Log only the first `limit` times this line is reached (for hooks that may fire every frame).
 #define RFA_LOG_FIRST(limit, ...)                \

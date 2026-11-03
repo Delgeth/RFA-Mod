@@ -1,4 +1,4 @@
-// Field of view for Red Faction: Armageddon (publicbeta DX11 exe).
+// Field of view for Red Faction: Armageddon (publicbeta DX11 exe). A part of rfa_qol.dll.
 //
 // Every frame the active camera mode hands its camera to the game's "finalise FOV" function, which
 // copies the camera's FOV (45 degrees vertical unless something like aiming changes it) into the
@@ -14,6 +14,7 @@
 #define RFA_MOD_NAME "fov"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "rfa_qol.h"
 #include <math.h>
 #include <stddef.h>
 
@@ -97,11 +98,11 @@ void SetFov(int vertical) {
 }  // namespace
 
 // The Gameplay menu changed a setting: apply a new FOV straight away.
-extern "C" __declspec(dllexport) void __cdecl RFAMod_SettingChanged(const char* section, const char*) {
+void fov::SettingChanged(const char* section, const char*) {
     if (_stricmp(section, "FOV") == 0) SetFov(ReadVerticalFov());
 }
 
-extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+void fov::Init() {
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; the FOV is left alone");
         return;

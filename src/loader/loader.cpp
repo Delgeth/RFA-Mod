@@ -779,6 +779,30 @@ void InstallLuaFunctions() {
     if (!g_registerGameFunctions) rfa::Log("Could not hook the game's Lua registration; rfa_* functions are off");
 }
 
+// Mods that were DLLs of their own and are now parts of another. An update copied over an older
+// install leaves their old DLLs in mods\; while the DLL that holds them now is there too, the old
+// ones are skipped, so their hooks don't go in twice.
+struct MergedMod {
+    const wchar_t* oldDll;
+    const wchar_t* nowIn;
+};
+constexpr MergedMod kMergedMods[] = {
+    {L"borderless.dll", L"rfa_qol.dll"},
+    {L"console.dll", L"rfa_qol.dll"},
+    {L"fov.dll", L"rfa_qol.dll"},
+    {L"video_settings.dll", L"rfa_qol.dll"},
+};
+
+// The DLL among `files` that now holds the mod `file` was, or nullptr.
+const wchar_t* MergedInto(const std::wstring& file, const std::vector<std::wstring>& files) {
+    for (const auto& merged : kMergedMods) {
+        if (_wcsicmp(file.c_str(), merged.oldDll) != 0) continue;
+        for (const auto& other : files)
+            if (_wcsicmp(other.c_str(), merged.nowIn) == 0) return merged.nowIn;
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 // Called by the launcher on a remote thread while the game's main thread is parked.
@@ -810,6 +834,11 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     DWORD loaded = 0;
     for (const auto& file : files) {
         const std::wstring name = file.substr(0, file.size() - 4);
+        if (const wchar_t* nowIn = MergedInto(file, files)) {
+            rfa::Log("Skipping %ls: an old copy of a mod that is now part of %ls (you can delete it)",
+                     file.c_str(), nowIn);
+            continue;
+        }
         if (!rfa::IniInt(L"Mods", name.c_str(), 1)) {
             rfa::Log("Skipping %ls (disabled in [Mods])", file.c_str());
             continue;

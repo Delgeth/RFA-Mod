@@ -68,6 +68,11 @@ single-player.
 A setting you delete from either file comes back with its default the next time the launcher
 starts, so to change what one does, change its value.
 
+Updating from v0.4.9-beta or older: borderless, FOV, video settings and the console are now one
+file, `mods\rfa_qol.dll`. You can delete the old `borderless.dll`, `console.dll`, `fov.dll` and
+`video_settings.dll` from `mods\`. If you leave them, they're skipped, and your settings for them
+work as before.
+
 ## Play
 
 1. With Steam running, start `RFAModLauncher.exe`.
@@ -88,7 +93,8 @@ starts, so to change what one does, change its value.
   - `[Launcher]`: where your games are (`GameDir=`, and `GuerrillaDir=` for the Guerrilla tools),
     and `LargeAddressAware=` (set it to `0` to start the game's own program, with 2 GB);
   - `[Loader]`: crash reports and overrides;
-  - `[Mods]`: set a mod to `0` to turn it off;
+  - `[Mods]`: set a mod to `0` to turn it off. `borderless`, `fov`, `video_settings` and `console`
+    share one file, `mods\rfa_qol.dll`, but each still turns off on its own;
   - one section for each mod: `[Borderless]`, `[FOV]`, `[Console]`, `[GuerrillaWorld]` and
     `[GuerrillaHud]`.
 - **`console.ini`**: console settings applied for you, as `<console name>=<value>`. `[Startup]`

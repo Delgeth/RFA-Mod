@@ -1,4 +1,5 @@
-// Improvements to the developer console of the publicbeta build (opened with the ` key).
+// Improvements to the developer console of the publicbeta build (opened with the ` key). A part of
+// rfa_qol.dll.
 //
 // The mod draws the console itself, in place of the game's drawing function (0xC7B890), with the
 // game's own rectangle and text functions, laid out like Quake 3's console:
@@ -57,6 +58,7 @@
 #define RFA_MOD_NAME "console"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "rfa_qol.h"
 #include <algorithm>
 #include <climits>
 #include <ctime>
@@ -1754,7 +1756,7 @@ void __cdecl FrameUpdate() {
 
 }  // namespace
 
-extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+void console::Init() {
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build (it has no developer console); nothing to do");
         return;

@@ -27,7 +27,8 @@ isn't the publicbeta build, and leave the game alone.
    official launcher (`rf4_launcher.exe`) passes it, and without it the engine expects loose dev
    files instead of the shipped `.vpp_pc` archives, and its first frames fail with
    `DXGI_ERROR_DEVICE_REMOVED`.
-2. The loader loads every DLL in `mods\` (alphabetically) and calls its `RFAMod_Init` export.
+2. The loader loads every DLL in `mods\` (alphabetically, by file name) and calls its
+   `RFAMod_Init` export.
 3. The game is released. Mods hook Windows functions the game imports, and send some of the
    game's own functions to plain C++ replacements in the mod DLLs.
 
@@ -77,8 +78,9 @@ applied again, so change a command's value there rather than deleting it.
 ```
 src\launcher\             RFAModLauncher.exe: updates your settings files, starts the game, injects the loader
 src\loader\               rfa_loader.dll: loads mods, crash reports, overrides, Lua bridge
-src\mods\<name>\          one folder per mod DLL (borderless, console, fov, guerrilla_hud,
-                          guerrilla_world, video_settings), and a mod's own scripts
+src\mods\<name>\          one folder per mod DLL (guerrilla_hud, guerrilla_world, rfa_qol), and a
+                          mod's own scripts; rfa_qol\ has a source file for each of its parts
+                          (borderless, console, fov, video_settings)
 src\common\               rfa_mod.h (logging, ini, hooking helpers), rfa_game.h (build check, Lua API)
 src\overrides\            replacements for files inside the game's archives, same layout as the game
 src\editor\RfaFormats\    C# library that reads and writes the game's file formats (no UI)
@@ -104,6 +106,11 @@ dist\                     made by tools\package.ps1: the mod and editor as other
 Settings are in `rfa_mods.ini`. Everything the launcher, loader and mods do is written to
 `logs\rfa_mods.log` (the launcher keeps the previous run as `rfa_mods.prev.log`). A mod is skipped
 when its name is set to `0` under `[Mods]`.
+
+**Merged mods**: `borderless.dll`, `console.dll`, `fov.dll` and `video_settings.dll` are now the
+parts of `rfa_qol.dll` (see [rfa_qol](#rfa_qol)). Copying an update over an older install leaves
+the old DLLs in `mods\`, so while `rfa_qol.dll` is there the loader skips them (`kMergedMods` in
+`loader.cpp`) and logs that they can be deleted; otherwise every hook would go in twice.
 
 **Crash reports** (`CrashReports=1` under `[Loader]`): if the game crashes, `logs\rfa_mods.log`
 ends with a `CRASH:` block: the exception, the module+offset it happened in, the registers, and
@@ -147,6 +154,25 @@ begins (`0x50F400`).
 
 ## The mods
 
+### rfa_qol
+
+`rfa_qol.dll` holds the quality-of-life mods below, `borderless`, `console`, `fov` and
+`video_settings`, one source file each in `src\mods\rfa_qol\`. They were DLLs of their own until
+v0.4.9-beta and work as they did then:
+- each has its own settings section in `rfa_mods.ini`, and its own switch under `[Mods]`
+  (`borderless=`, `console=`, `fov=`, `video_settings=`), the names the loader used to read for
+  their DLLs, so old settings files need no change. `rfa_qol.cpp`'s `RFAMod_Init` reads them and
+  calls the `Init` of each part that is on (`rfa_qol.h`), in the order the DLLs loaded in. A crash
+  in one part's `Init` is logged, and the others still start. `[Mods] rfa_qol=0` turns all four
+  off;
+- each logs under its own name. `RFA_MOD_NAME` is set per source file: `rfa::Log` sits in an
+  unnamed namespace in `rfa_mod.h`, so every file has its own copy with its own name;
+- `RFAMod_SettingChanged` is passed on to `fov`, the only part that listens.
+
+Its name sorts before `vehicle_spawner.dll`, a community mod that hooks the game's frame update
+(`0x544CB0`), which `console` hooks too. `rfa::HookFunction` copies the function's first bytes as
+they are, so it has to go first: the other hook, placed after it, chains on.
+
 ### borderless
 
 When the game is set to Windowed, its window loses its frame and covers the whole monitor. While
@@ -185,7 +211,7 @@ own, and at 180 or more the picture turns inside out.
 **The FOV slider in Options → Gameplay** is an override of the game's own script,
 [ui_options_gameplay.lua](../src/overrides/build/pc/cache/interface.vpp_pc/ui_options_gameplay.lua)
 (every line we added or changed is marked `[RFA]`). It reads and saves `[FOV] VerticalFov=`
-through the Lua bridge's `rfa_get_setting` / `rfa_set_setting`, and the fov mod picks up the change
+through the Lua bridge's `rfa_get_setting` / `rfa_set_setting`, and `fov` picks up the change
 through `RFAMod_SettingChanged`. The game's slider code assumes every slider starts at 0, so the
 override maps mouse clicks and drags itself.
 
@@ -233,7 +259,7 @@ game's registry code never runs for these settings, and nothing in the mod calls
   publicbeta exe is (1932726), the exe's name in its debug information (`RF4_pc_release_dx11`, from
   its CodeView record) and its link time (the header's time stamp, in UTC, as C's `asctime` writes
   it); then RFA-Mod's version from a release's `version.txt`, or, in a build of your own, the day
-  `console.dll` was compiled. It is also written to `logs\rfa_mods.log`.
+  `console.cpp` was compiled. It is also written to `logs\rfa_mods.log`.
 - *Notify lines*: with `Notify=1` the mod also keeps what the console prints while it is shut (the
   game keeps nothing then), and shows the newest lines printed in the last 3 seconds, 4 at most, at
   the top left with a shadow, as Quake 3 does.
@@ -795,6 +821,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() { /* install hooks *
 - Export `RFAMod_SettingChanged(section, key)` to hear about settings changed from the game's
   menus.
 - Add a `cl` line for it to `build.cmd`. Disable a mod with `<name>=0` under `[Mods]`.
+- One DLL can hold several mods, each in a source file of its own with its own `RFA_MOD_NAME`, as
+  `rfa_qol` does: its `<name>.cpp` exports `RFAMod_Init` and starts the parts.
 
 ## Building, packaging and releasing
 

@@ -7,7 +7,7 @@ namespace RfaEditor;
 
 /// <summary>
 /// The link between the level editor and the running game (started through RFAModLauncher, with
-/// the console mod; see src\mods\console\console.cpp):
+/// the console mod, a part of rfa_qol.dll; see src\mods\rfa_qol\console.cpp):
 ///   the game shows the editor what it shows, every frame, in a small block of shared memory
 ///     named "Local\RFAModEditorLink": the object picked there (the console's debug target: Q in
 ///     slew mode, or target_by_handle), where its camera is, which way it looks and its field of

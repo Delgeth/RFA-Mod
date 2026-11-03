@@ -1,4 +1,4 @@
-// Borderless fullscreen for Red Faction: Armageddon (DX11 exe).
+// Borderless fullscreen for Red Faction: Armageddon (DX11 exe). A part of rfa_qol.dll.
 //
 // Set the game's own display mode to Windowed (Options > Display). This mod then strips that
 // window's frame and stretches it over the whole monitor. While the game is in its own exclusive
@@ -18,6 +18,7 @@
 #define RFA_MOD_NAME "borderless"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "rfa_qol.h"
 #include <Xinput.h>
 
 namespace {
@@ -376,7 +377,7 @@ void MakeDpiAware() {
 
 }  // namespace
 
-extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+void borderless::Init() {
     g_enabled = rfa::IniInt(L"Borderless", L"Enabled", 1) != 0;
     g_monitorIndex = rfa::IniInt(L"Borderless", L"Monitor", 0);
     g_ignoreFocusLoss = rfa::IniInt(L"Borderless", L"IgnoreFocusLoss", 1) != 0;

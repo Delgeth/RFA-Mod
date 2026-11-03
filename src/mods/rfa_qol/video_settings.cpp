@@ -1,4 +1,5 @@
-// Keeps the game's video settings in bin\video_settings.cfg so they survive a restart.
+// Keeps the game's video settings in bin\video_settings.cfg so they survive a restart. A part of
+// rfa_qol.dll.
 //
 // The game loads and saves its video options (resolution, Windowed, quality settings) through two
 // small functions of its own, ReadSetting and WriteSetting, which only the video settings load/save
@@ -11,6 +12,7 @@
 #define RFA_MOD_NAME "video_settings"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "rfa_qol.h"
 
 namespace {
 
@@ -60,7 +62,7 @@ int __cdecl WriteSetting(const char* section, const char* name, DWORD value) {
 
 }  // namespace
 
-extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+void video_settings::Init() {
     bool exists = GetFileAttributesW(CfgPath().c_str()) != INVALID_FILE_ATTRIBUTES;
     rfa::Log("Video settings are kept in %ls%s", CfgPath().c_str(),
              exists ? "" : " (not created yet: set your options once in Options > Display)");
