@@ -43,10 +43,11 @@ public static class GuerrillaEffectTables
     /// <summary>
     /// The tables (Armageddon's with Guerrilla's entries added), each of Guerrilla's level object names
     /// the world uses to its added entry, each to the effect files (Guerrilla's names, without
-    /// extension) its added effects show, every effect file to convert, and what didn't fit.
+    /// extension) its added effects show, every effect file to convert, the files of the effects the
+    /// world plays everywhere, and what didn't fit.
     /// </summary>
     public sealed record Tables(byte[] Visuals, byte[] Effects, byte[] LevelObjects, IReadOnlyDictionary<string, string> PropsOf,
-                                IReadOnlyDictionary<string, IReadOnlyList<string>> FilesOf, IReadOnlyList<string> Files,
+                                IReadOnlyDictionary<string, IReadOnlyList<string>> FilesOf, IReadOnlyList<string> Files, IReadOnlyList<string> WorldFiles,
                                 int VisualsAdded, int EffectsAdded, IReadOnlyList<string> VisualsLeft, IReadOnlyList<string> ExplosionsLeft);
 
     /// <summary>The fields of a level object naming an effect (each holding just the name).</summary>
@@ -59,9 +60,12 @@ public static class GuerrillaEffectTables
     /// <summary>
     /// The tables for the level objects named in <paramref name="used"/> (Guerrilla's names, each with how
     /// many objects name it), from Armageddon's and Guerrilla's misc.vpp_pc; <paramref name="hasFile"/>
-    /// says whether Guerrilla's effect file (its name without extension) can be had.
+    /// says whether Guerrilla's effect file (its name without extension) can be had. The effects in
+    /// <paramref name="worldEffects"/> (effects.xtbl names: those the world plays everywhere, such as
+    /// its dust) are added too, their visuals before any object's.
     /// </summary>
-    public static Tables Build(Packfile armageddonMisc, Packfile guerrillaMisc, IReadOnlyDictionary<string, int> used, Func<string, bool> hasFile)
+    public static Tables Build(Packfile armageddonMisc, Packfile guerrillaMisc, IReadOnlyDictionary<string, int> used, Func<string, bool> hasFile,
+                               IReadOnlyCollection<string> worldEffects)
     {
         string Text(Packfile archive, string table) =>
             Encoding.Latin1.GetString(archive.Read(archive.Find(table) ?? throw new InvalidDataException($"no {table} in {archive.Name}")));
@@ -81,17 +85,20 @@ public static class GuerrillaEffectTables
             p => EffectFields.SelectMany(f => Leaves(objects[p], f)).Where(n => VisualOf(n) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             StringComparer.OrdinalIgnoreCase);
 
-        // The visuals the most placed objects show, as many as the game has room for.
+        // The visuals the most placed objects show, as many as the game has room for (the world's own
+        // effects' first: shown everywhere).
         var placed = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var (p, list) in effectsOf)
             foreach (string v in list.Select(e => VisualOf(e)!).Distinct(StringComparer.OrdinalIgnoreCase))
                 placed[v] = placed.GetValueOrDefault(v) + used[p];
+        var everywhere = worldEffects.Where(e => VisualOf(e) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (string e in everywhere) placed[VisualOf(e)!] = int.MaxValue;
         // (The entries of its <Table>: the two in <TableTemplates> are the editor's.)
         int visualRoom = Math.Max(0, VisualLimit - Count(ourVisuals, "Effect"));
         var ranked = placed.OrderByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.OrdinalIgnoreCase).Select(p => p.Key).ToList();
         var addedVisuals = ranked.Take(visualRoom).Where(v => !takenVisuals.Contains(Added(v))).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var addedEffects = effectsOf.Values.SelectMany(l => l).Where(e => addedVisuals.Contains(VisualOf(e)!) && !takenEffects.Contains(Added(e)))
-                                    .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var addedEffects = everywhere.Concat(effectsOf.Values.SelectMany(l => l)).Where(e => addedVisuals.Contains(VisualOf(e)!) && !takenEffects.Contains(Added(e)))
+                                     .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         int effectRoom = EffectLimit - Count(ourEffects, "Effect");
         if (addedEffects.Count > effectRoom) throw new InvalidDataException($"{addedEffects.Count} effects to add; the game has room for {effectRoom}");
         var effectSet = addedEffects.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -145,7 +152,8 @@ public static class GuerrillaEffectTables
             filesOf[p] = effectsOf[p].Where(effectSet.Contains).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
         var files = addedVisuals.Select(v => FileOf(visuals[v])).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
-        return new Tables(Append(ourVisuals, visualText), Append(ourEffects, effectText), Append(ourObjects, objectText), propsOf, filesOf, files,
+        var worldFiles = everywhere.Where(effectSet.Contains).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return new Tables(Append(ourVisuals, visualText), Append(ourEffects, effectText), Append(ourObjects, objectText), propsOf, filesOf, files, worldFiles,
                           addedVisuals.Count, addedEffects.Count, ranked.Skip(visualRoom).ToList(), [.. explosionsLeft]);
     }
 

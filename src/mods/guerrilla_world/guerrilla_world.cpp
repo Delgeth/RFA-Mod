@@ -520,6 +520,12 @@ bool g_particles = true;
 
 void ReadParticles() { g_particles = rfa::IniInt(L"GuerrillaWorld", L"Particles", 1) != 0; }
 
+// Guerrilla's dust round the camera (Dust=; read again whenever rfa_mods.ini is saved): see DustUpdate.
+// 0: none.
+bool g_dust = true;
+
+void ReadDust() { g_dust = rfa::IniInt(L"GuerrillaWorld", L"Dust", 1) != 0; }
+
 // Guerrilla's sun shafts, drawn with its tone mapping: how strong, times Guerrilla's own (SunShafts=;
 // 0: none; read again whenever rfa_mods.ini is saved).
 float g_sunShafts = 1.0f;
@@ -623,6 +629,9 @@ void CheckSettings() {
     const bool particlesBefore = g_particles;
     ReadParticles();
     if (g_particles != particlesBefore) rfa::Log("Particles: %s", g_particles ? "in a layer of their own, as Guerrilla's" : "drawn into the scene, as Armageddon's");
+    const bool dustBefore = g_dust;
+    ReadDust();
+    if (g_dust != dustBefore) rfa::Log("Dust: %s", g_dust ? "on" : "off");
     const float clockBefore = g_clockSpeed;
     ReadClockSpeed();
     if (g_clockSpeed != clockBefore && g_clockOurs) {
@@ -1157,10 +1166,14 @@ EffectFileLoadFn g_effectFileLoad;
 using LoadedEffectFn = void*(__cdecl*)(const char* name);
 auto const LoadedEffect = reinterpret_cast<LoadedEffectFn>(0x4EB430);
 int g_effectFilesLoaded = 0, g_ourEffectFilesLogged = 0;
+std::vector<std::string> g_ourEffectFiles;  // the rfg_ effect files the game has loaded (see GuerrillaParticleLight)
 
 bool __cdecl EffectFileLoad(const char* name, void* unused1, void* data, void* unused2, void* dataFile) {
     const bool loaded = g_effectFileLoad(name, unused1, data, unused2, dataFile);
     if (++g_effectFilesLoaded % 100 == 1) rfa::Log("Effects: the game has loaded %d effect files (now %s)", g_effectFilesLoaded, name ? name : "?");
+    if (loaded && name && _strnicmp(name, "rfg_", 4) == 0 && strstr(name, ".cefct_pc") &&
+        std::find(g_ourEffectFiles.begin(), g_ourEffectFiles.end(), name) == g_ourEffectFiles.end())
+        g_ourEffectFiles.push_back(name);
     if (name && _strnicmp(name, "rfg_", 4) == 0 && g_ourEffectFilesLogged < 100) {
         ++g_ourEffectFilesLogged;
         rfa::Log("Effects: the game loads %s: %s, %s in its map of loaded effects", name, loaded ? "loaded" : "NOT LOADED",
@@ -3709,6 +3722,277 @@ void __fastcall ParticleLast(void* renderer, void* unused) {
     g_particleLast(renderer, unused);
 }
 
+// ---- Guerrilla's dust
+
+// Guerrilla blows dust round the camera with a system of its own (dust_update, every frame), which
+// Armageddon has dropped (its dust_system_init is empty) though it keeps all it rests on: the weather's
+// wind, the effects' wind and expression variables, and the effect player. Each frame:
+//   - how much of the sky round the camera is blocked (gameaudio_update_listener_los): one 50 m ray a
+//     frame, in turn along 26 directions, each blocked if it hits the world within 20 m; the share
+//     blocked, each direction weighed (up 2, up and out 1, level 0.5, down 0.1);
+//   - the effects' variable wind_los: the wind's speed in m/s times the share of the sky left open
+//     (so none indoors), set for every effect (the camera effect's expressions show its haze, its dust
+//     and then its grit as wind_los grows from 0 to 45);
+//   - the camera effect (weather.xtbl's first Dust_effects, env_dust_camera_a; the world builder adds
+//     it as rfg_env_dust_camera_a) kept playing at the camera, turned as the effects' wind blows and
+//     moved upwind by up to a quarter of its radius (Dust_max_offset) as the wind nears its top speed.
+// In our worlds the mod does the same after the game's own effects update (0x4F8E10, cdecl, the frame's
+// seconds; it turns the weather's wind into the effects' wind and ages the effects). Not done yet: Guerrilla's gusts of dust on the ground
+// round the player (each ground material's own) and the fading of the dust right by buildings.
+constexpr DWORD kEffectsUpdate = 0x4F8E10;
+constexpr size_t kEffectsUpdatePrologue = 6;  // push ebp / mov ebp,esp / sub esp,5Ch
+using EffectsUpdateFn = void(__cdecl*)(float seconds);
+EffectsUpdateFn g_effectsUpdate;
+
+// effects.xtbl's entries by name (0x4EF370: the entry's number, or −1) and by number (0x4EF320: the
+// entry; +0x44 its visual's number); playing one (0x4EB460: the entry's number, where, the turn, and
+// seven more, given as Armageddon's own camera effects give them), which returns the effect object's
+// handle or −1. An object by its handle (the world, 0x1870630, in ECX; 0x4D4360), or null: an effect
+// object's place at +0x04, its turn (rows right, up, forward) at +0x10, flags at +0x57 (8: moved, to be
+// drawn there; as Guerrilla's set_render_flags(4)). As Armageddon's camera effects do once one plays,
+// two of its flags cleared (0x7B20A0(false), 0x4F8DA0(false)); stopping it 0x4F7AA0(1), as Guerrilla's
+// dust does.
+using EffectNumberFn = int(__cdecl*)(const char* name);
+auto const EffectNumber = reinterpret_cast<EffectNumberFn>(0x4EF370);
+using EffectEntryFn = BYTE*(__cdecl*)(int number);
+auto const EffectEntry = reinterpret_cast<EffectEntryFn>(0x4EF320);
+using EffectsPlayFn = int(__cdecl*)(int effect, const float* where, const float* turn, bool a4, int a5, int a6, int a7, bool a8, DWORD a9, DWORD a10);
+auto const EffectsPlay = reinterpret_cast<EffectsPlayFn>(0x4EB460);
+const float* const kIdentityTurn = reinterpret_cast<const float*>(0x290CB30);
+using ObjectFromHandleFn = BYTE*(__fastcall*)(void* world, void* unused, int handle);
+auto const ObjectFromHandle = reinterpret_cast<ObjectFromHandleFn>(0x4D4360);
+using ObjectFlagFn = void(__fastcall*)(BYTE* object, void* unused, bool on);
+auto const ClearObjectFlagA = reinterpret_cast<ObjectFlagFn>(0x7B20A0);
+auto const ClearObjectFlagB = reinterpret_cast<ObjectFlagFn>(0x4F8DA0);
+using StopEffectFn = void(__fastcall*)(BYTE* object, void* unused, int style);
+auto const StopEffect = reinterpret_cast<StopEffectFn>(0x4F7AA0);
+constexpr size_t kObjectPlace = 0x04, kObjectTurn = 0x10, kObjectFlags = 0x57;
+void* const kWorld = reinterpret_cast<void*>(0x1870630);
+
+// The weather's wind (0x6FB620: its speed in mph and its direction in degrees; started at the middle
+// of the zone's wind_min_speed and wind_max_speed, 50 and 80 in all of Guerrilla's zones), its top
+// speed (0x10FF83C, the zone's wind_max_speed), and the effects' wind filter ([0x26BF284]: its turn at
+// +0x50, which the game's effects update sets from the wind's direction; Guerrilla's at +0x54).
+using WindFn = void(__cdecl*)(float* speed, float* direction);
+auto const Wind = reinterpret_cast<WindFn>(0x6FB620);
+auto& g_windTopSpeed = *reinterpret_cast<float*>(0x10FF83C);
+BYTE* const* const kWindFilter = reinterpret_cast<BYTE* const*>(0x26BF284);
+constexpr size_t kWindFilterTurn = 0x50;
+
+// The effects' expression variables (0x124FAEC: each a pointer to its record, its name's hash at +0x0C;
+// number 4 is wind_los, as in Guerrilla) and setting one for every effect (0xB63140: the name's hash and
+// the value; Guerrilla's vfx_expressions_set_global_variable).
+BYTE* const* const kExpressionVariables = reinterpret_cast<BYTE* const*>(0x124FAEC);
+constexpr int kWindLos = 4;
+using SetEffectVariableFn = void(__cdecl*)(DWORD nameHash, float value);
+auto const SetEffectVariable = reinterpret_cast<SetEffectVariableFn>(0xB63140);
+
+// A ray through the world (0x7993C0, cdecl: the ray, its hits; true if it hit), as Guerrilla's
+// havok_raycast with one more word: from, to, its radius, +0x1C −1 (an object it passes through, it
+// seems), +0x20 and +0x24 0, the collision filter +0x28 (0x1975F00: layer 28, Guerrilla's
+// COLLIDE_RAY_WORLD_ONLY), which hits +0x2C (0: the nearest), +0x30 0; 0x424AD0 sets those defaults
+// (the game's own filter, layer 26). Its hits come back in a Havok array of Guerrilla's hit_info (0x38
+// bytes: where it hit, ..., +0x24 how far along the ray), here one of the mod's own the game may fill
+// but not free (its capacity's top bit set).
+struct Ray {
+    float from[3], to[3];
+    float radius;
+    int passThrough;
+    DWORD unknown20, unknown24, filter, nearest, unknown30;
+};
+static_assert(sizeof(Ray) == 0x34, "the game's ray input");
+struct RayHit {
+    float at[3], middle[3], normal[3];
+    float along;
+    DWORD rest[4];
+};
+static_assert(sizeof(RayHit) == 0x38, "the game's ray hit");
+struct RayHits {
+    RayHit* hits;
+    int count;
+    DWORD capacityAndFlags;
+};
+using RayInitFn = void(__fastcall*)(Ray* ray, void* unused);
+auto const RayInit = reinterpret_cast<RayInitFn>(0x424AD0);
+using CastRayFn = bool(__cdecl*)(const Ray* ray, RayHits* hits);
+auto const CastRay = reinterpret_cast<CastRayFn>(0x7993C0);
+auto& g_worldOnlyRays = *reinterpret_cast<DWORD*>(0x1975F00);
+
+// Guerrilla's 26 directions round the listener, in its order, and their weights.
+struct SkyDirection { float x, y, z, weight; };
+constexpr SkyDirection kSkyDirections[26] = {
+    {0, 1, 0, 2},           {0, -1, 0, 0.1f},          {-1, 0.707f, 0, 1},         {1, -0.353f, 0, 0.1f},
+    {0, 0, 1, 0.5f},        {0, 0, -1, 0.5f},          {1, 0.707f, 0, 1},          {-1, -0.353f, 0, 0.1f},
+    {0, 0.707f, -1, 1},     {0, -0.353f, 1, 0.1f},     {-1, 0, 0, 0.5f},           {1, 0, 0, 0.5f},
+    {0, -0.353f, -1, 0.1f}, {0, 0.707f, 1, 1},         {-0.707f, 0.707f, 0.707f, 1}, {0.707f, -0.353f, -0.707f, 0.1f},
+    {0.707f, 0.707f, 0.707f, 1}, {-0.707f, -0.353f, -0.707f, 0.1f}, {-0.707f, 0, 0.707f, 0.5f}, {0.707f, 0, -0.707f, 0.5f},
+    {-0.707f, 0.707f, -0.707f, 1}, {0.707f, -0.353f, 0.707f, 0.1f}, {0.707f, 0.707f, -0.707f, 1}, {-0.707f, -0.353f, 0.707f, 0.1f},
+    {0.707f, 0, 0.707f, 0.5f},   {-0.707f, 0, -0.707f, 0.5f},
+};
+constexpr float kSkyRayLength = 50, kSkyBlockedWithin = 20;
+constexpr float kMphToMetresPerSecond = 0.44704f;
+constexpr float kDustMaxOffset = 0.25f;  // weather.xtbl's Dust_max_offset, 25 (%)
+constexpr const char* kDustEffect = "rfg_env_dust_camera_a";
+
+bool g_skyBlocked[26] = {};
+int g_skyNext = 0;
+int g_dustHandle = -1;
+int g_dustEffect = -2;  // −2: not looked up yet; −1: the world has none
+bool g_dustLogged = false;
+
+// One more of the 26 rays; the share of the sky blocked round the camera.
+float SkyBlocked() {
+    const SkyDirection& direction = kSkyDirections[g_skyNext];
+    Ray ray;
+    RayInit(&ray, nullptr);
+    for (int i = 0; i < 3; ++i) ray.from[i] = g_cameraPosition[i];
+    ray.to[0] = g_cameraPosition[0] + direction.x * kSkyRayLength;
+    ray.to[1] = g_cameraPosition[1] + direction.y * kSkyRayLength;
+    ray.to[2] = g_cameraPosition[2] + direction.z * kSkyRayLength;
+    ray.radius = 0.1f;
+    ray.filter = g_worldOnlyRays;
+    ray.nearest = 0;
+    RayHit hits[4] = {};
+    RayHits found = {hits, 0, 0x80000000u | 4};
+    const bool hit = CastRay(&ray, &found) && found.count > 0 && found.hits;
+    g_skyBlocked[g_skyNext] = hit && found.hits[0].along * kSkyRayLength < kSkyBlockedWithin;
+    g_skyNext = (g_skyNext + 1) % 26;
+    float blocked = 0, all = 0;
+    for (int i = 0; i < 26; ++i) {
+        all += kSkyDirections[i].weight;
+        if (g_skyBlocked[i]) blocked += kSkyDirections[i].weight;
+    }
+    return blocked / all;
+}
+
+void StopDust() {
+    if (g_dustHandle == -1) return;
+    if (BYTE* effect = ObjectFromHandle(kWorld, nullptr, g_dustHandle)) StopEffect(effect, nullptr, 1);
+    g_dustHandle = -1;
+}
+
+void DustUpdate() {
+    if (!InOurWorld()) {
+        g_dustHandle = -1;  // (gone with the world's objects)
+        g_dustLogged = false;
+        return;
+    }
+    if (!g_dust) {
+        StopDust();
+        return;
+    }
+    float speed = 0, direction = 0;
+    Wind(&speed, &direction);
+    const float open = 1 - SkyBlocked();
+    const float windLos = (open > 0 ? open : 0) * speed * kMphToMetresPerSecond;
+    if (const BYTE* variable = kExpressionVariables[kWindLos]) SetEffectVariable(*reinterpret_cast<const DWORD*>(variable + 0x0C), windLos);
+
+    if (g_dustEffect == -2) {
+        g_dustEffect = EffectNumber(kDustEffect);
+        if (g_dustEffect < 0) rfa::Log("Dust: the game has no effect %s (build the world again with this version's GuerrillaWorld.exe); no dust", kDustEffect);
+    }
+    if (g_dustEffect < 0) return;
+    BYTE* effect = g_dustHandle != -1 ? ObjectFromHandle(kWorld, nullptr, g_dustHandle) : nullptr;
+    if (!effect) {
+        g_dustHandle = EffectsPlay(g_dustEffect, g_cameraPosition, kIdentityTurn, true, -1, -1, -1, false, 0, 0);
+        effect = g_dustHandle != -1 ? ObjectFromHandle(kWorld, nullptr, g_dustHandle) : nullptr;
+        if (!effect) {
+            RFA_LOG_FIRST(3, "Dust: %s didn't play (handle %d)", kDustEffect, g_dustHandle);
+            g_dustHandle = -1;
+            return;
+        }
+        effect[kObjectFlags] |= 8;
+        ClearObjectFlagA(effect, nullptr, false);
+        ClearObjectFlagB(effect, nullptr, false);
+        if (!g_dustLogged) {
+            g_dustLogged = true;
+            rfa::Log("Dust: %s plays round the camera; the wind %.0f mph (top %.0f) from %.0f degrees, %.0f %% of the sky open, wind_los %.1f",
+                     kDustEffect, speed, g_windTopSpeed, direction, open * 100, windLos);
+        }
+    }
+    // At the camera, turned as the effects' wind blows, upwind by up to a quarter of its radius.
+    float* place = reinterpret_cast<float*>(effect + kObjectPlace);
+    float* turn = reinterpret_cast<float*>(effect + kObjectTurn);
+    const BYTE* filter = *kWindFilter;
+    if (filter) memcpy(turn, filter + kWindFilterTurn, 9 * sizeof(float));
+    const BYTE* entry = EffectEntry(g_dustEffect);
+    const BYTE* visual = entry ? Visual(*reinterpret_cast<const int*>(entry + 0x44)) : nullptr;
+    const float radius = visual ? *reinterpret_cast<const float*>(visual + 0x84) : 0;
+    const float upwind = g_windTopSpeed > 0 ? radius * kDustMaxOffset * speed / g_windTopSpeed : 0;
+    for (int i = 0; i < 3; ++i) place[i] = g_cameraPosition[i] - upwind * turn[6 + i];
+    effect[kObjectFlags] |= 8;
+}
+
+// ---- Guerrilla's particle light
+
+// Guerrilla lights a particle with the time of day's particle_ambient_color times its emitter's own
+// ambient colour (rl_particle_renderer::render: Ambient_color = the scene's particle ambient × the
+// material's). Armageddon takes the emitter's ambient colour as the light itself: its artists cut
+// Guerrilla's 0.4-0.6 greys to about 0.01 when they ported the effects both games have, and with the
+// world's ambient light at 0 Guerrilla's dust haze (ambient 1) still drew white. So in our worlds the
+// mod gives each emitter of Guerrilla's loaded effects (the rfg_ files the world builder adds) that
+// product each frame: the time of day's particle_ambient_color (its sets' curves at +0x2A40, blended
+// as the game blends them; the block the game hands the renderer, 0x1973924, reads 0 in our worlds)
+// times Guerrilla's own ambient, kept from when the effect was first seen; nothing while no set is
+// loaded. A loaded effect (the game's map by file name, LoadedEffect) keeps its data at +0x0C: the file
+// as loaded, its offsets made pointers (signature +0, version 36 +4, the emitters' count +0x30 and
+// heads +0x34, 0x40 bytes each, the material at +0x1C; the material's ambient colour at +0x44).
+constexpr size_t kParticleAmbient = 0x2A40;  // particle_ambient_color
+constexpr DWORD kEffectSignature = 0x57423137, kEffectVersion = 36;
+constexpr size_t kEffectData = 0x0C, kEffectEmitterCount = 0x30, kEffectEmitters = 0x34, kEmitterHeadSize = 0x40,
+                 kEmitterMaterial = 0x1C, kMaterialAmbient = 0x44;
+struct Colour3 { float r, g, b; };
+std::vector<std::pair<std::string, std::vector<Colour3>>> g_guerrillaAmbients;  // by file, emitter by emitter
+bool g_particleLightLogged = false;
+
+void GuerrillaParticleLight() {
+    float light[3];
+    TodColour(kParticleAmbient, light);
+    if (light[0] == 0 && light[1] == 0 && light[2] == 0) return;
+    int lit = 0;
+    for (const std::string& file : g_ourEffectFiles) {
+        const BYTE* effect = static_cast<const BYTE*>(LoadedEffect(file.c_str()));
+        BYTE* data = effect ? *reinterpret_cast<BYTE* const*>(effect + kEffectData) : nullptr;
+        if (!data) continue;
+        if (*reinterpret_cast<const DWORD*>(data) != kEffectSignature || *reinterpret_cast<const DWORD*>(data + 4) != kEffectVersion) {
+            RFA_LOG_FIRST(3, "Particles: %s isn't laid out as expected in memory; its light left as it is", file.c_str());
+            continue;
+        }
+        const int count = *reinterpret_cast<const int*>(data + kEffectEmitterCount);
+        BYTE* heads = *reinterpret_cast<BYTE* const*>(data + kEffectEmitters);
+        if (count <= 0 || count > 256 || !heads) continue;
+        auto kept = std::find_if(g_guerrillaAmbients.begin(), g_guerrillaAmbients.end(), [&](const auto& entry) { return entry.first == file; });
+        if (kept == g_guerrillaAmbients.end()) {
+            // First seen: as converted from Guerrilla's file.
+            std::vector<Colour3> own(count, Colour3{0, 0, 0});
+            for (int i = 0; i < count; ++i)
+                if (const BYTE* material = *reinterpret_cast<BYTE* const*>(heads + i * kEmitterHeadSize + kEmitterMaterial))
+                    own[i] = *reinterpret_cast<const Colour3*>(material + kMaterialAmbient);
+            g_guerrillaAmbients.emplace_back(file, std::move(own));
+            kept = g_guerrillaAmbients.end() - 1;
+        }
+        for (int i = 0; i < count && i < static_cast<int>(kept->second.size()); ++i) {
+            BYTE* material = *reinterpret_cast<BYTE* const*>(heads + i * kEmitterHeadSize + kEmitterMaterial);
+            if (!material) continue;
+            auto* ambient = reinterpret_cast<Colour3*>(material + kMaterialAmbient);
+            const Colour3& own = kept->second[i];
+            *ambient = Colour3{light[0] * own.r, light[1] * own.g, light[2] * own.b};
+            ++lit;
+        }
+    }
+    if (lit && !g_particleLightLogged) {
+        g_particleLightLogged = true;
+        rfa::Log("Particles: Guerrilla's particle light: %d emitters lit by the time of day's particle ambient (%.3f %.3f %.3f) times their own",
+                 lit, light[0], light[1], light[2]);
+    }
+}
+
+void __cdecl EffectsUpdate(float seconds) {
+    g_effectsUpdate(seconds);
+    DustUpdate();
+    if (InOurWorld()) GuerrillaParticleLight();
+}
+
 HRESULT WINAPI CreateDevice(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver, HMODULE software, UINT flags,
                             const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk, ID3D11Device** device,
                             D3D_FEATURE_LEVEL* level, ID3D11DeviceContext** context) {
@@ -3761,6 +4045,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadSunShafts();
     ReadSunShadows();
     ReadParticles();
+    ReadDust();
     // Our worlds' zone size (and a physics world wide enough for them), and the streaming radii held
     // to what the game can track.
     if (g_zoneWidth > 0) {
@@ -3858,6 +4143,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         rfa::Log("Could not hook the particle phase; the game draws its particles its own way");
         g_particleLayerFailed = true;  // (a hook that did go in only passes through)
     }
+    // Guerrilla's dust, after the game's effects update each frame.
+    g_effectsUpdate = reinterpret_cast<EffectsUpdateFn>(rfa::HookFunction(kEffectsUpdate, kEffectsUpdatePrologue, reinterpret_cast<void*>(&EffectsUpdate)));
+    if (!g_effectsUpdate) rfa::Log("Could not hook the game's effects update; no dust");
     g_toneMappingConstants = reinterpret_cast<ToneMappingConstantsFn>(
         rfa::HookFunction(kToneMappingConstants, kToneMappingConstantsPrologue, reinterpret_cast<void*>(&ToneMappingConstants)));
     g_finalComposite[0] = reinterpret_cast<FinalCompositeFn>(

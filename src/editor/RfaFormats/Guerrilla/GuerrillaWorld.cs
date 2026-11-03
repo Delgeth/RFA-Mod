@@ -1,4 +1,6 @@
 using System.Numerics;
+using System.Text;
+using System.Xml.Linq;
 using RfaFormats.Meshes;
 using RfaFormats.Tables;
 using RfaFormats.Textures;
@@ -452,11 +454,17 @@ public static class GuerrillaWorld
         // Guerrilla's effects (see GuerrillaEffectTables): the level objects the objects name, their effects
         // and the visual effects those show, added to Armageddon's tables for the mod to hand the game; each
         // object names its level object there. The visual effects' files, converted (see GuerrillaEffects),
-        // and their textures go with the zones whose objects show them.
+        // and their textures go with the zones whose objects show them. The effects Guerrilla's dust
+        // plays round the camera (weather.xtbl's Dust_effects; the guerrilla_world mod plays them) go
+        // with every zone.
         var rfgFiles = new GuerrillaTextures(rfgCache, GuerrillaTextures.EffectArchives);
         var placedProps = propsIn.Values.SelectMany(p => p).Select(o => o.Text("Props")).OfType<string>().Where(n => n.Length > 0)
             .GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
-        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"));
+        var dustEffects = rfgTables.Find("weather.xtbl") is { } weather
+            ? XElement.Parse(Encoding.Latin1.GetString(rfgTables.Read(weather))).Descendants("Dust_effects").Elements("Element").Select(e => e.Value.Trim())
+                      .Where(n => n.Length > 0).ToList()
+            : [];
+        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"), dustEffects);
         File.WriteAllBytes(Path.Combine(modFolder, "vfx.xtbl"), effectTables.Visuals);
         File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
         File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
@@ -623,7 +631,7 @@ public static class GuerrillaWorld
             }
             AddChunks(files, zoneChunks);
             foreach (string file in propsIn[(col, row)].Select(o => o.Text("Props")).OfType<string>()
-                         .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Distinct(StringComparer.OrdinalIgnoreCase))
+                         .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Concat(effectTables.WorldFiles).Distinct(StringComparer.OrdinalIgnoreCase))
                 files.AddRange(effectFiles[file]);
             var parts = chunksIn.Select(names =>
             {
