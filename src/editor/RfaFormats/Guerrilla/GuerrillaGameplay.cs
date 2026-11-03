@@ -14,8 +14,9 @@ namespace RfaFormats.Guerrilla;
 /// props from anchoring), and it lacks 121 that Guerrilla's world uses.
 ///
 /// So the table is Armageddon's own with Guerrilla's settings added: each Guerrilla entry the world's
-/// objects name is converted to Armageddon's fields (its flags but force_dynamic and
-/// child_gives_control, which Armageddon has no bit for; its other fields as they are; salvage_chance
+/// objects name is converted to Armageddon's fields (its flags, force_dynamic by Armageddon's name for
+/// the same bit, prevent_anchor, but child_gives_control, which Armageddon has no bit for; its other
+/// fields as they are; salvage_chance
 /// 1, as every one of Armageddon's entries has it; its value left out, Armageddon's entries having
 /// none, and its LOD_Properties given to the object itself, see <see cref="GuerrillaLod"/>); where an
 /// Armageddon entry has the same settings the object names that
@@ -120,9 +121,24 @@ public static class GuerrillaGameplay
     /// <summary>An entry: its name, flags (in its order), its other fields as written, its editor category, salvage_chance and LOD class (Guerrilla's LOD_Properties; each null where it has none).</summary>
     sealed record Entry(string Name, IReadOnlyList<string> Flags, IReadOnlyDictionary<string, string> Values, string Category, string? SalvageChance, string? Lod)
     {
-        /// <summary>Guerrilla's entry in Armageddon's fields: the flags Armageddon knows, salvage_chance 1.</summary>
+        /// <summary>Guerrilla's entry in Armageddon's fields: the flags Armageddon knows (force_dynamic by its name there), salvage_chance 1.</summary>
         public Entry ForArmageddon() =>
-            this with { Flags = [.. Flags.Where(f => ArmageddonFlags.Contains(f, StringComparer.OrdinalIgnoreCase))], SalvageChance = "1.0" };
+            this with
+            {
+                Flags = [.. Flags.Select(ArmageddonName).Where(f => ArmageddonFlags.Contains(f, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase)],
+                SalvageChance = "1.0",
+            };
+
+        /// <summary>
+        /// A Guerrilla flag by Armageddon's name for it. The two games' chunk flags are the same bits up to
+        /// no_cover; Armageddon only renamed bit 3, Guerrilla's force_dynamic (CHUNK_FLAG_FORCE_DYNAMIC 3),
+        /// to prevent_anchor (8): a loose prop not anchored to the world where it stands, so it is knocked
+        /// about as a whole. Of the 935 entries both tables name, Armageddon's own conversion has
+        /// prevent_anchor on 68 of Guerrilla's 97 with force_dynamic and on none of the rest. Without it,
+        /// Guerrilla's barrels, crates and chairs were held to the ground: they swung on the spot when hit
+        /// and broke off instead of flying.
+        /// </summary>
+        static string ArmageddonName(string flag) => string.Equals(flag, "force_dynamic", StringComparison.OrdinalIgnoreCase) ? "prevent_anchor" : flag;
 
         /// <summary>Its settings, to compare by: the flags as a set, the words in lower case, the numbers as numbers.</summary>
         public string Key => string.Join("|",
