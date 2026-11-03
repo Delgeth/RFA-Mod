@@ -526,6 +526,12 @@ void ReadSunShafts() {
 
 bool SunShaftsOn() { return GuerrillaToneMapping() && g_sunShafts > 0 && !g_shaftsFailed; }
 
+// The sun's shadows (SunShadows=; read again whenever rfa_mods.ini is saved): the sun's light drawn
+// through the shadow map of the sun's lamp (see "The sun's shadows"). 0: it lights through everything.
+bool g_sunShadows = true;
+
+void ReadSunShadows() { g_sunShadows = rfa::IniInt(L"GuerrillaWorld", L"SunShadows", 1) != 0; }
+
 // How bright the sky, clouds and backdrop are drawn: their time-of-day colours times Brightness=; with
 // Guerrilla's tone mapping the picture holds Guerrilla's own values, so there the default 5 is
 // Guerrilla's own level (× 1).
@@ -605,6 +611,9 @@ void CheckSettings() {
     const float shaftsBefore = g_sunShafts;
     ReadSunShafts();
     if (g_sunShafts != shaftsBefore) rfa::Log("Sun shafts: times %.3g (was %.3g)", g_sunShafts, shaftsBefore);
+    const bool shadowsBefore = g_sunShadows;
+    ReadSunShadows();
+    if (g_sunShadows != shadowsBefore) rfa::Log("Sun's shadows: %s", g_sunShadows ? "on" : "off");
     const float clockBefore = g_clockSpeed;
     ReadClockSpeed();
     if (g_clockSpeed != clockBefore && g_clockOurs) {
@@ -656,6 +665,143 @@ void DirectLight(float (&toward)[3], float (&out)[3]) {
     float up = (toward[1] - 0.01f) / 0.1f;  // 0 at the horizon, 1 at 6° up
     up = up < 0 ? 0 : up > 1 ? 1 : up;
     for (float& c : out) c *= g_sun * up * up * (3 - 2 * up);
+}
+
+// ---- The sun's shadows
+// Armageddon can't draw a light that shines from one direction over the whole map (all its light
+// shaders are lamps'), but its light pass renders a lamp's shadow map, and it keeps a lamp for a sun's
+// shadow: the follow player light (lights.xtbl's FollowPlayerLight: a spot lamp with an orthographic
+// shadow map only, to 30 m), which an environment box's follow_player_light switches on for a level.
+// Each frame the game makes it if need be and puts it over the camera (Follow_player_light_offset_*,
+// 20 m up), unturned, shining straight down; the lightning lamps of its outdoor maps (use_sun_shadows)
+// borrow its shadow map. In our worlds the mod switches it on (choosing its template as such a box
+// would), puts it along the sun instead, aimed back at the camera, and has it drawn (not its map only)
+// with next to no light of its own; when the light pass has drawn it (its shadow map just rendered and
+// still bound), the mod draws the sun's light through that map (DrawLamp, below), and the sky's light
+// after the pass as before.
+// The follow light's template (an index into lights.xtbl's lights, -1 for none: the environment's
+// choice, cleared at each level's start) and its object's handle.
+auto& g_followLightTemplate = *reinterpret_cast<int*>(0x1102DE4);
+auto& g_followLightHandle = *reinterpret_cast<DWORD*>(0x1101C10);
+// lights.xtbl's light of a name: its index, or -1.
+using FindLightTemplateFn = int(__cdecl*)(const char* name);
+auto const FindLightTemplate = reinterpret_cast<FindLightTemplateFn>(0x7E82F0);
+// Each frame, the player's update of its lights: the follow light put where it goes (0x7E8A80) while
+// a template is chosen, else dimmed to nothing.
+constexpr DWORD kFollowLights = 0x8B8C30;
+constexpr size_t kFollowLightsPrologue = 6;  // push ebp / mov ebp,esp / sub esp,44h
+using FollowLightsFn = void(__cdecl*)(void* player);
+FollowLightsFn g_followLights;
+// Makes the follow light if need be (from the template) and puts it at a place, turned so (a world
+// matrix's rows right, up and forward; a spot lamp shines down its up).
+struct Place { float at[3]; };
+struct Turn { float rows[9]; };
+constexpr DWORD kPlaceFollowLight = 0x7E8A80;
+constexpr size_t kPlaceFollowLightPrologue = 6;  // push ebp / mov ebp,esp / sub esp,10h
+using PlaceFollowLightFn = void(__cdecl*)(Place place, Turn turn, int lightTemplate);
+PlaceFollowLightFn g_placeFollowLight;
+// Finds a lamp object by its handle (the world, 0x1870630, in ECX), or null. A lamp object: its colour
+// at +0x10C (its light's colour is that times its intensity, +0x128), its light (rl_light) at +0x194.
+// The light's flags at +0x15C: 1 it casts shadows, 2 it only renders its shadow map (0x7E5170 sets it).
+using FindLampFn = BYTE*(__fastcall*)(void* world, void* unused, DWORD handle);
+auto const FindLamp = reinterpret_cast<FindLampFn>(0x61C100);
+constexpr size_t kLampColour = 0x10C, kLampLight = 0x194;
+using SetShadowMapOnlyFn = void(__fastcall*)(void* light, void* unused, bool only);
+auto const SetShadowMapOnly = reinterpret_cast<SetShadowMapOnlyFn>(0x7E5170);
+// The light's colour (+0xF0: red, green, blue and a fourth, 1).
+using SetLightColourFn = void(__fastcall*)(void* light, void* unused, const float* colour);
+auto const SetLightColour = reinterpret_cast<SetLightColourFn>(0x52F050);
+// lights.xtbl's lights as the game keeps them (0x2A0 bytes each, from 0x1CD07FC): a lamp made from one
+// copies its reach (atten_start +0x50, atten_range +0x54, metres), its cone (hotspot_size +0x5C,
+// hotspot_falloff_size +0x60, degrees) and its shadow distance (+0x70), and its light's shadow setup
+// is fixed then: an orthographic shadow map (4096 × 4096) as wide as the reach × tan(hotspot +
+// falloff) and as deep as the reach from the lamp, its shadows fading out over the last fifth of
+// the shadow distance from the camera (the template's 80 m, 50° and 30 m made a map 95 m across and
+// 80 m deep). So while the game makes the follow light in our worlds the mod gives its template the
+// sun's, and puts the template's own back straight after.
+auto& g_lightTemplates = *reinterpret_cast<BYTE**>(0x1CD07FC);
+constexpr size_t kLightTemplateSize = 0x2A0;
+constexpr size_t kTemplateNumbers[5] = {0x50, 0x54, 0x5C, 0x60, 0x70};  // reach start, reach range, hotspot, falloff, shadow distance
+// The sun's: the lamp 150 m along the sun with a reach of 400 m (so its map holds what stands
+// between the sun and the camera and beyond), a cone of 36° (a map about 300 m across, 7 cm a
+// texel), the shadows to 150 m round the camera.
+constexpr float kSunLampDistance = 150.0f;
+constexpr float kSunTemplateNumbers[5] = {400.0f, 10.0f, 30.0f, 6.0f, 150.0f};
+
+BYTE* g_sunLight = nullptr;          // the follow light's light while it gives the sun its shadows
+bool g_followLightOurs = false;      // its template chosen by the mod
+BYTE* g_followLightSeen = nullptr;   // the follow light last logged
+
+void __cdecl FollowLights(void* player) {
+    if (!InOurWorld()) {
+        g_followLightOurs = false;  // (the game clears the template at each level's start)
+        g_sunLight = nullptr;
+    } else if (g_sunShadows) {
+        if (g_followLightTemplate < 0) {
+            g_followLightTemplate = FindLightTemplate("FollowPlayerLight");
+            g_followLightOurs = g_followLightTemplate >= 0;
+            if (g_followLightOurs)
+                RFA_LOG_FIRST(1, "Sun's shadows: the follow player light switched on in world \"%s\" (lights.xtbl's light %d)", WorldName(), g_followLightTemplate);
+            else
+                RFA_LOG_FIRST(1, "Sun's shadows: lights.xtbl has no FollowPlayerLight; the sun lights without shadows");
+        }
+    } else if (g_followLightOurs) {
+        g_followLightTemplate = -1;  // dimmed to nothing by the game, as where no level asks for it
+        g_followLightOurs = false;
+        g_sunLight = nullptr;
+    }
+    // The template the sun's while the game may make the follow light from it, then its own again.
+    float* numbers[5] = {};
+    float own[5] = {};
+    const bool sunTemplate = g_followLightOurs && g_followLightTemplate >= 0 && g_lightTemplates;
+    if (sunTemplate)
+        for (int i = 0; i < 5; ++i) {
+            numbers[i] = reinterpret_cast<float*>(g_lightTemplates + g_followLightTemplate * kLightTemplateSize + kTemplateNumbers[i]);
+            own[i] = *numbers[i];
+            *numbers[i] = kSunTemplateNumbers[i];
+        }
+    g_followLights(player);
+    if (sunTemplate)
+        for (int i = 0; i < 5; ++i) *numbers[i] = own[i];
+}
+
+void __cdecl PlaceFollowLight(Place place, Turn turn, int lightTemplate) {
+    const bool sun = g_followLightOurs && g_sunShadows && InOurWorld();
+    if (sun) {
+        // Its up along the light (the sun's, by night the moon's), so it shines back at the camera.
+        float up[3], unused[3];
+        DirectLight(up, unused);
+        const float east[3] = {1, 0, 0}, north[3] = {0, 0, 1};
+        const float* along = fabsf(up[2]) > 0.9f ? east : north;
+        float right[3] = {up[1] * along[2] - up[2] * along[1], up[2] * along[0] - up[0] * along[2], up[0] * along[1] - up[1] * along[0]};
+        const float length = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+        for (float& v : right) v /= length;
+        const float forward[3] = {right[1] * up[2] - right[2] * up[1], right[2] * up[0] - right[0] * up[2], right[0] * up[1] - right[1] * up[0]};
+        for (int i = 0; i < 3; ++i) {
+            turn.rows[i] = right[i];
+            turn.rows[3 + i] = up[i];
+            turn.rows[6 + i] = forward[i];
+            place.at[i] = g_cameraPosition[i] + up[i] * kSunLampDistance;
+        }
+    }
+    g_placeFollowLight(place, turn, lightTemplate);
+    g_sunLight = nullptr;
+    if (!sun) return;
+    BYTE* lamp = FindLamp(reinterpret_cast<void*>(0x1870630), nullptr, g_followLightHandle);
+    BYTE* light = lamp ? *reinterpret_cast<BYTE**>(lamp + kLampLight) : nullptr;
+    if (!light) return;
+    float* colour = reinterpret_cast<float*>(lamp + kLampColour);
+    if (lamp != g_followLightSeen) {
+        g_followLightSeen = lamp;
+        rfa::Log("Sun's shadows: the follow player light %08X (object %p, light %p) along the sun", g_followLightHandle, lamp, light);
+    }
+    // Next to no light of its own: the object's colour, and its light's (that times the intensity,
+    // set when the light is made).
+    for (int i = 0; i < 3; ++i) colour[i] = 0.001f;
+    const float faint[4] = {0.001f, 0.001f, 0.001f, 1.0f};
+    SetLightColour(light, nullptr, faint);
+    SetShadowMapOnly(light, nullptr, false);
+    g_sunLight = light;
 }
 
 // Replace the time of day's ambient setters: the game's own, then in our worlds the world's
@@ -1150,6 +1296,12 @@ float4 BackdropPixel(CloudPoint p) : SV_Target
 // the surface's sharpness (the G-buffer normals' alpha: the square root of its Specular_Power / 50,
 // the top half a flag; the power × 5.12), times how much it faces the sun and the sun's brightness.
 // A surface's own shader takes that times its specular map and Specular_Color; the ground's ignores it.
+// Drawn in two parts when the sun has its shadows (see "The sun's shadows"): the sun's light, through
+// the sun's lamp's shadow map, as the light pass draws that lamp, then the sky's light after the pass.
+// The shadow is the game's own test (ir_light_spot): the pixel's place in the camera's space (from its
+// depth, as the lamps work it out: the ray through the lamp's inverse projection, times the distance
+// ahead from IR_Similarity_Data) taken into the shadow map by Shadow_map_projTM, compared with the map
+// at nine texels round it; it fades out away from the camera and leaves at least Shadow_map_fade_params.x.
 constexpr char kLightShader[] = R"(
 cbuffer Light : register(b0)
 {
@@ -1159,10 +1311,54 @@ cbuffer Light : register(b0)
     float4 SunToward;   // toward the sun, in the camera's space
     float4 UpToward;    // straight up, in the camera's space
     float4 TargetSize;  // the light buffer's width and height, and the tangents of half the field of view across and up
+    float4 Parts;       // x 1: the sky's light; y 1: the sun's; z 1: the sun's through the lamp's shadow map
+};
+
+cbuffer Game : register(b1)
+{
+    float4 GameUnused[12];
+    float4 SimilarityData;  // zw: the camera's distance ahead = 1 / (z × depth + w)
+};
+
+cbuffer Lamp : register(b2)  // the sun's lamp's, as the light pass drew it (ir_light_spot's vc0)
+{
+    float4 LampPosition;
+    float4 InverseProjection[4];
+    float4 SpotDirection;
+    float4 ShadowRows[4];  // Shadow_map_projTM: x, y, depth and w in the map from the camera's space
+    float4 ShadowFade;     // x the least light left, y and z the fade by distance ahead, w a texel's size
 };
 
 Texture2D Normals : register(t0);
+Texture2D ShadowMap : register(t1);
+Texture2D Depth : register(t2);
 SamplerState Nearest : register(s0);
+
+// facing: how squarely the surface faces the sun (its normal · toward the sun).
+float SunShadow(float2 at, float facing)
+{
+    float depth = Depth.SampleLevel(Nearest, at, 0).x;
+    float ahead = 1 / (SimilarityData.z * depth + SimilarityData.w);
+    float2 corner = at * float2(2, -2) + float2(-1, 1);
+    float4 near = InverseProjection[0] * corner.x + InverseProjection[1] * corner.y + InverseProjection[3];
+    float3 ray = near.xyz / near.w;
+    float4 surface = float4(ray / ray.z * ahead, 1);
+    float4 inMap = float4(dot(ShadowRows[0], surface), dot(ShadowRows[1], surface), dot(ShadowRows[2], surface), dot(ShadowRows[3], surface));
+    float3 mapped = inMap.xyz / inMap.w;
+    if (any(mapped.xy < 0) || any(mapped.xy > 1)) return 1;
+    // The surface's own depth held back by about a texel along its slope to the sun, so that it
+    // doesn't shadow itself: the map's texels are far wider than the game's own lamps' (a texel's
+    // width in metres from the map's width, its depth per metre from the map's depth).
+    float texel = ShadowFade.w / length(ShadowRows[0].xyz);
+    float slope = min(sqrt(saturate(1 - facing * facing)) / max(facing, 0.05), 6);
+    float bias = (1 + 2 * slope) * texel * length(ShadowRows[2].xyz);
+    float lit = 0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+            lit += ShadowMap.SampleLevel(Nearest, mapped.xy + float2(x, y) * ShadowFade.w, 0).x < mapped.z - bias ? 0 : 1;
+    float fade = saturate((ShadowFade.y - surface.z) * ShadowFade.z);
+    return max(1 - (1 - lit / 9) * fade, ShadowFade.x);
+}
 
 float4 LightVertex(uint id : SV_VertexID) : SV_Position
 {
@@ -1189,7 +1385,8 @@ float4 LightPixel(float4 position : SV_Position) : SV_Target
     float3 reflection = 2 * facing * n - SunToward.xyz;
     float toEye = max(saturate(dot(reflection, -eye)), 0.000001);
     float shine = saturate(facing) * pow(toEye, sharpness) * dot(SunColour.rgb, float3(0.3, 0.59, 0.11));
-    return float4(sky + sun, shine);
+    float shadow = Parts.z > 0 && facing > 0 ? SunShadow(at, facing) : 1;
+    return float4(sky * Parts.x + sun * Parts.y * shadow, shine * Parts.y * shadow);
 }
 )";
 
@@ -1420,6 +1617,7 @@ struct LightConstants {
     float sunToward[4];
     float upToward[4];
     float targetSize[4];
+    float parts[4];
 };
 
 struct FogConstants {
@@ -2361,7 +2559,7 @@ struct SavedState {
     ID3D11PixelShader* pixelShader = nullptr;
     ID3D11GeometryShader* geometryShader = nullptr;
     ID3D11Buffer* vertexConstants = nullptr;
-    ID3D11Buffer* pixelConstants[2] = {};
+    ID3D11Buffer* pixelConstants[3] = {};
     ID3D11ShaderResourceView* pixelResources[3] = {};
     ID3D11SamplerState* pixelSampler = nullptr;
     ID3D11BlendState* blend = nullptr;
@@ -2378,7 +2576,7 @@ struct SavedState {
         g_context->PSGetShader(&pixelShader, nullptr, nullptr);
         g_context->GSGetShader(&geometryShader, nullptr, nullptr);
         g_context->VSGetConstantBuffers(0, 1, &vertexConstants);
-        g_context->PSGetConstantBuffers(0, 2, pixelConstants);
+        g_context->PSGetConstantBuffers(0, 3, pixelConstants);
         g_context->PSGetShaderResources(0, 3, pixelResources);
         g_context->PSGetSamplers(0, 1, &pixelSampler);
         g_context->OMGetBlendState(&blend, blendFactor, &sampleMask);
@@ -2394,7 +2592,7 @@ struct SavedState {
         g_context->PSSetShader(pixelShader, nullptr, 0);
         g_context->GSSetShader(geometryShader, nullptr, 0);
         g_context->VSSetConstantBuffers(0, 1, &vertexConstants);
-        g_context->PSSetConstantBuffers(0, 2, pixelConstants);
+        g_context->PSSetConstantBuffers(0, 3, pixelConstants);
         g_context->PSSetShaderResources(0, 3, pixelResources);
         g_context->PSSetSamplers(0, 1, &pixelSampler);
         g_context->OMSetBlendState(blend, blendFactor, sampleMask);
@@ -2402,6 +2600,7 @@ struct SavedState {
         for (IUnknown* held : {static_cast<IUnknown*>(layout), static_cast<IUnknown*>(vertexBuffer), static_cast<IUnknown*>(indexBuffer),
                                static_cast<IUnknown*>(vertexShader), static_cast<IUnknown*>(pixelShader), static_cast<IUnknown*>(geometryShader),
                                static_cast<IUnknown*>(vertexConstants), static_cast<IUnknown*>(pixelConstants[0]), static_cast<IUnknown*>(pixelConstants[1]),
+                               static_cast<IUnknown*>(pixelConstants[2]),
                                static_cast<IUnknown*>(pixelResources[0]), static_cast<IUnknown*>(pixelResources[1]), static_cast<IUnknown*>(pixelResources[2]),
                                static_cast<IUnknown*>(pixelSampler), static_cast<IUnknown*>(blend), static_cast<IUnknown*>(raster)})
             if (held) held->Release();
@@ -2502,9 +2701,19 @@ void DrawSky() {
     if (depthView) depthView->Release();
 }
 
-// Adds the sky's light and the sun into the light buffer the light pass has just filled (its lamps'
-// light), over the whole buffer, and puts the device context back as it was.
-void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals) {
+// What the sun's light is drawn through when it has its shadows: the sun's lamp's shadow map, the
+// G-buffer's depth, the game's constants (vc4) and the lamp's (vc0), as the light pass drew the lamp.
+struct SunShadowInputs {
+    ID3D11ShaderResourceView* map;
+    ID3D11ShaderResourceView* depth;
+    ID3D11Buffer* game;
+    ID3D11Buffer* lamp;
+};
+
+// Adds the sky's light and the sun into the light buffer the light pass fills (its lamps' light), over
+// the whole buffer, and puts the device context back as it was: either or both, the sun through its
+// lamp's shadow map when given.
+void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals, bool withSky, bool withSun, const SunShadowInputs* shadow) {
     ID3D11Resource* resource = nullptr;
     buffer->GetResource(&resource);
     ID3D11Texture2D* texture = nullptr;
@@ -2543,6 +2752,9 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     constants.targetSize[1] = static_cast<float>(desc.Height);
     constants.targetSize[3] = tanf(g_cameraFov * 3.14159265f / 360.0f);
     constants.targetSize[2] = constants.targetSize[3] * desc.Width / desc.Height;
+    constants.parts[0] = withSky ? 1.0f : 0.0f;
+    constants.parts[1] = withSun ? 1.0f : 0.0f;
+    constants.parts[2] = shadow ? 1.0f : 0.0f;
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(g_context->Map(g_lightConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     memcpy(mapped.pData, &constants, sizeof(constants));
@@ -2570,6 +2782,12 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     g_context->GSSetShader(nullptr, nullptr, 0);
     g_context->PSSetConstantBuffers(0, 1, &g_lightConstants);
     g_context->PSSetShaderResources(0, 1, &normals);
+    if (shadow) {
+        ID3D11Buffer* buffers[2] = {shadow->game, shadow->lamp};
+        g_context->PSSetConstantBuffers(1, 2, buffers);
+        ID3D11ShaderResourceView* resources[2] = {shadow->map, shadow->depth};
+        g_context->PSSetShaderResources(1, 2, resources);
+    }
     g_context->PSSetSamplers(0, 1, &g_lightSampler);
     const float noFactor[4] = {1, 1, 1, 1};
     g_context->OMSetBlendState(g_lightBlend, noFactor, 0xFFFFFFFF);
@@ -2952,9 +3170,131 @@ bool __cdecl LightCheck() {
     return g_lightCheck();
 }
 
+// The light pass draws each lamp with 0xEF67D0 (the scene renderer in ECX; the lamp's entry in the
+// frame's list of lamps, its light at +0x10, and the entry whose shadow map was just rendered into the
+// shared map): the shadowed spot lamp's shader
+// (ir_light_spot) then has the shadow map at t0 and the lamp's constants (Shadow_map_projTM, ...) at
+// b0, the G-buffer's normals and depth at t13 and t14, the game's constants at b4. After the sun's lamp
+// is drawn, while they are all still bound, the mod draws the sun's light through that shadow map.
+constexpr DWORD kDrawLamp = 0xEF67D0;
+constexpr size_t kDrawLampPrologue = 6;  // push ebx / mov ebx,esp / sub esp,8
+using DrawLampFn = void(__fastcall*)(void* renderer, void* unused, BYTE* entry, BYTE* shadowEntry);
+DrawLampFn g_drawLamp;
+constexpr size_t kEntryLight = 0x10;
+bool g_sunDrawn = false;  // the sun's light drawn through its shadow map in this light pass
+
+// Once: what the sun's lamp was drawn with (its shadow map, and its constants read back from the card).
+void TellSunLamp(ID3D11ShaderResourceView* map, ID3D11Buffer* lamp) {
+    ID3D11Resource* resource = nullptr;
+    map->GetResource(&resource);
+    ID3D11Texture2D* texture = nullptr;
+    D3D11_TEXTURE2D_DESC desc = {};
+    if (resource && SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture)))) {
+        texture->GetDesc(&desc);
+        texture->Release();
+    }
+    if (resource) resource->Release();
+    D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
+    map->GetDesc(&view);
+    rfa::Log("Sun's shadows: the sun's lamp's shadow map %u x %u, format %d (viewed as %d)", desc.Width, desc.Height,
+             static_cast<int>(desc.Format), static_cast<int>(view.Format));
+    D3D11_BUFFER_DESC bufferDesc = {};
+    lamp->GetDesc(&bufferDesc);
+    D3D11_BUFFER_DESC stagingDesc = {};
+    stagingDesc.ByteWidth = bufferDesc.ByteWidth;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Buffer* staging = nullptr;
+    if (FAILED(g_device->CreateBuffer(&stagingDesc, nullptr, &staging))) return;
+    g_context->CopyResource(staging, lamp);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (SUCCEEDED(g_context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        const float* f = static_cast<const float*>(mapped.pData);
+        const char* names[11] = {"light position", "inverse projection", "", "", "", "spot direction",
+                                 "shadow map projection", "", "", "", "shadow fade"};
+        for (UINT row = 0; row < 11 && row * 16 + 16 <= bufferDesc.ByteWidth; ++row)
+            rfa::Log("Sun's shadows: the lamp's constants [%u] %g %g %g %g %s", row, f[row * 4], f[row * 4 + 1], f[row * 4 + 2], f[row * 4 + 3], names[row]);
+        g_context->Unmap(staging, 0);
+    }
+    staging->Release();
+}
+
+// Draws the sun's light through the sun's lamp's shadow map with what the game has bound for the lamp
+// (its map at t0 and constants at b0, the G-buffer's normals and depth at t13 and t14, the game's
+// constants at b4, the light buffer as the target); false, and the sun left to the pass's end, when
+// any of them isn't bound (logged once, with which).
+bool DrawSunThroughLamp() {
+    ID3D11RenderTargetView* buffer = nullptr;
+    g_context->OMGetRenderTargets(1, &buffer, nullptr);
+    ID3D11ShaderResourceView* map = nullptr;
+    ID3D11ShaderResourceView* normals = nullptr;
+    ID3D11ShaderResourceView* depth = nullptr;
+    g_context->PSGetShaderResources(0, 1, &map);
+    g_context->PSGetShaderResources(13, 1, &normals);
+    g_context->PSGetShaderResources(14, 1, &depth);
+    ID3D11Buffer* lamp = nullptr;
+    ID3D11Buffer* game = nullptr;
+    g_context->PSGetConstantBuffers(0, 1, &lamp);
+    g_context->PSGetConstantBuffers(4, 1, &game);
+    const bool all = buffer && map && normals && depth && lamp && game;
+    if (all) {
+        static bool told = false;
+        if (!told) {
+            told = true;
+            TellSunLamp(map, lamp);
+            rfa::Log("Sun's shadows: the sun's light drawn through the follow player light's shadow map in world \"%s\"", WorldName());
+        }
+        const SunShadowInputs shadow = {map, depth, game, lamp};
+        DrawLight(buffer, normals, false, true, &shadow);
+        g_sunDrawn = true;
+    } else {
+        RFA_LOG_FIRST(1, "Sun's shadows: the follow player light drawn without everything bound (the light buffer %d, its shadow map %d, "
+                         "normals %d, depth %d, its constants %d, the game's %d; this is logged once); the sun lights without shadows",
+                      buffer != nullptr, map != nullptr, normals != nullptr, depth != nullptr, lamp != nullptr, game != nullptr);
+    }
+    for (IUnknown* held : {static_cast<IUnknown*>(buffer), static_cast<IUnknown*>(map), static_cast<IUnknown*>(normals),
+                           static_cast<IUnknown*>(depth), static_cast<IUnknown*>(lamp), static_cast<IUnknown*>(game)})
+        if (held) held->Release();
+    return all;
+}
+
+// Sets a texture slot of the renderer's draw state (0xC2F490: the state in ECX, the slot, the texture,
+// or null to clear it). The lamp's drawing clears its shadow map's slot (0xEF73ED) right after it has
+// drawn the lamp (0xEF72CE), the shared map being drawn into next for the next lamp. While the sun's
+// lamp is drawn, the mod draws the sun's light just before the first clearing, everything still bound.
+constexpr DWORD kSetTexture = 0xC2F490;
+constexpr size_t kSetTexturePrologue = 7;  // push ebp / mov ebp,esp / push ecx / mov [ebp-4],ecx
+using SetTextureFn = void(__fastcall*)(void* state, void* unused, int slot, void* texture);
+SetTextureFn g_setTexture;
+bool g_drawingSunLamp = false;  // the sun's lamp being drawn, its light not yet drawn through its map
+
+void __fastcall SetTexture(void* state, void* unused, int slot, void* texture) {
+    if (g_drawingSunLamp && !texture) {
+        g_drawingSunLamp = false;
+        DrawSunThroughLamp();
+    }
+    g_setTexture(state, unused, slot, texture);
+}
+
+void __fastcall DrawLamp(void* renderer, void* unused, BYTE* entry, BYTE* shadowEntry) {
+    const bool sunLamp = g_inLightPass && entry && g_sunLight && *reinterpret_cast<BYTE**>(entry + kEntryLight) == g_sunLight &&
+                         !g_sunDrawn && g_lightVertex && g_setTexture;
+    g_drawingSunLamp = sunLamp;
+    g_drawLamp(renderer, unused, entry, shadowEntry);
+    if (g_drawingSunLamp) {  // the lamp drawn without clearing a texture: try once more after it
+        g_drawingSunLamp = false;
+        DrawSunThroughLamp();
+    }
+}
+
 void __fastcall LightPass(void* renderer, void* unused) {
     const bool ours = g_context && InOurWorld();
     g_inLightPass = ours && g_lightOn && !g_lightFailed;
+    if (g_inLightPass && !g_lightVertex && !MakeLightObjects()) {
+        g_lightFailed = true;
+        g_inLightPass = false;
+    }
+    g_sunDrawn = false;
     DropFogInputs();
     if (g_shaftDepth) g_shaftDepth->Release();
     g_shaftDepth = nullptr;
@@ -2963,11 +3303,9 @@ void __fastcall LightPass(void* renderer, void* unused) {
     g_noteFog = false;
     if (g_inLightPass) {
         g_inLightPass = false;
-        if (!g_lightVertex && !MakeLightObjects()) {
-            g_lightFailed = true;
-        } else if (g_lightBuffer && g_lightNormals) {
+        if (g_lightBuffer && g_lightNormals) {
             RFA_LOG_FIRST(1, "Light: lighting world \"%s\" with the sky's light and the sun", WorldName());
-            DrawLight(g_lightBuffer, g_lightNormals);
+            DrawLight(g_lightBuffer, g_lightNormals, true, !g_sunDrawn, nullptr);
         } else {
             RFA_LOG_FIRST(1, "Light: a light pass showed no light buffer or normals (this is logged once); no light added to it");
         }
@@ -3150,6 +3488,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadFog();
     ReadToneMapping();
     ReadSunShafts();
+    ReadSunShadows();
     // Our worlds' zone size (and a physics world wide enough for them), and the streaming radii held
     // to what the game can track.
     if (g_zoneWidth > 0) {
@@ -3221,6 +3560,18 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
             rfa::Log("Could not hook the game's light pass; no light added and no fog");
             g_lightOn = false;  // (a hook that did go in only passes through)
             g_fogFailed = true;
+        }
+        // For the sun's shadows: the follow player light switched on and put along the sun, and each
+        // lamp's drawing (hooks that didn't go in leave the sun unshadowed, and only pass through).
+        if (g_lightOn) {
+            g_followLights = reinterpret_cast<FollowLightsFn>(
+                rfa::HookFunction(kFollowLights, kFollowLightsPrologue, reinterpret_cast<void*>(&FollowLights)));
+            g_placeFollowLight = reinterpret_cast<PlaceFollowLightFn>(
+                rfa::HookFunction(kPlaceFollowLight, kPlaceFollowLightPrologue, reinterpret_cast<void*>(&PlaceFollowLight)));
+            g_drawLamp = reinterpret_cast<DrawLampFn>(rfa::HookFunction(kDrawLamp, kDrawLampPrologue, reinterpret_cast<void*>(&DrawLamp)));
+            g_setTexture = reinterpret_cast<SetTextureFn>(rfa::HookFunction(kSetTexture, kSetTexturePrologue, reinterpret_cast<void*>(&SetTexture)));
+            if (!g_followLights || !g_placeFollowLight || !g_drawLamp || !g_setTexture)
+                rfa::Log("Could not hook the follow player light or the light pass's lamps; the sun lights without shadows");
         }
     }
     g_toneMappingConstants = reinterpret_cast<ToneMappingConstantsFn>(

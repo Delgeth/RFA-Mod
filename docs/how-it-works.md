@@ -316,6 +316,19 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   sun's light along its path over the day, by night the moon's, from the time of day's light
   colour (times `Sun=`). Both are read again when `rfa_mods.ini` is saved. The clouds are lit from
   the same direction.
+- **The sun's shadows** (`SunShadows=`): Armageddon's renderer has no light that shines from one
+  direction over the whole map, only lamps, but it renders a lamp's shadow map, and it keeps a lamp
+  for a sun's shadow: the "follow player light" (`lights.xtbl`'s `FollowPlayerLight`, a spot lamp
+  with an orthographic shadow map only), which an environment box's `follow_player_light` switches
+  on. The game makes it and puts it over the camera every frame, shining straight down (`0x8B8C30`,
+  `0x7E8A80`); its outdoor maps' lightning lamps borrow its shadow map. In our worlds the mod
+  switches it on (choosing its template as such a box does), puts it along the sun's direction
+  instead, aimed back at the camera, and has it drawn rather than its map only, with next to no
+  light of its own. The light pass renders its shadow map into the shared map and draws it
+  (`0xEF67D0`); right after, while the map and the lamp's constants (its shadow projection) are
+  still bound, the mod draws the sun's light through them, with the game's own shadow test: the
+  pixel's place taken into the map and compared with it at nine texels round it. The sky's light is
+  added after the pass as before.
 - **The sun's shine**: a surface's shine comes from the light buffer's alpha, which only lamps
   write, so Guerrilla's specular maps showed nothing. The mod's sun writes it as Armageddon's
   lamps do: the sun reflected off the surface toward the eye, to the power of the surface's
