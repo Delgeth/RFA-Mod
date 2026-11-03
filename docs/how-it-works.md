@@ -189,6 +189,20 @@ through the Lua bridge's `rfa_get_setting` / `rfa_set_setting`, and the fov mod 
 through `RFAMod_SettingChanged`. The game's slider code assumes every slider starts at 0, so the
 override maps mouse clicks and drags itself.
 
+**Options → Experimentals** is the same Gameplay screen with a list of RFA-Mod's own settings in
+place of the game's. The main and pause menus (overrides of `ui_main_menu_pc.lua` and
+`ui_pause_menu_pc.lua`, single player only) add EXPERIMENTALS to their Options lists; picking it
+sets the global `Rfa_options_page` to `"experimentals"` and opens `ui_options_gameplay`, whose
+script then shows its `Rfa_experimentals` list and leaves the game's own gameplay settings (and
+Reset Profile) out. The menus' Lua refuses to write or read a global its scripts didn't declare as
+they loaded (`system_lib.lua`), so the page is kept with `rawset(_UGGlobals, ...)` and read with
+the game's own `_GetAnyGlobalSilent`. Each entry names its `rfa_mods.ini` section, key and default: a toggle
+saves 1 or 0 (it reads as enabled for anything but 0), a slider its whole number. The Lua bridge
+writes only whole numbers, so tuning values such as `Exposure=1.2` stay in the ini, and a setting
+isn't rewritten unless you change it in the menu. The first entries are the Guerrilla world's live
+switches (sun's shadows, sun shafts, fog, blowing dust, Guerrilla's particles and tone mapping,
+colour correction, sky brightness, clock speed), which change as you pick them.
+
 ### video_settings
 
 The game saves its video options (resolution, Windowed, quality settings) through its own

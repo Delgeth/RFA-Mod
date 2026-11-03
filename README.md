@@ -24,6 +24,11 @@ single-player.
   own copy of Guerrilla.
 - **Guerrilla's HUD, a first piece** (`guerrilla_hud`, beta): Guerrilla's health meter and blood
   in that world, in place of Armageddon's health ring, red screen edges and compass bar.
+- **Options → Experimentals**: a new page in the game's Options menu, from the main menu or the
+  pause menu, for RFA-Mod's own settings. For now it holds the Guerrilla world's switches: the
+  sun's shadows and shafts, fog, blowing dust, Guerrilla's particles and tone mapping, colour
+  correction, sky brightness and clock speed. Each changes as you pick it and is saved in
+  `rfa_mods.ini`.
 - **More memory** (the launcher): the game gets 4 GB to work in instead of 2, which the Guerrilla
   world needs. The launcher starts it from a copy of its program, kept in `large_address\`, with
   the mark Windows looks for; your game folder isn't touched.
@@ -91,8 +96,8 @@ starts, so to change what one does, change its value.
   default it hides the beta's performance text.
 - **`defaults\`** holds this version's own copies of both files: the launcher takes new settings
   from them. Leave them as they are; each update replaces them.
-- **`overrides\`** holds files the game uses instead of its own (the FOV slider, the Guerrilla
-  world and HUD, and whatever you save from the editor). See
+- **`overrides\`** holds files the game uses instead of its own (the FOV slider, the Experimentals
+  page, the Guerrilla world and HUD, and whatever you save from the editor). See
   [src/overrides/README.md](src/overrides/README.md).
 
 ## Try the Guerrilla world (beta)
@@ -229,8 +234,10 @@ notices are in [docs/third-party-notices.txt](docs/third-party-notices.txt). The
 <https://github.com/FragsAreUs/RFA-Mod>; a release's `version.txt` says which commit it was built from.
 
 The mods and the editor work on your own copy of Red Faction: Armageddon, which stays untouched,
-and the game's files aren't included, with one exception:
-[ui_options_gameplay.lua](src/overrides/build/pc/cache/interface.vpp_pc/ui_options_gameplay.lua),
-the game's own Options → Gameplay script with our Field of View slider added. Only the lines
-marked `[RFA]` in it are ours and under the GPL; the rest is the game's. Red Faction: Armageddon
+and the game's files aren't included, with three exceptions, all menu scripts in
+[src/overrides/build/pc/cache/interface.vpp_pc](src/overrides/build/pc/cache/interface.vpp_pc):
+`ui_options_gameplay.lua`, the game's own Options → Gameplay script with our Field of View slider
+and Experimentals page added, and `ui_main_menu_pc.lua` and `ui_pause_menu_pc.lua`, the main and
+pause menus with Experimentals added to their Options lists. Only the lines marked `[RFA]` in them
+are ours and under the GPL; the rest is the game's. Red Faction: Armageddon
 belongs to its owners; this is an unofficial fan project, not made or endorsed by them.

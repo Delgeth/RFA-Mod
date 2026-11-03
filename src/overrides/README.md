@@ -67,4 +67,6 @@ original, extract it with the editor.
 
 | Override | What it changes |
 |---|---|
-| `build\pc\cache\interface.vpp_pc\ui_options_gameplay.lua` | Options → Gameplay: adds the Field of View slider (45–170), saved to `rfa_mods.ini` through `rfa_get_setting` / `rfa_set_setting` |
+| `build\pc\cache\interface.vpp_pc\ui_options_gameplay.lua` | Options → Gameplay: adds the Field of View slider (45–170), saved to `rfa_mods.ini` through `rfa_get_setting` / `rfa_set_setting`. Also Options → Experimentals: the same screen with RFA-Mod's own settings in place of the game's, when a menu opens it with `Rfa_options_page` set to `"experimentals"` |
+| `build\pc\cache\interface.vpp_pc\ui_main_menu_pc.lua` | The main menu: adds EXPERIMENTALS to its Options list |
+| `build\pc\cache\interface.vpp_pc\ui_pause_menu_pc.lua` | The pause menu: adds EXPERIMENTALS to its Options list (single player) |

@@ -2,7 +2,9 @@
 -- (Options > Gameplay). rfa_loader.dll gives the game this file instead of its own copy.
 --
 -- Adds a Field of View slider (45-170), saved to rfa_mods.ini through rfa_get_setting and
--- rfa_set_setting, which the loader adds. Every line we added or changed is marked [RFA];
+-- rfa_set_setting, which the loader adds. Also Options > Experimentals: the main and pause menus
+-- open this screen with the global Rfa_options_page "experimentals", and it then shows RFA-Mod's own
+-- settings (Rfa_experimentals) in place of the game's. Every line we added or changed is marked [RFA];
 -- everything else is the game's original script. Only the [RFA] lines are this project's (GNU GPL
 -- version 3 or later, see LICENSE); the rest belongs to the game's owners.
 -- To compare with the original, extract it with the editor.
@@ -38,7 +40,8 @@ local Data = {
 		min = 45,
 		max = 170,
 		step = 5,
-		current_value = 60
+		current_value = 60,
+		section = "FOV", key = "VerticalFov", default = 60,
 	},
 	[GAMEPLAY_RESET_PROFILE] = {
 		type = TYPE_BUTTON,
@@ -51,6 +54,30 @@ local Data = {
 		current_value = 2
 	},	
 }
+
+-- [RFA] Options > Experimentals: RFA-Mod's own settings, each kept in rfa_mods.ini (its section,
+-- key and default there; a toggle saves 1 or 0). The Guerrilla world's change while you play.
+local Rfa_experimentals = {
+	{type = TYPE_TOGGLE, label = "Sun's shadows", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "SunShadows", default = 1},
+	{type = TYPE_TOGGLE, label = "Sun shafts", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "SunShafts", default = 1},
+	{type = TYPE_TOGGLE, label = "Guerrilla's fog", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "Fog", default = 1},
+	{type = TYPE_TOGGLE, label = "Blowing dust", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "Dust", default = 1},
+	{type = TYPE_TOGGLE, label = "Guerrilla's particles", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "Particles", default = 1},
+	{type = TYPE_TOGGLE, label = "Guerrilla's tone mapping", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "ToneMapping", default = 1},
+	{type = TYPE_TOGGLE, label = "Colour correction", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "GuerrillaWorld", key = "ColourCorrection", default = 1},
+	{type = TYPE_SLIDER, label = "Sky brightness", min = 0, max = 10, step = 1, current_value = 5,
+		section = "GuerrillaWorld", key = "Brightness", default = 5},
+	{type = TYPE_SLIDER, label = "Clock speed", min = 0, max = 120, step = 4, current_value = 48,
+		section = "GuerrillaWorld", key = "ClockSpeed", default = 48},
+}
+local Rfa_experimental = false -- [RFA] showing Rfa_experimentals
 
 local Anims = {}
 
@@ -67,26 +94,44 @@ local Texticles = {}
 local Warned_difficulty = false
 
 -- [RFA] Everything from here to ui_options_gameplay_init is ours.
--- The FOV is read from and saved to rfa_mods.ini through functions the mod loader adds.
+-- The entries with a key (the FOV, and every one in Experimentals) are read from and saved to
+-- rfa_mods.ini through functions the mod loader adds. A toggle is enabled (1) for anything but 0.
 local function rfa_options_populate()
 	if rfa_get_setting == nil then
 		return
 	end
-	local fov = Data[FOV_INDEX]
-	fov.current_value = rfa_get_setting("FOV", "VerticalFov", 60)
-	if fov.current_value < fov.min then
-		fov.current_value = fov.min
-	elseif fov.current_value > fov.max then
-		fov.current_value = fov.max
+	for index, data in pairs(Data) do
+		if data.key ~= nil then
+			local value = rfa_get_setting(data.section, data.key, data.default)
+			if data.type == TYPE_TOGGLE then
+				data.current_value = (value ~= 0) and 1 or 2
+			else
+				if value < data.min then
+					value = data.min
+				elseif value > data.max then
+					value = data.max
+				end
+				data.current_value = value
+			end
+		end
 	end
 end
 
--- Also called while the slider moves, so the new FOV shows behind the menu straight away.
+-- Also called while a slider moves, so its change shows behind the menu straight away. Unchanged
+-- settings aren't written (the loader checks).
 local function rfa_options_save()
 	if rfa_set_setting == nil then
 		return
 	end
-	rfa_set_setting("FOV", "VerticalFov", Data[FOV_INDEX].current_value)
+	for index, data in pairs(Data) do
+		if data.key ~= nil then
+			if data.type == TYPE_TOGGLE then
+				rfa_set_setting(data.section, data.key, (data.current_value == 1) and 1 or 0)
+			else
+				rfa_set_setting(data.section, data.key, data.current_value)
+			end
+		end
+	end
 end
 
 -- As in the audio menu: an open slider shows its own confirm/cancel, so the hint bar hides.
@@ -153,6 +198,22 @@ function ui_options_gameplay_init()
 	local back_button = get_button_name_for_action("menu_cancel")
 	Hint_data = {back_button, "MENU_BACK"} -- [RFA] was a local
 	Hint_bar:set_hints(Hint_data)
+
+	-- [RFA] Options > Experimentals: our list in place of the game's, and none of its settings. (The
+	-- page is kept with rawset and read with _GetAnyGlobalSilent, system_lib's: the menus' Lua
+	-- refuses to write or read a global that wasn't declared as its script loaded.)
+	Rfa_experimental = (_GetAnyGlobalSilent("Rfa_options_page") == "experimentals")
+	rawset(_UGGlobals, "Rfa_options_page", "gameplay")
+	if Rfa_experimental then
+		Data = Rfa_experimentals
+		FINE_AIM_SNAP_INDEX = nil
+		HELP_MESSAGE_INDEX = nil
+		FOV_INDEX = nil
+		GAMEPLAY_RESET_PROFILE = nil
+		DIFFICULTY_INDEX = nil
+		Hint_bar:set_header("EXPERIMENTALS")
+		Hint_bar:set_value("RFA-Mod's settings for the Guerrilla world, saved in rfa_mods.ini")
+	else -- [RFA] the game's own, as before
 	Hint_bar:set_header("MENU_GAMEPLAY_SETTINGS")
 	Hint_bar:set_value("MENU_CHANGE_GAMEPLAY_SETTINGS")
 	
@@ -189,6 +250,7 @@ function ui_options_gameplay_init()
 
 	-- Get the current settings
 	vint_dataresponder_request("ui_gameplay_populate", "ui_options_gameplay_populate")
+	end -- [RFA]
 	rfa_options_populate() -- [RFA]
 	
 	-- Draw the list for the first time
@@ -271,6 +333,11 @@ function ui_options_gameplay_populate(fine_aim_snap, help_messages, difficulty)
 end
 
 function ui_options_gameplay_return_values()
+	-- [RFA] Experimentals has none of the game's settings, only ours
+	if Rfa_experimental then
+		rfa_options_save()
+		return
+	end
 
 	-- May not have help message value
 	local help_message_enabled = nil
