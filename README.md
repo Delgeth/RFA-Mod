@@ -49,6 +49,17 @@ single-player.
    - **into the game folder**, and leave `GameDir=` empty. RFA-Mod only adds files there; it never
      changes the game's own.
 
+## Update
+
+1. Unzip the new version over your old one. When Windows asks about files that are already there,
+   replace them all except your own `rfa_mods.ini` and `console.ini`.
+2. Start `RFAModLauncher.exe`. It adds the settings the new version brings to your two files, each
+   with its explanation, and keeps every value you set. Your files as they were are kept as
+   `rfa_mods.ini.bak` and `console.ini.bak`, and `logs\rfa_mods.log` lists what was added.
+
+A setting you delete from either file comes back with its default the next time the launcher
+starts, so to change what one does, change its value.
+
 ## Play
 
 1. With Steam running, start `RFAModLauncher.exe`.
@@ -74,6 +85,8 @@ single-player.
 - **`console.ini`**: console settings applied for you, as `<console name>=<value>`. `[Startup]`
   runs once when the game starts, and `[Gameplay]` each time a level, save or checkpoint loads. By
   default it hides the beta's performance text.
+- **`defaults\`** holds this version's own copies of both files: the launcher takes new settings
+  from them. Leave them as they are; each update replaces them.
 - **`overrides\`** holds files the game uses instead of its own (the FOV slider, the Guerrilla
   world and HUD, and whatever you save from the editor). See
   [src/overrides/README.md](src/overrides/README.md).
@@ -175,7 +188,8 @@ Things to know:
 - You need Visual Studio with the C++ desktop workload. The editor also needs the .NET 10 SDK; the
   build skips the editor without it.
 - Run `build.cmd`. Everything goes to `bin\`. Your `bin\rfa_mods.ini` and `bin\console.ini` are
-  copied from `config\` only if they don't exist yet.
+  copied from `config\` only if they don't exist yet; the templates also go to `bin\defaults\`
+  every time, and the launcher adds their new settings to your two files when it starts.
 - To make a zip to share (with the settings templates, never your own files):
   ```
   powershell -ExecutionPolicy Bypass -File tools\package.ps1

@@ -42,10 +42,27 @@ Nothing is tied to one PC: the launcher, loader, mods and editor find everything
 own files are and from `GameDir=`. `rfa_mods.ini` and `console.ini` in `bin\` are your own
 settings; the templates others start from are in `config\`.
 
+**Settings an update brings.** A release holds `rfa_mods.ini` and `console.ini` twice: as the files
+themselves, for a new install, and in `defaults\`, which an update replaces while the player keeps
+their own two files. Each time the launcher starts, before anything reads them, it compares each
+file with its template (`src\launcher\settings_update.h`). When the template has a setting or a
+section the file lacks, the file is rewritten from the template:
+- the template's comments, order and new settings, with the template's values;
+- the player's value for every setting they have, matched section by section, names in any case;
+- settings of theirs the template doesn't have stay in their section, after the template's own,
+  with the comment lines just above them; sections it doesn't have go at the end.
+
+The file as it was is kept as `rfa_mods.ini.bak` (`console.ini.bak`), and the log names what was
+added. A file that has every setting already is left alone, byte for byte, and a missing one is
+made from the template. The files are handled as bytes, so values in any encoding (and a UTF-8
+mark) come through as they were. A setting deleted from a file comes back with the template's value
+the next time: in `rfa_mods.ini` that is the mod's own default anyway, but in `console.ini` it is
+applied again, so change a command's value there rather than deleting it.
+
 ## Project layout
 
 ```
-src\launcher\             RFAModLauncher.exe: starts the game and injects the loader
+src\launcher\             RFAModLauncher.exe: updates your settings files, starts the game, injects the loader
 src\loader\               rfa_loader.dll: loads mods, crash reports, overrides, Lua bridge
 src\mods\<name>\          one folder per mod DLL (borderless, console, fov, guerrilla_hud,
                           guerrilla_world, video_settings), and a mod's own scripts
@@ -55,8 +72,8 @@ src\editor\RfaFormats\    C# library that reads and writes the game's file forma
 src\editor\RfaEditor\     the editor (C#, WPF desktop app); built into bin\editor\
 src\editor\GuerrillaHud\  GuerrillaHud.exe: makes Guerrilla's HUD for guerrilla_hud; built into bin\editor\
 src\editor\GuerrillaWorld\ GuerrillaWorld.exe: builds the world rfg for guerrilla_world; built into bin\editor\
-config\rfa_mods.ini       the settings template (copied to bin\ on the first build)
-config\console.ini        console settings template (copied to bin\ when missing)
+config\rfa_mods.ini       the settings template (to bin\ when missing, always to bin\defaults\)
+config\console.ini        console settings template (to bin\ when missing, always to bin\defaults\)
 docs\editor-guide.md      how to use the editor
 docs\how-it-works.md      this page
 docs\editor-roadmap.md    what the editor still lacks, by Volition's own tools (CLOE, ...)
@@ -267,7 +284,8 @@ game's registry code never runs for these settings, and nothing in the mod calls
   / `0` also mean on / off) or nothing to just run them. Because values say what a setting should
   be, applying them again after every load is safe. Each one is logged, and unknown names are
   skipped with a message. The template is `config\console.ini`, copied only when `bin\console.ini`
-  doesn't exist, so your edits are kept.
+  doesn't exist, so your edits are kept; the launcher adds settings new in the template to yours
+  (see [Getting into the game](#getting-into-the-game)).
 - *The level editor's link*: every frame (from the game's frame update, `0x544CB0`) the mod puts
   what the game shows into a small block of shared memory the editor reads while it follows the
   game (the object picked in the game, the camera's position, direction and field of view). While
@@ -677,7 +695,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() { /* install hooks *
 `build.cmd` needs Visual Studio with the C++ desktop workload, and the .NET 10 SDK for the editor
 (skipped if it's missing). It builds the launcher, loader and mods 32-bit (the game is a 32-bit
 process) into `bin\`, copies `src\overrides\` into `bin\overrides\`, and copies
-`config\rfa_mods.ini` and `config\console.ini` to `bin\` only if there are none there yet. It
+`config\rfa_mods.ini` and `config\console.ini` to `bin\` only if there are none there yet, and to
+`bin\defaults\` every time (the templates the launcher adds new settings from to yours). It
 builds the editor and the two Guerrilla tools 64-bit into `bin\editor\`. The build turns off the
 .NET SDK's usage reporting and its first-run web certificate.
 
@@ -687,7 +706,8 @@ builds the editor and the two Guerrilla tools 64-bit into `bin\editor\`. The bui
   files made from your copy of Guerrilla), the mod's own overrides (from `src\overrides\`, not the
   files you edited), the editor (without its `.pdb` debugging files), the README with the documents
   it links to (named one by one: `docs\` also holds private notes) and the licence, with the
-  settings templates from `config\` (so `GameDir=` is empty).
+  settings templates from `config\` (so `GameDir=` is empty), twice: as `rfa_mods.ini` and
+  `console.ini`, and in `defaults\`.
 - Your own `rfa_mods.ini`, `console.ini`, `video_settings.cfg`, `logs\`, `link\` and edited
   overrides stay out.
 - Every file it packs is checked for anything naming your PC (your user folder or name, this
@@ -705,6 +725,12 @@ has a `-` in it (`v0.1.0-beta`). Its text comes from `docs\releases\<tag>.md`. T
 git tag -a v0.3.0-beta -m "RFA-Mod v0.3.0-beta"
 git push origin v0.3.0-beta
 ```
+
+The notes' updating paragraph, from the first release with `defaults\` on:
+
+> **Updating from vX:** copy the new files over your old ones, but keep your own `rfa_mods.ini`
+> and `console.ini`. The launcher adds this version's new settings to them the next time it
+> starts, keeping your values: (name each new setting and its section, or say there are none).
 
 ## Checking the game files are untouched
 

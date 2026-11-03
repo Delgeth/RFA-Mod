@@ -6,8 +6,12 @@
 // The game folder is GameDir from rfa_mods.ini, or the launcher's own folder when the mod files
 // were copied into the game folder, or (with Steam launch options "<launcher> %command%") the
 // folder of the exe Steam passes on the command line.
+//
+// Before anything reads them, it adds the settings a newer RFA-Mod brings to your rfa_mods.ini and
+// console.ini, from the templates in defaults\ (see settings_update.h).
 #define RFA_MOD_NAME "launcher"
 #include "rfa_mod.h"
+#include "settings_update.h"
 #include <winternl.h>
 #include <shellapi.h>
 #include <vector>
@@ -197,6 +201,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     MoveFileExW(rfa::LogPath().c_str(), (rfa::RootDir() + L"\\logs\\rfa_mods.prev.log").c_str(),
                 MOVEFILE_REPLACE_EXISTING);
     rfa::Log("RFA mod launcher starting from %ls", rfa::RootDir().c_str());
+
+    // An update keeps your own settings files: give them the settings it brings, keeping your values.
+    settings::Update(rfa::RootDir(), L"rfa_mods.ini");
+    settings::Update(rfa::RootDir(), L"console.ini");
 
     // When Steam launches us via "%command%", argv[1] is the game's own launcher exe.
     int argc = 0;

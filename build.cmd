@@ -32,6 +32,11 @@ rem overrides\ mirrors the game folder (one folder per archive), so copy the who
 xcopy /e /i /y /q "%ROOT%src\overrides" "%ROOT%bin\overrides" >nul || goto :fail
 rem console.ini is yours to edit: only copy the template if there is none yet.
 if not exist "%ROOT%bin\console.ini" copy /y "%ROOT%config\console.ini" "%ROOT%bin\console.ini" >nul
+rem The templates again, in bin\defaults\: each time it starts, the launcher adds the settings they
+rem have and your bin\rfa_mods.ini and bin\console.ini lack, keeping your values.
+if not exist "%ROOT%bin\defaults" mkdir "%ROOT%bin\defaults"
+copy /y "%ROOT%config\rfa_mods.ini" "%ROOT%bin\defaults\rfa_mods.ini" >nul || goto :fail
+copy /y "%ROOT%config\console.ini" "%ROOT%bin\defaults\console.ini" >nul || goto :fail
 
 rem The editor is C# and needs the .NET 10 SDK. Its build leftovers go to build\editor. The
 rem DOTNET_* settings turn off the SDK's usage reporting and its first-run web certificate.

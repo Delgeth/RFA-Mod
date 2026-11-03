@@ -1,8 +1,9 @@
 # Makes a clean copy of the mod and the editor to share with others, in dist\RFA-Mod\ and as a
 # zip next to it. It holds what a new user needs and nothing of yours: the settings files are the
-# templates from config\ (no GameDir, your console settings or video settings), the overrides are
-# the mod's own from src\overrides (not the files you edited), the documents are the ones the
-# README links to, and logs\ and link\ stay out.
+# templates from config\ (no GameDir, your console settings or video settings), packed twice: as
+# the files themselves and in defaults\, which the launcher adds new settings from to a player's
+# own files. The overrides are the mod's own from src\overrides (not the files you edited), the
+# documents are the ones the README links to, and logs\ and link\ stay out.
 # Every file packed is checked for anything naming this PC (your user folder or name, this
 # project's folder, your game folder); the package is refused if one does.
 #
@@ -27,6 +28,10 @@ $parts = @(
     @{ From = 'bin\rfa_loader.dll';     To = 'rfa_loader.dll' },
     @{ From = 'config\rfa_mods.ini';    To = 'rfa_mods.ini' },
     @{ From = 'config\console.ini';     To = 'console.ini' },
+    # The same templates again, which an update replaces while the player keeps their own two files:
+    # the launcher adds the settings these have and theirs lack.
+    @{ From = 'config\rfa_mods.ini';    To = 'defaults\rfa_mods.ini' },
+    @{ From = 'config\console.ini';     To = 'defaults\console.ini' },
     @{ From = 'README.md';              To = 'README.md' },
     # The documents the README links to, by name: docs\ also holds private notes.
     @{ From = 'docs\editor-guide.md';          To = 'docs\editor-guide.md' },
