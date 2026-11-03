@@ -9,8 +9,13 @@
 //
 // Before anything reads them, it adds the settings a newer RFA-Mod brings to your rfa_mods.ini and
 // console.ini, from the templates in defaults\ (see settings_update.h).
+//
+// With LargeAddressAware=1 it starts the game from a copy of its exe in large_address\ with the
+// "large address aware" mark set, so the 32-bit game gets 4 GB of memory to work in instead of 2
+// (see LargeAddressCopy).
 #define RFA_MOD_NAME "launcher"
 #include "rfa_mod.h"
+#include "rfa_game.h"
 #include "settings_update.h"
 #include <winternl.h>
 #include <shellapi.h>
@@ -71,6 +76,76 @@ int Fail(const std::wstring& message) {
 std::wstring TrimSlashes(std::wstring dir) {
     while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
     return dir;
+}
+
+// Windows gives a 32-bit program 4 GB of memory to work in (on 64-bit Windows) only if its exe is
+// marked "large address aware" (IMAGE_FILE_LARGE_ADDRESS_AWARE in its file header), and reads the
+// mark only as the process starts; the game's exe hasn't it. So the game is started from a copy of
+// its exe with that one mark set, kept in large_address\ in the mod folder, the game folder left as
+// it is. The copy carries the installed exe's last-write time, so it is made again whenever the
+// game updates. The game runs in the game folder as before (the loader tells it the installed exe's
+// path; see the loader). Returns the exe to start: the copy, or the installed one if it already
+// has the mark; empty on failure, with `err` set.
+std::wstring LargeAddressCopy(const std::wstring& exe, const std::wstring& exeName, std::wstring& err) {
+    WIN32_FILE_ATTRIBUTE_DATA installed;
+    if (!GetFileAttributesExW(exe.c_str(), GetFileExInfoStandard, &installed)) {
+        err = L"could not read " + exe + L", " + ErrorText(GetLastError());
+        return L"";
+    }
+    // Reads the file header's characteristics (or writes them, with `set`).
+    auto characteristics = [](const std::wstring& path, WORD& value, bool set) {
+        HANDLE file = CreateFileW(path.c_str(), set ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        IMAGE_DOS_HEADER dos{};
+        DWORD done = 0;
+        bool ok = ReadFile(file, &dos, sizeof(dos), &done, nullptr) && done == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE;
+        // The characteristics: after the "PE\0\0" signature, the file header's last word.
+        const LONG at = dos.e_lfanew + sizeof(DWORD) + offsetof(IMAGE_FILE_HEADER, Characteristics);
+        ok = ok && SetFilePointer(file, at, nullptr, FILE_BEGIN) == static_cast<DWORD>(at);
+        if (ok && set) ok = WriteFile(file, &value, sizeof(value), &done, nullptr) && done == sizeof(value);
+        else if (ok) ok = ReadFile(file, &value, sizeof(value), &done, nullptr) && done == sizeof(value);
+        CloseHandle(file);
+        return ok;
+    };
+    WORD flags = 0;
+    if (!characteristics(exe, flags, false)) {
+        err = L"could not read the file header of " + exe;
+        return L"";
+    }
+    if (flags & IMAGE_FILE_LARGE_ADDRESS_AWARE) {
+        rfa::Log("Large address aware: the game's own program already is");
+        return exe;
+    }
+
+    const std::wstring folder = rfa::RootDir() + L"\\large_address";
+    const std::wstring copy = folder + L"\\" + exeName;
+    WIN32_FILE_ATTRIBUTE_DATA kept;
+    WORD keptFlags = 0;
+    if (GetFileAttributesExW(copy.c_str(), GetFileExInfoStandard, &kept) && kept.nFileSizeLow == installed.nFileSizeLow &&
+        kept.nFileSizeHigh == installed.nFileSizeHigh && CompareFileTime(&kept.ftLastWriteTime, &installed.ftLastWriteTime) == 0 &&
+        characteristics(copy, keptFlags, false) && (keptFlags & IMAGE_FILE_LARGE_ADDRESS_AWARE)) {
+        rfa::Log("Large address aware: starting the game from %ls", copy.c_str());
+        return copy;
+    }
+    CreateDirectoryW(folder.c_str(), nullptr);
+    if (!CopyFileW(exe.c_str(), copy.c_str(), FALSE)) {
+        err = L"could not copy " + exe + L" to " + copy + L", " + ErrorText(GetLastError());
+        return L"";
+    }
+    WORD marked = flags | IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    if (!characteristics(copy, marked, true)) {
+        err = L"could not mark " + copy + L" large address aware";
+        return L"";
+    }
+    // (The header's checksum is left as it was: Windows checks it only for drivers and boot files.)
+    HANDLE file = CreateFileW(copy.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        SetFileTime(file, nullptr, nullptr, &installed.ftLastWriteTime);
+        CloseHandle(file);
+    }
+    rfa::Log("Large address aware: made %ls (a copy of the game's program with that mark set); starting the game from it", copy.c_str());
+    return copy;
 }
 
 bool ReadMem(HANDLE proc, const void* addr, void* out, size_t size) {
@@ -244,11 +319,32 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (!GetEnvironmentVariableW(L"SteamAppId", nullptr, 0)) SetEnvironmentVariableW(L"SteamAppId", kSteamAppId);
     if (!GetEnvironmentVariableW(L"SteamGameId", nullptr, 0)) SetEnvironmentVariableW(L"SteamGameId", kSteamAppId);
 
+    // The program to start: the game's own, or its large-address-aware copy. Started from the copy,
+    // the game is told the installed exe's path (rfa::game::kInstalledExeVariable) and finds its DLLs
+    // (steam_api.dll, binkw32.dll) in the game folder, which leads its PATH as well as being its
+    // current folder.
+    std::wstring program = exe;
+    if (rfa::IniInt(L"Launcher", L"LargeAddressAware", 1)) {
+        std::wstring copyErr;
+        program = LargeAddressCopy(exe, exeName, copyErr);
+        if (program.empty()) {
+            rfa::Log("Large address aware: %ls; starting the game's own program (2 GB)", copyErr.c_str());
+            program = exe;
+        }
+    }
+    if (program != exe) {
+        SetEnvironmentVariableW(rfa::game::kInstalledExeVariable, exe.c_str());
+        const DWORD pathLength = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+        std::wstring path(pathLength, L'\0');
+        if (pathLength) path.resize(GetEnvironmentVariableW(L"PATH", path.data(), pathLength));
+        SetEnvironmentVariableW(L"PATH", (gameDir + (path.empty() ? L"" : L";" + path)).c_str());
+    }
+
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
     cmdBuf.push_back(L'\0');
-    if (!CreateProcessW(exe.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, gameDir.c_str(),
+    if (!CreateProcessW(program.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, gameDir.c_str(),
                         &si, &pi))
         return Fail(L"Could not start the game, " + ErrorText(GetLastError()));
 

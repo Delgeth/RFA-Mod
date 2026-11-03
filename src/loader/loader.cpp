@@ -212,6 +212,72 @@ void InstallCrashReporter() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The large-address-aware copy (the launcher's LargeAddressAware=)
+
+// Started from the launcher's copy of its exe, the game still asks where its own exe is: WinMain
+// first makes that folder the current one (0xA455B0), the DLC search looks in its build folder
+// (0x519B50), and the C runtime keeps it as the program's name. So its imports of
+// GetModuleFileNameA/W answer, for the game's own module, with the installed exe in the game folder,
+// as when it is started from there. Other modules are answered as Windows answers.
+std::wstring g_installedExe;
+using GetModuleFileNameWFn = DWORD(WINAPI*)(HMODULE, LPWSTR, DWORD);
+using GetModuleFileNameAFn = DWORD(WINAPI*)(HMODULE, LPSTR, DWORD);
+GetModuleFileNameWFn o_GetModuleFileNameW;
+GetModuleFileNameAFn o_GetModuleFileNameA;
+
+bool IsGameModule(HMODULE module) { return module == nullptr || module == GetModuleHandleW(nullptr); }
+
+// Copies `text` into `out` as GetModuleFileName does: cut short to fit with ERROR_INSUFFICIENT_BUFFER
+// and the buffer's size returned, else the length.
+template <class Char>
+DWORD AnswerPath(const std::basic_string<Char>& text, Char* out, DWORD size) {
+    if (size == 0) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    const DWORD length = static_cast<DWORD>(text.size());
+    const DWORD copied = length < size ? length : size - 1;
+    std::copy(text.begin(), text.begin() + copied, out);
+    out[copied] = 0;
+    if (length >= size) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return size;
+    }
+    SetLastError(ERROR_SUCCESS);
+    return length;
+}
+
+DWORD WINAPI Hk_GetModuleFileNameW(HMODULE module, LPWSTR out, DWORD size) {
+    if (!IsGameModule(module)) return o_GetModuleFileNameW(module, out, size);
+    return AnswerPath(g_installedExe, out, size);
+}
+
+DWORD WINAPI Hk_GetModuleFileNameA(HMODULE module, LPSTR out, DWORD size) {
+    if (!IsGameModule(module)) return o_GetModuleFileNameA(module, out, size);
+    const int bytes = WideCharToMultiByte(CP_ACP, 0, g_installedExe.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string narrow(bytes > 0 ? bytes - 1 : 0, '\0');
+    if (bytes > 1) WideCharToMultiByte(CP_ACP, 0, g_installedExe.c_str(), -1, narrow.data(), bytes, nullptr, nullptr);
+    return AnswerPath(narrow, out, size);
+}
+
+void InstallInstalledExePath() {
+    wchar_t running[MAX_PATH];
+    GetModuleFileNameW(nullptr, running, MAX_PATH);
+    g_installedExe = rfa::game::InstalledExePath();
+    if (_wcsicmp(g_installedExe.c_str(), running) != 0) {
+        HMODULE game = GetModuleHandleW(nullptr);
+        const bool wide = rfa::HookImport(game, "KERNEL32.dll", "GetModuleFileNameW", &Hk_GetModuleFileNameW, &o_GetModuleFileNameW);
+        const bool narrow = rfa::HookImport(game, "KERNEL32.dll", "GetModuleFileNameA", &Hk_GetModuleFileNameA, &o_GetModuleFileNameA);
+        rfa::Log("Started from the large-address-aware copy; the game is told its program is %ls%s", g_installedExe.c_str(),
+                 wide && narrow ? "" : " (COULD NOT hook its GetModuleFileName: it may look for its files next to the copy)");
+    }
+    MEMORYSTATUSEX memory{sizeof(memory)};
+    if (GlobalMemoryStatusEx(&memory))
+        rfa::Log("The game's address space: %llu MB (%s)", memory.ullTotalVirtual >> 20,
+                 memory.ullTotalVirtual > (2ull << 30) ? "large address aware" : "the 2 GB of a 32-bit program not marked large address aware");
+}
+
+// ---------------------------------------------------------------------------------------------
 // Lua: script overrides and settings access for the game's menu scripts
 
 using rfa::game::lua_State;
@@ -357,9 +423,7 @@ void AddOverride(const std::wstring& root, const std::wstring& relative) {
     const size_t slash = relative.find_last_of(L'\\');
     const std::wstring archive = slash == std::wstring::npos ? L"" : relative.substr(0, slash);
     const std::string name = Narrow(relative.substr(slash + 1));
-    wchar_t exe[MAX_PATH];
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring gameDir = exe;
+    std::wstring gameDir = rfa::game::InstalledExePath();
     gameDir.resize(gameDir.find_last_of(L'\\'));
     if (archive.size() < 7 || _wcsicmp(archive.c_str() + archive.size() - 7, L".vpp_pc") != 0) {
         // Not in an archive's folder: a new file, if the game folder hasn't one there.
@@ -724,6 +788,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     rfa::Log("Loader running in %ls (pid %lu)", exe, GetCurrentProcessId());
     rfa::Log("Game build: %s", rfa::game::BuildDescription());
+    InstallInstalledExePath();
     InstallCrashReporter();
     if (rfa::game::IsSupportedBuild()) {
         InstallOverrides();

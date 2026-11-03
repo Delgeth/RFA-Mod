@@ -8,6 +8,7 @@
 #pragma once
 #include <windows.h>
 #include <stddef.h>
+#include <string>
 
 namespace rfa::game {
 
@@ -21,6 +22,19 @@ inline DWORD ExeTimestamp() {
 }
 
 inline bool IsSupportedBuild() { return ExeTimestamp() == kPublicBetaTimestamp; }
+
+// The launcher may start the game from its large-address-aware copy of the exe (LargeAddressAware=
+// in rfa_mods.ini); it then names the installed exe, in the game folder, in this environment
+// variable, which the game inherits.
+constexpr wchar_t kInstalledExeVariable[] = L"RFA_GAME_EXE";
+
+// The game's exe as installed: the one in the game folder, even when the game runs from the copy.
+inline std::wstring InstalledExePath() {
+    wchar_t path[MAX_PATH] = {};
+    const DWORD length = GetEnvironmentVariableW(kInstalledExeVariable, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return path;
+}
 
 inline const char* BuildDescription() {
     switch (ExeTimestamp()) {
