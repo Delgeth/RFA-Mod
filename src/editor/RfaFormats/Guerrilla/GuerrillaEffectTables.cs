@@ -15,10 +15,14 @@ namespace RfaFormats.Guerrilla;
 /// games have all four tables alike, and Armageddon's level_objects.xtbl still names most of
 /// Guerrilla's entries, with its own settings and effects.
 ///
-/// So the three tables are Armageddon's own with Guerrilla's entries added under "rfg_" names: each
+/// So the four tables are Armageddon's own with Guerrilla's entries added under "rfg_" names: each
 /// level object the world's objects name, with its effect names made the added ones (or left out
-/// where the effect isn't added) and explosions Armageddon lacks left out (its physical materials are
-/// all Armageddon's too); each effect they name that has a visual (sound left out: Guerrilla's are
+/// where the effect isn't added) and its explosions the added ones (see below; else Armageddon's of
+/// that name, or left out where it has none; its physical materials are all Armageddon's too); each
+/// explosion they die in, as many as the game has room for (<see cref="ExplosionLimit"/>), the most
+/// placed objects' first: Armageddon plays its own explosion of the name with its own effects, which
+/// it loads only with its own levels, so ours went off unseen; each effect they name (an explosion's
+/// too) that has a visual (sound left out: Guerrilla's are
 /// XACT cues, which Armageddon's Wwise doesn't know); each visual, Environmental, its file the
 /// converted effect "rfg_&lt;file&gt;" (see <see cref="GuerrillaEffects"/>), which the world's
 /// containers hold. Every added entry is fitted to the shape of Armageddon's own (see <see cref="Fit"/>:
@@ -37,6 +41,12 @@ public static class GuerrillaEffectTables
     /// <summary>How many visual effects (vfx.xtbl entries) the game keeps; how many effects (effects.xtbl entries).</summary>
     public const int VisualLimit = 950, EffectLimit = 1224;
 
+    /// <summary>
+    /// How many explosions (explosions.xtbl entries) the game keeps: its reader (0x6E9C70) stops at 0x84,
+    /// counting at 0x1893498, the base table's first and then each DLC's (dlcNN_explosions.xtbl).
+    /// </summary>
+    public const int ExplosionLimit = 132;
+
     /// <summary>The name an added entry (or a converted effect's file) has: Guerrilla's with "rfg_" before it.</summary>
     public static string Added(string guerrillaName) => "rfg_" + guerrillaName;
 
@@ -46,9 +56,13 @@ public static class GuerrillaEffectTables
     /// extension) its added effects show, every effect file to convert, the files of the effects the
     /// world plays everywhere, and what didn't fit.
     /// </summary>
-    public sealed record Tables(byte[] Visuals, byte[] Effects, byte[] LevelObjects, IReadOnlyDictionary<string, string> PropsOf,
+    public sealed record Tables(byte[] Visuals, byte[] Effects, byte[] LevelObjects, byte[] Explosions, IReadOnlyDictionary<string, string> PropsOf,
                                 IReadOnlyDictionary<string, IReadOnlyList<string>> FilesOf, IReadOnlyList<string> Files, IReadOnlyList<string> WorldFiles,
-                                int VisualsAdded, int EffectsAdded, IReadOnlyList<string> VisualsLeft, IReadOnlyList<string> ExplosionsLeft);
+                                int VisualsAdded, int EffectsAdded, int ExplosionsAdded, IReadOnlyList<string> VisualsLeft, IReadOnlyList<string> ExplosionsWaiting,
+                                IReadOnlyList<string> ExplosionsLeft);
+
+    /// <summary>Guerrilla's explosion fields under the names Armageddon's table gives them.</summary>
+    static readonly (string Guerrilla, string Armageddon)[] ExplosionFieldNames = [("Impulse", "Mover_Impulse"), ("Structural_Damage", "StructuralDamage")];
 
     /// <summary>The fields of a level object naming an effect (each holding just the name).</summary>
     static readonly string[] EffectFields =
@@ -65,12 +79,15 @@ public static class GuerrillaEffectTables
     /// its dust) are added too, their visuals before any object's.
     /// </summary>
     public static Tables Build(Packfile armageddonMisc, Packfile guerrillaMisc, IReadOnlyDictionary<string, int> used, Func<string, bool> hasFile,
-                               IReadOnlyCollection<string> worldEffects)
+                               IReadOnlyCollection<string> worldEffects, int dlcExplosions)
     {
         string Text(Packfile archive, string table) =>
             Encoding.Latin1.GetString(archive.Read(archive.Find(table) ?? throw new InvalidDataException($"no {table} in {archive.Name}")));
         string ourVisuals = Text(armageddonMisc, "vfx.xtbl"), ourEffects = Text(armageddonMisc, "effects.xtbl"), ourObjects = Text(armageddonMisc, "level_objects.xtbl");
-        var explosions = Entries(Text(armageddonMisc, "explosions.xtbl"), "Explosion").Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string ourExplosionText = Text(armageddonMisc, "explosions.xtbl"), theirExplosionText = Text(guerrillaMisc, "explosions.xtbl");
+        var ourExplosions = Entries(ourExplosionText, "Explosion");
+        var explosions = ourExplosions.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var theirExplosions = Entries(theirExplosionText, "Explosion");
         var objects = Entries(Text(guerrillaMisc, "level_objects.xtbl"), "Level_Object");
         var effects = Entries(Text(guerrillaMisc, "effects.xtbl"), "Effect");
         var visuals = Entries(Text(guerrillaMisc, "vfx.xtbl"), "Effect");
@@ -81,8 +98,27 @@ public static class GuerrillaEffectTables
         // Each used level object's effects, and each effect's visual (where it has one in Guerrilla's vfx.xtbl and its file can be had).
         string? VisualOf(string effect) =>
             effects.TryGetValue(effect, out var e) && Field(e, "visual") is { Length: > 0 } v && visuals.TryGetValue(v, out var x) && hasFile(FileOf(x)) ? v : null;
+
+        // Guerrilla's explosions the used level objects die in, the most placed objects' first, as many as
+        // the game has room for after Armageddon's and its DLCs' (the rest keep Armageddon's of that
+        // name where it has one); each one's effects (Guerrilla's Effects list) are its objects' too.
+        var explosionsOf = used.Keys.Where(objects.ContainsKey).ToDictionary(p => p,
+            p => Leaves(objects[p], "Death_Explosion").Where(theirExplosions.ContainsKey).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            StringComparer.OrdinalIgnoreCase);
+        var explosionUse = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (p, list) in explosionsOf)
+            foreach (string x in list) explosionUse[x] = explosionUse.GetValueOrDefault(x) + used[p];
+        var takenExplosions = explosions;
+        int explosionRoom = Math.Max(0, ExplosionLimit - Count(ourExplosionText, "Explosion") - dlcExplosions);
+        var rankedExplosions = explosionUse.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase).Select(x => x.Key)
+                                           .Where(x => !takenExplosions.Contains(Added(x))).ToList();
+        var addedExplosions = rankedExplosions.Take(explosionRoom).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        IEnumerable<string> ExplosionEffects(string explosion) => Leaves(theirExplosions[explosion], "Element");
+
         var effectsOf = used.Keys.Where(objects.ContainsKey).ToDictionary(p => p,
-            p => EffectFields.SelectMany(f => Leaves(objects[p], f)).Where(n => VisualOf(n) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            p => EffectFields.SelectMany(f => Leaves(objects[p], f))
+                             .Concat(explosionsOf[p].Where(addedExplosions.Contains).SelectMany(ExplosionEffects))
+                             .Where(n => VisualOf(n) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             StringComparer.OrdinalIgnoreCase);
 
         // The visuals the most placed objects show, as many as the game has room for (the world's own
@@ -139,10 +175,11 @@ public static class GuerrillaEffectTables
                     string effect = m.Groups[2].Value.Trim();
                     return effect.Length == 0 ? m.Value : effectSet.Contains(effect) ? $"{m.Groups[1].Value}<{field}>{Added(effect)}</{field}>" : "";
                 });
-            // Explosions Armageddon hasn't left out.
-            body = Regex.Replace(body, @"\s*<Death_Explosion>([^<]*)</Death_Explosion>", m =>
+            // Guerrilla's explosions where added, else Armageddon's of that name, else left out.
+            body = Regex.Replace(body, @"(\s*)<Death_Explosion>([^<]*)</Death_Explosion>", m =>
             {
-                string explosion = m.Groups[1].Value.Trim();
+                string explosion = m.Groups[2].Value.Trim();
+                if (addedExplosions.Contains(explosion)) return $"{m.Groups[1].Value}<Death_Explosion>{Added(explosion)}</Death_Explosion>";
                 if (explosion.Length == 0 || explosions.Contains(explosion)) return m.Value;
                 explosionsLeft.Add(explosion);
                 return "";
@@ -151,10 +188,47 @@ public static class GuerrillaEffectTables
             propsOf[p] = name;
             filesOf[p] = effectsOf[p].Where(effectSet.Contains).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
+        // The explosions: Guerrilla's settings in Armageddon's fields (see ExplosionEntry), new unique
+        // numbers after Armageddon's own.
+        var explosionShape = new Shape(ourExplosionText, "Explosion", theirExplosionText);
+        var explosionText = new StringBuilder();
+        int uniqueId = ourExplosions.Values.Select(x => int.TryParse(Field(x, "Unique_ID"), out int id) ? id : 0).DefaultIfEmpty(0).Max();
+        foreach (string x in rankedExplosions.Where(addedExplosions.Contains))
+        {
+            string body = ExplosionEntry(theirExplosions[x], Added(x), ourExplosions.GetValueOrDefault(x), effectSet, ++uniqueId);
+            explosionText.Append($"\t<Explosion>{Fit(body, "Explosion", explosionShape)}</Explosion>\n");
+        }
+
         var files = addedVisuals.Select(v => FileOf(visuals[v])).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
         var worldFiles = everywhere.Where(effectSet.Contains).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        return new Tables(Append(ourVisuals, visualText), Append(ourEffects, effectText), Append(ourObjects, objectText), propsOf, filesOf, files, worldFiles,
-                          addedVisuals.Count, addedEffects.Count, ranked.Skip(visualRoom).ToList(), [.. explosionsLeft]);
+        return new Tables(Append(ourVisuals, visualText), Append(ourEffects, effectText), Append(ourObjects, objectText), Append(ourExplosionText, explosionText),
+                          propsOf, filesOf, files, worldFiles, addedVisuals.Count, addedEffects.Count, addedExplosions.Count, ranked.Skip(visualRoom).ToList(),
+                          rankedExplosions.Skip(explosionRoom).ToList(), [.. explosionsLeft]);
+    }
+
+    /// <summary>
+    /// One of Guerrilla's explosions as an Armageddon entry named <paramref name="name"/>: Guerrilla's
+    /// fields (Impulse and Structural_Damage under Armageddon's names, see <see cref="ExplosionFieldNames"/>),
+    /// its effects in Armageddon's form (each an Effect with its Name, the added one, and Play_Style
+    /// Always; those not added left out), and the fields only Armageddon's have (how it damages
+    /// buildings: Material_Damage_Class_Inner and _Outer, the Structural_Damage_Type shape cutters, its
+    /// radii, Electrical_Explosion) from <paramref name="ours"/>, Armageddon's entry of the same name,
+    /// where there is one (else Fit gives the words every one of Armageddon's has).
+    /// </summary>
+    static string ExplosionEntry(string theirs, string name, string? ours, ISet<string> addedEffects, int uniqueId)
+    {
+        var entry = XElement.Parse($"<Explosion>{Rename(theirs, name)}</Explosion>");
+        foreach (var (guerrilla, armageddon) in ExplosionFieldNames)
+            foreach (var e in entry.Elements(guerrilla).ToList())
+                e.Name = armageddon;
+        if (entry.Element("Effects") is { } list)
+            list.ReplaceNodes(list.Elements("Element").Select(e => e.Value.Trim()).Where(addedEffects.Contains)
+                                  .Select(e => new XElement("Effect", new XElement("Name", Added(e)), new XElement("Play_Style", "Always"))));
+        if (entry.Element("Unique_ID") is { } id) id.Value = uniqueId.ToString();
+        if (ours != null)
+            foreach (var e in XElement.Parse($"<Explosion>{ours}</Explosion>").Elements())
+                if (entry.Element(e.Name) == null && e.Name.LocalName != "Effects") entry.Add(e);  // (never Armageddon's effects)
+        return string.Concat(entry.Nodes().Select(n => Write(n, 2)));
     }
 
     /// <summary>A visual's file (its Filename without ".effectx").</summary>

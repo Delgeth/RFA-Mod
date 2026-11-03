@@ -572,7 +572,12 @@ converts:
   for the guerrilla_world mod (above): each entry the objects name is put in Armageddon's fields
   (Guerrilla's flags but two Armageddon has no bit for), and an object names an Armageddon entry
   with the same settings where there is one, else a new `rfg_` entry (139). Armageddon's own
-  entries are left as they are.
+  entries are left as they are. The two games' flags are the same bits up to `no_cover`, but for
+  one name: Guerrilla's `force_dynamic` (bit 3: a loose prop, knocked about whole) is Armageddon's
+  `prevent_anchor` (Armageddon's own conversion has it on 68 of the 97 shared entries with
+  `force_dynamic` and on none of the others). Written under that name, barrels, crates and chairs
+  fly when hit, where without it the game anchored them to the ground and they swung on the spot
+  or broke off.
 - **Their draw distances** (`GuerrillaLod`): Guerrilla switches an object off at the distance of
   its gameplay entry's LOD class (25, 50, 100, 150 or 200 m; most have none, and are always
   drawn). Armageddon's classes of the same names fade out much nearer, so the builder adds
@@ -587,7 +592,14 @@ converts:
   settings and effects. So the builder (`GuerrillaEffectTables`) adds Guerrilla's level objects,
   effects and visual effects the objects use to Armageddon's three tables under `rfg_` names, for
   the mod to hand the game, and each object names its `rfg_` level object. Sounds are left out
-  (Guerrilla's are XACT cues; Armageddon uses Wwise). Each visual effect's file is converted
+  (Guerrilla's are XACT cues; Armageddon uses Wwise). The explosions an object dies in
+  (`explosions.xtbl`) are added the same way, Guerrilla's settings and effects in Armageddon's
+  fields (its `Impulse` as `Mover_Impulse`, `Structural_Damage` as `StructuralDamage`, each effect
+  an `Effect` with its name; how it damages buildings taken from Armageddon's explosion of the same
+  name). Armageddon's own explosion of a name plays effects it loads only with its own levels, so
+  in our world it went off unseen. But the game keeps at most 132 explosions, Armageddon's and its
+  DLCs' first, which leaves room for two: the most used, `gas_barrel` (the explosive barrels) and
+  `chem_tank_a`, are Guerrilla's; the other twelve keep Armageddon's of the name for now. Each visual effect's file is converted
   (`GuerrillaEffects`: Guerrilla's effect format, versions 21 to 26, written as Armageddon's
   version 36: its emitters, lights, meshes and coronas reworked, each emitter's material given the
   values Armageddon keeps after it (taken from Guerrilla's emitter: self-illumination, ambient and

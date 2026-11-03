@@ -464,10 +464,12 @@ public static class GuerrillaWorld
             ? XElement.Parse(Encoding.Latin1.GetString(rfgTables.Read(weather))).Descendants("Dust_effects").Elements("Element").Select(e => e.Value.Trim())
                       .Where(n => n.Length > 0).ToList()
             : [];
-        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"), dustEffects);
+        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"), dustEffects,
+                                                       DlcExplosions(game));
         File.WriteAllBytes(Path.Combine(modFolder, "vfx.xtbl"), effectTables.Visuals);
         File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
         File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
+        File.WriteAllBytes(Path.Combine(modFolder, "explosions.xtbl"), effectTables.Explosions);
         var effectFiles = new Dictionary<string, List<(string Name, byte[] Data)>>(StringComparer.OrdinalIgnoreCase);
         var effectTextures = new Dictionary<string, (string Name, byte[] Data)[]>(StringComparer.OrdinalIgnoreCase);
         var unshipped = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -495,11 +497,14 @@ public static class GuerrillaWorld
             }
             effectFiles[file] = list;
         }
+        log($"Explosions: {effectTables.ExplosionsAdded} of Guerrilla's added to Armageddon's table (mods\\guerrilla_world\\explosions.xtbl; the game keeps " +
+            $"{GuerrillaEffectTables.ExplosionLimit}, Armageddon's and its DLCs' first)" +
+            (effectTables.ExplosionsWaiting.Count > 0 ? $"; no room for {string.Join(", ", effectTables.ExplosionsWaiting)} (Armageddon's of the name play instead, where it has one)" : ""));
         log($"Effects: {effectTables.PropsOf.Count} of Guerrilla's level objects, {effectTables.EffectsAdded} effects and {effectTables.VisualsAdded} visual effects added to Armageddon's tables " +
             $"(mods\\guerrilla_world\\level_objects.xtbl, effects.xtbl, vfx.xtbl); {effectFiles.Count} effect files converted with {effectTextures.Count} textures, " +
             $"{effectFiles.Values.Sum(l => l.Sum(f => (long)f.Data.Length)) / 1024:N0} KB" +
             (effectTables.VisualsLeft.Count > 0 ? $"; {effectTables.VisualsLeft.Count} visual effects past the game's room of {GuerrillaEffectTables.VisualLimit} left out: {string.Join(", ", effectTables.VisualsLeft)}" : "") +
-            (effectTables.ExplosionsLeft.Count > 0 ? $"; explosions Armageddon hasn't left out: {string.Join(", ", effectTables.ExplosionsLeft)}" : "") +
+            (effectTables.ExplosionsLeft.Count > 0 ? $"; explosions neither added nor Armageddon's left out: {string.Join(", ", effectTables.ExplosionsLeft)}" : "") +
             (unshipped.Count > 0 ? $"; textures Guerrilla never shipped, drawn as nothing: {string.Join(", ", unshipped)}" : ""));
         string? PropsOf(string name) => effectTables.PropsOf.GetValueOrDefault(name) ?? (levelObjects.Contains(name) ? name : null);
 
@@ -1179,6 +1184,31 @@ public static class GuerrillaWorld
     /// for Guerrilla's HUD and other mods. Each slot costs the game about 36 bytes of its start-up pool.
     /// </summary>
     const int SpareTextureSlots = 1_000;
+
+    /// <summary>
+    /// How many explosions the game's DLCs add after its own (each DLC's dlcNN_explosions.xtbl, in an
+    /// archive of its build\dlcNN\pc\cache folder; the player's copy has what it has), which take room
+    /// from the explosions the world can add (see <see cref="GuerrillaEffectTables.ExplosionLimit"/>).
+    /// </summary>
+    static int DlcExplosions(string game)
+    {
+        int count = 0;
+        string build = Path.Combine(game, "build");
+        if (!Directory.Exists(build)) return 0;
+        foreach (string dlc in Directory.GetDirectories(build, "dlc*"))
+        {
+            string cache = Path.Combine(dlc, "pc", "cache");
+            if (!Directory.Exists(cache)) continue;
+            foreach (string archive in Directory.GetFiles(cache, "*.vpp_pc"))
+            {
+                var pack = Packfile.Open(archive);
+                foreach (var entry in pack.Entries.Where(e => e.Name.StartsWith("dlc", StringComparison.OrdinalIgnoreCase) &&
+                                                              e.Name.EndsWith("_explosions.xtbl", StringComparison.OrdinalIgnoreCase)))
+                    count += XtblFile.FromBytes(pack.Read(entry)).Entries.Count();
+            }
+        }
+        return count;
+    }
 
     /// <summary>Whether a file is one the asset list names as a primitive (a header file; its data file goes with it).</summary>
     static bool IsHeader(string name)

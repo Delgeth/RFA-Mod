@@ -101,7 +101,8 @@
 // (lod_properties.xtbl: the LOD class an object names, Guerrilla's switch-off distances added) are
 // handed over the same way, and so are the effects: level_objects.xtbl (what a destructible object
 // shows when it breaks or is hit), effects.xtbl and vfx.xtbl (the visual effects and their files),
-// each Armageddon's with Guerrilla's entries the world uses added under "rfg_" names.
+// and explosions.xtbl (what an object dies in), each Armageddon's with Guerrilla's entries the world
+// uses added under "rfg_" names.
 #define RFA_MOD_NAME "guerrilla_world"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -270,9 +271,10 @@ using NamePoolInitFn = void(__fastcall*)(void* pool, void* unused, void* buffer,
 NamePoolInitFn g_namePoolInit;
 
 // The tables the world builder writes for the mod to hand the game: the gameplay properties, the draw
-// distances (LOD classes), and the effects (visual effects, effects, level objects), each read at
-// start-up (the visual effects before the effects, which name them, and those before the level
-// objects, which name the effects).
+// distances (LOD classes), and the effects (visual effects, effects, explosions, level objects), each
+// read at start-up (the visual effects before the effects, which name them, and those before the
+// level objects, which name the effects; the explosions name effects too, and level objects name
+// explosions).
 struct BuiltTable {
     const char* name;         // its file name, in mods\guerrilla_world\ and as the game asks for it
     const char* what;         // for the log
@@ -283,6 +285,7 @@ BuiltTable g_builtTables[] = {
     {"lod_properties.xtbl", "Draw distances", {}},
     {"vfx.xtbl", "Visual effects", {}},
     {"effects.xtbl", "Effects", {}},
+    {"explosions.xtbl", "Explosions", {}},
     {"level_objects.xtbl", "Level objects", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
