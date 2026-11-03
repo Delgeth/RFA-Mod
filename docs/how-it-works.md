@@ -345,8 +345,10 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   light of its own. The light pass renders its shadow map into the shared map and draws it
   (`0xEF67D0`); right after, while the map and the lamp's constants (its shadow projection) are
   still bound, the mod draws the sun's light through them, with the game's own shadow test: the
-  pixel's place taken into the map and compared with it at nine texels round it. The sky's light is
-  added after the pass as before.
+  pixel's place taken into the map and compared with it over a square three texels across, each
+  texel counted by how much of it the square covers, so the edge slides smoothly from texel to
+  texel. The map's size is the game's `ShadowDetail` video setting (4096 across by default). The
+  sky's light is added after the pass as before.
 - **The sun's shine**: a surface's shine comes from the light buffer's alpha, which only lamps
   write, so Guerrilla's specular maps showed nothing. The mod's sun writes it as Armageddon's
   lamps do: the sun reflected off the surface toward the eye, to the power of the surface's

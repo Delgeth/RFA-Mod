@@ -1301,7 +1301,8 @@ float4 BackdropPixel(CloudPoint p) : SV_Target
 // The shadow is the game's own test (ir_light_spot): the pixel's place in the camera's space (from its
 // depth, as the lamps work it out: the ray through the lamp's inverse projection, times the distance
 // ahead from IR_Similarity_Data) taken into the shadow map by Shadow_map_projTM, compared with the map
-// at nine texels round it; it fades out away from the camera and leaves at least Shadow_map_fade_params.x.
+// over three texels round it, weighed as the game does; it fades out away from the camera and leaves at
+// least Shadow_map_fade_params.x.
 constexpr char kLightShader[] = R"(
 cbuffer Light : register(b0)
 {
@@ -1352,10 +1353,24 @@ float SunShadow(float2 at, float facing)
     float texel = ShadowFade.w / length(ShadowRows[0].xyz);
     float slope = min(sqrt(saturate(1 - facing * facing)) / max(facing, 0.05), 6);
     float bias = (1 + 2 * slope) * texel * length(ShadowRows[2].xyz);
+    // The test over a square three texels across centred on the point, each texel counted by how much
+    // of it the square covers (the game's own lamps weigh theirs the same way): the edge slides
+    // smoothly from texel to texel instead of stepping.
+    uint width, height;
+    ShadowMap.GetDimensions(width, height);
+    float2 start = mapped.xy * float2(width, height) - 1.5;
+    float2 first = floor(start);
+    float2 part = start - first;
+    float4 across = float4(1 - part.x, 1, 1, part.x);
+    float4 down = float4(1 - part.y, 1, 1, part.y);
     float lit = 0;
-    for (int y = -1; y <= 1; ++y)
-        for (int x = -1; x <= 1; ++x)
-            lit += ShadowMap.SampleLevel(Nearest, mapped.xy + float2(x, y) * ShadowFade.w, 0).x < mapped.z - bias ? 0 : 1;
+    [unroll] for (int y = 0; y < 4; ++y)
+        [unroll] for (int x = 0; x < 4; ++x)
+        {
+            int2 cell = clamp(int2(first) + int2(x, y), 0, int2(width, height) - 1);
+            float stored = ShadowMap.Load(int3(cell, 0)).x;
+            lit += (stored < mapped.z - bias ? 0 : 1) * across[x] * down[y];
+        }
     float fade = saturate((ShadowFade.y - surface.z) * ShadowFade.z);
     return max(1 - (1 - lit / 9) * fade, ShadowFade.x);
 }
