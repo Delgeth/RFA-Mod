@@ -260,9 +260,10 @@ public static class GuerrillaEffects
         foreach (var (to, from, size) in BlockCopy) Array.Copy(c, e + from, b, to, size);
         b[0x02] = (byte)(I(e + 0x188) switch { 5 => 6, 6 => 5, var t => t });  // particle type: Guerrilla's nodes 5 and radial 6 swapped
         b[0x10] = (byte)Math.Clamp(I(e + 0x184), 0, 255);                       // tails
-        // Guerrilla's use_length and use_length_mid_value: which of +0x14/+0x15 is which isn't known
-        // (alike in every emitter both games have), so both on when the length is used.
-        b[0x14] = b[0x15] = c[e + 0x19E];
+        // Guerrilla's loader turns on every emitter's size and colour variances (its files have no
+        // flag for them); Armageddon reads them from +0x20 and +0x22 (both 0 in its own files).
+        b[0x20] = 1;  // use_size_variance
+        b[0x22] = 1;  // use_color_variance
         foreach (var (at, value) in Fixed) BitConverter.TryWriteBytes(b.AsSpan(at), value);
         for (int k = 0; k < 5; k++)
         {
@@ -292,10 +293,12 @@ public static class GuerrillaEffects
         (0x0C, 0x170, 4),  // weight end
         (0x12, 0x168, 1),  // rotation_enabled
         (0x13, 0x1B4, 1),  // is_random_start_rotation
+        (0x14, 0x19E, 1),  // use_length
+        (0x15, 0x19D, 1),  // use_length_mid_value
         (0x16, 0x4B, 1),   // local_space_emission
         (0x17, 0x4A, 1),   // inherit_velocity
-        (0x18, 0x84, 1),   // use_color_mid_value
-        (0x19, 0x19C, 1),  // use_size_mid_value
+        (0x18, 0x19C, 1),  // use_size_mid_value
+        (0x19, 0x84, 1),   // use_color_mid_value
         (0x1A, 0x86, 1),   // use_color_saturation_value
         (0x1B, 0x138, 1),  // use_additive_key_value
         (0x1C, 0x3D, 1),   // is_reverse_render

@@ -345,9 +345,11 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   light of its own. The light pass renders its shadow map into the shared map and draws it
   (`0xEF67D0`); right after, while the map and the lamp's constants (its shadow projection) are
   still bound, the mod draws the sun's light through them, with the game's own shadow test: the
-  pixel's place taken into the map and compared with it over a square three texels across, each
-  texel counted by how much of it the square covers, so the edge slides smoothly from texel to
-  texel. The map's size is the game's `ShadowDetail` video setting (4096 across by default). The
+  pixel's place, moved out a little along its normal (more the more it slants from the sun, with only
+  a texel or two of depth held back, so a surface doesn't shadow itself through the map's wide texels
+  yet a thin overhang such as a roof's edge still shadows what's under it), taken into the map and
+  compared with it over a square three texels across, each texel counted by how much of it the
+  square covers, so the edge slides smoothly from texel to texel. The map's size is the game's `ShadowDetail` video setting (4096 across by default). The
   sky's light is added after the pass as before.
 - **The sun's shine**: a surface's shine comes from the light buffer's alpha, which only lamps
   write, so Guerrilla's specular maps showed nothing. The mod's sun writes it as Armageddon's
@@ -379,9 +381,28 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   scene (4.5 × its luminance) and eased toward at the district's `iris_rate`; the exposure
   `E = range / max(1 + offset × (base + amount × (L − base)), 0.1)` from the time of day's
   `tonemap_lum_range`, `tonemap_lum_offset`, `eye_adaption_base` and `eye_adaption_amount`, which
-  the world builder writes; then `1 − e^(−E × (colour + bloom + sun shafts))` and the sRGB curve. `Exposure=`
-  scales `E` (1 is Guerrilla's). The sky's brightness setting is a fifth under it, since Guerrilla's
-  sky goes through the same exposure.
+  the world builder writes; then `1 − (1 − particles) × e^(−E × (colour × (1 − cover) + bloom + sun
+  shafts))` (the particles below; without them `1 − e^(−E × (colour + bloom + sun shafts))`) and the
+  sRGB curve. `Exposure=` scales `E` (1 is Guerrilla's). The sky's brightness setting is a fifth under
+  it, since Guerrilla's sky goes through the same exposure.
+- **The particles** (`Particles=`, with the tone mapping): Guerrilla draws its particles into a
+  buffer of their own (their colour, and in its alpha how much they cover) and lays it over the picture
+  only in its last tone mapping pass, as above: particles keep the colour they're drawn in, dim only
+  what's behind them, and never feed the bloom or the eye's brightness. Armageddon draws them into the
+  lit scene before its bloom, where Guerrilla's colours burn out (an EDF screen's blue glow added to
+  its lit screen went white and bloomed). Armageddon draws them all in one phase (`0xC35FC0`: the
+  half-res ones, laid in at the end of `0xC35DD0`, then the full-resolution ones, `0xC35040`), into
+  the scene with premultiplied blending, all four channels written, before a last step for the heat
+  distortion (`0xC35CF0`). In our worlds the mod copies the scene aside and clears it as the phase
+  starts, so the phase leaves exactly Guerrilla's particle buffer in it; before the last step it
+  copies that into a layer of its own and puts the scene back, so the distortion, the bloom and the
+  eye see no particles; the tone mapping lays the layer over the picture. `Particles=0` leaves them
+  to Armageddon.
+- **The renderer's warnings**: when one of the renderer's pools runs out (GPU visibility queries,
+  decals, render calls, ...) it sets a bit in a word (the renderer at `0x11BA7F0`, +0x60, then +4)
+  and shows a "RENDER_LIB WARNINGS" box with a line a bit, two of them with no text. The box only
+  flashes on the screen, so the mod names each bit in the log the first time it appears in our
+  worlds.
 - **The sun** (`SunShafts=`): Armageddon draws no sun in our worlds. Guerrilla's sun is an orbital of
   the world's global time of day (`terr01.gtodx`, which the world builder writes as `rfg.gtodx`): a
   texture, a size, a colour and an opacity, each a curve over the day, along the sun's path (the same
@@ -463,7 +484,15 @@ converts:
   runs. When a level loads, the game checks that within each island of the people's mesh the
   cells no mission has switched off are one piece ("Isolated sub-islands found!"), so the people's
   islands are numbered that way. The scenery zones around the map get a file with no navigation,
-  as in Guerrilla.
+  as in Guerrilla. Buildings bring navpoints of their own, which the game makes as each streams in
+  (navpoint stream `0x7F08A0`); a transition point, joining a building's points to the ground's
+  mesh, looks for the cell under it (`0x5B9AA0`), skipping cells a mission has switched off.
+  Guerrilla switches off the ground's cells round many of its buildings, so some of these points
+  stand on no cell the game takes ("Invalid transition navpoint ... can not find nav cell").
+  Guerrilla's own loader then links such a point to the nearest open point of the mesh; Armageddon's
+  reports it instead. In our worlds guerrilla_world gives the point the nearest open cell, asking the
+  game's lookup again on rings round it (every half metre, out to 10 m), which joins it where
+  Guerrilla's link would; the log names each one.
 - **The destructible objects** (Guerrilla's `rfg_mover`s and `general_mover`s). Each chunk file
   (`.cchk_pc`, Guerrilla's version 55) is rewritten as Armageddon's version 62 (`GuerrillaChunks`):
   the mesh block, the materials moved onto Armageddon's shaders (`GuerrillaMaterials`), the
@@ -501,8 +530,10 @@ converts:
   (`GuerrillaEffects`: Guerrilla's effect format, versions 21 to 26, written as Armageddon's
   version 36: its emitters, lights, meshes and coronas reworked, each emitter's material given the
   values Armageddon keeps after it (taken from Guerrilla's emitter: self-illumination, ambient and
-  diffuse colours and the rest), its meshes' materials on Armageddon's shaders, and the fixes
-  Guerrilla's loader makes to its older files), with its
+  diffuse colours and the rest), each emitter's flags where Armageddon reads them (whether its
+  particles grow through their middle sizes, lengths and colours, as Guerrilla's file says) with the
+  size and colour variances Guerrilla's loader turns on for every emitter, its meshes' materials on
+  Armageddon's shaders, and the fixes Guerrilla's loader makes to its older files), with its
   textures (`GuerrillaTextures`: found in Guerrilla's effect archives, flip-book tiles kept), into
   the container of each zone whose objects show it, and a group of its own is named after each file
   (`rfg_<name>.cefct_pc`) in Armageddon's effects asset list (an override of `effects.vpp_pc`'s

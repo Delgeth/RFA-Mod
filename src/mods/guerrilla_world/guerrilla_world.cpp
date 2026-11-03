@@ -514,6 +514,12 @@ void ReadToneMapping() {
 
 bool GuerrillaToneMapping() { return g_toneMapping && !g_toneMappingFailed; }
 
+// Guerrilla's particle layer with its tone mapping (Particles=; read again whenever rfa_mods.ini is
+// saved): see ParticlePhase. 0 = particles drawn into the scene as Armageddon draws them.
+bool g_particles = true;
+
+void ReadParticles() { g_particles = rfa::IniInt(L"GuerrillaWorld", L"Particles", 1) != 0; }
+
 // Guerrilla's sun shafts, drawn with its tone mapping: how strong, times Guerrilla's own (SunShafts=;
 // 0: none; read again whenever rfa_mods.ini is saved).
 float g_sunShafts = 1.0f;
@@ -614,6 +620,9 @@ void CheckSettings() {
     const bool shadowsBefore = g_sunShadows;
     ReadSunShadows();
     if (g_sunShadows != shadowsBefore) rfa::Log("Sun's shadows: %s", g_sunShadows ? "on" : "off");
+    const bool particlesBefore = g_particles;
+    ReadParticles();
+    if (g_particles != particlesBefore) rfa::Log("Particles: %s", g_particles ? "in a layer of their own, as Guerrilla's" : "drawn into the scene, as Armageddon's");
     const float clockBefore = g_clockSpeed;
     ReadClockSpeed();
     if (g_clockSpeed != clockBefore && g_clockOurs) {
@@ -976,6 +985,113 @@ void __cdecl ReportError(int level, int flag, const char* format, va_list argume
     g_reportError(level, flag, format, arguments);
 }
 
+// The renderer's warnings: when one of its pools runs out it sets a bit in a word (the renderer,
+// [0x11BA7F0], +0x60, then +4) and draws a "RENDER_LIB WARNINGS" box with a line a bit, a message for
+// each but two (0x40 and 0x400 show as an empty line). The box only shows on the screen; each bit is
+// named in the log the first time it is seen in our worlds.
+constexpr DWORD kRenderer = 0x11BA7F0;
+constexpr size_t kRendererMetrics = 0x60, kMetricsWarnings = 0x04;
+struct RenderWarning { DWORD bit; const char* text; };
+constexpr RenderWarning kRenderWarnings[] = {
+    {0x1, "out of dynamic indices"}, {0x2, "out of instance buffer space"}, {0x4, "out of instance blocks"},
+    {0x8, "out of dynamic render groups"}, {0x10, "out of decals"}, {0x20, "out of decal blocks"},
+    {0x80, "out of buffer space on the hardware"}, {0x100, "out of morph weight memory"},
+    {0x200, "out of unbatched renderable trackers"}, {0x800, "out of render calls"}, {0x1000, "out of visibility list entries"},
+    {0x2000, "out of GPU visibility queue entries"}, {0x4000, "out of GPU occlusion queries"}, {0x8000, "out of Edge geometry jobs"},
+    {0x10000, "out of light volume buffer space"}, {0x20000, "out of batched visibility entries"}, {0x40000, "dynamic vertices stall"},
+    {0x80000, "dynamic clone vertices stall"}, {0x100000, "dynamic indices stall"}, {0x200000, "dynamic instance vertices stall"},
+};
+DWORD g_renderWarningsLogged = 0;
+
+void NoteRenderWarnings() {
+    if (!InOurWorld()) return;
+    const BYTE* renderer = *reinterpret_cast<BYTE* const*>(kRenderer);
+    const BYTE* metrics = renderer ? *reinterpret_cast<const BYTE* const*>(renderer + kRendererMetrics) : nullptr;
+    const DWORD warnings = metrics ? *reinterpret_cast<const DWORD*>(metrics + kMetricsWarnings) : 0;
+    const DWORD fresh = warnings & ~g_renderWarningsLogged;
+    if (!fresh) return;
+    g_renderWarningsLogged |= fresh;
+    for (DWORD bit = 1; bit; bit <<= 1) {
+        if (!(fresh & bit)) continue;
+        const char* text = nullptr;
+        for (const RenderWarning& warning : kRenderWarnings)
+            if (warning.bit == bit) text = warning.text;
+        if (text) rfa::Log("Render warning (0x%X): %s", bit, text);
+        else rfa::Log("Render warning (0x%X): one the game shows with no message", bit);
+    }
+}
+
+// ---- Transition navpoints
+
+// A building's navpoints come with its destructible object, and the game makes them as it streams the
+// object in (navpoint's stream, 0x7F08A0, thiscall, one bool, ret 4). A transition navpoint (type 11, the
+// byte at +0xF4; one joining the building's points to the ground's navigation) then looks for the nav
+// cell under its position (+0x04) with the cell lookup (0x5B9AA0, cdecl, a query whose +0 points at the
+// position; it returns the cell, or none), skipping the cells switched off (flags 0x08 and 0x10).
+// Guerrilla switches off the ground's cells round many buildings until a mission switches them on, so
+// in our worlds some of these points stand on no cell the lookup takes, and the game reports
+// "Invalid transition navpoint ... can not find nav cell". Guerrilla's own navpoint stream does the same
+// lookup and then, finding none, makes a navpoint at the nearest point of an open cell and links the
+// two. Here the transition point is given that nearest open cell itself (the lookup asked again round
+// it, ring by ring), which joins it to the ground's navigation in the same place; the game then keeps
+// it in that cell as it does any other.
+constexpr DWORD kNavpointStream = 0x7F08A0;
+constexpr size_t kNavpointStreamPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0A8h
+using NavpointStreamFn = bool(__fastcall*)(BYTE* navpoint, void* unused, bool flag);
+NavpointStreamFn g_navpointStream;
+constexpr DWORD kFindNavCell = 0x5B9AA0;
+constexpr size_t kFindNavCellPrologue = 9;  // push ebp / mov ebp,esp / sub esp,474h
+using FindNavCellFn = void*(__cdecl*)(BYTE* query);
+FindNavCellFn g_findNavCell;
+constexpr size_t kNavpointPosition = 0x04, kNavpointHandle = 0x68, kNavpointType = 0xF4;
+constexpr char kTransitionNavpoint = 11;
+constexpr size_t kNavQuerySize = 0x30;   // the caller's query on its stack, with what the lookup writes back
+constexpr float kNavRingStep = 0.5f;     // the rings round the point, every half metre ...
+constexpr int kNavRings = 20;            // ... out to 10 m
+constexpr int kNavRingDirections = 16;
+thread_local BYTE* g_streamingNavpoint = nullptr;  // the navpoint this thread is streaming in, while its stream runs
+int g_navpointsJoined = 0;
+
+bool __fastcall NavpointStream(BYTE* navpoint, void* unused, bool flag) {
+    BYTE* outer = g_streamingNavpoint;
+    g_streamingNavpoint = navpoint;
+    const bool result = g_navpointStream(navpoint, unused, flag);
+    g_streamingNavpoint = outer;
+    return result;
+}
+
+void* __cdecl FindNavCell(BYTE* query) {
+    void* cell = g_findNavCell(query);
+    BYTE* navpoint = g_streamingNavpoint;
+    const float* position = navpoint ? reinterpret_cast<const float*>(navpoint + kNavpointPosition) : nullptr;
+    if (cell || !navpoint || *reinterpret_cast<const char*>(navpoint + kNavpointType) != kTransitionNavpoint ||
+        *reinterpret_cast<const float* const*>(query) != position || !InOurWorld())
+        return cell;
+    BYTE ask[kNavQuerySize];
+    memcpy(ask, query, sizeof(ask));
+    float around[3] = {position[0], position[1], position[2]};
+    *reinterpret_cast<float**>(ask) = around;
+    const DWORD handle = *reinterpret_cast<const DWORD*>(navpoint + kNavpointHandle);
+    for (int ring = 1; ring <= kNavRings; ++ring) {
+        const float distance = ring * kNavRingStep;
+        for (int direction = 0; direction < kNavRingDirections; ++direction) {
+            const float angle = direction * 6.2831853f / kNavRingDirections;
+            around[0] = position[0] + distance * cosf(angle);
+            around[2] = position[2] + distance * sinf(angle);
+            cell = g_findNavCell(ask);
+            if (!cell) continue;
+            if (g_navpointsJoined++ < 50)
+                rfa::Log("Pathfinding: transition navpoint %08X at (%.1f, %.1f, %.1f) stands on no open nav cell; joined to the nearest "
+                         "open one, %.1f m away, as Guerrilla links such a point to the nearest open place",
+                         handle, position[0], position[1], position[2], distance);
+            return cell;
+        }
+    }
+    rfa::Log("Pathfinding: transition navpoint %08X at (%.1f, %.1f, %.1f) has no open nav cell within %.0f m",
+             handle, position[0], position[1], position[2], kNavRings * kNavRingStep);
+    return nullptr;
+}
+
 int g_debugPrintsLogged = 0;
 
 void __cdecl DebugPrint(const char* format, ...) {
@@ -1300,9 +1416,9 @@ float4 BackdropPixel(CloudPoint p) : SV_Target
 // the sun's lamp's shadow map, as the light pass draws that lamp, then the sky's light after the pass.
 // The shadow is the game's own test (ir_light_spot): the pixel's place in the camera's space (from its
 // depth, as the lamps work it out: the ray through the lamp's inverse projection, times the distance
-// ahead from IR_Similarity_Data) taken into the shadow map by Shadow_map_projTM, compared with the map
-// over three texels round it, weighed as the game does; it fades out away from the camera and leaves at
-// least Shadow_map_fade_params.x.
+// ahead from IR_Similarity_Data), moved out a little along its normal, taken into the shadow map by
+// Shadow_map_projTM, compared with the map over three texels round it, weighed as the game does; it
+// fades out away from the camera and leaves at least Shadow_map_fade_params.x.
 constexpr char kLightShader[] = R"(
 cbuffer Light : register(b0)
 {
@@ -1335,8 +1451,9 @@ Texture2D ShadowMap : register(t1);
 Texture2D Depth : register(t2);
 SamplerState Nearest : register(s0);
 
-// facing: how squarely the surface faces the sun (its normal · toward the sun).
-float SunShadow(float2 at, float facing)
+// n: the surface's normal, facing: how squarely it faces the sun (n · toward the sun). The normals
+// are in the camera's space as the positions worked out here are (the game's lamps light with both).
+float SunShadow(float2 at, float3 n, float facing)
 {
     float depth = Depth.SampleLevel(Nearest, at, 0).x;
     float ahead = 1 / (SimilarityData.z * depth + SimilarityData.w);
@@ -1344,15 +1461,19 @@ float SunShadow(float2 at, float facing)
     float4 near = InverseProjection[0] * corner.x + InverseProjection[1] * corner.y + InverseProjection[3];
     float3 ray = near.xyz / near.w;
     float4 surface = float4(ray / ray.z * ahead, 1);
-    float4 inMap = float4(dot(ShadowRows[0], surface), dot(ShadowRows[1], surface), dot(ShadowRows[2], surface), dot(ShadowRows[3], surface));
+    // So that a surface doesn't shadow itself through the map's wide texels (a texel's width in metres
+    // from the map's width, its depth per metre from the map's depth), the point looked up is moved
+    // out along the surface's normal, more the more it slants from the sun, and its depth held back
+    // by a texel or two. Moving out instead of holding the depth far back keeps thin overhangs (a
+    // roof's edge just above a wall) casting their shadow on what is under them.
+    float texel = ShadowFade.w / length(ShadowRows[0].xyz);
+    float slant = sqrt(saturate(1 - facing * facing));
+    float4 lookup = float4(surface.xyz + n * texel * (1 + 2 * slant), 1);
+    float4 inMap = float4(dot(ShadowRows[0], lookup), dot(ShadowRows[1], lookup), dot(ShadowRows[2], lookup), dot(ShadowRows[3], lookup));
     float3 mapped = inMap.xyz / inMap.w;
     if (any(mapped.xy < 0) || any(mapped.xy > 1)) return 1;
-    // The surface's own depth held back by about a texel along its slope to the sun, so that it
-    // doesn't shadow itself: the map's texels are far wider than the game's own lamps' (a texel's
-    // width in metres from the map's width, its depth per metre from the map's depth).
-    float texel = ShadowFade.w / length(ShadowRows[0].xyz);
-    float slope = min(sqrt(saturate(1 - facing * facing)) / max(facing, 0.05), 6);
-    float bias = (1 + 2 * slope) * texel * length(ShadowRows[2].xyz);
+    float slope = min(slant / max(facing, 0.05), 1);
+    float bias = (1 + slope) * texel * length(ShadowRows[2].xyz);
     // The test over a square three texels across centred on the point, each texel counted by how much
     // of it the square covers (the game's own lamps weigh theirs the same way): the edge slides
     // smoothly from texel to texel instead of stepping.
@@ -1400,7 +1521,7 @@ float4 LightPixel(float4 position : SV_Position) : SV_Target
     float3 reflection = 2 * facing * n - SunToward.xyz;
     float toEye = max(saturate(dot(reflection, -eye)), 0.000001);
     float shine = saturate(facing) * pow(toEye, sharpness) * dot(SunColour.rgb, float3(0.3, 0.59, 0.11));
-    float shadow = Parts.z > 0 && facing > 0 ? SunShadow(at, facing) : 1;
+    float shadow = Parts.z > 0 && facing > 0 ? SunShadow(at, n, facing) : 1;
     return float4(sky * Parts.x + sun * Parts.y * shadow, shine * Parts.y * shadow);
 }
 )";
@@ -1473,6 +1594,7 @@ Texture2D Scene : register(t0);
 Texture2D Bloom : register(t1);
 Texture2D Adapted : register(t2);  // 1 x 1: the brightness the eye has adapted to
 Texture2D SunShafts : register(t3);
+Texture2D Particles : register(t4);  // Guerrilla's particle layer: their colour, and in alpha how much they cover (none: zeros)
 SamplerState Smooth : register(s0);
 
 float4 ToneVertex(uint id : SV_VertexID) : SV_Position
@@ -1503,7 +1625,10 @@ float4 TonePixel(float4 position : SV_Position) : SV_Target
     float3 shafts = max(SunShafts.Sample(Smooth, position.xy / Picture.zw).rgb, 0) * Picture.y * Shafts.x;
     float adapted = Adapted.Load(int3(0, 0, 0)).r;
     float exposure = Exposure.x / max(1 + Exposure.y * (Exposure.z + Exposure.w * (adapted - Exposure.z)), 0.1) * Picture.x;
-    float3 picture = saturate(1 - exp(-exposure * (colour + bloom + shafts)));
+    float4 particles = Particles.Load(int3(position.xy, 0));
+    float3 laid = min(max(particles.rgb, 0), 0.996);
+    float behind = saturate(1 - particles.a);
+    float3 picture = saturate(1 - (1 - laid) * exp(-exposure * (colour * behind + bloom + shafts)));
     float3 encoded = picture <= 0.0031308 ? picture * 12.92 : 1.055 * pow(picture, 1 / 2.4) - 0.055;
     return float4(encoded, 1);
 }
@@ -3002,6 +3127,10 @@ LARGE_INTEGER g_toneLast = {};
 ULONGLONG g_lastEyeLog = 0;
 bool g_eyeReadPending = false;
 
+// Guerrilla's particle layer (see ParticlePhase): this frame's particles, once the phase has drawn them.
+ID3D11ShaderResourceView* g_particleView = nullptr;
+bool g_particlesReady = false;
+
 void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* scene, ID3D11ShaderResourceView* bloom, UINT width, UINT height) {
     // The frame's time, for the eye (a new start after a gap of more than a second).
     LARGE_INTEGER now, frequency;
@@ -3081,14 +3210,15 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     const D3D11_VIEWPORT whole = {0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
     g_context->OMSetRenderTargets(1, &target, nullptr);
     g_context->RSSetViewports(1, &whole);
-    ID3D11ShaderResourceView* pictureInputs[4] = {scene, bloom, g_eyeView[next], sunShafts};
-    g_context->PSSetShaderResources(0, 4, pictureInputs);
+    ID3D11ShaderResourceView* pictureInputs[5] = {scene, bloom, g_eyeView[next], sunShafts, g_particlesReady ? g_particleView : nullptr};
+    g_context->PSSetShaderResources(0, 5, pictureInputs);
+    g_particlesReady = false;
     g_context->PSSetShader(g_tonePixel, nullptr, 0);
     g_context->OMSetBlendState(g_toneBlend, noFactor, 0xFFFFFFFF);
     g_context->Draw(3, 0);
 
-    ID3D11ShaderResourceView* none[4] = {};
-    g_context->PSSetShaderResources(0, 4, none);
+    ID3D11ShaderResourceView* none[5] = {};
+    g_context->PSSetShaderResources(0, 5, none);
     g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, gameTargets, gameDepthView);
     g_context->RSSetViewports(viewportCount, gameViewports);
     g_context->OMSetDepthStencilState(gameDepth, stencilRef);
@@ -3303,6 +3433,7 @@ void __fastcall DrawLamp(void* renderer, void* unused, BYTE* entry, BYTE* shadow
 }
 
 void __fastcall LightPass(void* renderer, void* unused) {
+    NoteRenderWarnings();
     const bool ours = g_context && InOurWorld();
     g_inLightPass = ours && g_lightOn && !g_lightFailed;
     if (g_inLightPass && !g_lightVertex && !MakeLightObjects()) {
@@ -3435,6 +3566,7 @@ void TellComposite(int which) {
 void __fastcall FinalComposite0(void* compositor, void* unused, int flag) {
     g_finalComposite[0](compositor, unused, flag);
     if (!InOurWorld()) return;
+    NoteRenderWarnings();
     TellComposite(0);
     ToneMapAfterComposite();
 }
@@ -3442,6 +3574,7 @@ void __fastcall FinalComposite0(void* compositor, void* unused, int flag) {
 void __fastcall FinalComposite1(void* compositor, void* unused, int flag) {
     g_finalComposite[1](compositor, unused, flag);
     if (!InOurWorld()) return;
+    NoteRenderWarnings();
     TellComposite(1);
     ToneMapAfterComposite();
 }
@@ -3453,6 +3586,129 @@ using CreateDeviceFn = HRESULT(WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE,
 CreateDeviceFn g_createDevice;
 
 // Notes the device the game makes (the last one, if it makes several), and keeps it alive.
+// ---- Guerrilla's particle layer
+
+// Guerrilla draws its particles into a buffer of their own (premultiplied colour, and in alpha how
+// much they cover) and lays it over the picture only in its final tone mapping (rl_hdr pass 21):
+// picture = 1 − (1 − particles) · e^(−exposure · (scene · (1 − cover) + bloom)). So particles keep
+// the colour they are drawn in, dim only what is behind them, and never feed the bloom or the eye.
+// Armageddon draws them into the lit scene before its bloom, where Guerrilla's colours (made for
+// Guerrilla's way) burn out: an EDF screen's glow added to its lit screen turns white and blooms.
+//
+// Armageddon draws them all in one phase (0xC35FC0, thiscall, one argument, ret 4): the half-res
+// ones (0xC35DD0, laid into the scene at its end), the full-resolution ones (0xC35040), then a last
+// step (0xC35CF0, none) for the heat distortion, which reads the scene. All of them draw into the
+// scene (half floats) with premultiplied blending (colour one / one − source alpha, alpha the same,
+// all four written), so a scene cleared to nothing ends the phase holding exactly Guerrilla's
+// particle buffer. In our worlds with Guerrilla's tone mapping (Particles=1): at the phase's start
+// the scene is copied aside and cleared; at the last step's start (or the phase's end) what it then
+// holds is copied into our layer and the scene put back, so the distortion, the bloom and the eye see
+// the scene without particles; the tone mapping lays the layer over it. Otherwise the game draws its
+// particles its own way.
+constexpr DWORD kParticlePhase = 0xC35FC0, kParticleLast = 0xC35CF0;
+constexpr size_t kParticlePhasePrologue = 5;  // push ebp / mov ebp,esp / push −1 (both)
+using ParticlePhaseFn = void(__fastcall*)(void* renderer, void* unused, int value);
+using ParticleLastFn = void(__fastcall*)(void* renderer, void* unused);
+ParticlePhaseFn g_particlePhase;
+ParticleLastFn g_particleLast;
+ID3D11Texture2D* g_particleSceneCopy = nullptr;  // the scene as the phase found it
+ID3D11Texture2D* g_particleTaken = nullptr;      // what the phase drew, as drawn (multisampled if the scene is)
+ID3D11Texture2D* g_particleResolved = nullptr;   // ... and resolved, when it is
+ID3D11Texture2D* g_particleScene = nullptr;      // the scene being drawn into, while the phase runs
+D3D11_TEXTURE2D_DESC g_particleDesc = {};
+bool g_particleLayerFailed = false;
+
+bool ParticlesWanted() {
+    return g_particles && !g_particleLayerFailed && GuerrillaToneMapping() && g_toneVertex && g_context && g_device && InOurWorld();
+}
+
+// The layer's textures for a scene of this description (made again when it changes).
+bool MakeParticleTextures(const D3D11_TEXTURE2D_DESC& scene) {
+    if (g_particleSceneCopy && scene.Width == g_particleDesc.Width && scene.Height == g_particleDesc.Height &&
+        scene.Format == g_particleDesc.Format && scene.SampleDesc.Count == g_particleDesc.SampleDesc.Count &&
+        scene.SampleDesc.Quality == g_particleDesc.SampleDesc.Quality && scene.MipLevels == g_particleDesc.MipLevels)
+        return true;
+    for (ID3D11Texture2D** texture : {&g_particleSceneCopy, &g_particleTaken, &g_particleResolved}) {
+        if (*texture) (*texture)->Release();
+        *texture = nullptr;
+    }
+    if (g_particleView) g_particleView->Release();
+    g_particleView = nullptr;
+    g_particleDesc = scene;
+    D3D11_TEXTURE2D_DESC copy = scene;
+    copy.Usage = D3D11_USAGE_DEFAULT;
+    copy.BindFlags = 0;
+    copy.CPUAccessFlags = 0;
+    copy.MiscFlags = 0;
+    const bool multisampled = scene.SampleDesc.Count > 1;
+    D3D11_TEXTURE2D_DESC taken = copy;
+    if (!multisampled) taken.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_TEXTURE2D_DESC resolved = copy;
+    resolved.SampleDesc = {1, 0};
+    resolved.MipLevels = 1;
+    resolved.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    bool ok = SUCCEEDED(g_device->CreateTexture2D(&copy, nullptr, &g_particleSceneCopy)) &&
+              SUCCEEDED(g_device->CreateTexture2D(&taken, nullptr, &g_particleTaken)) &&
+              (!multisampled || SUCCEEDED(g_device->CreateTexture2D(&resolved, nullptr, &g_particleResolved)));
+    ok = ok && SUCCEEDED(g_device->CreateShaderResourceView(multisampled ? g_particleResolved : g_particleTaken, nullptr, &g_particleView));
+    if (!ok) {
+        g_particleLayerFailed = true;
+        rfa::Log("Particles: could not make the particle layer's textures; the game draws its particles its own way");
+        return false;
+    }
+    rfa::Log("Particles: drawn into a layer of their own and laid over the picture as Guerrilla does (%u x %u, format %d, %u samples)",
+             scene.Width, scene.Height, static_cast<int>(scene.Format), scene.SampleDesc.Count);
+    return true;
+}
+
+// At the phase's start: the scene being drawn into, copied aside and cleared.
+void SetSceneAside() {
+    if (g_particleScene || !ParticlesWanted()) return;
+    ID3D11RenderTargetView* target = nullptr;
+    g_context->OMGetRenderTargets(1, &target, nullptr);
+    if (!target) return;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Resource* resource = nullptr;
+    target->GetResource(&resource);
+    ID3D11Texture2D* scene = nullptr;
+    if (resource && TextureOf(target, desc) && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+        SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&scene))) && MakeParticleTextures(desc)) {
+        if (g_particlesReady) RFA_LOG_FIRST(3, "Particles: last frame's layer was never laid in (the tone mapping didn't draw)");
+        g_context->CopyResource(g_particleSceneCopy, scene);
+        const float nothing[4] = {0, 0, 0, 0};
+        g_context->ClearRenderTargetView(target, nothing);
+        g_particleScene = scene;  // (the reference kept until the scene is put back)
+        scene = nullptr;
+    } else {
+        RFA_LOG_FIRST(1, "Particles: the scene the particles draw into isn't a half-float target; the game draws them its own way there");
+    }
+    if (scene) scene->Release();
+    if (resource) resource->Release();
+    target->Release();
+}
+
+// Once the particles are drawn: what the scene holds is the layer, and the scene is put back.
+void TakeParticles() {
+    if (!g_particleScene) return;
+    g_context->CopyResource(g_particleTaken, g_particleScene);
+    if (g_particleResolved) g_context->ResolveSubresource(g_particleResolved, 0, g_particleTaken, 0, g_particleDesc.Format);
+    g_context->CopyResource(g_particleScene, g_particleSceneCopy);
+    g_particleScene->Release();
+    g_particleScene = nullptr;
+    g_particlesReady = true;
+}
+
+void __fastcall ParticlePhase(void* renderer, void* unused, int value) {
+    SetSceneAside();
+    g_particlePhase(renderer, unused, value);
+    TakeParticles();
+}
+
+void __fastcall ParticleLast(void* renderer, void* unused) {
+    TakeParticles();
+    g_particleLast(renderer, unused);
+}
+
 HRESULT WINAPI CreateDevice(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver, HMODULE software, UINT flags,
                             const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk, ID3D11Device** device,
                             D3D_FEATURE_LEVEL* level, ID3D11DeviceContext** context) {
@@ -3504,6 +3760,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadToneMapping();
     ReadSunShafts();
     ReadSunShadows();
+    ReadParticles();
     // Our worlds' zone size (and a physics world wide enough for them), and the streaming radii held
     // to what the game can track.
     if (g_zoneWidth > 0) {
@@ -3527,6 +3784,11 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_debugPrint) rfa::Log("Could not hook the game's debug print; what it says while loading our worlds isn't logged");
     g_precacheArea = reinterpret_cast<PrecacheAreaFn>(rfa::HookFunction(kPrecacheArea, kPrecacheAreaPrologue, reinterpret_cast<void*>(&PrecacheArea)));
     if (!g_precacheArea) rfa::Log("Could not hook the game's precache areas; our worlds' shared files won't be found");
+    g_navpointStream = reinterpret_cast<NavpointStreamFn>(
+        rfa::HookFunction(kNavpointStream, kNavpointStreamPrologue, reinterpret_cast<void*>(&NavpointStream)));
+    g_findNavCell = reinterpret_cast<FindNavCellFn>(rfa::HookFunction(kFindNavCell, kFindNavCellPrologue, reinterpret_cast<void*>(&FindNavCell)));
+    if (!g_navpointStream || !g_findNavCell)
+        rfa::Log("Could not hook the navpoints' streaming or the nav cell lookup; buildings' transition points on switched-off cells stay unjoined");
     // Guerrilla's gameplay properties, draw distances and effects, if the world builder has written them (the
     // game reads the tables while it starts, before any world).
     bool anyTable = false;
@@ -3588,6 +3850,13 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
             if (!g_followLights || !g_placeFollowLight || !g_drawLamp || !g_setTexture)
                 rfa::Log("Could not hook the follow player light or the light pass's lamps; the sun lights without shadows");
         }
+    }
+    // Guerrilla's particle layer (with its tone mapping).
+    g_particlePhase = reinterpret_cast<ParticlePhaseFn>(rfa::HookFunction(kParticlePhase, kParticlePhasePrologue, reinterpret_cast<void*>(&ParticlePhase)));
+    g_particleLast = reinterpret_cast<ParticleLastFn>(rfa::HookFunction(kParticleLast, kParticlePhasePrologue, reinterpret_cast<void*>(&ParticleLast)));
+    if (!g_particlePhase || !g_particleLast) {
+        rfa::Log("Could not hook the particle phase; the game draws its particles its own way");
+        g_particleLayerFailed = true;  // (a hook that did go in only passes through)
     }
     g_toneMappingConstants = reinterpret_cast<ToneMappingConstantsFn>(
         rfa::HookFunction(kToneMappingConstants, kToneMappingConstantsPrologue, reinterpret_cast<void*>(&ToneMappingConstants)));
