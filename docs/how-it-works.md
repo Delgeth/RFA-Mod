@@ -78,15 +78,16 @@ applied again, so change a command's value there rather than deleting it.
 ```
 src\launcher\             RFAModLauncher.exe: updates your settings files, starts the game, injects the loader
 src\loader\               rfa_loader.dll: loads mods, crash reports, overrides, Lua bridge
-src\mods\<name>\          one folder per mod DLL (guerrilla_hud, guerrilla_world, rfa_qol), and a
-                          mod's own scripts; rfa_qol\ has a source file for each of its parts
-                          (borderless, console, fov, video_settings)
+src\mods\<name>\          one folder per mod DLL (guerrilla_hud, guerrilla_vehicles, guerrilla_world,
+                          rfa_qol), and a mod's own scripts; rfa_qol\ has a source file for each of
+                          its parts (borderless, console, fov, video_settings)
 src\common\               rfa_mod.h (logging, ini, hooking helpers), rfa_game.h (build check, Lua API)
 src\overrides\            replacements for files inside the game's archives, same layout as the game
 src\editor\RfaFormats\    C# library that reads and writes the game's file formats (no UI)
 src\editor\RfaEditor\     the editor (C#, WPF desktop app); built into bin\editor\
 src\editor\GuerrillaHud\  GuerrillaHud.exe: makes Guerrilla's HUD for guerrilla_hud; built into bin\editor\
 src\editor\GuerrillaWorld\ GuerrillaWorld.exe: builds the world rfg for guerrilla_world; built into bin\editor\
+src\editor\GuerrillaArsenal\ GuerrillaArsenal.exe: makes Guerrilla's vehicles usable; built into bin\editor\
 config\rfa_mods.ini       the settings template (to bin\ when missing, always to bin\defaults\)
 config\console.ini        console settings template (to bin\ when missing, always to bin\defaults\)
 docs\editor-guide.md      how to use the editor
@@ -530,7 +531,9 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   at the copy's lookup and gives the names 64 KB of its own. Without the file, or with the mod
   off, the game keeps its own table, and a name it doesn't have is its Default entry. The draw
   distances (`lod_properties.xtbl`, read the same way) are handed over likewise, and so are the
-  effects' three tables (`vfx.xtbl`, `effects.xtbl`, `level_objects.xtbl`, below).
+  effects' three tables (`vfx.xtbl`, `effects.xtbl`, `level_objects.xtbl`, below) and the vehicles'
+  two (`vehicles.xtbl`, `vehicle_interactions.xtbl`, written by `GuerrillaArsenal.exe`: see
+  [guerrilla_vehicles](#guerrilla_vehicles)).
 
 The world itself is built by `editor\GuerrillaWorld.exe` (code in `src\editor\GuerrillaWorld\` and
 `src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
@@ -718,6 +721,50 @@ documents (elements driven by a Lua script).
 - `--remove` takes all of it away again. Since that sheet table now holds the pictures of
   Armageddon's own HUD too, it must never be deleted alone.
 
+### guerrilla_vehicles
+
+What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself
+(`[GuerrillaVehicles]` in the ini). So far: driving.
+
+- **Driving keys**: Armageddon still has Guerrilla's driving code for the player. Its gameplay
+  controls (`0x4DBBD0`) read the accelerator and brake as button values (actions 62 `veh_accelerate`
+  and 63 `veh_brake`, through `0x4E1280`) and the handbrake as a held button (64 `veh_handbrake`),
+  and pass them to the car, with steering from the `veh_steer` axis (A/D). But its PC controls give
+  those three actions no key (it has no car-driving scheme on PC, only on foot, exo, walker/tank and
+  flyer), so a car's throttle stays at 0. The mod wraps the function that builds a control set's key
+  map from its bindings (`0x4E86E0`) and gives each of the three a key first, if it has none:
+  Guerrilla's own PC defaults, W, S and Space, or the keys named in the ini (by the names the
+  console's `controls_show_key_bindings` prints). The bindings are 20 bytes an action from
+  `0x11BEBA0`, the keyboard key at +8 as a DirectInput scancode, 0 for none.
+
+`editor\GuerrillaArsenal.exe` (code in `src\editor\GuerrillaArsenal\` and
+`src\editor\RfaFormats\Guerrilla\GuerrillaArsenal.cs`, `GuerrillaVehicles.cs`) makes the vehicles
+from the player's own copy of Guerrilla (`--vehicles <names>` or `all`; the taxi, `Col_Taxi_1`,
+when none are named; `--remove` takes everything away):
+- **The model** (`.ccar_pc`, Guerrilla's version 27) is written as Armageddon's version 30. Both are
+  one structure (the vehicle's parts, lights, tag lists, mesh, materials, collision and MOPP trees,
+  with offsets from the file's start); Armageddon only added fields: 0x90 bytes and two arrays in
+  the header, three arrays in each part (240 → 264 bytes), a word in each light (76 → 80). The mesh
+  block (4 or 6 → 9), the materials (onto Armageddon's shaders) and the collision (Havok 5.5 → 2010)
+  are converted as for the world's destructible objects, and every offset is moved to where its
+  target lands. Checked on the civilian walker, which both games ship: every part, light, tag list
+  and section of ours matches Armageddon's own conversion. Guerrilla's dents (morph targets, which
+  none of Armageddon's vehicles has) and tracked vehicles' tread splines aren't carried over yet.
+- **Its container**, named as Guerrilla's (`col_taxi_1.ccar_pc.str2_pc`, a new file in
+  `overrides\build\pc\cache\`) with the model and its textures, and an entry for it in an override
+  of `vehicles.vpp_pc\vehicle_containers.asm_pc` (the player's own list with ours added).
+- **Its table entries**: Guerrilla's own `vehicles.xtbl` and `vehicle_interactions.xtbl` entries,
+  added to Armageddon's tables, which guerrilla_world hands the game at start-up. A field
+  Armageddon's table hasn't is left out; a field it requires that Guerrilla's entry hasn't gets the
+  default Armageddon's table gives it (the game's table reader stops on a missing one). Left out for
+  now: the sounds (Guerrilla's are XACT cues), lights and effects, turrets.
+- **Getting in**: the interaction keeps Guerrilla's waypoints and seats (the taxi's enter points at
+  its doors). Both games name the same actions and animation states, and `vehicle enter primary 1`
+  ending in `driving forward` is what seats the player behind the wheel. Guerrilla's animations for
+  them are made for Mason's skeleton, so until they're converted the interaction plays Armageddon's
+  LAV animations, keeps only the transitions those cover (the driver's in and out) and names no
+  door (with one the game wants the door's opening animation).
+
 ## The editor
 
 The code is in `src\editor\`: `RfaFormats` reads and writes the formats (no UI, reusable by other
@@ -831,7 +878,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() { /* install hooks *
 process) into `bin\`, copies `src\overrides\` into `bin\overrides\`, and copies
 `config\rfa_mods.ini` and `config\console.ini` to `bin\` only if there are none there yet, and to
 `bin\defaults\` every time (the templates the launcher adds new settings from to yours). It
-builds the editor and the two Guerrilla tools 64-bit into `bin\editor\`. The build turns off the
+builds the editor and the three Guerrilla tools 64-bit into `bin\editor\`. The build turns off the
 .NET SDK's usage reporting and its first-run web certificate.
 
 `tools\package.ps1` makes the copy to give others, in `dist\RFA-Mod\` and as

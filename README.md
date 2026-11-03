@@ -24,6 +24,9 @@ single-player.
   own copy of Guerrilla.
 - **Guerrilla's HUD, a first piece** (`guerrilla_hud`, beta): Guerrilla's health meter and blood
   in that world, in place of Armageddon's health ring, red screen edges and compass bar.
+- **Guerrilla's vehicles, a first one** (`guerrilla_vehicles`, beta): Guerrilla's taxi, which you
+  can spawn, get into and drive (W, S, Space and A/D, Guerrilla's keys). You build it from your own
+  copy of Guerrilla too.
 - **Options → Experimentals**: a new page in the game's Options menu, from the main menu or the
   pause menu, for RFA-Mod's own settings. For now it holds the Guerrilla world's switches: the
   sun's shadows and shafts, fog, blowing dust, Guerrilla's particles and tone mapping, colour
@@ -95,8 +98,8 @@ work as before.
   - `[Loader]`: crash reports and overrides;
   - `[Mods]`: set a mod to `0` to turn it off. `borderless`, `fov`, `video_settings` and `console`
     share one file, `mods\rfa_qol.dll`, but each still turns off on its own;
-  - one section for each mod: `[Borderless]`, `[FOV]`, `[Console]`, `[GuerrillaWorld]` and
-    `[GuerrillaHud]`.
+  - one section for each mod: `[Borderless]`, `[FOV]`, `[Console]`, `[GuerrillaWorld]`,
+    `[GuerrillaHud]` and `[GuerrillaVehicles]`.
 - **`console.ini`**: console settings applied for you, as `<console name>=<value>`. `[Startup]`
   runs once when the game starts, and `[Gameplay]` each time a level, save or checkpoint loads. By
   default it hides the beta's performance text.
@@ -117,14 +120,25 @@ work as before.
    Nano Forge rebuilds), and its sky into `mods\guerrilla_world\`. `--props none` leaves out the
    buildings and props; `--zones 11-12,10-11` builds only that block of zones (columns, then rows).
 4. Run `editor\GuerrillaHud.exe` for Guerrilla's HUD (a few seconds).
-5. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
+5. Run `editor\GuerrillaArsenal.exe` for Guerrilla's vehicles (a few seconds). So far it builds
+   one: the taxi.
+6. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
    `level rfg_12_11`, or any zone's name, `rfg_<column>_<row>` (such as `rfg_04_10`, a town).
+7. To drive: type `drop_car Taxi` in the console, walk up to the taxi's driver side and get in with
+   the use key. W accelerates, S brakes and reverses, Space is the handbrake, A and D steer.
 
 Things to know:
-- Run both tools again after updating RFA-Mod, and `GuerrillaHud.exe` again after changing its
+- Run the tools again after updating RFA-Mod, and `GuerrillaHud.exe` again after changing its
   script.
 - `editor\GuerrillaHud.exe --remove` takes the HUD away. Only remove it that way: one of its files
   also holds Armageddon's own HUD pictures.
+- The taxi is a first step. Getting in still plays Armageddon's own climb-in rather than
+  Guerrilla's animation, it has no sounds or lights yet, and its glass shows too bright.
+  `drop_car` may leave it waiting to load: the game only loads a vehicle a level has set memory
+  aside for, which the Guerrilla world doesn't do yet.
+- The driving keys are under `[GuerrillaVehicles]` in `rfa_mods.ini`. A key you have set for
+  driving yourself is kept.
+- `editor\GuerrillaArsenal.exe --remove` takes the vehicles away again.
 - Nothing made from Guerrilla is ever shipped; it stays on your PC.
 - `guerrilla_world` widens the game's physics for every world, the campaign included. Set
   `ZoneSize=0` under `[GuerrillaWorld]` if you don't use the Guerrilla world.

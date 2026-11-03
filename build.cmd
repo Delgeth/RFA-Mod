@@ -23,6 +23,7 @@ rem file each, in one DLL. The loader skips their old DLLs if an older build lef
 cl %CFLAGS% /LD "%ROOT%src\mods\rfa_qol\*.cpp" /Fe"%ROOT%bin\mods\rfa_qol.dll" /link /IMPLIB:rfa_qol.lib user32.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%ROOT%bin\mods\guerrilla_world.dll" /link /IMPLIB:guerrilla_world.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_hud\guerrilla_hud.cpp" /Fe"%ROOT%bin\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib || goto :fail
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\guerrilla_vehicles.cpp" /Fe"%ROOT%bin\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib || goto :fail
 rem guerrilla_hud's scripts, which editor\GuerrillaHud.exe packs with Guerrilla's HUD documents.
 xcopy /i /y /q "%ROOT%src\mods\guerrilla_hud\*.lua" "%ROOT%bin\mods\guerrilla_hud" >nul || goto :fail
 
@@ -51,6 +52,8 @@ rem GuerrillaHud.exe, next to the editor: makes Guerrilla's HUD for guerrilla_hu
 dotnet build "%ROOT%src\editor\GuerrillaHud\GuerrillaHud.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
 rem GuerrillaWorld.exe, next to the editor: builds the world rfg for guerrilla_world from your copy of Guerrilla.
 dotnet build "%ROOT%src\editor\GuerrillaWorld\GuerrillaWorld.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
+rem GuerrillaArsenal.exe, next to the editor: makes Guerrilla's vehicles usable from your copy of Guerrilla.
+dotnet build "%ROOT%src\editor\GuerrillaArsenal\GuerrillaArsenal.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
 
 :done
 echo Build OK: %ROOT%bin

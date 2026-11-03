@@ -102,7 +102,8 @@
 // handed over the same way, and so are the effects: level_objects.xtbl (what a destructible object
 // shows when it breaks or is hit), effects.xtbl and vfx.xtbl (the visual effects and their files),
 // and explosions.xtbl (what an object dies in), each Armageddon's with Guerrilla's entries the world
-// uses added under "rfg_" names.
+// uses added under "rfg_" names; and vehicles.xtbl and vehicle_interactions.xtbl, Armageddon's with
+// Guerrilla's vehicles that GuerrillaArsenal.exe made added under their own names.
 #define RFA_MOD_NAME "guerrilla_world"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -274,7 +275,8 @@ NamePoolInitFn g_namePoolInit;
 // distances (LOD classes), and the effects (visual effects, effects, explosions, level objects), each
 // read at start-up (the visual effects before the effects, which name them, and those before the
 // level objects, which name the effects; the explosions name effects too, and level objects name
-// explosions).
+// explosions). The vehicles and their interactions (where and how people get in; Armageddon's with
+// Guerrilla's added) are written by GuerrillaArsenal.exe.
 struct BuiltTable {
     const char* name;         // its file name, in mods\guerrilla_world\ and as the game asks for it
     const char* what;         // for the log
@@ -287,6 +289,8 @@ BuiltTable g_builtTables[] = {
     {"effects.xtbl", "Effects", {}},
     {"explosions.xtbl", "Explosions", {}},
     {"level_objects.xtbl", "Level objects", {}},
+    {"vehicles.xtbl", "Vehicles", {}},
+    {"vehicle_interactions.xtbl", "Vehicle interactions", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";
@@ -4305,7 +4309,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
             anyTable = true;
         } else {
             table.bytes.clear();
-            rfa::Log("%s: no mods\\guerrilla_world\\%s (made by the world builder); the game keeps its own", table.what, table.name);
+            rfa::Log("%s: no mods\\guerrilla_world\\%s (made by the Guerrilla tools); the game keeps its own", table.what, table.name);
         }
     }
     if (anyTable) {
