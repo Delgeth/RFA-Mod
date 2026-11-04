@@ -1,7 +1,14 @@
-Third-party software shipped with the RFA editor (editor\)
-============================================================
+Third-party software shipped with RFA-Mod
+=========================================
 
-The editor's Direct3D view uses these libraries, each under the MIT License (below):
+The in-game menus (rfa_loader.dll, and mods\rfa_qol.dll's Spawn windows) are drawn with this
+library, under the MIT License (below); its source is in src\third_party\imgui:
+
+  Dear ImGui (version 1.92.9b)
+      Copyright (c) 2014-2026 Omar Cornut
+      https://github.com/ocornut/imgui
+
+The editor's Direct3D view (editor\) uses these libraries, each under the MIT License (below):
 
   Vortice.Direct3D11, Vortice.Direct3D9, Vortice.DXGI, Vortice.D3DCompiler, Vortice.DirectX
   (Vortice.*.dll, version 3.8.3)

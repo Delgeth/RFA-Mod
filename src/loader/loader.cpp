@@ -2,10 +2,11 @@
 // Loads every DLL in the mods folder (alphabetically) and calls its RFAMod_Init export.
 // Also writes a crash report (log lines + logs\crash-*.dmp) if the game crashes, lets files in
 // overrides\ replace files inside the game's archives, and gives the game's menu scripts access
-// to rfa_mods.ini.
+// to rfa_mods.ini. Hosts the mods' in-game menus, drawn with Dear ImGui (menus.cpp).
 #define RFA_MOD_NAME "loader"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "menus.h"
 #include <DbgHelp.h>
 #include <algorithm>
 #include <map>
@@ -817,6 +818,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     if (rfa::game::IsSupportedBuild()) {
         InstallOverrides();
         InstallLuaFunctions();
+        InstallMenus(&g_mods);
     }
 
     const std::wstring dir = rfa::RootDir() + L"\\mods\\";

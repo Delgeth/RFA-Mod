@@ -19,3 +19,10 @@ void SettingChanged(const char* section, const char* key);
 namespace video_settings {
 void Init();
 }
+
+struct RFAMenu;
+namespace spawner {
+void Init();
+// Its part of the in-game menus (RFAMod_Menu).
+void Menu(const RFAMenu* menu);
+}  // namespace spawner

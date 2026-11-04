@@ -153,26 +153,83 @@ begins (`0x50F400`).
 `rfa_set_setting(section, key, value)` and `rfa_log(text)`. After a change the loader calls
 `RFAMod_SettingChanged(section, key)` in every mod that exports it.
 
+**In-game menus** (`menus.cpp`): the loader hosts [Dear ImGui](https://github.com/ocornut/imgui)
+(`src\third_party\imgui`, built with `NDEBUG` so its checks never stop the game) on the game's own
+Direct3D 11 device. The game makes its swap chain with a DXGI factory, so the loader wraps the
+`CreateDXGIFactory` import and, on the factory, `CreateSwapChain` (slot 10 of its methods); on the
+swap chain, `Present` (8), where it draws the menus on the finished picture, and `ResizeBuffers`
+(13). It reads the game window's messages for ImGui by subclassing it. The menus are up while the
+console is open (`0x28FF1CA`), when the game has already stopped the player's controls and freed the
+mouse; ImGui draws its own cursor, as the game hides Windows'. The game reads its own input with
+DirectInput, so the window's messages go on to it untouched, and the console asks
+`RFALoader_MenusWant` whether the menus have the mouse or are taking text, and then leaves those
+clicks and keys alone (it also hands the game's mouse messages on, so they don't reach the game
+either). A bar along the bottom of the screen holds each mod's menus: every frame the loader calls
+the `RFAMod_Menu(const RFAMenu*)` export of each mod that has one, first inside the bar, then for its
+windows ([rfa_menu.h](../src/common/rfa_menu.h) has the rules for writing one). Whatever a mod leaves
+unfinished is put right after it, and a crash in one turns that mod's menus off. Window places are
+kept in `menus.ini`.
+
 ## The mods
 
 ### rfa_qol
 
-`rfa_qol.dll` holds the quality-of-life mods below, `borderless`, `console`, `fov` and
-`video_settings`, one source file each in `src\mods\rfa_qol\`. They were DLLs of their own until
-v0.4.9-beta and work as they did then:
+`rfa_qol.dll` holds the quality-of-life mods below, `borderless`, `console`, `fov`,
+`video_settings` and `spawner`, one source file each in `src\mods\rfa_qol\`. The first four were
+DLLs of their own until v0.4.9-beta and work as they did then:
 - each has its own settings section in `rfa_mods.ini`, and its own switch under `[Mods]`
-  (`borderless=`, `console=`, `fov=`, `video_settings=`), the names the loader used to read for
-  their DLLs, so old settings files need no change. `rfa_qol.cpp`'s `RFAMod_Init` reads them and
-  calls the `Init` of each part that is on (`rfa_qol.h`), in the order the DLLs loaded in. A crash
-  in one part's `Init` is logged, and the others still start. `[Mods] rfa_qol=0` turns all four
-  off;
+  (`borderless=`, `console=`, `fov=`, `video_settings=`, and now `spawner=`), the names the loader
+  used to read for their DLLs, so old settings files need no change. `rfa_qol.cpp`'s `RFAMod_Init`
+  reads them and calls the `Init` of each part that is on (`rfa_qol.h`), in the order the DLLs
+  loaded in. A crash in one part's `Init` is logged, and the others still start.
+  `[Mods] rfa_qol=0` turns them all off;
 - each logs under its own name. `RFA_MOD_NAME` is set per source file: `rfa::Log` sits in an
   unnamed namespace in `rfa_mod.h`, so every file has its own copy with its own name;
-- `RFAMod_SettingChanged` is passed on to `fov`, the only part that listens.
+- `RFAMod_SettingChanged` is passed on to `fov`, the only part that listens, and `RFAMod_Menu` (the
+  in-game menus) to `spawner`.
 
 Its name sorts before `vehicle_spawner.dll`, a community mod that hooks the game's frame update
 (`0x544CB0`), which `console` hooks too. `rfa::HookFunction` copies the function's first bytes as
 they are, so it has to go first: the other hook, placed after it, chains on.
+
+### spawner
+
+**Spawn** in the in-game menus (see "In-game menus" under the loader): four windows, each with
+ImGui's text filter. The menus are drawn on the thread that draws the game, so what a window asks
+for is only noted there, and carried out on the game's thread from a hook of `drop_car`'s per-frame
+step (`0x619360`, from the gameplay update).
+
+- **Vehicles**: the game's own vehicle list (`0x148BD08`: entries of 0x880 bytes, `+0` the table
+  name, `+4` the `Display_Name` that `drop_car` takes); Spawn or a double-click drops one (below).
+- **Items**: the item table `drop_item` looks names up in (`0x7CA730`: `[0x1BB1D44]` its entries,
+  `[0x1BB1D3C]` how many, 0x168 bytes each, the name first); Drop runs `drop_item <name>`.
+- **Weapons**: the weapon table (`[0x18F8048]`, `[0x18F804C]`, 0xE0 bytes each: `+0` the name,
+  `+0x18` its inventory item, whose name `give_player_item` takes). Turret and walker weapons share
+  `generic_inventory_item`, which would only give the first of them, so those are greyed out.
+- **Spawned**: the vehicle the game's create (`0x762A40`) makes inside `drop_car`'s step for one of
+  our spawns is kept by its handle (object `+0x68`), eight at most, the oldest removed when a ninth
+  comes. Remove takes one away by its handle (`0x6D56A0`, thiscall on the world `0x1870630`), so one
+  already gone is passed over. It also shows the vehicle pool's free slots (`0x7612F0` on
+  `0x1972900`, of the count at `+0x10`).
+
+A spawned walker used to crash the game a few seconds later: every frame its per-human debug update
+(`0x636440`, from `0x638CC0`) casts each human with `0x5FB5C0`, which returns 0 for a walker, and
+reads the cast's `+0x1C`. The update only draws debug overlays, so the spawner leaves it out for an
+object the cast turns down.
+
+A vehicle has to have streamed in (`0x762290`) before the game makes one. Where a level's spawn
+resource is in force, the game makes only the vehicles that resource holds and loads no other, so
+`drop_car` alone waits its 3 seconds (`0x10FCA14`) and gives up. The resource is in force when the
+pools' state `0x19734CC` isn't 0: on Wrecking Crew levels, which the Guerrilla world is made from,
+and in multiplayer. So the spawner first adds the vehicle to that resource, the way the game adds a
+resource's own vehicles when it starts (`0x761DC0`: category 8, owner 3, the vehicle; it makes room
+only by letting go of a reservation nothing uses). It waits up to 30 seconds for the vehicle to
+stream in, then runs `drop_car <display name>`. Where no resource is in force (the campaign),
+`drop_car` loads the vehicle itself. Clearing the state instead makes the game dump every
+reservation, freeing what the vehicles already in the world use, and the game crashes soon after.
+The game makes no vehicle while you're in one (the player, `0x8B92D0()`, `+0x1160`: the vehicle's
+handle, -1 on foot), so the window says so. This way of loading a vehicle, the item and weapon
+lists, the eight tracked vehicles, the walkers' guard and the first spawner are Venom_Intellect's.
 
 ### borderless
 
@@ -726,7 +783,7 @@ documents (elements driven by a Lua script).
 
 What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself
 (`[GuerrillaVehicles]` in the ini). So far: the keys for driving, getting out and changing seats,
-room for the vehicles' animation sets, and their own skeletons.
+room for the vehicles themselves and for their animation sets, and their own skeletons.
 
 - **Driving keys**: Armageddon still has Guerrilla's driving code for the player. Its gameplay
   controls (`0x4DBBD0`) read the accelerator and brake as button values (actions 62 `veh_accelerate`
@@ -758,6 +815,19 @@ room for the vehicles' animation sets, and their own skeletons.
   against the game's first, none changed if one differs. Mods start before the game's own start-up
   code, so the game's constructor builds the new table and the old one is never used. Without the
   mod, guerrilla_world doesn't hand over Guerrilla's set list (the game keeps its own).
+- **Room for the vehicles**: the game keeps every vehicle the vehicle table describes in one list of
+  40 (`0x148BD08`: its entries, how many it holds, how many it has; 0x880 bytes an entry, kept right
+  after it), which its start-up constructor (`0x6270C0`) builds and which can't grow. The table's
+  reader drops every vehicle after the 40th without a word, and Armageddon has 24, so until
+  v0.5.0-beta only Guerrilla's first 16 (the Maverick, the APCs and three scouts) were in the game.
+  The game reaches the entries only through the list, so the mod builds it itself in place of the
+  constructor: 255 entries of its own, each built by the game's own constructor for one (`0x627100`).
+- **Room for their bone infos**: each vehicle in the list also takes, for as long as the game runs,
+  one of the animation library's 138 entity bone infos (0x240 bytes each from `0x323BD50`), which the
+  people and animated objects take theirs from while they're about. With all of them taken the game
+  writes through a null pointer. Four small functions use that table (add, remove, clear, find),
+  each with its address and its size in its code, so the mod moves it as it does the animation sets:
+  to a table of 512, those four addresses and five sizes changed after checking them.
 - **Vehicles' own skeletons**: walkers, flyers and turret trucks have a skeleton of their own
   (`Rig` in their table entry). The game loads every skeleton its archives list while it starts
   (`0x973460`: each through `0x973550`, by name), and when it reads the vehicle table it takes each
@@ -934,6 +1004,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() { /* install hooks *
 - Two `HookFunction`s on one address don't chain, so check no other mod hooks it first.
 - Export `RFAMod_SettingChanged(section, key)` to hear about settings changed from the game's
   menus.
+- Export `RFAMod_Menu(const RFAMenu*)` to add menus and windows to the in-game menus, drawn with
+  Dear ImGui (`rfa_menu.h`: start with `rfa::menu::Use(menu)`, and build ImGui's four core files
+  with the mod, with `NDEBUG`, as `build.cmd` does for `rfa_qol`).
 - Add a `cl` line for it to `build.cmd`. Disable a mod with `<name>=0` under `[Mods]`.
 - One DLL can hold several mods, each in a source file of its own with its own `RFA_MOD_NAME`, as
   `rfa_qol` does: its `<name>.cpp` exports `RFAMod_Init` and starts the parts.

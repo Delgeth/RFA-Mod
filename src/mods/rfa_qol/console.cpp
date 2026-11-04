@@ -59,6 +59,7 @@
 #include "rfa_mod.h"
 #include "rfa_game.h"
 #include "rfa_qol.h"
+#include "rfa_menu.h"
 #include <algorithm>
 #include <climits>
 #include <ctime>
@@ -481,6 +482,10 @@ void __cdecl ConsoleKeys() {
 // one in its place.
 int __cdecl NextKey() {
     if (!g_readingConsoleKeys || !g_consoleOpen) return g_nextKey();
+    if (rfa::menu::Want(RFA_MENUS_KEYBOARD)) {  // typed into one of the in-game menus: not the console's
+        while (g_nextKey()) {}
+        return 0;
+    }
     if (g_nextPastedAfterEnter) {  // the game has run the line Enter sent
         g_nextPastedAfterEnter = false;
         if (!g_pasted.empty()) {
@@ -915,6 +920,10 @@ MouseMessageFn g_mouseMessage;
 int g_wheel = 0;  // wheel movement not yet turned into whole notches (high-resolution wheels)
 
 void __cdecl MouseMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    if (g_consoleOpen && rfa::menu::Want(RFA_MENUS_MOUSE)) {  // over one of the in-game menus: theirs
+        if (message == WM_LBUTTONUP) g_dragging = false;
+        return;
+    }
     if (g_consoleOpen && g_drawsConsole) {
         if (message == WM_MOUSEWHEEL) {
             g_autoScroll = false;
@@ -1107,9 +1116,11 @@ void DrawConsole() {
     drawn.inputScale = inputScale;
     g_drawn = drawn;
 
-    // The mouse on top of it all, over the console (menus and the render debug panel draw their own).
+    // The mouse on top of it all, over the console (menus and the render debug panel draw their own,
+    // and so do the in-game menus while they are up).
     if (g_autoScroll) DrawAnchor(m);
-    if (mouseIn && (OnConsole(mouse) || g_dragging || g_autoScroll)) DrawCursor(mouse.x, mouse.y, m.screenScale);
+    if (mouseIn && (OnConsole(mouse) || g_dragging || g_autoScroll) && !rfa::menu::Want(RFA_MENUS_SHOWN))
+        DrawCursor(mouse.x, mouse.y, m.screenScale);
 }
 
 bool ConsoleCanDraw() { return g_consoleReady && !g_textMode; }  // what 0xC7D540 checks before drawing it

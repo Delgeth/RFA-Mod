@@ -30,6 +30,15 @@ single-player.
   (opening the door, climbing in, quick and diving exits, moving between seats with the middle
   mouse button, getting out with E), his animations moved onto Darius. You build them from your
   own copy of Guerrilla too.
+- **In-game menus** (`rfa_loader`, drawn with [Dear ImGui](https://github.com/ocornut/imgui)):
+  while the console is open, a bar along the bottom of the screen holds RFA-Mod's menus. Its first
+  is **Spawn** (`spawner`, in `rfa_qol`), with four windows, each with a filter: **Vehicles**, every
+  vehicle the game has, Guerrilla's too, dropped in front of you even if the area hasn't loaded it;
+  **Items**, every item the game can drop; **Weapons**, given to you; and **Spawned**, the vehicles
+  you spawned (the oldest goes after eight), to remove one or all, and how many of the game's
+  vehicle slots are free. Other mods can add menus of their own (see
+  [rfa_menu.h](src/common/rfa_menu.h)). The spawner is based on Venom_Intellect's vehicle_spawner
+  and their notes on the game.
 - **Options → Experimentals**: a new page in the game's Options menu, from the main menu or the
   pause menu, for RFA-Mod's own settings. For now it holds the Guerrilla world's switches: the
   sun's shadows and shafts, fog, blowing dust, Guerrilla's particles and tone mapping, colour
@@ -99,8 +108,8 @@ work as before.
   - `[Launcher]`: where your games are (`GameDir=`, and `GuerrillaDir=` for the Guerrilla tools),
     and `LargeAddressAware=` (set it to `0` to start the game's own program, with 2 GB);
   - `[Loader]`: crash reports and overrides;
-  - `[Mods]`: set a mod to `0` to turn it off. `borderless`, `fov`, `video_settings` and `console`
-    share one file, `mods\rfa_qol.dll`, but each still turns off on its own;
+  - `[Mods]`: set a mod to `0` to turn it off. `borderless`, `fov`, `video_settings`, `console`
+    and `spawner` share one file, `mods\rfa_qol.dll`, but each still turns off on its own;
   - one section for each mod: `[Borderless]`, `[FOV]`, `[Console]`, `[GuerrillaWorld]`,
     `[GuerrillaHud]` and `[GuerrillaVehicles]`.
 - **`console.ini`**: console settings applied for you, as `<console name>=<value>`. `[Startup]`
@@ -127,23 +136,26 @@ work as before.
    one it can (`--vehicles Col_Taxi_1,Min_ATV_1` for only some).
 6. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
    `level rfg_12_11`, or any zone's name, `rfg_<column>_<row>` (such as `rfg_04_10`, a town).
-7. To drive: type `drop_car Taxi` in the console (or another vehicle's name: `ATV`, `Bluecrab`,
-   `Staffcar`, `Caravan`, `MiningRover`, `Raider`, ...; the tool lists them all at the end), walk up
-   to its driver side and get in with E. W accelerates, S brakes and reverses, Space is the
-   handbrake, A and D steer, E gets you out, the middle mouse button moves you to another seat.
+7. To drive: with the console open, click **Spawn**, then **Vehicles**, in the bar at the bottom
+   of the screen; pick one (type `taxi`, `ATV`, `Bluecrab`, `Staffcar`, `Raider`, ... in the box to
+   find it) and click Spawn. Close the console, walk up to its driver side and get in with E. W accelerates, S brakes
+   and reverses, Space is the handbrake, A and D steer, E gets you out, the middle mouse button moves
+   you to another seat.
 
 Things to know:
 - Run the tools again after updating RFA-Mod, and `GuerrillaHud.exe` again after changing its
   script.
 - `editor\GuerrillaHud.exe --remove` takes the HUD away. Only remove it that way: one of its files
   also holds Armageddon's own HUD pictures.
-- The vehicles have no sounds, lights or turrets yet (the doors open silently), and their glass
-  shows too bright. Darius is a little taller than Mason, so his hands may not land exactly on the
+- Getting into a car with doors (the Taxi, the ATV, ...) gets stuck at the start: the door doesn't
+  open, and after a few seconds the game puts you in; getting out fills the screen with "Vehicle
+  interaction anim missing open 'DOOR_L'" reports. The APCs' hatches work. This is being fixed.
+- The vehicles have no sounds, lights or turrets yet, and their glass shows too bright. Darius is a little taller than Mason, so his hands may not land exactly on the
   wheel and door. Tanks and the bulldozer aren't built yet, and walkers can't be got into yet.
-  `guerrilla_vehicles` must be on: besides the keys, it makes room in the game for the vehicles'
-  animation sets (Armageddon holds only 140 and uses 125 itself).
-  `drop_car` may leave it waiting to load: the game only loads a vehicle a level has set memory
-  aside for, which the Guerrilla world doesn't do yet.
+  `guerrilla_vehicles` must be on: besides the keys, it makes room in the game for the vehicles
+  (Armageddon holds only 40, and uses 24 itself) and their animation sets. The console's own
+  `drop_car` only makes vehicles the area has loaded; the Vehicles window loads the one you pick
+  first. The game makes no vehicle while you're in one. Remove ones you're done with in Spawned.
 - The driving, getting-out and seat keys are under `[GuerrillaVehicles]` in `rfa_mods.ini`. A key
   you have set for one of them yourself is kept. E also gets you out of Armageddon's own vehicles
   where the game lets you (as a controller's button already does).
@@ -258,8 +270,9 @@ Copyright (C) 2026 FragsAreUs.
 This project's own code and notes are free software under the GNU General Public License,
 version 3 or (at your option) any later version ([LICENSE](LICENSE)). Anyone may use, change and
 share them, but whatever they pass on, changed or not, must stay under the same licence with its
-source code. The editor's Direct3D libraries are under the MIT License, which allows this; their
-notices are in [docs/third-party-notices.txt](docs/third-party-notices.txt). The source code is at
+source code. Dear ImGui, which draws the in-game menus, and the editor's Direct3D libraries are
+under the MIT License, which allows this; their notices are in
+[docs/third-party-notices.txt](docs/third-party-notices.txt). The source code is at
 <https://github.com/FragsAreUs/RFA-Mod>; a release's `version.txt` says which commit it was built from.
 
 The mods and the editor work on your own copy of Red Faction: Armageddon, which stays untouched,

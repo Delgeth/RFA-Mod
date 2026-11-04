@@ -17,10 +17,15 @@ set CFLAGS=/nologo /std:c++17 /permissive- /O2 /MT /W3 /EHsc /DUNICODE /D_UNICOD
 pushd "%ROOT%build"
 
 cl %CFLAGS% "%ROOT%src\launcher\launcher.cpp" /Fe"%ROOT%bin\RFAModLauncher.exe" /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib || goto :fail
-cl %CFLAGS% /LD "%ROOT%src\loader\loader.cpp" /Fe"%ROOT%bin\rfa_loader.dll" /link /IMPLIB:rfa_loader.lib user32.lib || goto :fail
-rem rfa_qol.dll: the quality-of-life mods (borderless, console, fov, video_settings), one source
-rem file each, in one DLL. The loader skips their old DLLs if an older build left them in bin\mods.
-cl %CFLAGS% /LD "%ROOT%src\mods\rfa_qol\*.cpp" /Fe"%ROOT%bin\mods\rfa_qol.dll" /link /IMPLIB:rfa_qol.lib user32.lib || goto :fail
+rem Dear ImGui (src\third_party\imgui), for the in-game menus: the loader hosts it with its
+rem Direct3D 11 and Win32 backends; a mod with menus is built with its core files. NDEBUG leaves out
+rem its debug checks, which would stop the game with a dialog.
+set "IMGUI=%ROOT%src\third_party\imgui"
+set IMGUI_CORE="%IMGUI%\imgui.cpp" "%IMGUI%\imgui_draw.cpp" "%IMGUI%\imgui_tables.cpp" "%IMGUI%\imgui_widgets.cpp"
+cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\loader\loader.cpp" "%ROOT%src\loader\menus.cpp" %IMGUI_CORE% "%IMGUI%\backends\imgui_impl_dx11.cpp" "%IMGUI%\backends\imgui_impl_win32.cpp" /Fe"%ROOT%bin\rfa_loader.dll" /link /IMPLIB:rfa_loader.lib user32.lib || goto :fail
+rem rfa_qol.dll: the quality-of-life mods (borderless, console, fov, video_settings, spawner), one
+rem source file each, in one DLL. The loader skips their old DLLs if an older build left them in bin\mods.
+cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\rfa_qol\*.cpp" %IMGUI_CORE% /Fe"%ROOT%bin\mods\rfa_qol.dll" /link /IMPLIB:rfa_qol.lib user32.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%ROOT%bin\mods\guerrilla_world.dll" /link /IMPLIB:guerrilla_world.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_hud\guerrilla_hud.cpp" /Fe"%ROOT%bin\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\guerrilla_vehicles.cpp" /Fe"%ROOT%bin\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib || goto :fail
