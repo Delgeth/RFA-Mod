@@ -330,12 +330,14 @@ void Carry(const Request& request) {
     case Request::kVehicle: SpawnVehicle(request.index); break;
     case Request::kItem:
         if (request.index < ItemCount()) {
+            rfa::Log("Dropping item %s", ItemName(request.index));
             RunCommand("drop_item %s", ItemName(request.index));
             SetStatus(std::string("Dropped ") + ItemName(request.index));
         }
         break;
     case Request::kWeapon:
         if (request.index < WeaponCount() && *WeaponItem(request.index)) {
+            rfa::Log("Giving weapon %s (%s)", WeaponName(request.index), WeaponItem(request.index));
             RunCommand("give_player_item %s", WeaponItem(request.index));
             SetStatus(std::string("Gave ") + WeaponName(request.index));
         }

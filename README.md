@@ -36,7 +36,9 @@ single-player.
   vehicle the game has, Guerrilla's too, dropped in front of you even if the area hasn't loaded it;
   **Items**, every item the game can drop; **Weapons**, given to you; and **Spawned**, the vehicles
   you spawned (the oldest goes after eight), to remove one or all, and how many of the game's
-  vehicle slots are free. Other mods can add menus of their own (see
+  vehicle slots are free. **Limits** (`limits`, in `rfa_qol`) shows how full the engine's fixed
+  tables are (vehicles, animation sets, triggers, explosions, ...) and which a mod has raised; the
+  game drops what doesn't fit without a word. Other mods can add menus of their own (see
   [rfa_menu.h](src/common/rfa_menu.h)). The spawner is based on Venom_Intellect's vehicle_spawner
   and their notes on the game.
 - **Options → Experimentals**: a new page in the game's Options menu, from the main menu or the

@@ -6,8 +6,10 @@
 //   video_settings  video settings kept in video_settings.cfg             (no settings)
 //   spawner         Spawn in the in-game menus: vehicles, items, weapons  (no settings)
 //                   and the vehicles you spawned
+//   limits          Limits in the in-game menus: how full the engine's    (no settings)
+//                   fixed tables are
 // Each works as it did when it was a DLL of its own: its settings section in rfa_mods.ini, its own
-// switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=; 0 = off, on when missing) and
+// switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=, limits=; 0 = off, on when missing) and
 // its own name in the log. They start in the order they loaded as separate DLLs.
 //
 // Those old DLLs (borderless.dll, console.dll, fov.dll, video_settings.dll) may still be in mods\
@@ -45,6 +47,7 @@ bool StartPart(const wchar_t* name, InitFn init) {
 
 bool g_fovRunning = false;
 bool g_spawnerRunning = false;
+bool g_limitsRunning = false;
 
 }  // namespace
 
@@ -54,6 +57,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_fovRunning = StartPart(L"fov", fov::Init);
     StartPart(L"video_settings", video_settings::Init);
     g_spawnerRunning = StartPart(L"spawner", spawner::Init);
+    g_limitsRunning = StartPart(L"limits", limits::Init);
 }
 
 // The game's menus changed a setting: only fov listens.
@@ -61,7 +65,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_SettingChanged(const char* 
     if (g_fovRunning) fov::SettingChanged(section, key);
 }
 
-// The in-game menus (rfa_menu.h): only the spawner has any.
+// The in-game menus (rfa_menu.h): the spawner's and the limits'.
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Menu(const RFAMenu* menu) {
     if (g_spawnerRunning) spawner::Menu(menu);
+    if (g_limitsRunning) limits::Menu(menu);
 }
