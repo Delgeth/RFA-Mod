@@ -17,7 +17,9 @@ namespace RfaFormats.Guerrilla;
 /// panes with, blended (flags 0x41) as Armageddon's glass is: Guerrilla's colour map (its alpha the
 /// pane's see-through), white for the pattern map, Armageddon's reflection cube
 /// str_gls_cube_default_a (from its dlc01_precache), and its window panes' values (no dust, opacity
-/// 1, reflection brightness 0.5 and contrast 0.1). Not ir_glass_shatter, which those buildings give
+/// 1, reflection brightness 0.5 and contrast 0.1); a vehicle's glass, as Armageddon's cars' (its
+/// ambulance's: brightness and contrast 0), reflects nothing, or the sky's cube made it white-hot in the
+/// sun. Not ir_glass_shatter, which those buildings give
 /// their broken-off pieces: it reads four UV channels, the last three the corners of each shard's
 /// triangle, and discards every pixel outside it; Guerrilla's panes have no such channels, and drawn
 /// with it they show in fragments.
@@ -142,7 +144,7 @@ public static class GuerrillaMaterials
     /// Armageddon's material block for the Guerrilla one at <paramref name="at"/> in <paramref name="file"/>.
     /// Its textures' names are in <paramref name="names"/>, and the built-ins it needs are added there.
     /// </summary>
-    internal static byte[] Convert(byte[] file, int at, TextureNameList names)
+    internal static byte[] Convert(byte[] file, int at, TextureNameList names, bool vehicle = false)
     {
         int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
         uint flags = BitConverter.ToUInt32(file, at + 0x0C);
@@ -171,7 +173,7 @@ public static class GuerrillaMaterials
 
         return Block(shader, file, at, 0x40u | (glass ? 1u : cutOut ? 2u : 0u), shader.Constants.Length * 2,
             slot => textures.TryGetValue(slot, out int n) && slot != ReflectionMap ? n : names.Add(BuiltIn(slot) + ".tga"),
-            constant => Value(constant, constants, glass));
+            constant => Value(constant, constants, glass, glass && !vehicle));
     }
 
     /// <summary>The built-in texture filling a slot a material hasn't.</summary>
@@ -315,7 +317,7 @@ public static class GuerrillaMaterials
         string.Equals(texture, "missing", StringComparison.OrdinalIgnoreCase) || string.Equals(texture, "missing.tga", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>An Armageddon constant's value from the Guerrilla material's constants.</summary>
-    static Vector4 Value(string constant, Dictionary<uint, Vector4> from, bool glass)
+    static Vector4 Value(string constant, Dictionary<uint, Vector4> from, bool glass, bool reflects)
     {
         Vector4? Get(string name) => from.TryGetValue(H(name), out var v) ? v : null;
         static Vector4 X(float x) => new(x, 0, 0, 0);
@@ -333,8 +335,8 @@ public static class GuerrillaMaterials
             "Decal2_Opacity" => Get("Decal_Map_2_Opacity") ?? X(1),
             "decal2_tilingU" or "decal2_tilingV" => X(1),
             "Decal1_Color" or "decal2_color" => Vector4.One,
-            "reflection_brightness" => X(glass ? 0.5f : 0),
-            "reflection_contrast" => X(glass ? 0.1f : 0),
+            "reflection_brightness" => X(reflects ? 0.5f : 0),
+            "reflection_contrast" => X(reflects ? 0.1f : 0),
             "Dust_Amount" => X(0),
             "Dust_Color" => Vector4.One,
             "Main_Opacity" => X(1),
