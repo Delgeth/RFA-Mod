@@ -684,9 +684,14 @@ converts:
   fields (its `Impulse` as `Mover_Impulse`, `Structural_Damage` as `StructuralDamage`, each effect
   an `Effect` with its name; how it damages buildings taken from Armageddon's explosion of the same
   name). Armageddon's own explosion of a name plays effects it loads only with its own levels, so
-  in our world it went off unseen. But the game keeps at most 132 explosions, Armageddon's and its
-  DLCs' first, which leaves room for two: the most used, `gas_barrel` (the explosive barrels) and
-  `chem_tank_a`, are Guerrilla's; the other twelve keep Armageddon's of the name for now. Each visual effect's file is converted
+  in our world it went off unseen. The game keeps at most 132 explosions, Armageddon's and its
+  DLCs' first, which left room for two, so the mod gives it a table of 256 (`0x1888D88`, 0x144 bytes
+  each: eight addresses and one size changed after checking them), and the world builder adds 12 of
+  Guerrilla's explosions.
+  Visual effects had the same problem: the game keeps 950 (`0x121FDE8`, 0xB4 bytes each) and
+  Armageddon's take 904, so only the 46 most placed of Guerrilla's 99 fitted. The mod moves that
+  table to 2,048 (13 addresses and 2 sizes, its new entries built with the game's own constructor),
+  and the world builder adds them all. Each visual effect's file is converted
   (`GuerrillaEffects`: Guerrilla's effect format, versions 21 to 26, written as Armageddon's
   version 36: its emitters, lights, meshes and coronas reworked, each emitter's material given the
   values Armageddon keeps after it (taken from Guerrilla's emitter: self-illumination, ambient and
@@ -838,6 +843,14 @@ skeletons.
   reaches the pool, so the mod gives it one of 16,384: its address and its size changed after
   checking them. At start-up the log also says, for a few door animations, how many triggers each
   got ("Door check:").
+- **Room for the animations themselves**: the game keeps an entry for each `anim_files.xtbl` entry
+  (4,224 of 0x34 bytes from `0x2597D30`) and the animation library one for each animation it knows
+  (4,500 of 32 bytes from `0x34C7570`, with their names in a lookup of 9,000 places from `0x34B2D18`).
+  Armageddon's and Guerrilla's vehicles' come to about 3,820 of each, and Guerrilla's people and
+  walkers would pass them. Only their own functions reach these tables, so the mod moves them the
+  same way: the entries to 8,192 (15 addresses and 7 sizes), the library to 8,192 and its lookup to
+  16,384 (17 addresses, 10 sizes and the reset's two byte counts). The lookup moves first, and the
+  library only if it did: a lookup with no empty place would leave the game looking for one for ever.
 - **Vehicles' own skeletons**: walkers, flyers and turret trucks have a skeleton of their own
   (`Rig` in their table entry). The game loads every skeleton its archives list while it starts
   (`0x973460`: each through `0x973550`, by name), and when it reads the vehicle table it takes each

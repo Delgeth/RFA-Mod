@@ -482,7 +482,7 @@ void __cdecl ConsoleKeys() {
 // one in its place.
 int __cdecl NextKey() {
     if (!g_readingConsoleKeys || !g_consoleOpen) return g_nextKey();
-    if (rfa::menu::Want(RFA_MENUS_KEYBOARD)) {  // typed into one of the in-game menus: not the console's
+    if (rfa::menu::Want(RFA_MENUS_KEYBOARD) || rfa::menu::Want(RFA_MENUS_ALONE)) {  // the in-game menus': not the console's
         while (g_nextKey()) {}
         return 0;
     }
@@ -956,6 +956,7 @@ void __cdecl MouseMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 }
 
 void DrawConsole() {
+    if (rfa::menu::Want(RFA_MENUS_ALONE)) return;  // the in-game menus were opened with their own key
     if (!g_drawRectangle || !g_drawText) return;
     if (!g_backgroundSet) {  // the mod's darker panel, unless console_set_bg_color was used already
         g_backgroundSet = true;

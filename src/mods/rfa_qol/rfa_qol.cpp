@@ -8,8 +8,10 @@
 //                   and the vehicles you spawned
 //   limits          Limits in the in-game menus: how full the engine's    (no settings)
 //                   fixed tables are
+//   graphics        Graphics in the in-game menus: the ported world's     [GuerrillaWorld]
+//                   picture settings, saved as you change them
 // Each works as it did when it was a DLL of its own: its settings section in rfa_mods.ini, its own
-// switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=, limits=; 0 = off, on when missing) and
+// switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=, limits=, graphics=; 0 = off, on when missing) and
 // its own name in the log. They start in the order they loaded as separate DLLs.
 //
 // Those old DLLs (borderless.dll, console.dll, fov.dll, video_settings.dll) may still be in mods\
@@ -48,6 +50,7 @@ bool StartPart(const wchar_t* name, InitFn init) {
 bool g_fovRunning = false;
 bool g_spawnerRunning = false;
 bool g_limitsRunning = false;
+bool g_graphicsRunning = false;
 
 }  // namespace
 
@@ -58,6 +61,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     StartPart(L"video_settings", video_settings::Init);
     g_spawnerRunning = StartPart(L"spawner", spawner::Init);
     g_limitsRunning = StartPart(L"limits", limits::Init);
+    g_graphicsRunning = StartPart(L"graphics", graphics::Init);
 }
 
 // The game's menus changed a setting: only fov listens.
@@ -65,8 +69,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_SettingChanged(const char* 
     if (g_fovRunning) fov::SettingChanged(section, key);
 }
 
-// The in-game menus (rfa_menu.h): the spawner's and the limits'.
+// The in-game menus (rfa_menu.h): the spawner's, the limits' and the graphics'.
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Menu(const RFAMenu* menu) {
     if (g_spawnerRunning) spawner::Menu(menu);
     if (g_limitsRunning) limits::Menu(menu);
+    if (g_graphicsRunning) graphics::Menu(menu);
 }

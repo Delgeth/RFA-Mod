@@ -123,6 +123,49 @@ inline bool PatchCode(void* address, const void* bytes, size_t size) {
     return true;
 }
 
+// The 4-byte value at `address` in the game's code or data.
+inline DWORD CodeValue(DWORD address) { return *reinterpret_cast<const DWORD*>(address); }
+
+// Moves one of the game's tables (`name` in the log) from `game`, of `holds` entries of `entrySize`
+// bytes, to `table`, of `newHolds`: each of `references` (the 4-byte values in the game's code that
+// hold the table's address, or a field's in its first entry) gets the new table's, each of `limits`
+// the new size. All are checked against the game's values first, and none changed if one differs.
+template <size_t References, size_t Limits>
+bool MoveTable(const char* name, DWORD game, DWORD entrySize, DWORD holds, const DWORD (&references)[References],
+               const DWORD (&limits)[Limits], BYTE* table, DWORD newHolds) {
+    for (DWORD at : references) {
+        const DWORD value = CodeValue(at);
+        if (value < game || value >= game + entrySize) {
+            rfa::Log("%s: the game's code at 0x%08lX isn't as expected (0x%08lX); the game keeps its %lu", name, at, value, holds);
+            return false;
+        }
+    }
+    for (DWORD at : limits) {
+        if (CodeValue(at) != holds) {
+            rfa::Log("%s: the game's limit at 0x%08lX isn't %lu (it's %lu); the game keeps its own", name, at, holds, CodeValue(at));
+            return false;
+        }
+    }
+    const DWORD moved = reinterpret_cast<DWORD>(table);
+    for (DWORD at : references) {
+        const DWORD value = moved + (CodeValue(at) - game);
+        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &value, sizeof(value))) {
+            rfa::Log("%s: could not change the game's code at 0x%08lX (part of it already points at the new table)", name, at);
+            return false;
+        }
+    }
+    for (DWORD at : limits) {
+        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &newHolds, sizeof(newHolds))) {
+            rfa::Log("%s: could not change the game's limit at 0x%08lX", name, at);
+            return false;
+        }
+    }
+    rfa::Log("%s: the game holds %lu (its own %lu): the table moved to 0x%08lX, %u places in its code changed", name,
+             newHolds, holds, moved, static_cast<unsigned>(References + Limits));
+    return true;
+}
+
+
 // The one piece of machine code the hooks need: a 5-byte x86 "jump to target" instruction
 // (opcode 0xE9, then the distance from the end of the instruction to the target).
 inline void MakeJump(BYTE (&code)[5], const void* from, const void* to) {

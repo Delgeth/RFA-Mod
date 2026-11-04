@@ -86,6 +86,7 @@
 #define RFA_MOD_NAME "guerrilla_vehicles"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include <algorithm>
 #include <cwctype>
 #include <fstream>
 #include <iterator>
@@ -195,6 +196,76 @@ constexpr DWORD kTriggerLimits[] = {0xD89D4F};
 constexpr DWORD kMaxTriggers = 16384;
 alignas(16) BYTE g_triggers[kMaxTriggers * kTriggerSize];  // the new pool, filled by the game
 
+// The game's animation entries: one for each anim_files.xtbl entry (0x34 bytes each from 0x2597D30,
+// how many at 0x25CD738; added by 0x95DCF0, which stops at 4224). Armageddon's and Guerrilla's
+// vehicles' come to 3821; Guerrilla's people and walkers will pass it. Only the entries' own
+// functions (0x95DCF0 to 0x95DFA2) reach the table by its address (15 values: as its start, or its
+// first entry's fields; one turns an entry back into its number by subtracting it, 0x95DE80), and its
+// size is in seven: the add, the look-up by number, a walk over them all, and the animation set
+// loaders' four checks of a set's animation numbers (cmp [eax+edx*4],1080h after 0x95DE80, too big
+// = not found). So the mod moves it as the others, to 8192.
+constexpr DWORD kAnimationEntries = 0x2597D30;
+constexpr DWORD kAnimationEntrySize = 0x34;
+constexpr DWORD kGameMaxAnimationEntries = 4224;
+constexpr DWORD kAnimationEntryReferences[] = {0x95DD0D, 0x95DD25, 0x95DD87, 0x95DDB2, 0x95DDC5, 0x95DDE4, 0x95DDFD, 0x95DE13,
+                                               0x95DE1F, 0x95DE32, 0x95DE6F, 0x95DE87, 0x95DF07, 0x95DF59, 0x95DF8C};
+constexpr DWORD kAnimationEntryLimits[] = {0x95DCFA, 0x95DE5C, 0x95DFA5, 0x97CB33, 0x97CD94, 0x97D388, 0x97D62D};
+constexpr DWORD kMaxAnimationEntries = 8192;
+alignas(16) BYTE g_animationEntries[kMaxAnimationEntries * kAnimationEntrySize];  // the new table, filled by the game
+
+// The animation library: every animation it knows, 32 bytes each from 0x34C7570 (how many at
+// 0x34B2C10; +4 the hash of its name), and a 9000-place table of their numbers by that hash (from
+// 0x34B2D18, -1 for an empty place), so twice as many places as animations. Its functions, all in
+// 0xD87100-0xD8C350: the reset (clears both, by their sizes in bytes), add (0xD87670, stops at
+// 4500), file a name (0xD876E0, looks for an empty place: with no empty place it would never stop),
+// forget a name (0xD87510), look a name up (0xD8C2C0), by number (0xD87850), the number of an entry
+// (0xD8C2A0, by subtracting the table's start), a walk over them all (0xD89F40), and the start-up
+// constructor (0xF60010, which only clears them). Armageddon's and Guerrilla's vehicles' come to 3814.
+// Both tables move together, the names' to twice the animations' as the game has them; 8192 still
+// fits any 13-bit field an animation's number might be kept in.
+constexpr DWORD kLibraryAnimations = 0x34C7570;
+constexpr DWORD kLibraryAnimationSize = 32;
+constexpr DWORD kGameMaxLibraryAnimations = 4500;
+constexpr DWORD kLibraryAnimationReferences[] = {
+    0xD8710E, 0xD8786F, 0xD89F50, 0xD8C2B4, 0xF60020,  // the reset, by number, the walk, the number of one, the constructor
+    0xD8759A, 0xD876BF, 0xD87765, 0xD8C337,            // the name's hash (+4): forget, add, file, look up
+};
+constexpr DWORD kLibraryAnimationLimits[] = {0xD87682, 0xD876B1, 0xD89F6B, 0xF60019};  // add (twice), the walk, the constructor
+constexpr DWORD kLibraryNames = 0x34B2D18;
+constexpr DWORD kGameLibraryNamePlaces = 9000;
+constexpr DWORD kLibraryNameReferences[] = {0xD87122, 0xD8753C, 0xD87585, 0xD875A9, 0xD8770C, 0xD87750, 0xD8777B, 0xD8C322};
+constexpr DWORD kLibraryNameLimits[] = {0xD8752D, 0xD87576, 0xD876FD, 0xD87741, 0xD8C2DD, 0xD8C313};  // mov ecx,2328h before each div
+constexpr DWORD kLibraryAnimationBytes = 0xD87107;  // the reset's push 23280h (4500 x 32)
+constexpr DWORD kLibraryNameBytes = 0xD8711B;       // and push 8CA0h (9000 x 4)
+constexpr DWORD kMaxLibraryAnimations = 8192;
+constexpr DWORD kLibraryNamePlaces = 2 * kMaxLibraryAnimations;
+alignas(16) BYTE g_libraryAnimations[kMaxLibraryAnimations * kLibraryAnimationSize];  // the new table, cleared and filled by the game
+alignas(16) int g_libraryNames[kLibraryNamePlaces];                                    // the new names' table, emptied below and by the game
+
+// Moves the animation library's two tables, the names' first: more animations than the names'
+// table has places for would make filing a name loop for ever, so the animations only move if the
+// names' table has.
+void MoveAnimationLibrary() {
+    if (rfa::CodeValue(kLibraryAnimationBytes) != kGameMaxLibraryAnimations * kLibraryAnimationSize ||
+        rfa::CodeValue(kLibraryNameBytes) != kGameLibraryNamePlaces * sizeof(int)) {
+        rfa::Log("Library animations: the library's reset isn't as expected; the game keeps its %lu", kGameMaxLibraryAnimations);
+        return;
+    }
+    std::fill(std::begin(g_libraryNames), std::end(g_libraryNames), -1);
+    if (!rfa::MoveTable("Library animation names", kLibraryNames, sizeof(int), kGameLibraryNamePlaces, kLibraryNameReferences,
+                        kLibraryNameLimits, reinterpret_cast<BYTE*>(g_libraryNames), kLibraryNamePlaces))
+        return;
+    const DWORD nameBytes = kLibraryNamePlaces * sizeof(int);
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kLibraryNameBytes), &nameBytes, sizeof(nameBytes)))
+        rfa::Log("Library animation names: could not change the reset's size; it empties only the first %lu places", kGameLibraryNamePlaces);
+    if (!rfa::MoveTable("Library animations", kLibraryAnimations, kLibraryAnimationSize, kGameMaxLibraryAnimations,
+                        kLibraryAnimationReferences, kLibraryAnimationLimits, g_libraryAnimations, kMaxLibraryAnimations))
+        return;
+    const DWORD animationBytes = kMaxLibraryAnimations * kLibraryAnimationSize;
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kLibraryAnimationBytes), &animationBytes, sizeof(animationBytes)))
+        rfa::Log("Library animations: could not change the reset's size; it clears only the first %lu", kGameMaxLibraryAnimations);
+}
+
 // Loads every skeleton the archives list, at start-up (cdecl, no arguments).
 constexpr DWORD kLoadSkeletons = 0x973460;
 constexpr size_t kLoadSkeletonsPrologue = 9;  // push ebp / mov ebp,esp / sub esp,240h
@@ -266,47 +337,6 @@ void __cdecl BuildKeyMap(int controlSet) {
 
 // ---- Room for more animation sets and bone infos (see the top)
 
-DWORD ValueAt(DWORD address) { return *reinterpret_cast<const DWORD*>(address); }
-
-// Moves one of the game's tables (`name` in the log) from `game`, of `holds` entries of `entrySize`
-// bytes, to `table`, of `newHolds`: each of `references` (the 4-byte values in the game's code that
-// hold the table's address, or a field's in its first entry) gets the new table's, each of `limits`
-// the new size. All are checked against the game's values first, and none changed if one differs.
-template <size_t References, size_t Limits>
-bool MoveTable(const char* name, DWORD game, DWORD entrySize, DWORD holds, const DWORD (&references)[References],
-               const DWORD (&limits)[Limits], BYTE* table, DWORD newHolds) {
-    for (DWORD at : references) {
-        const DWORD value = ValueAt(at);
-        if (value < game || value >= game + entrySize) {
-            rfa::Log("%s: the game's code at 0x%08lX isn't as expected (0x%08lX); the game keeps its %lu", name, at, value, holds);
-            return false;
-        }
-    }
-    for (DWORD at : limits) {
-        if (ValueAt(at) != holds) {
-            rfa::Log("%s: the game's limit at 0x%08lX isn't %lu (it's %lu); the game keeps its own", name, at, holds, ValueAt(at));
-            return false;
-        }
-    }
-    const DWORD moved = reinterpret_cast<DWORD>(table);
-    for (DWORD at : references) {
-        const DWORD value = moved + (ValueAt(at) - game);
-        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &value, sizeof(value))) {
-            rfa::Log("%s: could not change the game's code at 0x%08lX (part of it already points at the new table)", name, at);
-            return false;
-        }
-    }
-    for (DWORD at : limits) {
-        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &newHolds, sizeof(newHolds))) {
-            rfa::Log("%s: could not change the game's limit at 0x%08lX", name, at);
-            return false;
-        }
-    }
-    rfa::Log("%s: the game holds %lu (its own %lu): the table moved to 0x%08lX, %u places in its code changed", name,
-             newHolds, holds, moved, static_cast<unsigned>(References + Limits));
-    return true;
-}
-
 // ---- Room for more vehicles (see the top)
 
 BYTE* __fastcall BuildVehicleList(BYTE* list, void*) {
@@ -329,8 +359,9 @@ BYTE* __fastcall BuildVehicleList(BYTE* list, void*) {
 auto const FindAnimation = reinterpret_cast<int(__cdecl*)(const char* name)>(0xD8C2C0);
 auto const AnimationEntry = reinterpret_cast<const BYTE*(__cdecl*)(int index)>(0xD87850);
 void LogDoorAnimations() {
-    rfa::Log("Door check: the animation library holds %d of 4500, the game's animation entries %d of 4224; \"door start\" is trigger %d",
-             *reinterpret_cast<const int*>(0x34B2C10), *reinterpret_cast<const int*>(0x25CD738), *reinterpret_cast<const int*>(0x25CFD88));
+    rfa::Log("Door check: the animation library holds %d of %lu, the game's animation entries %d of %lu; \"door start\" is trigger %d",
+             *reinterpret_cast<const int*>(0x34B2C10), rfa::CodeValue(kLibraryAnimationLimits[0]), *reinterpret_cast<const int*>(0x25CD738),
+             rfa::CodeValue(kAnimationEntryLimits[0]), *reinterpret_cast<const int*>(0x25CFD88));
     for (const char* name : {"pc_enter_lav.anim", "hvy_wlkr_wlk.anim", "apc_dr_opn_htch.anim", "apc_dr_exit_cab.anim",
                              "taxi_dr_opn_door.anim", "taxi_dr_exit_cab.anim", "mnatv_dr_opn_l.anim", "mnatv_dr_exit_l.anim"}) {
         const int index = FindAnimation(name);
@@ -370,9 +401,12 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
     }
-    MoveTable("Animation sets", kAnimSets, kAnimSetSize, kGameMaxAnimSets, kAnimSetReferences, kAnimSetLimits, g_animSets, kMaxAnimSets);
-    MoveTable("Bone infos", kBoneInfos, kBoneInfoSize, kGameMaxBoneInfos, kBoneInfoReferences, kBoneInfoLimits, g_boneInfos, kMaxBoneInfos);
-    MoveTable("Animation triggers", kTriggers, kTriggerSize, kGameMaxTriggers, kTriggerReferences, kTriggerLimits, g_triggers, kMaxTriggers);
+    rfa::MoveTable("Animation sets", kAnimSets, kAnimSetSize, kGameMaxAnimSets, kAnimSetReferences, kAnimSetLimits, g_animSets, kMaxAnimSets);
+    rfa::MoveTable("Bone infos", kBoneInfos, kBoneInfoSize, kGameMaxBoneInfos, kBoneInfoReferences, kBoneInfoLimits, g_boneInfos, kMaxBoneInfos);
+    rfa::MoveTable("Animation triggers", kTriggers, kTriggerSize, kGameMaxTriggers, kTriggerReferences, kTriggerLimits, g_triggers, kMaxTriggers);
+    rfa::MoveTable("Animation entries", kAnimationEntries, kAnimationEntrySize, kGameMaxAnimationEntries, kAnimationEntryReferences,
+                   kAnimationEntryLimits, g_animationEntries, kMaxAnimationEntries);
+    MoveAnimationLibrary();
     g_buildVehicleList = reinterpret_cast<BuildVehicleListFn>(rfa::HookFunction(kBuildVehicleList, kBuildVehicleListPrologue, reinterpret_cast<void*>(&BuildVehicleList)));
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
     ReadSkeletonList();

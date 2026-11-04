@@ -31,14 +31,18 @@ single-player.
   mouse button, getting out with E), his animations moved onto Darius. You build them from your
   own copy of Guerrilla too.
 - **In-game menus** (`rfa_loader`, drawn with [Dear ImGui](https://github.com/ocornut/imgui)):
-  while the console is open, a bar along the bottom of the screen holds RFA-Mod's menus. Its first
+  press F7 (or open the console) and a bar along the bottom of the screen holds RFA-Mod's menus
+  (another key: `MenuKey=` under `[Loader]`). Its first
   is **Spawn** (`spawner`, in `rfa_qol`), with four windows, each with a filter: **Vehicles**, every
   vehicle the game has, Guerrilla's too, dropped in front of you even if the area hasn't loaded it;
   **Items**, every item the game can drop; **Weapons**, given to you; and **Spawned**, the vehicles
   you spawned (the oldest goes after eight), to remove one or all, and how many of the game's
   vehicle slots are free. **Limits** (`limits`, in `rfa_qol`) shows how full the engine's fixed
   tables are (vehicles, animation sets, triggers, explosions, ...) and which a mod has raised; the
-  game drops what doesn't fit without a word. Other mods can add menus of their own (see
+  game drops what doesn't fit without a word. **Graphics** (`graphics`, in `rfa_qol`) has sliders
+  and switches for the Guerrilla world's picture (exposure, sky, sun, fog, sun shafts, sharpening,
+  clock speed, tone mapping, shadows, ...): let go of a slider and the world changes within a second,
+  saved in `rfa_mods.ini`. Other mods can add menus of their own (see
   [rfa_menu.h](src/common/rfa_menu.h)). The spawner is based on Venom_Intellect's vehicle_spawner
   and their notes on the game.
 - **Options → Experimentals**: a new page in the game's Options menu, from the main menu or the

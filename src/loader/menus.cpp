@@ -9,7 +9,10 @@
 // pointer to call on.
 //
 // When: while the developer console is open (0x28FF1CA), when the game has already stopped the
-// player's controls and stopped holding the mouse in the middle of the screen. The game hides
+// player's controls and stopped holding the mouse in the middle of the screen. Their own key
+// ([Loader] MenuKey=, F7 unless set; read from the window's messages) opens them alone: it opens the
+// console for the game (0xC7DCA0), which our console then neither draws nor gives keys to
+// (RFALoader_MenusWant(RFA_MENUS_ALONE)); the key again closes it (0xC7DC80), as ` does. The game hides
 // Windows' cursor, so ImGui draws its own. The game reads its own keys and mouse with DirectInput,
 // so the window's messages, which ImGui reads, are passed on to the game untouched; the console
 // asks RFALoader_MenusWant whether the menus have the mouse or are taking text, and leaves them.
@@ -25,6 +28,8 @@
 #include "backends/imgui_impl_win32.h"
 #include <d3d11.h>
 #include <dxgi.h>
+#include <cstdlib>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -65,7 +70,40 @@ UINT g_pictureWidth = 0, g_pictureHeight = 0;
 bool g_started = false;  // ImGui is set up
 bool g_failed = false;   // and couldn't be
 bool g_shown = false;    // the menus were drawn this frame
+bool g_alone = false;    // opened with their own key, the console out of sight
+UINT g_menuKey = VK_F7;  // that key (0: none)
 std::string g_iniPath;
+
+auto& g_consoleOpenByte = *reinterpret_cast<const volatile BYTE*>(0x28FF1CA);
+auto const OpenConsole = reinterpret_cast<void(__cdecl*)()>(0xC7DCA0);
+auto const CloseConsole = reinterpret_cast<void(__cdecl*)(bool)>(0xC7DC80);
+
+// A key's name as the setting gives it: F1 to F12, Insert, Home, End, PageUp, PageDown, Delete,
+// Pause, or one letter or digit. 0 if none.
+UINT KeyNamed(const std::wstring& name) {
+    if (name.size() >= 2 && (name[0] == L'F' || name[0] == L'f')) {
+        const int n = _wtoi(name.c_str() + 1);
+        if (n >= 1 && n <= 12) return VK_F1 + n - 1;
+    }
+    static const struct { const wchar_t* name; UINT key; } named[] = {
+        {L"Insert", VK_INSERT}, {L"Home", VK_HOME}, {L"End", VK_END}, {L"PageUp", VK_PRIOR},
+        {L"PageDown", VK_NEXT}, {L"Delete", VK_DELETE}, {L"Pause", VK_PAUSE}};
+    for (const auto& one : named)
+        if (_wcsicmp(name.c_str(), one.name) == 0) return one.key;
+    if (name.size() == 1 && iswalnum(name[0])) return towupper(name[0]);
+    return 0;
+}
+
+// The menus' own key, pressed (on the game's thread, in its window's messages).
+void ToggleMenus() {
+    if (!g_consoleOpenByte) {
+        OpenConsole();
+        g_alone = true;
+    } else {
+        CloseConsole(false);
+        g_alone = false;
+    }
+}
 
 // Swaps slot `slot` of `object`'s methods for `replacement`, keeping the old one in `original`.
 template <class Fn>
@@ -79,6 +117,10 @@ bool WrapMethod(void* object, int slot, Fn replacement, Fn* original) {
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (message == WM_KEYDOWN && g_menuKey && w == g_menuKey && !(l & (1 << 30)) && !g_failed) {
+        ToggleMenus();
+        return 0;
+    }
     if (g_shown && ImGui::GetCurrentContext()) ImGui_ImplWin32_WndProcHandler(window, message, w, l);
     return CallWindowProcW(g_windowProc, window, message, w, l);
 }
@@ -88,6 +130,80 @@ std::string Utf8(const std::wstring& text) {
     std::string out(size > 0 ? size - 1 : 0, '\0');
     if (size > 1) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &out[0], size, nullptr, nullptr);
     return out;
+}
+
+std::string g_menuKeyName;  // the menus' key, as the setting names it
+
+// The menus' look: dark charcoal panels with rust-orange accents (Red Faction's), roomy spacing and
+// slightly rounded corners.
+void ApplyTheme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::StyleColorsDark(&style);
+    style.WindowPadding = ImVec2(12, 10);
+    style.FramePadding = ImVec2(9, 5);
+    style.ItemSpacing = ImVec2(9, 6);
+    style.ItemInnerSpacing = ImVec2(7, 5);
+    style.ScrollbarSize = 14;
+    style.GrabMinSize = 12;
+    style.WindowBorderSize = 1;
+    style.FrameBorderSize = 0;
+    style.PopupBorderSize = 1;
+    style.WindowRounding = 5;
+    style.ChildRounding = 4;
+    style.FrameRounding = 3;
+    style.PopupRounding = 4;
+    style.ScrollbarRounding = 6;
+    style.GrabRounding = 3;
+    style.TabRounding = 3;
+    style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+
+    const ImVec4 text(0.93f, 0.90f, 0.85f, 1.00f), dim(0.55f, 0.52f, 0.48f, 1.00f);
+    const ImVec4 panel(0.075f, 0.072f, 0.070f, 0.95f), panelDeep(0.050f, 0.048f, 0.047f, 0.97f);
+    const ImVec4 frame(0.16f, 0.15f, 0.14f, 1.00f), frameLit(0.24f, 0.20f, 0.17f, 1.00f);
+    const ImVec4 rust(0.62f, 0.24f, 0.09f, 1.00f), rustLit(0.80f, 0.34f, 0.12f, 1.00f), rustDeep(0.40f, 0.15f, 0.06f, 1.00f);
+    const ImVec4 border(0.30f, 0.20f, 0.14f, 0.60f);
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_Text] = text;
+    c[ImGuiCol_TextDisabled] = dim;
+    c[ImGuiCol_WindowBg] = panel;
+    c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_PopupBg] = panelDeep;
+    c[ImGuiCol_MenuBarBg] = panelDeep;
+    c[ImGuiCol_Border] = border;
+    c[ImGuiCol_FrameBg] = frame;
+    c[ImGuiCol_FrameBgHovered] = frameLit;
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.30f, 0.22f, 0.17f, 1.00f);
+    c[ImGuiCol_TitleBg] = panelDeep;
+    c[ImGuiCol_TitleBgActive] = rustDeep;
+    c[ImGuiCol_TitleBgCollapsed] = panelDeep;
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.25f);
+    c[ImGuiCol_ScrollbarGrab] = frameLit;
+    c[ImGuiCol_ScrollbarGrabHovered] = rustDeep;
+    c[ImGuiCol_ScrollbarGrabActive] = rust;
+    c[ImGuiCol_CheckMark] = rustLit;
+    c[ImGuiCol_SliderGrab] = rust;
+    c[ImGuiCol_SliderGrabActive] = rustLit;
+    c[ImGuiCol_Button] = rustDeep;
+    c[ImGuiCol_ButtonHovered] = rust;
+    c[ImGuiCol_ButtonActive] = rustLit;
+    c[ImGuiCol_Header] = ImVec4(0.40f, 0.15f, 0.06f, 0.75f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.62f, 0.24f, 0.09f, 0.80f);
+    c[ImGuiCol_HeaderActive] = rust;
+    c[ImGuiCol_Separator] = border;
+    c[ImGuiCol_SeparatorHovered] = rust;
+    c[ImGuiCol_SeparatorActive] = rustLit;
+    c[ImGuiCol_ResizeGrip] = ImVec4(0.62f, 0.24f, 0.09f, 0.25f);
+    c[ImGuiCol_ResizeGripHovered] = rust;
+    c[ImGuiCol_ResizeGripActive] = rustLit;
+    c[ImGuiCol_Tab] = frame;
+    c[ImGuiCol_TabHovered] = rust;
+    c[ImGuiCol_TableHeaderBg] = frame;
+    c[ImGuiCol_TableBorderStrong] = border;
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.22f, 0.18f, 0.15f, 0.50f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.03f);
+    c[ImGuiCol_PlotHistogram] = rust;
+    c[ImGuiCol_TextSelectedBg] = ImVec4(0.62f, 0.24f, 0.09f, 0.45f);
+    c[ImGuiCol_NavCursor] = rustLit;
 }
 
 bool MakeTarget() {
@@ -123,13 +239,11 @@ bool Start() {
 
     // Sized for the picture: as ImGui's own at 1080 lines, larger above.
     const float scale = g_pictureHeight > 1080 ? g_pictureHeight / 1080.0f : 1.0f;
-    ImGui::StyleColorsDark();
+    ApplyTheme();
     ImGuiStyle& style = ImGui::GetStyle();
     style.ScaleAllSizes(scale);
-    style.FontSizeBase = 18.0f;
+    style.FontSizeBase = 19.0f;
     style.FontScaleMain = scale;
-    style.WindowRounding = 4.0f * scale;
-    style.Colors[ImGuiCol_WindowBg].w = 0.92f;
     wchar_t windows[MAX_PATH];
     const UINT length = GetWindowsDirectoryW(windows, MAX_PATH);
     const std::wstring font = length && length < MAX_PATH ? std::wstring(windows) + L"\\Fonts\\segoeui.ttf" : L"";
@@ -141,7 +255,6 @@ bool Start() {
         rfa::Log("Could not set up Dear ImGui on the game's window and device; no menus");
         return false;
     }
-    g_windowProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WindowProc)));
     if (!g_windowProc) {
         rfa::Log("Could not read the game window's messages; no menus");
         return false;
@@ -205,7 +318,8 @@ void DrawBar() {
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                    ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoFocusOnAppearing;
     if (ImGui::Begin("##RFA-Mod menus", nullptr, flags) && ImGui::BeginMenuBar()) {
-        ImGui::TextDisabled("RFA-Mod");
+        if (g_menuKey) ImGui::TextDisabled("RFA-Mod  (%s)", g_menuKeyName.c_str());
+        else ImGui::TextDisabled("RFA-Mod");
         CallMenus(RFA_MENU_BAR);
         ImGui::EndMenuBar();
     }
@@ -216,6 +330,7 @@ void DrawBar() {
 
 void DrawMenus() {
     g_shown = false;
+    if (!g_consoleOpen) g_alone = false;
     if (!g_consoleOpen || g_failed) return;
     if (!g_started) {
         g_started = true;
@@ -280,6 +395,7 @@ HRESULT STDMETHODCALLTYPE CreateSwapChain(IDXGIFactory* factory, IUnknown* devic
     g_device->GetImmediateContext(&g_context);
     g_chain = *chain;
     g_window = desc->OutputWindow;
+    g_windowProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WindowProc)));
     rfa::Log("The game's swap chain: %ux%u; menus will show while the console is open", desc->BufferDesc.Width, desc->BufferDesc.Height);
     return made;
 }
@@ -296,17 +412,23 @@ HRESULT WINAPI CreateFactory(REFIID id, void** factory) {
 
 void InstallMenus(const std::vector<HMODULE>* mods) {
     g_mods = mods;
+    const std::wstring key = rfa::IniString(L"Loader", L"MenuKey", L"F7");
+    g_menuKey = KeyNamed(key);
+    g_menuKeyName = Utf8(key);
+    rfa::Log(g_menuKey ? "Menus: %ls opens them" : "Menus: no key of their own (\"%ls\"); open the console", key.c_str());
     if (!rfa::HookImport(GetModuleHandleW(nullptr), "dxgi.dll", "CreateDXGIFactory", &CreateFactory, &g_createFactory))
         rfa::Log("Could not hook the game's CreateDXGIFactory; no menus");
 }
 
 extern "C" __declspec(dllexport) int __cdecl RFALoader_MenusWant(int what) {
+    if (what == RFA_MENUS_ALONE) return g_alone && g_consoleOpenByte ? 1 : 0;  // from the first frame on
     if (!g_shown) return 0;
     const ImGuiIO& io = ImGui::GetIO();
     switch (what) {
         case RFA_MENUS_SHOWN: return 1;
         case RFA_MENUS_MOUSE: return io.WantCaptureMouse ? 1 : 0;
         case RFA_MENUS_KEYBOARD: return io.WantTextInput ? 1 : 0;
+        case RFA_MENUS_ALONE: return g_alone ? 1 : 0;
         default: return 0;
     }
 }

@@ -552,6 +552,16 @@ void ReadSunShafts() {
 
 bool SunShaftsOn() { return GuerrillaToneMapping() && g_sunShafts > 0 && !g_shaftsFailed; }
 
+// Sharpening of the final picture in our worlds (Sharpen=, 0-100; 0: none; read again whenever
+// rfa_mods.ini is saved): see "Sharpening".
+float g_sharpen = 0.4f;
+bool g_sharpenFailed = false;
+
+void ReadSharpen() {
+    const int amount = rfa::IniInt(L"GuerrillaWorld", L"Sharpen", 40);
+    g_sharpen = (amount < 0 ? 0 : amount > 100 ? 100 : amount) / 100.0f;
+}
+
 // The sun's shadows (SunShadows=; read again whenever rfa_mods.ini is saved): the sun's light drawn
 // through the shadow map of the sun's lamp (see "The sun's shadows"). 0: it lights through everything.
 bool g_sunShadows = true;
@@ -636,6 +646,7 @@ void CheckSettings() {
     if (g_exposure != exposureBefore) rfa::Log("Tone mapping: exposure times %.3g (was %.3g)", g_exposure, exposureBefore);
     const float shaftsBefore = g_sunShafts;
     ReadSunShafts();
+    ReadSharpen();
     if (g_sunShafts != shaftsBefore) rfa::Log("Sun shafts: times %.3g (was %.3g)", g_sunShafts, shaftsBefore);
     const bool shadowsBefore = g_sunShadows;
     ReadSunShadows();
@@ -3602,12 +3613,161 @@ void TellComposite(int which) {
     }
 }
 
+// ---- Sharpening
+
+// Contrast-adaptive sharpening (AMD's FidelityFX CAS, as its paper describes it), over the final
+// picture in our worlds, right after the last composite step (and Guerrilla's tone mapping), before
+// the HUD and menus are drawn over it, so their text isn't sharpened. Each pixel is pushed away from
+// the average of the four next to it, by less where the nine around it already span much of the
+// range (an edge, which would ring) and by more where they are close (soft detail): the amount is
+// sqrt(min(darkest, 2 - brightest) / brightest), each of those over the cross of five plus the
+// corners, times -1 / lerp(8, 5, Sharpen). The picture is copied first, as the pass draws over it.
+const char kSharpenShader[] = R"(
+Texture2D Picture : register(t0);
+cbuffer Sharpen : register(b0) { float4 Params; };  // x: the negative peak weight
+
+float4 SharpenVertex(uint id : SV_VertexID) : SV_Position {
+    float2 at = float2((id << 1) & 2, id & 2);
+    return float4(at * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+
+float3 At(int2 p, int2 size) { return Picture.Load(int3(clamp(p, int2(0, 0), size - 1), 0)).rgb; }
+
+float4 SharpenPixel(float4 position : SV_Position) : SV_Target {
+    uint width, height;
+    Picture.GetDimensions(width, height);
+    int2 size = int2(width, height), p = int2(position.xy);
+    float3 a = At(p + int2(-1, -1), size), b = At(p + int2(0, -1), size), c = At(p + int2(1, -1), size);
+    float3 d = At(p + int2(-1, 0), size), e = At(p, size), f = At(p + int2(1, 0), size);
+    float3 g = At(p + int2(-1, 1), size), h = At(p + int2(0, 1), size), i = At(p + int2(1, 1), size);
+    float3 low = min(min(min(d, e), min(f, b)), h);
+    low += min(low, min(min(a, c), min(g, i)));
+    float3 high = max(max(max(d, e), max(f, b)), h);
+    high += max(high, max(max(a, c), max(g, i)));
+    float3 amount = sqrt(saturate(min(low, 2.0 - high) / max(high, 1e-5)));
+    float3 weight = amount * Params.x;
+    return float4(saturate(((b + d + f + h) * weight + e) / (1.0 + 4.0 * weight)), 1);
+}
+)";
+
+ID3D11VertexShader* g_sharpenVertex = nullptr;
+ID3D11PixelShader* g_sharpenPixel = nullptr;
+ID3D11Buffer* g_sharpenConstants = nullptr;
+ID3D11BlendState* g_sharpenBlend = nullptr;
+ID3D11Texture2D* g_sharpenCopy = nullptr;  // the picture, copied to be read from
+ID3D11ShaderResourceView* g_sharpenView = nullptr;
+D3D11_TEXTURE2D_DESC g_sharpenCopyDesc = {};
+
+bool MakeSharpenObjects() {
+    if (!LoadCompiler()) return false;
+    ID3DBlob* vertex = Compile(kSharpenShader, sizeof(kSharpenShader) - 1, "SharpenVertex", "vs_4_0");
+    ID3DBlob* pixel = Compile(kSharpenShader, sizeof(kSharpenShader) - 1, "SharpenPixel", "ps_4_0");
+    bool ok = vertex && pixel &&
+              SUCCEEDED(g_device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &g_sharpenVertex)) &&
+              SUCCEEDED(g_device->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &g_sharpenPixel));
+    for (ID3DBlob* blob : {vertex, pixel})
+        if (blob) blob->Release();
+    D3D11_BUFFER_DESC buffer = {};
+    buffer.ByteWidth = 16;
+    buffer.Usage = D3D11_USAGE_DYNAMIC;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ok = ok && SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_sharpenConstants));
+    D3D11_BLEND_DESC blend = {};
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+    ok = ok && SUCCEEDED(g_device->CreateBlendState(&blend, &g_sharpenBlend));
+    if (!ok) rfa::Log("Could not make the sharpening's shaders or states; no sharpening");
+    return ok;
+}
+
+// A copy of `picture` to read from, made again if its size or format changes.
+bool CopyForSharpening(ID3D11Texture2D* picture, const D3D11_TEXTURE2D_DESC& desc) {
+    if (!g_sharpenCopy || g_sharpenCopyDesc.Width != desc.Width || g_sharpenCopyDesc.Height != desc.Height ||
+        g_sharpenCopyDesc.Format != desc.Format) {
+        if (g_sharpenView) g_sharpenView->Release();
+        if (g_sharpenCopy) g_sharpenCopy->Release();
+        g_sharpenView = nullptr;
+        g_sharpenCopy = nullptr;
+        D3D11_TEXTURE2D_DESC copy = desc;
+        copy.MipLevels = copy.ArraySize = 1;
+        copy.Usage = D3D11_USAGE_DEFAULT;
+        copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        copy.CPUAccessFlags = copy.MiscFlags = 0;
+        if (FAILED(g_device->CreateTexture2D(&copy, nullptr, &g_sharpenCopy)) ||
+            FAILED(g_device->CreateShaderResourceView(g_sharpenCopy, nullptr, &g_sharpenView)))
+            return false;
+        g_sharpenCopyDesc = copy;
+        rfa::Log("Sharpening: the final picture %u x %u (format %d), Sharpen=%d", desc.Width, desc.Height, static_cast<int>(desc.Format),
+                 static_cast<int>(g_sharpen * 100 + 0.5f));
+    }
+    g_context->CopyResource(g_sharpenCopy, picture);
+    return true;
+}
+
+void SharpenAfterComposite() {
+    if (g_sharpen <= 0 || g_sharpenFailed || !g_context || !g_device) return;
+    ID3D11RenderTargetView* target = nullptr;
+    g_context->OMGetRenderTargets(1, &target, nullptr);
+    if (!target) return;
+    ID3D11Resource* resource = nullptr;
+    target->GetResource(&resource);
+    ID3D11Texture2D* picture = nullptr;
+    D3D11_TEXTURE2D_DESC desc = {};
+    if (resource && SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&picture)))) picture->GetDesc(&desc);
+    if (picture && desc.SampleDesc.Count == 1 && desc.ArraySize == 1 && desc.MipLevels == 1) {
+        if (!g_sharpenVertex && !MakeSharpenObjects()) {
+            g_sharpenFailed = true;
+        } else if (CopyForSharpening(picture, desc)) {
+            const float peak = -1.0f / (8.0f + (5.0f - 8.0f) * g_sharpen);
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(g_context->Map(g_sharpenConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                const float params[4] = {peak, 0, 0, 0};
+                memcpy(mapped.pData, params, sizeof(params));
+                g_context->Unmap(g_sharpenConstants, 0);
+                SavedState saved;
+                saved.Save();
+                ID3D11DepthStencilState* gameDepth = nullptr;
+                UINT stencilRef = 0;
+                g_context->OMGetDepthStencilState(&gameDepth, &stencilRef);
+                D3D11_VIEWPORT gameViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+                UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                g_context->RSGetViewports(&viewportCount, gameViewports);
+                const float noFactor[4] = {1, 1, 1, 1};
+                const D3D11_VIEWPORT whole = {0, 0, static_cast<float>(desc.Width), static_cast<float>(desc.Height), 0, 1};
+                g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                g_context->IASetInputLayout(nullptr);
+                g_context->VSSetShader(g_sharpenVertex, nullptr, 0);
+                g_context->GSSetShader(nullptr, nullptr, 0);
+                g_context->PSSetShader(g_sharpenPixel, nullptr, 0);
+                g_context->PSSetConstantBuffers(0, 1, &g_sharpenConstants);
+                g_context->PSSetShaderResources(0, 1, &g_sharpenView);
+                if (g_toneDepth) g_context->OMSetDepthStencilState(g_toneDepth, 0);
+                if (g_toneRaster) g_context->RSSetState(g_toneRaster);
+                g_context->OMSetBlendState(g_sharpenBlend, noFactor, 0xFFFFFFFF);
+                g_context->OMSetRenderTargets(1, &target, nullptr);
+                g_context->RSSetViewports(1, &whole);
+                g_context->Draw(3, 0);
+                ID3D11ShaderResourceView* none = nullptr;
+                g_context->PSSetShaderResources(0, 1, &none);
+                g_context->RSSetViewports(viewportCount, gameViewports);
+                g_context->OMSetDepthStencilState(gameDepth, stencilRef);
+                saved.Restore();
+                if (gameDepth) gameDepth->Release();
+            }
+        }
+    }
+    if (picture) picture->Release();
+    if (resource) resource->Release();
+    target->Release();
+}
+
 void __fastcall FinalComposite0(void* compositor, void* unused, int flag) {
     g_finalComposite[0](compositor, unused, flag);
     if (!InOurWorld()) return;
     NoteRenderWarnings();
     TellComposite(0);
     ToneMapAfterComposite();
+    SharpenAfterComposite();
 }
 
 void __fastcall FinalComposite1(void* compositor, void* unused, int flag) {
@@ -3616,6 +3776,7 @@ void __fastcall FinalComposite1(void* compositor, void* unused, int flag) {
     NoteRenderWarnings();
     TellComposite(1);
     ToneMapAfterComposite();
+    SharpenAfterComposite();
 }
 
 // ---- The game's device
@@ -4236,6 +4397,124 @@ void __cdecl EffectsUpdate(float seconds) {
     if (InOurWorld()) GuerrillaParticleLight();
 }
 
+// ---- Road log (RoadLog=1, a diagnosis; off by default)
+
+// Our roads' edges show one even colour where they should hand over to the ground beside them.
+// Armageddon's ground and road vertex shaders both place the ground's layers and its blend map by
+// two constants the engine sets in their per-object buffer (cb2): Terrain_uv_params (register 6)
+// and Terrain_subzone_offset (23), from the world position (objTM, registers 15-17, plus
+// Render_offset, 18). The road's own texture doesn't use them, so if the engine doesn't set them
+// for a road, only its edges go wrong. With RoadLog=1 the mod notes the game's terrain vertex
+// shaders as the game makes them (by the constants they name: a road's names Edge_fade__use_spec_map),
+// and in our worlds logs those registers for draws with values not yet logged, to compare a road
+// with the ground round it. Reading them back stalls the frame, so it stops after a few hundred.
+bool g_roadLog = false;
+using CreateVertexShaderFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device* device, const void* code, SIZE_T size,
+                                                         ID3D11ClassLinkage* linkage, ID3D11VertexShader** shader);
+using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext* context, UINT count, UINT first, INT base);
+CreateVertexShaderFn g_createVertexShader = nullptr;
+DrawIndexedFn g_drawIndexed = nullptr;
+constexpr int kCreateVertexShaderSlot = 12;  // ID3D11Device: IUnknown's 3, then CreateBuffer ... CreateInputLayout
+constexpr int kDrawIndexedSlot = 12;         // ID3D11DeviceContext: IUnknown's 3, ID3D11DeviceChild's 4, then VSSetConstantBuffers ...
+std::vector<ID3D11VertexShader*> g_roadShaders, g_groundShaders;
+ID3D11Buffer* g_roadLogCopy = nullptr;
+int g_roadLogReads = 0, g_roadLogLines = 0;
+constexpr int kRoadLogReads = 600, kRoadLogLines = 120;
+constexpr UINT kTerrainRegisters = 24;
+struct LoggedTerrain {
+    bool road;
+    float values[7];  // Terrain_uv_params, Terrain_subzone_offset
+};
+std::vector<LoggedTerrain> g_roadLogged;
+
+bool Names(const void* code, SIZE_T size, const char* name) {
+    const char* start = static_cast<const char*>(code);
+    const size_t length = strlen(name);
+    return std::search(start, start + size, name, name + length) != start + size;
+}
+
+HRESULT STDMETHODCALLTYPE CreateVertexShaderNoted(ID3D11Device* device, const void* code, SIZE_T size, ID3D11ClassLinkage* linkage,
+                                                  ID3D11VertexShader** shader) {
+    const HRESULT result = g_createVertexShader(device, code, size, linkage, shader);
+    if (SUCCEEDED(result) && shader && *shader && code && Names(code, size, "Terrain_uv_params")) {
+        if (Names(code, size, "Edge_fade__use_spec_map")) g_roadShaders.push_back(*shader);
+        else g_groundShaders.push_back(*shader);
+    }
+    return result;
+}
+
+void LogTerrainDraw(ID3D11DeviceContext* context) {
+    ID3D11VertexShader* shader = nullptr;
+    context->VSGetShader(&shader, nullptr, nullptr);
+    if (!shader) return;
+    const bool road = std::find(g_roadShaders.begin(), g_roadShaders.end(), shader) != g_roadShaders.end();
+    const bool ground = !road && std::find(g_groundShaders.begin(), g_groundShaders.end(), shader) != g_groundShaders.end();
+    shader->Release();
+    if (!road && !ground) return;
+    ID3D11Buffer* constants = nullptr;
+    context->VSGetConstantBuffers(2, 1, &constants);
+    if (!constants) return;
+    D3D11_BUFFER_DESC desc;
+    constants->GetDesc(&desc);
+    if (desc.ByteWidth < kTerrainRegisters * 16) {
+        constants->Release();
+        return;
+    }
+    if (!g_roadLogCopy) {
+        D3D11_BUFFER_DESC copy = {};
+        copy.ByteWidth = kTerrainRegisters * 16;
+        copy.Usage = D3D11_USAGE_STAGING;
+        copy.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(g_device->CreateBuffer(&copy, nullptr, &g_roadLogCopy))) {
+            constants->Release();
+            g_roadLogReads = kRoadLogReads;
+            rfa::Log("Road log: could not make a buffer to read the constants into; nothing logged");
+            return;
+        }
+    }
+    const D3D11_BOX box = {0, 0, 0, kTerrainRegisters * 16, 1, 1};
+    context->CopySubresourceRegion(g_roadLogCopy, 0, 0, 0, 0, constants, 0, &box);
+    constants->Release();
+    ++g_roadLogReads;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(context->Map(g_roadLogCopy, 0, D3D11_MAP_READ, 0, &mapped))) return;
+    float c[kTerrainRegisters * 4];
+    memcpy(c, mapped.pData, sizeof(c));
+    context->Unmap(g_roadLogCopy, 0);
+    LoggedTerrain seen = {road, {c[24], c[25], c[26], c[27], c[92], c[93], c[94]}};
+    for (const LoggedTerrain& logged : g_roadLogged)
+        if (logged.road == seen.road && memcmp(logged.values, seen.values, sizeof(seen.values)) == 0) return;
+    g_roadLogged.push_back(seen);
+    ++g_roadLogLines;
+    rfa::Log("Road log: %s  uv_params (%.6g, %.6g, %.6g, %.6g)  subzone_offset (%.6g, %.6g, %.6g)  objTM at (%.6g, %.6g, %.6g)  "
+             "render_offset (%.6g, %.6g, %.6g)  position_scale (%.6g, %.6g, %.6g)",
+             road ? "ROAD  " : "ground", c[24], c[25], c[26], c[27], c[92], c[93], c[94], c[63], c[67], c[71], c[72], c[73], c[74],
+             c[28], c[29], c[30]);
+}
+
+void STDMETHODCALLTYPE DrawIndexedLogged(ID3D11DeviceContext* context, UINT count, UINT first, INT base) {
+    if (g_roadLogReads < kRoadLogReads && g_roadLogLines < kRoadLogLines && InOurWorld()) LogTerrainDraw(context);
+    g_drawIndexed(context, count, first, base);
+}
+
+// Puts `replacement` in slot `slot` of a COM object's table of methods, keeping the old one.
+template <typename Fn>
+bool WrapSlot(void* object, int slot, Fn replacement, Fn* original) {
+    void** table = *static_cast<void***>(object);
+    *original = reinterpret_cast<Fn>(table[slot]);
+    void* value = reinterpret_cast<void*>(replacement);
+    return rfa::PatchCode(&table[slot], &value, sizeof(value));
+}
+
+void StartRoadLog(ID3D11Device* device, ID3D11DeviceContext* context) {
+    if (g_createVertexShader) return;
+    if (WrapSlot(device, kCreateVertexShaderSlot, &CreateVertexShaderNoted, &g_createVertexShader) &&
+        WrapSlot(context, kDrawIndexedSlot, &DrawIndexedLogged, &g_drawIndexed))
+        rfa::Log("Road log: on (RoadLog=1); the terrain's constants are logged in our worlds");
+    else
+        rfa::Log("Road log: could not wrap the device's methods; nothing logged");
+}
+
 HRESULT WINAPI CreateDevice(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver, HMODULE software, UINT flags,
                             const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdk, ID3D11Device** device,
                             D3D_FEATURE_LEVEL* level, ID3D11DeviceContext** context) {
@@ -4246,6 +4525,7 @@ HRESULT WINAPI CreateDevice(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driver, HMODU
         (*context)->AddRef();
         g_device = *device;
         g_context = *context;
+        if (g_roadLog) StartRoadLog(*device, *context);
     }
     return result;
 }
@@ -4265,6 +4545,56 @@ std::vector<std::string> SplitList(const std::wstring& text) {
     return names;
 }
 
+// ---- Room for more explosions
+
+// The game keeps every explosion explosions.xtbl (and each DLC's) describes in one table of 132
+// (0x144 bytes each from 0x1888D88, how many it has at 0x1893498, just after it); its reader
+// (0x6E9C70) drops each one past the 132nd (cmp [1893498h],84h). Armageddon's own and its DLCs' come
+// to 130, so only 2 of the 14 Guerrilla's props blow up with fitted. The game's code reaches the
+// table by its address in seven instructions (the reader and the look-ups by name and number, one of
+// them a field at +0x20) and its size in that one, so the mod moves it to a table of 256 of its own,
+// as guerrilla_vehicles does its tables, after checking each value. The world builder fills to the
+// same 256 (GuerrillaEffectTables.ExplosionLimit).
+constexpr DWORD kExplosions = 0x1888D88;
+constexpr DWORD kExplosionSize = 0x144;
+constexpr DWORD kGameMaxExplosions = 132;
+constexpr DWORD kExplosionReferences[] = {0x6E9D14, 0x6EAE5F, 0x6EAE7A, 0x6EAECF, 0x6EAEE2, 0x6EAF3F, 0x6EAF78, 0x6EAF98};
+constexpr DWORD kExplosionLimits[] = {0x6E9D00};
+constexpr DWORD kMaxExplosions = 256;
+alignas(16) BYTE g_explosions[kMaxExplosions * kExplosionSize];  // the new table, filled by the game
+
+// ---- Room for more visual effects
+
+// The game keeps every visual effect vfx.xtbl describes (and a DLC level's, while it's loaded) in a
+// table of 950 (0xB4 bytes each from 0x121FDE8, how many at 0x1200BF4); its entry reader (0x4EE340)
+// leaves out each one past it (cmp [1200BF4h],3B6h). Armageddon's own are 904, so only 46 of the 87
+// visuals Guerrilla's props show fitted. Seven functions reach the table by its address (the base
+// table's reader and a DLC level's, the entry readers, the look-ups by name and number), 13 values,
+// and the start-up constructor (0xF1C8B0) builds its entries with 0x4EF6A0 (+0x94 = -1). The mod
+// moves it to a table of 2048, builds the new entries with that constructor itself (in case the
+// game's start-up constructor already ran), and the world builder fills to the same
+// (GuerrillaEffectTables.VisualLimit). The effects (effects.xtbl) are in a pool of their own, built
+// into a bigger object, with room for Guerrilla's as it is (1224).
+constexpr DWORD kVisuals = 0x121FDE8;
+constexpr DWORD kVisualSize = 0xB4;
+constexpr DWORD kGameMaxVisuals = 950;
+constexpr DWORD kVisualCount = 0x1200BF4;
+constexpr DWORD kVisualReferences[] = {0x4EA941, 0x4EAA96, 0x4EAB97, 0x4EAF3F, 0x4EB0AD, 0x4EDFDA, 0x4EE03A,
+                                       0x4EE18E, 0x4EE2D7, 0x4EE423, 0x4EF412, 0x4EF482, 0xF1C8C3};
+constexpr DWORD kVisualLimits[] = {0x4EE40A, 0xF1C8B9};  // the entry reader's check, the constructor's push 3B6h
+constexpr DWORD kMaxVisuals = 2048;
+alignas(16) BYTE g_visuals[kMaxVisuals * kVisualSize];  // the new table, filled by the game
+auto const BuildVisual = reinterpret_cast<void*(__fastcall*)(void* visual, void* unused)>(0x4EF6A0);
+
+void MoveVisuals() {
+    if (*reinterpret_cast<const int*>(kVisualCount) != 0) {
+        rfa::Log("Visual effects: the game has already read some; it keeps its %lu", kGameMaxVisuals);
+        return;
+    }
+    for (DWORD i = 0; i < kMaxVisuals; ++i) BuildVisual(g_visuals + i * kVisualSize, nullptr);
+    rfa::MoveTable("Visual effects", kVisuals, kVisualSize, kGameMaxVisuals, kVisualReferences, kVisualLimits, g_visuals, kMaxVisuals);
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -4272,6 +4602,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
     }
+    rfa::MoveTable("Explosions", kExplosions, kExplosionSize, kGameMaxExplosions, kExplosionReferences, kExplosionLimits, g_explosions,
+                   kMaxExplosions);
+    MoveVisuals();
+    g_roadLog = rfa::IniInt(L"GuerrillaWorld", L"RoadLog", 0) != 0;
     g_skyOn = rfa::IniInt(L"GuerrillaWorld", L"Sky", 1) != 0;
     g_cloudsOn = rfa::IniInt(L"GuerrillaWorld", L"Clouds", 1) != 0;
     g_worlds = SplitList(rfa::IniString(L"GuerrillaWorld", L"Worlds", L"rfg"));
@@ -4286,6 +4620,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadFog();
     ReadToneMapping();
     ReadSunShafts();
+    ReadSharpen();
     ReadSunShadows();
     ReadParticles();
     ReadDust();

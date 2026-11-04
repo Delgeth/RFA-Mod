@@ -3,7 +3,8 @@
 // before each frame is shown, and feeds ImGui the game window's mouse and keys. The menus are up
 // while the developer console is open (the ` key), when the game has already freed the mouse and
 // stopped the player's controls: a bar along the bottom of the screen, with each mod's menus, and
-// the windows they open.
+// the windows they open. Their own key ([Loader] MenuKey=, F7) opens them alone: it opens the console
+// for the game, which the console then keeps out of sight.
 //
 // A mod with menus exports
 //     extern "C" __declspec(dllexport) void __cdecl RFAMod_Menu(const RFAMenu* menu);
@@ -46,6 +47,7 @@ enum RFAMenuWant {
     RFA_MENUS_SHOWN = 0,     // the menus are up
     RFA_MENUS_MOUSE = 1,     // the mouse is over one of them (its clicks are theirs)
     RFA_MENUS_KEYBOARD = 2,  // one of them is taking typed text
+    RFA_MENUS_ALONE = 3,     // they were opened with their own key: the console stays out of sight
 };
 
 namespace rfa::menu {

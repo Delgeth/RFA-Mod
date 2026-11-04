@@ -32,3 +32,9 @@ void Init();
 // Its part of the in-game menus (RFAMod_Menu).
 void Menu(const RFAMenu* menu);
 }  // namespace limits
+
+namespace graphics {
+void Init();
+// Its part of the in-game menus (RFAMod_Menu).
+void Menu(const RFAMenu* menu);
+}  // namespace graphics

@@ -12,9 +12,10 @@
 //   animation sets     0x2632170, size in `cmp [2632170h],8Ch` at 0x97BE87 (140)
 //   bone infos         the animation library's entity bone infos, 0x3393360, size at 0xD7B613 (138)
 //   animation triggers 0x34C6D68, size in `cmp [34C6D68h],1676h` at 0xD89D4F (5750)
-//   library animations the animation library's entries, 0x34B2C10 (4500)
-//   animation entries  the game's animation entries, 0x25CD738 (4224)
-//   explosions         the explosion table, 0x1893498 (132)
+//   library animations the animation library's entries, 0x34B2C10, size in `cmp [34B2C10h],1194h` at 0xD87682 (4500)
+//   animation entries  the game's animation entries, 0x25CD738, size in `cmp [25CD738h],1080h` at 0x95DCFA (4224)
+//   explosions         the explosion table, 0x1893498, size in `cmp [1893498h],84h` at 0x6E9D00 (132)
+//   visual effects     the visual effects, 0x1200BF4, size in `cmp [1200BF4h],3B6h` at 0x4EE40A (950)
 //   vehicle slots      the vehicle pool 0x1972900: taken of the slots it holds (+0x10; 0x7612F0 the free)
 #define RFA_MOD_NAME "limits"
 #include "rfa_mod.h"
@@ -39,9 +40,10 @@ const Limit kLimits[] = {
     {"Animation sets", 0x2632170, 0x97BE87, 0, 140, "Set files and animated objects; each vehicle's interaction uses one"},
     {"Bone infos", 0x3393360, 0xD7B613, 0, 138, "Each vehicle keeps one; people and animated objects take one while about"},
     {"Animation triggers", 0x34C6D68, 0xD89D4F, 0, 5750, "Every animation's triggers (doors, feet, camera), from anim_files.xtbl"},
-    {"Library animations", 0x34B2C10, 0, 4500, 4500, "Every animation the animation library knows"},
-    {"Animation entries", 0x25CD738, 0, 4224, 4224, "The game's entries for anim_files.xtbl"},
-    {"Explosions", 0x1893498, 0, 132, 132, "explosions.xtbl and the DLCs'"},
+    {"Library animations", 0x34B2C10, 0xD87682, 0, 4500, "Every animation the animation library knows"},
+    {"Animation entries", 0x25CD738, 0x95DCFA, 0, 4224, "The game's entries for anim_files.xtbl"},
+    {"Explosions", 0x1893498, 0x6E9D00, 0, 132, "explosions.xtbl and the DLCs'"},
+    {"Visual effects", 0x1200BF4, 0x4EE40A, 0, 950, "vfx.xtbl: Armageddon's, Guerrilla's props', and a DLC level's while it's loaded"},
 };
 
 BYTE* const kVehiclePool = reinterpret_cast<BYTE*>(0x1972900);
