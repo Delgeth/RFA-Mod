@@ -783,7 +783,8 @@ documents (elements driven by a Lua script).
 
 What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself
 (`[GuerrillaVehicles]` in the ini). So far: the keys for driving, getting out and changing seats,
-room for the vehicles themselves and for their animation sets, and their own skeletons.
+room for the vehicles themselves, their animation sets and their animations' triggers, and their own
+skeletons.
 
 - **Driving keys**: Armageddon still has Guerrilla's driving code for the player. Its gameplay
   controls (`0x4DBBD0`) read the accelerator and brake as button values (actions 62 `veh_accelerate`
@@ -828,6 +829,15 @@ room for the vehicles themselves and for their animation sets, and their own ske
   writes through a null pointer. Four small functions use that table (add, remove, clear, find),
   each with its address and its size in its code, so the mod moves it as it does the animation sets:
   to a table of 512, those four addresses and five sizes changed after checking them.
+- **Room for the animations' triggers**: an animation's triggers (a door starting to open, a foot
+  landing, the camera moving: each `anim_files.xtbl` entry's `<Triggers>`) are kept in one pool of
+  5,750 for every animation (8 bytes each from `0x34BB9B8`, how many taken at `0x34C6D68`), which the
+  animation library fills as it reads the table (`0xD89D40`). Once it's full, every animation after
+  gets none, without a word. Armageddon's and Guerrilla's together come to about 7,000, so the cars
+  after the APCs had no "door start" and getting in stopped at the door. Only that one function
+  reaches the pool, so the mod gives it one of 16,384: its address and its size changed after
+  checking them. At start-up the log also says, for a few door animations, how many triggers each
+  got ("Door check:").
 - **Vehicles' own skeletons**: walkers, flyers and turret trucks have a skeleton of their own
   (`Rig` in their table entry). The game loads every skeleton its archives list while it starts
   (`0x973460`: each through `0x973550`, by name), and when it reads the vehicle table it takes each

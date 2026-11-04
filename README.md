@@ -147,9 +147,6 @@ Things to know:
   script.
 - `editor\GuerrillaHud.exe --remove` takes the HUD away. Only remove it that way: one of its files
   also holds Armageddon's own HUD pictures.
-- Getting into a car with doors (the Taxi, the ATV, ...) gets stuck at the start: the door doesn't
-  open, and after a few seconds the game puts you in; getting out fills the screen with "Vehicle
-  interaction anim missing open 'DOOR_L'" reports. The APCs' hatches work. This is being fixed.
 - The vehicles have no sounds, lights or turrets yet, and their glass shows too bright. Darius is a little taller than Mason, so his hands may not land exactly on the
   wheel and door. Tanks and the bulldozer aren't built yet, and walkers can't be got into yet.
   `guerrilla_vehicles` must be on: besides the keys, it makes room in the game for the vehicles

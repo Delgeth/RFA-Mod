@@ -65,6 +65,15 @@
 // they had), the four addresses and the five sizes changed after checking them. The game clears the
 // table (every entry free, -1) while it starts, after the mods.
 //
+// Room for the animations' triggers: an animation's triggers (when a door starts to open, a foot
+// lands, the camera moves; each anim_files.xtbl entry's <Triggers>) are kept in one pool of 5750 for
+// every animation (8 bytes each, a trigger and its time, from 0x34BB9B8; how many are taken at
+// 0x34C6D68), which the animation library adds them to as it reads the table (0xD89D40, from
+// 0xD877B0). Once it is full, every animation after gets none, without a word. Armageddon's own and
+// Guerrilla's come to about 7000, so the cars after the APCs had no "door start", and getting in
+// stopped at the door. Only that function reaches the pool, by its address and its size, so the mod
+// moves it: a pool of 16384 of its own, the one address and the one size changed after checking them.
+//
 // Guerrilla's vehicles' own skeletons: the game loads every skeleton (.rig_pc) its archives list while
 // it starts (0x973460, from the start-up sequence: the list, then each through 0x973550), up to 290
 // (its table of loaded skeletons, 0x48 bytes each from 0x34F5808; Armageddon has 178). A vehicle
@@ -174,6 +183,17 @@ constexpr DWORD kBoneInfoLimits[] = {0xD7B613, 0xD7B663, 0xD7B8EE, 0xD7BDFE, 0xD
 
 constexpr DWORD kMaxBoneInfos = 512;
 alignas(16) BYTE g_boneInfos[kMaxBoneInfos * kBoneInfoSize];  // the new table, cleared by the game
+
+// The animations' triggers (see the top): where the pool is, a trigger's size, how many it holds.
+constexpr DWORD kTriggers = 0x34BB9B8;
+constexpr DWORD kTriggerSize = 8;
+constexpr DWORD kGameMaxTriggers = 5750;
+// Its address (lea edx,[ecx*8+34BB9B8h]) and its size (cmp dword ptr [34C6D68h],1676h), in 0xD89D40.
+constexpr DWORD kTriggerReferences[] = {0xD89DBF};
+constexpr DWORD kTriggerLimits[] = {0xD89D4F};
+
+constexpr DWORD kMaxTriggers = 16384;
+alignas(16) BYTE g_triggers[kMaxTriggers * kTriggerSize];  // the new pool, filled by the game
 
 // Loads every skeleton the archives list, at start-up (cdecl, no arguments).
 constexpr DWORD kLoadSkeletons = 0x973460;
@@ -352,6 +372,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     }
     MoveTable("Animation sets", kAnimSets, kAnimSetSize, kGameMaxAnimSets, kAnimSetReferences, kAnimSetLimits, g_animSets, kMaxAnimSets);
     MoveTable("Bone infos", kBoneInfos, kBoneInfoSize, kGameMaxBoneInfos, kBoneInfoReferences, kBoneInfoLimits, g_boneInfos, kMaxBoneInfos);
+    MoveTable("Animation triggers", kTriggers, kTriggerSize, kGameMaxTriggers, kTriggerReferences, kTriggerLimits, g_triggers, kMaxTriggers);
     g_buildVehicleList = reinterpret_cast<BuildVehicleListFn>(rfa::HookFunction(kBuildVehicleList, kBuildVehicleListPrologue, reinterpret_cast<void*>(&BuildVehicleList)));
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
     ReadSkeletonList();
