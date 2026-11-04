@@ -72,14 +72,24 @@ public sealed class Animation
         Root = root;
     }
 
-    public static Animation Read(byte[] data)
+    public static Animation Read(byte[] data) => Read(data, guerrilla: false);
+
+    /// <summary>
+    /// One of Red Faction: Guerrilla's animations. Also version 10 and laid out the same, but for its
+    /// rotation keys: a run's header is 5 bytes (x, y, z and w each a starting value and a big step,
+    /// then the key count − 1 in the low 4 bits and the doubled steps of x, y, z and w in bits 7, 6, 5
+    /// and 4) and a key is 4 bytes (w kept with the rest, not worked out from them).
+    /// </summary>
+    public static Animation ReadGuerrilla(byte[] data) => Read(data, guerrilla: true);
+
+    static Animation Read(byte[] data, bool guerrilla)
     {
         if (data.Length < 0x30 || data[0] != 'A' || data[1] != 'N' || data[2] != 'I' || data[3] != 'M')
             throw new InvalidDataException("not an animation (no \"ANIM\" at the start)");
         if (data[4] != 10) throw new InvalidDataException($"animation version {data[4]}; only version 10 is known");
         try
         {
-            return ReadKeys(data);
+            return ReadKeys(data, guerrilla);
         }
         catch (Exception ex) when (ex is IndexOutOfRangeException or ArgumentException)
         {
@@ -87,9 +97,9 @@ public sealed class Animation
         }
     }
 
-    static Animation ReadKeys(byte[] data)
+    static Animation ReadKeys(byte[] data, bool guerrilla)
     {
-        var reader = new Reader(data, data[5]);
+        var reader = new Reader(data, data[5], guerrilla);
         int frames = BitConverter.ToUInt16(data, 6);
         int animated = data[0xA], skeletonBones = data[0xB];
         var movement = new Vector3(BitConverter.ToSingle(data, 0x1C), BitConverter.ToSingle(data, 0x20), BitConverter.ToSingle(data, 0x24));
@@ -192,8 +202,39 @@ public sealed class Animation
         return rotations;
     }
 
+    /// <summary>Guerrilla's rotation keys (see <see cref="ReadGuerrilla"/>): runs of 5 bytes, keys of 4, the four parts decoded alike.</summary>
+    static Quaternion[] ReadGuerrillaRotations(byte[] data, int runsAt, int keysAt, int count)
+    {
+        var rotations = new Quaternion[count];
+        int key = 0;
+        for (int run = runsAt; key < count; run += 5)
+        {
+            int keysInRun = (data[run + 4] & 0x0F) + 1;
+            var start = new int[4];
+            var step = new int[4];
+            for (int axis = 0; axis < 4; axis++)
+            {
+                start[axis] = (sbyte)(data[run + axis] << 1) >> 1;
+                bool big = (data[run + axis] & 0x80) != 0, doubled = (data[run + 4] & (0x80 >> axis)) != 0;
+                step[axis] = big ? (doubled ? 32 : 4) : (doubled ? 2 : 1);
+            }
+            var steps = new int[4];
+            for (int k = 0; k < keysInRun && key < count; k++, key++)
+            {
+                var value = new float[4];
+                for (int axis = 0; axis < 4; axis++)
+                {
+                    steps[axis] += (sbyte)data[keysAt + key * 4 + axis];
+                    value[axis] = (short)(start[axis] * 256 + steps[axis] * step[axis]) / 16383f;
+                }
+                rotations[key] = Quaternion.Normalize(new Quaternion(-value[0], -value[1], -value[2], value[3]));
+            }
+        }
+        return rotations;
+    }
+
     /// <summary>Reads the parts of an animation file in order, as the game's block reader (0xD7B260) does.</summary>
-    sealed class Reader(byte[] data, int flags)
+    sealed class Reader(byte[] data, int flags, bool guerrilla = false)
     {
         public int At;
         bool WideCounts => (flags & 0x80) != 0;
@@ -245,12 +286,13 @@ public sealed class Animation
             int scaleCount = (flags & 0x20) != 0 ? Count() : 0;
 
             // Rotations: runs until they cover the keys, then the keys, then their times.
-            int runsAt = At;
-            for (int covered = 0; covered < rotationCount; At += 4)
-                covered += (data[At + 3] & 0x0F) + 1;
+            int runsAt = At, runSize = guerrilla ? 5 : 4, keySize = guerrilla ? 4 : 3;
+            for (int covered = 0; covered < rotationCount; At += runSize)
+                covered += (data[At + runSize - 1] & 0x0F) + 1;
             int keysAt = At;
-            At += rotationCount * 3;
-            Quaternion[] rotations = ReadRotations(data, runsAt, keysAt, rotationCount);
+            At += rotationCount * keySize;
+            Quaternion[] rotations = guerrilla ? ReadGuerrillaRotations(data, runsAt, keysAt, rotationCount)
+                                               : ReadRotations(data, runsAt, keysAt, rotationCount);
             int[] rotationTimes = Times(rotationCount);
 
             // Positions: runs of (count, starting point), then the keys, then their times.

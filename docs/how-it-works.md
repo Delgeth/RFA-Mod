@@ -531,9 +531,10 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   at the copy's lookup and gives the names 64 KB of its own. Without the file, or with the mod
   off, the game keeps its own table, and a name it doesn't have is its Default entry. The draw
   distances (`lod_properties.xtbl`, read the same way) are handed over likewise, and so are the
-  effects' three tables (`vfx.xtbl`, `effects.xtbl`, `level_objects.xtbl`, below) and the vehicles'
-  two (`vehicles.xtbl`, `vehicle_interactions.xtbl`, written by `GuerrillaArsenal.exe`: see
-  [guerrilla_vehicles](#guerrilla_vehicles)).
+  effects' three tables (`vfx.xtbl`, `effects.xtbl`, `level_objects.xtbl`, below), the vehicles'
+  two (`vehicles.xtbl`, `vehicle_interactions.xtbl`) and the animation lists their animation sets
+  need (`anim_set_filenames.xtbl`, `anim_files.xtbl`, `anim_states.xtbl`, `anim_actions.xtbl`), all
+  written by `GuerrillaArsenal.exe` (see [guerrilla_vehicles](#guerrilla_vehicles)).
 
 The world itself is built by `editor\GuerrillaWorld.exe` (code in `src\editor\GuerrillaWorld\` and
 `src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
@@ -724,7 +725,8 @@ documents (elements driven by a Lua script).
 ### guerrilla_vehicles
 
 What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself
-(`[GuerrillaVehicles]` in the ini). So far: driving.
+(`[GuerrillaVehicles]` in the ini). So far: the keys for driving, getting out and changing seats,
+room for the vehicles' animation sets, and their own skeletons.
 
 - **Driving keys**: Armageddon still has Guerrilla's driving code for the player. Its gameplay
   controls (`0x4DBBD0`) read the accelerator and brake as button values (actions 62 `veh_accelerate`
@@ -735,12 +737,45 @@ What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doe
   map from its bindings (`0x4E86E0`) and gives each of the three a key first, if it has none:
   Guerrilla's own PC defaults, W, S and Space, or the keys named in the ini (by the names the
   console's `controls_show_key_bindings` prints). The bindings are 20 bytes an action from
-  `0x11BEBA0`, the keyboard key at +8 as a DirectInput scancode, 0 for none.
+  `0x11BEBA0`, the keyboard key at +8 as a DirectInput scancode, 0 for none, the mouse button at
+  +0xC (0 to 6, −1 for none).
+- **Getting out and changing seats**: in a vehicle the game's use button is the vehicle action
+  (`0x4E1B70` picks it: `of_action` on foot, `exo_action` in an exo, 86 `veh_action` in a vehicle,
+  `veh_flyer_action` in a flyer), which gets the player out through the vehicle's interaction; 90
+  `veh_change_seat` moves them to another seat. Armageddon's PC defaults (six tables from
+  `0xF7F078`: action, key, mouse button) give neither one a key, only a controller button for the
+  vehicle action (its own walkers and tank are left by script), so the player got into a car with E
+  and couldn't get out. The mod gives them Guerrilla's: E (as on foot) and the third mouse button.
+- **Room for animation sets**: the game keeps every animation set in one table of 140
+  (`MAX_ANIM_SETS`, 20 bytes a set from `0x26321B8`, the count at `0x2632170`), and Armageddon fills
+  125 itself (its 50 set files and one set for each of its 75 animated objects), so Guerrilla's
+  vehicles' 24 don't fit: one too many stops the game at start-up ("Num_anim_sets <
+  MAX_ANIM_SETS") and it crashes. No one function holds the table: the game's code reaches it by
+  its address, written into 34 instructions in 20 functions (the set loaders, `anim_set_find`, the
+  people's animation code, which turns a set's address back into its number by subtracting the
+  table's start), and its size into five (the four loaders' checks, the start-up constructor). So
+  the mod gives the game a table of 255 of its own and changes those 39 values to it, each checked
+  against the game's first, none changed if one differs. Mods start before the game's own start-up
+  code, so the game's constructor builds the new table and the old one is never used. Without the
+  mod, guerrilla_world doesn't hand over Guerrilla's set list (the game keeps its own).
+- **Vehicles' own skeletons**: walkers, flyers and turret trucks have a skeleton of their own
+  (`Rig` in their table entry). The game loads every skeleton its archives list while it starts
+  (`0x973460`: each through `0x973550`, by name), and when it reads the vehicle table it takes each
+  vehicle's from those (`0x62F1C0`) without checking: one that isn't loaded crashes it. Guerrilla's
+  six (`walker_civilian`, `walker_min`, `walker_flamer`, `edf_flyer`, `flatbed`, `fueltanker`, none
+  of them Armageddon's) are new files `GuerrillaArsenal.exe` writes into `overrides\build\pc\cache\`,
+  in no archive's list, with their names in `mods\guerrilla_vehicles\rigs.txt`; the mod wraps the
+  start-up loading and has the game load each of those by name after its own. The tool leaves out a
+  vehicle whose skeleton is in neither game.
 
 `editor\GuerrillaArsenal.exe` (code in `src\editor\GuerrillaArsenal\` and
-`src\editor\RfaFormats\Guerrilla\GuerrillaArsenal.cs`, `GuerrillaVehicles.cs`) makes the vehicles
-from the player's own copy of Guerrilla (`--vehicles <names>` or `all`; the taxi, `Col_Taxi_1`,
-when none are named; `--remove` takes everything away):
+`src\editor\RfaFormats\Guerrilla\GuerrillaArsenal.cs`, `GuerrillaVehicles.cs`,
+`GuerrillaAnimationSets.cs`, `GuerrillaAnimations.cs`) makes the vehicles
+from the player's own copy of Guerrilla (every one that converts, or `--vehicles <names>`;
+`--remove` takes everything away). Tracked vehicles wait for their tread splines, and walkers for
+their skeletons and blended movement (they are built but can't be got into: a vehicle whose
+interaction can't be ported gets none, not Armageddon's `Dummy`, with which the player gets in and
+can't drive or get out):
 - **The model** (`.ccar_pc`, Guerrilla's version 27) is written as Armageddon's version 30. Both are
   one structure (the vehicle's parts, lights, tag lists, mesh, materials, collision and MOPP trees,
   with offsets from the file's start); Armageddon only added fields: 0x90 bytes and two arrays in
@@ -756,14 +791,46 @@ when none are named; `--remove` takes everything away):
 - **Its table entries**: Guerrilla's own `vehicles.xtbl` and `vehicle_interactions.xtbl` entries,
   added to Armageddon's tables, which guerrilla_world hands the game at start-up. A field
   Armageddon's table hasn't is left out; a field it requires that Guerrilla's entry hasn't gets the
-  default Armageddon's table gives it (the game's table reader stops on a missing one). Left out for
+  default Armageddon's table gives it (the game's table reader stops on a missing one). A field the
+  two games measure differently is converted: the vehicle's price (Guerrilla's in millions,
+  Armageddon's in whole units) and a flyer's turn and tilt rates (revolutions a second, degrees a
+  second); a decimal left in a field Armageddon reads as a whole number stops its reader too. Left out for
   now: the sounds (Guerrilla's are XACT cues), lights and effects, turrets.
-- **Getting in**: the interaction keeps Guerrilla's waypoints and seats (the taxi's enter points at
-  its doors). Both games name the same actions and animation states, and `vehicle enter primary 1`
-  ending in `driving forward` is what seats the player behind the wheel. Guerrilla's animations for
-  them are made for Mason's skeleton, so until they're converted the interaction plays Armageddon's
-  LAV animations, keeps only the transitions those cover (the driver's in and out) and names no
-  door (with one the game wants the door's opening animation).
+- **Getting in and out**: the interaction is Guerrilla's whole: its waypoints, seats and every
+  transition between them with its steps (open the door, climb in; quick, diving and side exits;
+  driver to passenger; crawling out of an upturned car). Both games name the same steps, actions
+  and animation states (`vehicle enter primary 1` ending in `driving forward` is what seats the
+  player behind the wheel); Guerrilla's `Door` is Armageddon's `Door_1`. The doors' sound cues are
+  left out until Guerrilla's audio is ported.
+- **Its animation set** (such as Guerrilla's `Vehicle_Taxi`: which animation plays for each step), with
+  every animation it names, from the vehicle's container or Guerrilla's `anims.vpp_pc`, moved onto
+  Darius's skeleton and packed in our container (as Armageddon packs its walkers' player
+  animations: asset list type 16). Both games' animations are the same format (version 10), but
+  Guerrilla packs its rotation keys differently (each run's header 5 bytes, each key 4: an explicit
+  w; Armageddon's 4 and 3, w worked out from the rest), so it has a reader of its own
+  (`Animation.ReadGuerrilla`), and `AnimationWriter` writes Armageddon's. The skeletons aren't bone
+  for bone (Guerrilla's people all share its player's 52 bones, in the same order, and some add
+  their own after them: Mason's camera, EDF shoulder pads, coats, so an animation's bone count tells
+  its skeleton; Darius's 137: different spine and clavicle parents, Mason's arms chains of twist
+  segments, Darius's twists beside the limbs), so each frame is posed on Mason and carried over bone by bone: Darius's bone
+  gets the world turn of Mason's same bone, first turned to point the way Mason's points at rest
+  (Darius's forearms are bent forward at rest, Mason's hang straight); the twists and muscle bones
+  follow Mason's twist segments or sit halfway across their joint; the hips, spine and hand props
+  are placed where Mason's are, scaled by the hip heights. An animation that moves only part of the
+  body keys only that part of Darius, with its weight curves; an additive one (a flinch, played on
+  top of another) is carried over turn for turn. An animation for any other skeleton is a vehicle's
+  own (a turret's, the flyer's) and is only re-packed, its scale keys and weight curves as they are. The game reads its animation lists and
+  sets while it starts, and guerrilla_world hands it Armageddon's with Guerrilla's added: the set's
+  listing (`anim_set_filenames.xtbl`; the set's own table is a new file in
+  `overrides\build\pc\cache\`, which the game then reads by name), each animation's triggers and
+  flags (`anim_files.xtbl`: the door opens between its animation's `door start` and `door end`
+  frames, so without them a transition naming a door stops at it), and the state and action names
+  Armageddon's tables haven't (`driver look back`, which Guerrilla's code names itself). A name
+  Armageddon already uses gets the prefix `rfg_`. With guerrilla_vehicles the game holds 255 sets
+  (see above), and Armageddon fills 125: the sets in its listed files and one per object with
+  animations of its own (`anim_rig_objects.xtbl`). The tool counts them from the player's files and
+  ports only as many of Guerrilla's sets as fit, in the order of Guerrilla's vehicle table; a
+  vehicle whose set is left out gets no interaction.
 
 ## The editor
 

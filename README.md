@@ -24,9 +24,12 @@ single-player.
   own copy of Guerrilla.
 - **Guerrilla's HUD, a first piece** (`guerrilla_hud`, beta): Guerrilla's health meter and blood
   in that world, in place of Armageddon's health ring, red screen edges and compass bar.
-- **Guerrilla's vehicles, a first one** (`guerrilla_vehicles`, beta): Guerrilla's taxi, which you
-  can spawn, get into and drive (W, S, Space and A/D, Guerrilla's keys). You build it from your own
-  copy of Guerrilla too.
+- **Guerrilla's vehicles** (`guerrilla_vehicles`, beta): Guerrilla's cars, trucks, buses, ATVs,
+  rovers, EDF staff cars, scouts and APCs, Marauder raiders and more, which you can spawn and drive
+  (W, S, Space and A/D, Guerrilla's keys). You get in and out the way Mason does in Guerrilla
+  (opening the door, climbing in, quick and diving exits, moving between seats with the middle
+  mouse button, getting out with E), his animations moved onto Darius. You build them from your
+  own copy of Guerrilla too.
 - **Options → Experimentals**: a new page in the game's Options menu, from the main menu or the
   pause menu, for RFA-Mod's own settings. For now it holds the Guerrilla world's switches: the
   sun's shadows and shafts, fog, blowing dust, Guerrilla's particles and tone mapping, colour
@@ -120,24 +123,30 @@ work as before.
    Nano Forge rebuilds), and its sky into `mods\guerrilla_world\`. `--props none` leaves out the
    buildings and props; `--zones 11-12,10-11` builds only that block of zones (columns, then rows).
 4. Run `editor\GuerrillaHud.exe` for Guerrilla's HUD (a few seconds).
-5. Run `editor\GuerrillaArsenal.exe` for Guerrilla's vehicles (a few seconds). So far it builds
-   one: the taxi.
+5. Run `editor\GuerrillaArsenal.exe` for Guerrilla's vehicles (a few seconds). It builds every
+   one it can (`--vehicles Col_Taxi_1,Min_ATV_1` for only some).
 6. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
    `level rfg_12_11`, or any zone's name, `rfg_<column>_<row>` (such as `rfg_04_10`, a town).
-7. To drive: type `drop_car Taxi` in the console, walk up to the taxi's driver side and get in with
-   the use key. W accelerates, S brakes and reverses, Space is the handbrake, A and D steer.
+7. To drive: type `drop_car Taxi` in the console (or another vehicle's name: `ATV`, `Bluecrab`,
+   `Staffcar`, `Caravan`, `MiningRover`, `Raider`, ...; the tool lists them all at the end), walk up
+   to its driver side and get in with E. W accelerates, S brakes and reverses, Space is the
+   handbrake, A and D steer, E gets you out, the middle mouse button moves you to another seat.
 
 Things to know:
 - Run the tools again after updating RFA-Mod, and `GuerrillaHud.exe` again after changing its
   script.
 - `editor\GuerrillaHud.exe --remove` takes the HUD away. Only remove it that way: one of its files
   also holds Armageddon's own HUD pictures.
-- The taxi is a first step. Getting in still plays Armageddon's own climb-in rather than
-  Guerrilla's animation, it has no sounds or lights yet, and its glass shows too bright.
+- The vehicles have no sounds, lights or turrets yet (the doors open silently), and their glass
+  shows too bright. Darius is a little taller than Mason, so his hands may not land exactly on the
+  wheel and door. Tanks and the bulldozer aren't built yet, and walkers can't be got into yet.
+  `guerrilla_vehicles` must be on: besides the keys, it makes room in the game for the vehicles'
+  animation sets (Armageddon holds only 140 and uses 125 itself).
   `drop_car` may leave it waiting to load: the game only loads a vehicle a level has set memory
   aside for, which the Guerrilla world doesn't do yet.
-- The driving keys are under `[GuerrillaVehicles]` in `rfa_mods.ini`. A key you have set for
-  driving yourself is kept.
+- The driving, getting-out and seat keys are under `[GuerrillaVehicles]` in `rfa_mods.ini`. A key
+  you have set for one of them yourself is kept. E also gets you out of Armageddon's own vehicles
+  where the game lets you (as a controller's button already does).
 - `editor\GuerrillaArsenal.exe --remove` takes the vehicles away again.
 - Nothing made from Guerrilla is ever shipped; it stays on your PC.
 - `guerrilla_world` widens the game's physics for every world, the campaign included. Set

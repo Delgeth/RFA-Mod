@@ -276,7 +276,10 @@ NamePoolInitFn g_namePoolInit;
 // read at start-up (the visual effects before the effects, which name them, and those before the
 // level objects, which name the effects; the explosions name effects too, and level objects name
 // explosions). The vehicles and their interactions (where and how people get in; Armageddon's with
-// Guerrilla's added) are written by GuerrillaArsenal.exe.
+// Guerrilla's added) are written by GuerrillaArsenal.exe, and so are the animation lists their
+// animation sets need: the sets (anim_set_filenames.xtbl, read first; each set's own table is a new
+// file the game then finds by name), every animation's triggers and flags (anim_files.xtbl), and the
+// state and action names (anim_states.xtbl, anim_actions.xtbl), each Armageddon's with Guerrilla's added.
 struct BuiltTable {
     const char* name;         // its file name, in mods\guerrilla_world\ and as the game asks for it
     const char* what;         // for the log
@@ -291,6 +294,10 @@ BuiltTable g_builtTables[] = {
     {"level_objects.xtbl", "Level objects", {}},
     {"vehicles.xtbl", "Vehicles", {}},
     {"vehicle_interactions.xtbl", "Vehicle interactions", {}},
+    {"anim_set_filenames.xtbl", "Animation sets", {}},
+    {"anim_files.xtbl", "Animation files", {}},
+    {"anim_states.xtbl", "Animation states", {}},
+    {"anim_actions.xtbl", "Animation actions", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";
@@ -1142,6 +1149,14 @@ const char* __cdecl PrecacheArea(int column, int row, int gridSize) {
     return WorldName();
 }
 
+// The game holds 140 animation sets and fills 125 itself; guerrilla_vehicles makes room for more (its
+// own table of them, the size in the loaders' checks changed). The check's size, in the first loader
+// (cmp dword ptr [2632170h],8Ch at 0x97C1CC): still 140 means there's no room, and Guerrilla's
+// vehicles' sets, more than the 15 left, would stop the game at start-up, so their list isn't handed
+// over then.
+constexpr DWORD kAnimSetLimit = 0x97C1D2;
+constexpr DWORD kGameMaxAnimSets = 140;
+
 // Answers the start-up table copy's lookup of a table the world builder wrote (by its file name,
 // whatever folder it is asked with) with the builder's; every other table is the game's.
 bool __fastcall TableCacheFind(void* cache, void* unused, const char* name, CachedTable* out) {
@@ -1151,6 +1166,10 @@ bool __fastcall TableCacheFind(void* cache, void* unused, const char* name, Cach
             if (*c == '\\' || *c == '/') file = c + 1;
         for (const BuiltTable& table : g_builtTables) {
             if (table.bytes.empty() || _stricmp(file, table.name) != 0) continue;
+            if (_stricmp(table.name, "anim_set_filenames.xtbl") == 0 && *reinterpret_cast<const DWORD*>(kAnimSetLimit) == kGameMaxAnimSets) {
+                RFA_LOG_FIRST(1, "%s: the game has no room for Guerrilla's vehicles' sets (the guerrilla_vehicles mod makes it); it keeps its own", table.what);
+                break;
+            }
             out->data = table.bytes.data();
             out->size = static_cast<DWORD>(table.bytes.size() - 1);
             rfa::Log("%s: the game reads mods\\guerrilla_world\\%s (%lu bytes)", table.what, table.name, out->size);

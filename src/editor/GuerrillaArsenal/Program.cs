@@ -11,9 +11,9 @@
 //   - Guerrilla: the folder given, or GuerrillaDir under [Launcher] in rfa_mods.ini (the one with
 //     build\pc\cache\vehicles_r.vpp_pc; the Steam Edition's is ...\Red Faction Guerrilla).
 // It writes the vehicles into overrides\build\pc\cache\ and their table into mods\guerrilla_world\.
-// --vehicles names Guerrilla's vehicles.xtbl entries to build (comma-separated; Col_Taxi_1, the taxi,
-// when none are named), or all. In the game: drop_car <the vehicle's display name> in the developer
-// console (Taxi for the taxi).
+// --vehicles names Guerrilla's vehicles.xtbl entries to build (comma-separated, such as Col_Taxi_1 for
+// the taxi), or all (the default: every one that converts). In the game: drop_car <the vehicle's
+// display name> in the developer console (Taxi for the taxi).
 using RfaFormats;
 using RfaFormats.Guerrilla;
 
