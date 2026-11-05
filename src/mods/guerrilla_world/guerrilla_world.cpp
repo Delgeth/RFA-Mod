@@ -104,6 +104,11 @@
 // and explosions.xtbl (what an object dies in), each Armageddon's with Guerrilla's entries the world
 // uses added under "rfg_" names; and vehicles.xtbl and vehicle_interactions.xtbl, Armageddon's with
 // Guerrilla's vehicles that GuerrillaArsenal.exe made added under their own names.
+//
+// The undergrowth: Guerrilla's grass and dust rocks, which its zones' terrain files scatter over 8 m
+// cells and Armageddon's undergrowth code still loads, scatters and draws. Its random scatter puts
+// every piece at height 0 (it takes the height before looking it up), so the mod replaces it with the
+// same scatter in Guerrilla's order, the pieces on the ground (RandomlyPlace).
 #define RFA_MOD_NAME "guerrilla_world"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -3804,7 +3809,10 @@ void __fastcall LightPass(void* renderer, void* unused) {
 // The scene renderer's material pass (0xEF9290, right after the light pass: each surface drawn again
 // with its colours, lit by the light buffer). In our worlds, while it runs, Guerrilla's material
 // shaders are given what the light pass made for them (SurfaceConstants), and the G-buffer's normals
-// (t18, for the terrain's), unbound after it, as the next light pass draws into those textures.
+// (t18, for the terrain's), unbound after it, as the next light pass draws into those textures. The
+// constants (b8) stay bound after it: the next frame's depth and G-buffer passes of Guerrilla's
+// cut-outs read their time from them, so a scrolling cut-out's holes move with its colours (no shader
+// of the game's reads b8). A frame whose light pass made nothing for them unbinds b8 first.
 constexpr DWORD kMaterialPass = 0xEF9290;
 constexpr size_t kMaterialPassPrologue = 5;  // push ebp / mov ebp,esp / push -1
 using MaterialPassFn = void(__fastcall*)(void* renderer, void* unused);
@@ -3817,13 +3825,14 @@ void __fastcall MaterialPass(void* renderer, void* unused) {
         ID3D11ShaderResourceView* views[3] = {g_ourLightView, g_beforeView, g_surfaceNormals};
         g_context->PSSetShaderResources(16, 3, views);
         g_context->PSSetConstantBuffers(8, 1, &g_surfaceConstants);
+    } else if (g_context) {
+        ID3D11Buffer* noBuffer = nullptr;
+        g_context->PSSetConstantBuffers(8, 1, &noBuffer);
     }
     g_materialPass(renderer, unused);
     if (give) {
         ID3D11ShaderResourceView* none[3] = {nullptr, nullptr, nullptr};
-        ID3D11Buffer* noBuffer = nullptr;
         g_context->PSSetShaderResources(16, 3, none);
-        g_context->PSSetConstantBuffers(8, 1, &noBuffer);
     }
     if (g_surfaceNormals) g_surfaceNormals->Release();
     g_surfaceNormals = nullptr;
@@ -5240,6 +5249,182 @@ bool __fastcall LoadShaders(void* library, void* unused) {
     return loaded;
 }
 
+
+// ---- Guerrilla's undergrowth (the grass and dust rocks our worlds' terrain files carry, which the
+// game's own undergrowth code still loads, scatters over each zone's cells and draws). Its random
+// scatter (randomly_place_objects, 0x6C4850) works out each piece's height from its cell's middle
+// before it has looked the ground's height up, so every piece it places lands at height 0 (its
+// even scatter and Guerrilla's own random scatter, Re-Mars-tered's 0x92B5E0, don't). So it is
+// replaced by the same function, in Guerrilla's order, on the game's own helpers and its rand (so
+// the pieces fall where Guerrilla's do): for each piece, a model by the layer's weights, a place in
+// the cell, the ground's height and normal there, its turn (along the slope if the model says so)
+// and size, a tint between its model's two colours; kept where the cell's 1 m mask says the layer
+// grows, into the model's active cell (made when it has none yet, room allowing).
+constexpr DWORD kRandomlyPlace = 0x6C4850;
+constexpr size_t kRandomlyPlacePrologue = 9;  // push ebp / mov ebp,esp / sub esp,0x164
+
+struct GrowthVector { float x, y, z; };
+struct GrowthRows { GrowthVector row[3]; };  // a piece's turn and size (rows)
+
+// A layer's model (16 bytes): its mesh's name, its weight, whether it turns to the slope (bit 0),
+// how much its size may vary (of 255), the two colours its tint is picked between (blue, green,
+// red, alpha bytes).
+struct GrowthModel {
+    const char* name;
+    uint16_t weight;
+    uint8_t flags;
+    uint8_t scaleNoise;
+    uint8_t colourA[4];
+    uint8_t colourB[4];
+};
+struct GrowthLayer { int models; GrowthModel* model; };
+
+// An active cell of one model's pieces, as the game keeps it.
+struct GrowthCell {
+    uint32_t unused0;
+    int count;
+    uint8_t* elements;  // 32 bytes a piece
+    int model;
+    uint32_t unused10;
+    GrowthVector middle;
+};
+
+// A piece as the game's element constructor (0x6A5420) and packer (0x6A5150) take it.
+struct GrowthElement {
+    GrowthVector at;     // from the cell's middle
+    GrowthRows rows;
+    float tint[4];
+    float sway;
+    uint8_t more[64];    // whatever else the constructor sets
+};
+
+using PickModelFn = int(__cdecl*)(GrowthLayer** layer, int totalWeight);                      // 0x6C4EA0
+using GrowthRandFn = int(__cdecl*)();                                                          // 0xDA9376, the C runtime's rand
+using GroundAtFn = bool(__cdecl*)(float* height, float x, float z, GrowthVector* normal, int flags);  // 0x7748E0: false where no ground is loaded
+using OrientFn = void(__fastcall*)(GrowthRows* rows, void* unused, const GrowthVector* up, const GrowthVector* right);  // 0xC9DE80
+using TurnFn = void(__fastcall*)(GrowthRows* rows, void* unused, float angle);                // 0xC9E780
+using PoolRoomFn = bool(__fastcall*)(void* pool, void* unused);                               // 0x664C80
+using MempoolRoomFn = bool(__fastcall*)(void* mempool, void* unused, int size, int flags);    // 0xCC6410
+using NewCellFn = GrowthCell*(__fastcall*)(void* list, void* unused, int flags);              // 0x6C63D0
+using MempoolTakeFn = uint8_t*(__fastcall*)(void* mempool, void* unused, int size, int a, int b, int c);  // 0xCC6570
+using ElementInitFn = void(__fastcall*)(GrowthElement* element, void* unused);                // 0x6A5420
+using ElementPutFn = void(__fastcall*)(uint8_t* slot, void* unused, const GrowthElement* element);  // 0x6A5150
+
+const auto PickModel = reinterpret_cast<PickModelFn>(0x6C4EA0);
+const auto GrowthRand = reinterpret_cast<GrowthRandFn>(0xDA9376);
+const auto GroundAt = reinterpret_cast<GroundAtFn>(0x7748E0);
+const auto Orient = reinterpret_cast<OrientFn>(0xC9DE80);
+const auto Turn = reinterpret_cast<TurnFn>(0xC9E780);
+const auto CellPoolHasRoom = reinterpret_cast<PoolRoomFn>(0x664C80);
+const auto MempoolHasRoom = reinterpret_cast<MempoolRoomFn>(0xCC6410);
+const auto NewCell = reinterpret_cast<NewCellFn>(0x6C63D0);
+const auto MempoolTake = reinterpret_cast<MempoolTakeFn>(0xCC6570);
+const auto ElementInit = reinterpret_cast<ElementInitFn>(0x6A5420);
+const auto ElementPut = reinterpret_cast<ElementPutFn>(0x6A5150);
+using FindFoliageMeshFn = void*(__cdecl*)(const char* name);                                  // 0x972B50, by its ".fmeshx" name
+const auto FindFoliageMesh = reinterpret_cast<FindFoliageMeshFn>(0x972B50);
+int g_growthCallsLogged = 0;  // the first scatters are logged, to see where the pieces go
+void* const kCellPool = reinterpret_cast<void*>(0x1859790);
+void* const kCellList = reinterpret_cast<void*>(0x18597AC);
+void* const kGrowthMempool = reinterpret_cast<void*>(0x26AFD68);
+const auto kIdentityRows = reinterpret_cast<const GrowthRows*>(0x290CB30);
+const auto kRightVector = reinterpret_cast<const GrowthVector*>(0x290772C);
+
+// A random number from 0 to 999 over `over` (as the game's: rand() % 1000 / 1000.0).
+double GrowthChance(double over = 1000.0) { return (GrowthRand() % 1000) / over; }
+
+// cells: the active cell of each of the layer's models (null until it has one); count: how many
+// pieces to try; zone: the undergrowth zone (+4 its cell size); layer: the layer; record: the cell's
+// record of the layer (+2 its 64-bit mask of 1 m squares); low, high: the cell's corners (x, z);
+// middle: its middle.
+void __cdecl RandomlyPlace(GrowthCell** cells, int count, uint8_t* zone, GrowthLayer** layer, const uint8_t* record,
+                           const float* low, const float* high, const GrowthVector* middle) {
+    RFA_LOG_FIRST(1, "Undergrowth: pieces scattered on the ground (the game's random scatter replaced)");
+    const bool logThis = g_growthCallsLogged < 12;
+    int kept = 0, firstModel = -1, withoutGround = 0;
+    GrowthVector firstAt{};
+    float firstHeight = 0;
+    int totalWeight = 0;
+    for (int m = 0; m < (*layer)->models; ++m) totalWeight += (*layer)->model[m].weight;
+    const float across = high[0] - low[0];
+    const float cellSize = *reinterpret_cast<const float*>(zone + 4);
+    for (int k = 0; k < count; ++k) {
+        const int m = PickModel(layer, totalWeight);
+        const GrowthModel& model = (*layer)->model[m];
+        // Its place, the ground's height and normal there.
+        GrowthVector offset{};
+        offset.x = static_cast<float>((GrowthChance() - 0.5) * across);
+        offset.z = static_cast<float>((GrowthChance() - 0.5) * across);
+        GrowthVector at{offset.x + middle->x, 0, offset.z + middle->z};
+        float height = 0;
+        GrowthVector normal{};
+        // (The game's own scatter asks through 0x6C4820, which takes no ground as height 0: the cells
+        // made while a level loads, before its ground is, had their pieces at 0. Such a piece is left
+        // out; its cell is made again with the rest when the player comes back.)
+        if (!GroundAt(&height, at.x, at.z, &normal, 0)) { ++withoutGround; continue; }
+        at.y = height;
+        offset.y = at.y - middle->y;
+        // Its turn: along the slope if its model says so (the rows the game's orient gives, the second
+        // and third swapped, the new third turned round), then about its up by 0-359 degrees.
+        GrowthRows rows = *kIdentityRows;
+        if (model.flags & 1) {
+            GrowthRows slope = *kIdentityRows;
+            Orient(&slope, nullptr, &normal, kRightVector);
+            rows.row[0] = slope.row[0];
+            rows.row[1] = slope.row[2];
+            rows.row[2] = {-slope.row[1].x, -slope.row[1].y, -slope.row[1].z};
+        }
+        Turn(&rows, nullptr, static_cast<float>((GrowthRand() % 360) / 180.0 * 3.1415927410125732));
+        // Its size and tint.
+        const float scale = static_cast<float>(1.0 - (GrowthChance(500.0) - 1.0) * (model.scaleNoise / 255.0));
+        const float mix = static_cast<float>(GrowthChance());
+        float tint[4];
+        for (int c = 0; c < 4; ++c) {
+            static const int kByte[4] = {2, 1, 0, 3};  // red, green, blue, alpha from the blue, green, red, alpha bytes
+            const float a = model.colourA[kByte[c]] / 255.0f, b = model.colourB[kByte[c]] / 255.0f;
+            tint[c] = (b - a) * mix + a;
+        }
+        for (GrowthVector& row : rows.row) row = {row.x * scale, row.y * scale, row.z * scale};
+        // Kept only where the layer grows: the cell's 1 m square there (8 across).
+        const int ix = static_cast<int>(floorf(static_cast<float>((at.x - low[0]) / cellSize * 8.0)));
+        const int iz = static_cast<int>(floorf(static_cast<float>((at.z - low[1]) / cellSize * 8.0)));
+        const int square = ix + iz * 8;
+        if (square < 0 || square >= 64 || !(record[2 + square / 8] & (1 << (square % 8)))) continue;
+        const float sway = static_cast<float>(GrowthChance() * 7.0);
+        // The model's active cell, made the first time, room allowing.
+        if (!cells[m]) {
+            if (!CellPoolHasRoom(kCellPool, nullptr) || !MempoolHasRoom(kGrowthMempool, nullptr, count * 32, 0)) continue;
+            GrowthCell* cell = NewCell(kCellList, nullptr, 0);
+            if (!cell) continue;
+            cells[m] = cell;
+            cell->model = m;
+            cell->count = 0;
+            cell->elements = MempoolTake(kGrowthMempool, nullptr, count * 32, 0, 0, 0);
+            cell->unused0 = 0;
+            cell->middle = *middle;
+        }
+        GrowthCell* cell = cells[m];
+        uint8_t* slot = cell->elements + cell->count * 32;
+        cell->count++;
+        alignas(16) GrowthElement element{};
+        ElementInit(&element, nullptr);
+        element.at = offset;
+        element.rows = rows;
+        for (int c = 0; c < 4; ++c) element.tint[c] = tint[c];
+        element.sway = sway;
+        ElementPut(slot, nullptr, &element);
+        if (kept++ == 0) { firstModel = m; firstAt = at; firstHeight = height; }
+    }
+    if (logThis) {
+        ++g_growthCallsLogged;
+        const GrowthModel* model = firstModel >= 0 ? &(*layer)->model[firstModel] : nullptr;
+        rfa::Log("Undergrowth scatter: %d of %d pieces kept in the cell at (%.1f, %.1f, %.1f) (%d where no ground is loaded yet), cell size %.3f; "
+                 "first %s at (%.1f, %.1f, %.1f), ground %.2f, its mesh %s",
+                 kept, count, middle->x, middle->y, middle->z, withoutGround, cellSize, model && model->name ? model->name : "-", firstAt.x, firstAt.y, firstAt.z,
+                 firstHeight, model && model->name ? (FindFoliageMesh(model->name) ? "found" : "NOT found") : "-");
+    }
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -5253,6 +5438,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreParticleRoom();
     g_loadShaders = reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
     if (!g_loadShaders) rfa::Log("Could not add Guerrilla's material shaders to the game's; materials using them draw red");
+    // Guerrilla's undergrowth: its random scatter with the pieces on the ground (see RandomlyPlace).
+    if (!rfa::HookFunction(kRandomlyPlace, kRandomlyPlacePrologue, reinterpret_cast<void*>(&RandomlyPlace)))
+        rfa::Log("Could not replace the undergrowth's random scatter; its pieces lie at height 0");
     g_roadLog =rfa::IniInt(L"GuerrillaWorld", L"RoadLog", 0) != 0;
     g_skyOn = rfa::IniInt(L"GuerrillaWorld", L"Sky", 1) != 0;
     g_cloudsOn = rfa::IniInt(L"GuerrillaWorld", L"Clouds", 1) != 0;

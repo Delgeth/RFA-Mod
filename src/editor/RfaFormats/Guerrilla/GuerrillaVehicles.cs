@@ -168,7 +168,7 @@ public static class GuerrillaVehicles
         int namesEnd = Following(g, names, partCount);
         var nameList = new TextureNameList(g.AsSpan(names, namesEnd - names));
         var materials = new List<byte[]>();
-        for (int k = 0; k < materialCount; k++) materials.Add(GuerrillaMaterials.Convert(g, I(materialList + k * 4), nameList, vehicle: true));
+        for (int k = 0; k < materialCount; k++) materials.Add(GuerrillaMaterials.Convert(g, I(materialList + k * 4), nameList, vehicle: true, guerrillaShaders: true));
         var textures = new List<string>();
         var finalNames = new TextureNameList([]);
         foreach (byte[] m in materials)

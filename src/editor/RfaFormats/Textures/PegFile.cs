@@ -75,6 +75,32 @@ public sealed class PegFile
     public const ushort DataFlag = 0x200;
 
     /// <summary>
+    /// <paramref name="header"/> (a texture header file) with <see cref="DataFlag"/> set on each texture
+    /// whose name (without ".tga") <paramref name="isData"/> says holds data; the same array if none
+    /// changes. Armageddon reads a texture without the flag as sRGB colour, turning its values to linear
+    /// light first, which bends a normal map's directions.
+    /// </summary>
+    public static byte[] WithDataFlag(byte[] header, Func<string, bool> isData)
+    {
+        if (header.Length < HeaderSize || BitConverter.ToUInt32(header, 0) != Magic) return header;
+        int count = BitConverter.ToUInt16(header, 0x10), nameAt = HeaderSize + count * EntrySize;
+        byte[]? made = null;
+        for (int i = 0; i < count && nameAt < header.Length; i++)
+        {
+            int nameEnd = Array.IndexOf(header, (byte)0, nameAt);
+            if (nameEnd < 0) nameEnd = header.Length;
+            string name = Path.GetFileNameWithoutExtension(Encoding.Latin1.GetString(header, nameAt, nameEnd - nameAt));
+            nameAt = nameEnd + 1;
+            int flagsAt = HeaderSize + i * EntrySize + 18;
+            ushort flags = BitConverter.ToUInt16(header, flagsAt);
+            if ((flags & DataFlag) != 0 || !isData(name)) continue;
+            made ??= (byte[])header.Clone();
+            BitConverter.TryWriteBytes(made.AsSpan(flagsAt), (ushort)(flags | DataFlag));
+        }
+        return made ?? header;
+    }
+
+    /// <summary>
     /// A header file for one texture (a .cvbm_pc) from nothing, as the game's own single-image ones
     /// are (checked byte for byte against ruin01_alpha00, ruin01comb, ter_sur_blder_nm and
     /// ter_ice_rock_dtlonly_di): "GEKV", version 10, platform 0, its own size, the data file's size

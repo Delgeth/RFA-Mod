@@ -25,6 +25,8 @@ namespace RfaFormats.Meshes;
 ///   to 4, 8 bytes an invisible barrier, to 16, their "MCKH" section (<see cref="TerrainBarriers"/>)
 ///   to 4; with ground: the layer map (each 1 m cell's ground effect material, 2 bits), a word a
 ///     material, their names (NUL-terminated), to 4, a word a material (its index, filled at load)
+///   to 4; Guerrilla's undergrowth if terrain_data +0x78 has layers (<see cref="UndergrowthLength"/>),
+///     to 4 (Armageddon's own files have none, but its loader still reads it)
 ///   to 4; foliage if terrain_data has layers (<see cref="ZoneFoliage"/>): 32 bytes a layer, 16 a
 ///     model, each layer's model names then to 4, 12 bytes a cell, 16 a patch, to 16, and the
 ///     scattering's buffer
@@ -70,6 +72,45 @@ public sealed class TerrainFile
     public byte[] BarrierSection { get; set; } = EmptySection;
     public LayerMapPart? LayerMap { get; set; }
     public byte[]? Foliage { get; set; }
+
+    /// <summary>Guerrilla's undergrowth section as the file keeps it (see <see cref="UndergrowthLength"/>), or null.</summary>
+    public byte[]? Undergrowth { get; set; }
+
+    /// <summary>
+    /// The length of an undergrowth section (Guerrilla's grass and rocks, scattered by the game over 8 m
+    /// cells) starting at <paramref name="start"/> (a multiple of 4), with <paramref name="layers"/> layers
+    /// and <paramref name="records"/> cell-layer records (terrain_data +0x78 and +0x84; Guerrilla's
+    /// +0x74 and +0x80), walked as the game's loader walks it: the layers, 28 bytes each (their model
+    /// count first); the models, 16 bytes each; each layer's mesh names (NUL-terminated), to 4; the cells,
+    /// 0x4000 bytes; the records, 10 bytes each (the layer's number first), to 4; a 12-byte record of
+    /// single pieces each (their count first), then each one's pieces, 24 bytes each; then for each record
+    /// a u16 per model of its layer; to 4.
+    /// </summary>
+    public static int UndergrowthLength(byte[] f, int start, int layers, int records)
+    {
+        int I(int at) => BitConverter.ToInt32(f, at);
+        int p = start;
+        var models = Enumerable.Range(0, layers).Select(k => I(start + 28 * k)).ToArray();
+        p += layers * 28 + models.Sum() * 16;
+        foreach (int count in models)
+        {
+            for (int m = 0; m < count; m++) p = Array.IndexOf(f, (byte)0, p) + 1;
+            p = To(p, 4);
+        }
+        p += 0x4000;
+        int recordsAt = p;
+        p = To(p + records * 10, 4);
+        int singlesAt = p;
+        p += records * 12;
+        for (int k = 0; k < records; k++) p += I(singlesAt + k * 12) * 24;
+        for (int k = 0; k < records; k++)
+        {
+            int layer = f[recordsAt + k * 10];
+            if (layer >= layers) throw new InvalidDataException($"undergrowth record {k} is of layer {layer}, of {layers}");
+            p += models[layer] * 2;
+        }
+        return To(p, 4) - start;
+    }
     public byte[]? FoliageBuffer { get; set; }
     public byte[]? FarRecords { get; set; }
     public List<byte[]> FarBlocks { get; } = [];
@@ -100,11 +141,12 @@ public sealed class TerrainFile
     {
         /// <summary>
         /// The names with as few of <paramref name="fillers"/> after them (effect materials the game
-        /// knows, which no cell will use) as make the materials take a multiple of 16 bytes.
+        /// knows, which no cell will use) as make the materials take a multiple of 16 bytes, with
+        /// <paramref name="after"/> bytes (the undergrowth, a multiple of 4) between them and the far meshes.
         /// </summary>
-        public static List<string> PaddedNames(IReadOnlyList<string> names, IReadOnlyList<string> fillers)
+        public static List<string> PaddedNames(IReadOnlyList<string> names, IReadOnlyList<string> fillers, int after = 0)
         {
-            static bool Fits(IReadOnlyCollection<string> list) => (list.Count * 8 + To(list.Sum(n => n.Length + 1), 4)) % 16 == 0;
+            bool Fits(IReadOnlyCollection<string> list) => (list.Count * 8 + To(list.Sum(n => n.Length + 1), 4) + after) % 16 == 0;
             var unused = fillers.Where(f => !names.Contains(f, StringComparer.OrdinalIgnoreCase)).ToList();
             if (Fits(names.ToList())) return [.. names];
             foreach (string a in unused)
@@ -178,7 +220,11 @@ public sealed class TerrainFile
             t.LayerMap = new LayerMapPart(cells, nameWords, names, Take(ref p, n * 4));
         }
         p = To(p, 4);
-        if (t.HasGround && t.D(0x78) > 0) throw new InvalidDataException("the terrain file has Guerrilla's undergrowth layers, which aren't read");
+        if (t.HasGround && t.D(0x78) > 0)
+        {
+            t.Undergrowth = Take(ref p, UndergrowthLength(f, p, t.D(0x78), t.D(0x84)));
+            p = To(p, 4);
+        }
         if (t.D(0xAC) > 0)
         {
             int start = p, layers = t.D(0xAC);
@@ -302,6 +348,7 @@ public sealed class TerrainFile
             Pad(4); Put(map.IndexWords);
         }
         Pad(4);
+        if (HasGround && Undergrowth != null) { Put(Undergrowth); Pad(4); }
         if (Foliage != null) { Put(Foliage); Pad(16); Put(FoliageBuffer ?? []); }
         if (HasGround)
         {

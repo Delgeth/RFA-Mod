@@ -315,6 +315,35 @@ public static class GuerrillaWorld
         var navigable = navigation.Values.Where(n => n.People != null || n.Vehicles != null).ToList();
         log($"Navigation: Guerrilla's own in {navigable.Count} zones ({navigable.Sum(n => n.People?.Cells.Length ?? 0):N0} cells for people, " +
             $"{navigable.Sum(n => n.Vehicles?.Cells.Length ?? 0):N0} for vehicles); none in the other {zones.Count - navigable.Count}, as in Guerrilla");
+        // An undergrowth mesh made Armageddon's (see GuerrillaFoliage) under its own name, and its texture
+        // under its new one; each made once.
+        var undergrowthFiles = new Dictionary<string, (string Name, byte[] Data)[]>(StringComparer.OrdinalIgnoreCase);
+        (string Name, byte[] Data)[] UndergrowthFiles(int col, int row, string mesh)
+        {
+            if (undergrowthFiles.TryGetValue(mesh, out var made)) return made;
+            byte[] guerrillaMesh = RfgFile(col, row, mesh + ".cfmesh_pc") ?? throw new InvalidDataException($"no {mesh}.cfmesh_pc for {Alias(mesh)}'s undergrowth");
+            var (converted, texture) = GuerrillaFoliage.Convert(guerrillaMesh, Alias);
+            byte[] header = RfgFile(col, row, texture + ".cvbm_pc") ?? throw new InvalidDataException($"no {texture}.cvbm_pc for {mesh}");
+            byte[] data = RfgFile(col, row, texture + ".gvbm_pc", 1000) ?? RfgFile(col, row, texture + ".gvbm_pc", 1) ?? throw new InvalidDataException($"no {texture}.gvbm_pc for {mesh}");
+            return undergrowthFiles[mesh] = [(mesh + ".cfmesh_pc", converted), (Alias(texture) + ".cvbm_pc", Repacked(header, data, Alias(texture))), (Alias(texture) + ".gvbm_pc", data)];
+        }
+
+        // Guerrilla's reflection cube as a texture of its own under its new name: six faces one under
+        // another, its cube flag (0x8) and every level as Guerrilla's (Armageddon keeps its cubes the same way).
+        (string Name, byte[] Data)[]? guerrillaCube = null;
+        (string Name, byte[] Data)[] GuerrillaCubeFiles()
+        {
+            if (guerrillaCube != null) return guerrillaCube;
+            var rfgMiscPack = Packfile.Open(Path.Combine(rfgCache, "misc.vpp_pc"));
+            byte[] Entry(string file) => rfgMiscPack.Read(rfgMiscPack.Find(file) ?? throw new InvalidDataException($"no {file} in Guerrilla's misc.vpp_pc"));
+            var peg = PegFile.Read(Entry("always_loaded.cpeg_pc"), Entry("always_loaded.gpeg_pc"));
+            var cube = peg.Textures.FirstOrDefault(t => Path.GetFileNameWithoutExtension(t.Name).Equals(GuerrillaMaterials.GuerrillaCube, StringComparison.OrdinalIgnoreCase))
+                       ?? throw new InvalidDataException($"no {GuerrillaMaterials.GuerrillaCube} in Guerrilla's always_loaded textures");
+            string alias = Alias(GuerrillaMaterials.GuerrillaCube);
+            var (header, data) = peg.Single(cube, alias + ".tga", cube.MipLevels);
+            return guerrillaCube = [(alias + ".cvbm_pc", header), (alias + ".gvbm_pc", data)];
+        }
+
         // A Guerrilla texture's header made again under its new name: its size, format and flags as
         // Guerrilla's, and its mip levels, but a compressed one's only down to 4 x 4. Guerrilla sizes
         // the levels smaller than a 4-pixel block by their pixels (a 2 x 2 DXT5 level 4 bytes, not a
@@ -429,6 +458,12 @@ public static class GuerrillaWorld
                             if (texture == GuerrillaMaterials.GlassReflection)
                             {
                                 chunkTextures[texture] = [(texture + ".cvbm_pc", Pre(texture + ".cvbm_pc")), (texture + ".gvbm_pc", Pre(texture + ".gvbm_pc"))];
+                                continue;
+                            }
+                            // Guerrilla's own reflection cube (its mirror glass's), from its always-loaded textures.
+                            if (texture.Equals(GuerrillaMaterials.GuerrillaCube, StringComparison.OrdinalIgnoreCase))
+                            {
+                                chunkTextures[texture] = GuerrillaCubeFiles();
                                 continue;
                             }
                             // A texture that isn't there is drawn white.
@@ -652,6 +687,12 @@ public static class GuerrillaWorld
                 foreach (string texture in piece.Textures) files.AddRange(rockTextures[texture]);
             }
             AddChunks(files, zoneChunks);
+            // The meshes its undergrowth scatters (under Guerrilla's names, as its terrain file names
+            // them) and their textures: in more than one zone each, so kept once, in the precache.
+            if (RfgFile(col, row, $"terr01_{col:00}_{row:00}.cterrain_pc") is { } guerrillaTerrainFile &&
+                GuerrillaTerrain.Undergrowth(guerrillaTerrainFile) is { } undergrowth)
+                foreach (string mesh in GuerrillaTerrain.UndergrowthMeshes(undergrowth.Section, undergrowth.Layers))
+                    files.AddRange(UndergrowthFiles(col, row, mesh));
             foreach (string file in propsIn[(col, row)].Select(o => o.Text("Props")).OfType<string>()
                          .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Concat(effectTables.WorldFiles).Distinct(StringComparer.OrdinalIgnoreCase))
                 files.AddRange(effectFiles[file]);
@@ -698,9 +739,12 @@ public static class GuerrillaWorld
         }
         var inPrecache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int directory = 16, left = 0;
+        // (The undergrowth's meshes first, small as they are: the game keeps the foliage meshes loaded in
+        // a table of 64, which a copy in every zone's container would crowd.)
         foreach (var unit in holders.Keys.Where(n => holders[n] > 1 && !differing.Contains(n))
                                          .GroupBy(UnitOf, StringComparer.OrdinalIgnoreCase)
-                                         .OrderByDescending(u => (long)(u.Max(n => holders[n]) - 1) * u.Sum(n => (long)lengths[n])))
+                                         .OrderByDescending(u => u.Key.EndsWith(".cfmesh_pc", StringComparison.OrdinalIgnoreCase))
+                                         .ThenByDescending(u => (long)(u.Max(n => holders[n]) - 1) * u.Sum(n => (long)lengths[n])))
         {
             int cost = unit.Sum(n => 24 + n.Length + 1);
             if (directory + cost > PrecacheDirectoryBudget)
@@ -713,6 +757,7 @@ public static class GuerrillaWorld
         }
         bool Shared(string name) => inPrecache.Contains(name);
         var precacheFiles = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        var normalAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var textureFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);  // every texture file in the world's containers
         long before = 0, after = 0;
         // A container of the world (0h_cXXYY for a sub-zone, 1h_cXXYY for a zone, which goes in the
@@ -720,6 +765,12 @@ public static class GuerrillaWorld
         // entries made.
         void Pack(string name, bool zoneLayer, IReadOnlyList<(string Name, byte[] Data)> files)
         {
+            // Guerrilla's normal maps marked as data (see GuerrillaMaterials.NormalMaps): every material is
+            // converted by now.
+            if (normalAliases.Count != GuerrillaMaterials.NormalMaps.Count)
+                normalAliases = GuerrillaMaterials.NormalMaps.Keys.Select(Alias).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            files = [.. files.Select(f => f.Name.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase) || f.Name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase)
+                                          ? (f.Name, PegFile.WithDataFlag(f.Data, normalAliases.Contains)) : f)];
             var kept = files.Where(f => !Shared(f.Name)).ToList();
             var fromPrecache = files.Where(f => Shared(f.Name)).ToList();
             before += files.Sum(f => (long)f.Data.Length);
@@ -771,8 +822,8 @@ public static class GuerrillaWorld
                                                     holes[(col, row)], roadsIn[(col, row)], OwnCliffs(look) ? look.Cliffs.Count : 3);
             string blendName = $"rfg{col:00}{row:00}_a00", colourName = $"rfg{col:00}{row:00}cmb";
             string guerrillaZone = $"terr01_{col:00}_{row:00}";
-            var (terrainFile, terrainData, farLowered) = ZoneTerrain(h, corner, look, barriers[(col, row)], zone, blendName, colourName,
-                RfgFile(col, row, guerrillaZone + ".cterrain_pc") ?? throw new InvalidDataException($"no {guerrillaZone}.cterrain_pc"),
+            byte[] guerrillaTerrain = RfgFile(col, row, guerrillaZone + ".cterrain_pc") ?? throw new InvalidDataException($"no {guerrillaZone}.cterrain_pc");
+            var (terrainFile, terrainData, farLowered) = ZoneTerrain(h, corner, look, barriers[(col, row)], zone, blendName, colourName, guerrillaTerrain,
                 RfgFile(col, row, guerrillaZone + ".gterrain_pc", 1) ?? throw new InvalidDataException($"no {guerrillaZone}.gterrain_pc"));
             // The blend map uncompressed with one level, data not colour; the colour map DXT1 with its
             // levels down to 4 × 4: as the game's own ground maps are kept.
@@ -1140,8 +1191,12 @@ public static class GuerrillaWorld
         if (cells.Length != 512 * 512 / 4) throw new InvalidDataException($"{zone}'s layer map is {cells.Length} bytes, not 512 × 512 cells of 2 bits");
         // Guerrilla's names, then (so the far meshes after them start at a multiple of 16) effect materials
         // Armageddon's rfg_effect_materials.xtbl has, which no cell uses.
+        // Guerrilla's undergrowth (its grass and dust rocks), as its file keeps it: Armageddon's loader
+        // and scatter still take it (the mod puts the scattered pieces on the ground).
+        var undergrowth = GuerrillaTerrain.Undergrowth(guerrillaTerrain);
+        t.Undergrowth = undergrowth?.Section;
         var effectNames = TerrainFile.LayerMapPart.PaddedNames(guerrillaNames,
-            ["Terrain", "Dirt", "Ice", "Steel", "Rubber", "Concrete", "Composite", "Unobtanium", "Electronics"]);
+            ["Terrain", "Dirt", "Ice", "Steel", "Rubber", "Concrete", "Composite", "Unobtanium", "Electronics"], t.Undergrowth?.Length ?? 0);
         t.LayerMap = new TerrainFile.LayerMapPart(cells, new byte[effectNames.Count * 4], effectNames, new byte[effectNames.Count * 4]);
         t.Occluders = GuerrillaTerrain.Occluders(guerrillaTerrain);
 
@@ -1156,6 +1211,7 @@ public static class GuerrillaWorld
         Word(0x24, t.Occluders.Length / 24);            // occluders (Guerrilla's)
         Word(0x4C, t.SubzoneSlots.Length / 4);          // sub-zones
         Word(0x58, 512); Word(0x5C, 512); Word(0x60, 2); Word(0x64, cells.Length); Word(0x6C, effectNames.Count);
+        Word(0x78, undergrowth?.Layers ?? 0); Word(0x84, undergrowth?.Records ?? 0);  // Guerrilla's undergrowth
         Word(0x94, barriers.Count);
         Word(0x9C, 0);                                  // a height field
         Word(0xA0, cliffs.Count);

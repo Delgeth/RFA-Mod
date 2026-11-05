@@ -152,6 +152,63 @@ public static class GuerrillaTerrain
         return terrain[at..(at + count * 24)];
     }
 
+    /// <summary>
+    /// The zone's undergrowth (its grass and rocks: see <see cref="TerrainFile.UndergrowthLength"/>), as
+    /// Armageddon's terrain files would keep it, or null if it has none: the section after the layer
+    /// map, from a multiple of 4, its run-time words cleared (each layer's models pointer at +4, each
+    /// record of single pieces' pointers at +4 and +8); and its layer and record counts (Guerrilla's
+    /// terrain_data +0x74 and +0x80).
+    /// </summary>
+    public static (byte[] Section, int Layers, int Records)? Undergrowth(byte[] terrain)
+    {
+        int I(int at) => BitConverter.ToInt32(terrain, at);
+        int data = DataAt(terrain), layers = I(data + 0x74), records = I(data + 0x80);
+        if (layers <= 0) return null;
+        // After the layer map: its cells, a word a material, their names, to 4, a word a material.
+        int size = I(data + 0x60), count = I(data + 0x68);
+        int p = To(TerrainBarriers.End(terrain), 4) + size + count * 4;
+        for (int k = 0; k < count; k++) p = Array.IndexOf(terrain, (byte)0, p) + 1;
+        p = To(To(p, 4) + count * 4, 4);
+        byte[] section = terrain[p..(p + TerrainFile.UndergrowthLength(terrain, p, layers, records))];
+        for (int k = 0; k < layers; k++) BitConverter.TryWriteBytes(section.AsSpan(k * 28 + 4), 0);
+        // The records of single pieces: after the layers, models, names, cells and records (to 4).
+        int at = layers * 28;
+        var models = Enumerable.Range(0, layers).Select(k => BitConverter.ToInt32(section, k * 28)).ToArray();
+        at += models.Sum() * 16;
+        foreach (int m in models)
+        {
+            for (int n = 0; n < m; n++) at = Array.IndexOf(section, (byte)0, at) + 1;
+            at = To(at, 4);
+        }
+        at = To(at + 0x4000 + records * 10, 4);
+        for (int k = 0; k < records; k++)
+        {
+            BitConverter.TryWriteBytes(section.AsSpan(at + k * 12 + 4), 0);
+            BitConverter.TryWriteBytes(section.AsSpan(at + k * 12 + 8), 0);
+        }
+        return (section, layers, records);
+    }
+
+    /// <summary>The mesh names (without ".fmeshx") the zone's undergrowth layers scatter, each once.</summary>
+    public static List<string> UndergrowthMeshes(byte[] section, int layers)
+    {
+        var models = Enumerable.Range(0, layers).Select(k => BitConverter.ToInt32(section, k * 28)).ToArray();
+        int at = layers * 28 + models.Sum() * 16;
+        var names = new List<string>();
+        foreach (int m in models)
+        {
+            for (int n = 0; n < m; n++)
+            {
+                string name = CString(section, at);
+                at += name.Length + 1;
+                string mesh = Path.GetFileNameWithoutExtension(name);
+                if (!names.Contains(mesh, StringComparer.OrdinalIgnoreCase)) names.Add(mesh);
+            }
+            at = To(at, 4);
+        }
+        return names;
+    }
+
     /// <summary>Where terrain_data starts: after the 36-byte header, the texture names, the stitch names and placements and the foliage mesh names, each to 4.</summary>
     static int DataAt(byte[] terrain)
     {

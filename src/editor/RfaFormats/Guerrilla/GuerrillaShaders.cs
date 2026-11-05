@@ -8,14 +8,22 @@ namespace RfaFormats.Guerrilla;
 /// Guerrilla's lit model shaders rewritten for Armageddon's renderer, as effect files of the game's
 /// own kind (see <see cref="EffectFile"/>): gw_standard0/1/2 (Guerrilla's standard shaders: Lambert,
 /// Blinn and self-illumination), gw_metal0/1/2 (its metal: the metal lobe), gw_brdf0/1/2 (its BRDF
-/// shaders: their fitted curves or look-up maps) and gw_blendmetal0/1/2 (metal and standard mixed by
-/// the specular map's alpha), the number the UV sets past the first their meshes have; each as _s
-/// (still meshes) and _bs (instanced ones). They go with
+/// shaders: their fitted curves or look-up maps), gw_blendmetal0/1/2 (metal and standard mixed by
+/// the specular map's alpha), gw_glass0 (its blended glass), gw_eosglass1 (its mirror glass) and
+/// gw_composite1c (its composite panels), gw_vehiclepaint0/1 (its vehicles' paint) and gw_clearcoat1
+/// (its Oasis roofs), the number the UV sets past the first their meshes have, then
+/// "c" for alpha-tested materials (cut-outs) and "b" for blended ones; each as _s (still meshes) and
+/// _bs (instanced ones), and the glass also as _c (skinned: the game draws a pane's flying shards with
+/// its material's _c effect, and won't shatter glass whose shader has none). They go with
 /// the world's other new files (overrides\build\pc\cache\), and the guerrilla_world mod has the game
 /// load them after its own (the game only loads the effect files inside its archives).
 ///
 /// Each takes its G-buffer passes (the normals, plain and stippled) and the engine's texture slots
-/// from Armageddon's ir_default as they are, and adds its own material pass, compiled from
+/// from Armageddon's ir_default as they are (but gw_glass, which has no G-buffer pass: Guerrilla's
+/// glass casts no shadow and Armageddon then skips a blended material's G-buffer and shadow passes,
+/// nor the blended "b" ones; and the cut-outs, whose depth (shadow) and G-buffer passes are ours too,
+/// so their holes are cut by Guerrilla's own alpha in every pass, as ir_at_default lays them out),
+/// and adds its own material pass, compiled from
 /// Guerrilla\Shaders\GuerrillaSurfaces.hlsl, which lights the surface with Guerrilla's maths from
 /// what the mod gives it. The material pass of objects fading in or out (stippled) is the plain one.
 /// The materials name Guerrilla's own texture slots and these constants, register by register (the
@@ -27,10 +35,31 @@ namespace RfaFormats.Guerrilla;
 /// </summary>
 public static class GuerrillaShaders
 {
-    public enum Family { Standard = 1, Metal = 2, Brdf = 3, BlendMetal = 4 }
+    public enum Family { Standard = 1, Metal = 2, Brdf = 3, BlendMetal = 4, Glass = 5, EosGlass = 6, Composite = 7, VehiclePaint = 8, Clearcoat = 9 }
+
+    /// <summary>Opaque, alpha-tested (Guerrilla's material flags 2: holes cut by the alpha) or blended (flags 1).</summary>
+    public enum Variant { Plain, CutOut, Blended }
+
+    /// <summary>The UV sets past the first a family's effects are written for: Guerrilla's glass has one, its mirror glass and composite two.</summary>
+    public static int[] LayersOf(Family family) => family switch
+    {
+        Family.Glass => [0],
+        Family.EosGlass or Family.Composite or Family.Clearcoat => [1],
+        Family.VehiclePaint => [0, 1],
+        _ => [0, 1, 2],
+    };
+
+    /// <summary>The variants a family's effects are written as: glass is blended itself, the composite is always cut out.</summary>
+    public static Variant[] VariantsOf(Family family) => family switch
+    {
+        Family.Glass or Family.EosGlass or Family.VehiclePaint or Family.Clearcoat => [Variant.Plain],
+        Family.Composite => [Variant.CutOut],
+        _ => [Variant.Plain, Variant.CutOut, Variant.Blended],
+    };
 
     /// <summary>An effect's name (without its _s / _bs): its family and how many UV sets past the first its meshes have.</summary>
-    public static string Name(Family family, int layers) => $"gw_{family.ToString().ToLowerInvariant()}{layers}";
+    public static string Name(Family family, int layers, Variant variant = Variant.Plain) =>
+        $"gw_{family.ToString().ToLowerInvariant()}{layers}{variant switch { Variant.CutOut => "c", Variant.Blended => "b", _ => "" }}";
 
     /// <summary>The material constants in register order (0 is the engine's).</summary>
     public static readonly string[] Constants =
@@ -41,7 +70,7 @@ public static class GuerrillaShaders
     /// <summary>The texture slots (Guerrilla's names) and their registers, as the shader's.</summary>
     public static readonly (string Slot, byte Register)[] Slots =
         [("Normal_Map", 0), ("Diffuse_Map", 1), ("Specular_Map", 2), ("Decal_Map_1", 3), ("Decal_Map_2", 4), ("Environment_Map", 5),
-         ("BRDF_Diff_Map", 6), ("BRDF_Spec_Map", 7)];
+         ("BRDF_Diff_Map", 6), ("BRDF_Spec_Map", 7), ("reflection_map", 8), ("Alpha_Map", 10), ("BRDF_Mask_Map", 11)];
 
     /// <summary>
     /// The slots an effect samples: the standard shaders' decals at UV1 and UV2; the others' layer at UV1
@@ -49,6 +78,11 @@ public static class GuerrillaShaders
     /// </summary>
     public static string[] SlotsOf(Family family, int layers)
     {
+        if (family == Family.Glass) return ["Diffuse_Map", "Specular_Map"];
+        if (family == Family.EosGlass) return ["Normal_Map", "Diffuse_Map", "Environment_Map", "reflection_map"];
+        if (family == Family.Composite) return ["Normal_Map", "Diffuse_Map", "Decal_Map_1", "Alpha_Map"];
+        if (family == Family.VehiclePaint) return ["Normal_Map", "Diffuse_Map", "Specular_Map", "Decal_Map_1", "BRDF_Mask_Map"];
+        if (family == Family.Clearcoat) return ["Normal_Map", "Specular_Map", "Environment_Map", "Decal_Map_1"];
         string[] uvSets = family == Family.Standard
             ? layers switch { 1 => ["Decal_Map_1"], 2 => ["Decal_Map_1", "Decal_Map_2"], _ => [] }
             : layers switch { 1 => ["Environment_Map"], 2 => ["Environment_Map", "Decal_Map_1"], _ => [] };
@@ -60,7 +94,7 @@ public static class GuerrillaShaders
     static readonly (string Name, byte Register)[] BaseConstants =
         [("IR_Object_ID", 0), ("Normal_Height", 1), ("Specular_Power", 2), ("Diffuse_TilingU", 3), ("Diffuse_TilingV", 4)];
 
-    static readonly uint GeometryTechnique = 0x6614AD7B, GeometryFadingTechnique = 0xB08EBA8C,
+    static readonly uint DepthTechnique = 0xD0A87291, GeometryTechnique = 0x6614AD7B, GeometryFadingTechnique = 0xB08EBA8C,
         MaterialTechnique = 0xEA49BBC0, MaterialFadingTechnique = 0xFE6B0E83;
 
     /// <summary>
@@ -73,25 +107,41 @@ public static class GuerrillaShaders
         string source = Source();
         var misc = Packfile.Open(Path.Combine(armageddonCache, "misc.vpp_pc"));
         var written = new List<string>();
-        foreach (var (suffix, instanced) in new[] { ("s", false), ("bs", true) })
+        foreach (var (suffix, instanced, skinned) in new[] { ("s", false, false), ("bs", true, false), ("c", false, true) })
         {
             string baseName = $"ir_default_{suffix}.fxo_pc_dx11";
             var entry = misc.Find(baseName) ?? throw new InvalidDataException($"Armageddon's misc.vpp_pc has no {baseName}");
             var baseEffect = EffectFile.Read(misc.Read(entry));
             Check(baseEffect, baseName);
-            foreach (var family in Enum.GetValues<Family>())
-                for (int layers = 0; layers <= 2; layers++)
-                {
-                    string name = $"{Name(family, layers)}_{suffix}.fxo_pc_dx11";
-                    var defines = new Dictionary<string, string>
+            EffectFile? cutOutBase = null;
+            if (!skinned)
+            {
+                string cutOutName = $"ir_at_default_{suffix}.fxo_pc_dx11";
+                cutOutBase = EffectFile.Read(misc.Read(misc.Find(cutOutName) ?? throw new InvalidDataException($"Armageddon's misc.vpp_pc has no {cutOutName}")));
+                CheckCutOut(cutOutBase, cutOutName);
+            }
+            foreach (var family in Enum.GetValues<Family>().Where(f => !skinned || f is Family.Glass or Family.EosGlass))
+                foreach (int layers in LayersOf(family))
+                    foreach (var variant in VariantsOf(family))
                     {
-                        ["FAMILY"] = ((int)family).ToString(), ["LAYERS"] = layers.ToString(), ["INSTANCED"] = instanced ? "1" : "0",
-                    };
-                    byte[] vertex = HlslCompiler.Compile(source, "SurfaceVertex", "vs_4_0", "GuerrillaSurfaces.hlsl", defines);
-                    byte[] pixel = HlslCompiler.Compile(source, "SurfacePixel", "ps_4_0", "GuerrillaSurfaces.hlsl", defines);
-                    File.WriteAllBytes(Path.Combine(output, name), Effect(baseEffect, family, layers, vertex, pixel).Write());
-                    written.Add(name);
-                }
+                        string name = $"{Name(family, layers, variant)}_{suffix}.fxo_pc_dx11";
+                        byte[] Compile(string entryPoint, string target, bool stippled = false) =>
+                            HlslCompiler.Compile(source, entryPoint, target, "GuerrillaSurfaces.hlsl", new Dictionary<string, string>
+                            {
+                                ["FAMILY"] = ((int)family).ToString(), ["LAYERS"] = layers.ToString(), ["INSTANCED"] = instanced ? "1" : "0",
+                                ["SKINNED"] = skinned ? "1" : "0",
+                                ["CUTOUT"] = variant == Variant.CutOut ? "1" : "0", ["BLENDED"] = variant == Variant.Blended ? "1" : "0",
+                                ["STIPPLED"] = stippled ? "1" : "0",
+                            });
+                        byte[] vertex = Compile("SurfaceVertex", "vs_4_0"), pixel = Compile("SurfacePixel", "ps_4_0");
+                        var effect = variant == Variant.CutOut
+                            ? CutOut(cutOutBase!, baseEffect, family, layers, [Compile("DepthVertex", "vs_4_0"), Compile("GeometryVertex", "vs_4_0"), Compile("GeometryVertex", "vs_4_0", true), vertex],
+                                     [Compile("DepthPixel", "ps_4_0"), Compile("GeometryPixel", "ps_4_0"), Compile("GeometryPixel", "ps_4_0", true), pixel])
+                            : family == Family.Glass || variant == Variant.Blended ? MaterialPassOnly(baseEffect, family, layers, vertex, pixel)
+                            : Effect(baseEffect, family, layers, vertex, pixel);
+                        File.WriteAllBytes(Path.Combine(output, name), effect.Write());
+                        written.Add(name);
+                    }
         }
         written.AddRange(WriteTerrain(misc, output));
         return written;
@@ -121,21 +171,31 @@ public static class GuerrillaShaders
         foreach (int variant in new[] { 2, 3, 4 })
             foreach (string suffix in new[] { "_s", "_bs" })
                 effects.Add((TerrainMaterials.RoadShaderName(variant) + suffix, $"ir_terrain_road_layer{variant}{suffix}", 5, variant));
+        // The undergrowth: Armageddon's foliage effect (a depth, a G-buffer and a material pass).
+        foreach (string suffix in new[] { "_s", "_bs" })
+            effects.Add((GuerrillaFoliage.ShaderName + suffix, $"ir_foliage_clutter{suffix}", 7, 0));
         foreach (var (name, from, surface, road) in effects)
         {
             string file = from + ".fxo_pc_dx11";
             var entry = misc.Find(file) ?? throw new InvalidDataException($"Armageddon's misc.vpp_pc has no {file}");
             var e = EffectFile.Read(misc.Read(entry));
-            if (e.VertexShaders.Count != 2 || e.PixelShaders.Count != 2 || e.Techniques.Count != 4 ||
-                e.Techniques[2] != new EffectFile.Technique(1, 1, MaterialTechnique, 0x80) || e.Techniques[3] != new EffectFile.Technique(1, 1, MaterialFadingTechnique, 0x100))
-                throw new InvalidDataException($"Armageddon's {file} isn't laid out as Guerrilla's terrain shaders expect");
+            // The material pass: the last vertex and pixel shaders (the terrain's second of two, the foliage's third of three).
+            int material = surface == 7 ? 2 : 1;
+            bool laidOut = surface == 7
+                ? e.VertexShaders.Count == 3 && e.PixelShaders.Count == 3 && e.Techniques.Count == 5 &&
+                  e.Techniques[3] == new EffectFile.Technique(2, 2, MaterialTechnique, 0x80) && e.Techniques[4] == new EffectFile.Technique(2, 2, MaterialFadingTechnique, 0x100)
+                : e.VertexShaders.Count == 2 && e.PixelShaders.Count == 2 && e.Techniques.Count == 4 &&
+                  e.Techniques[2] == new EffectFile.Technique(1, 1, MaterialTechnique, 0x80) && e.Techniques[3] == new EffectFile.Technique(1, 1, MaterialFadingTechnique, 0x100);
+            if (!laidOut) throw new InvalidDataException($"Armageddon's {file} isn't laid out as Guerrilla's terrain shaders expect");
+            if (surface == 7 && !FoliageConstants.Select((c, r) => e.Constants.Any(k => k.Name == H(c) && k.Register == r)).All(x => x))
+                throw new InvalidDataException($"Armageddon's {file} hasn't the constants where Guerrilla's undergrowth shader reads them");
             if (surface == 5 && (RoadConstants.Where((c, r) => !e.Constants.Any(k => k.Name == H(c) && k.Register == r)).Any() ||
                                  RoadTextures.Any(t => !e.Textures.Any(k => k.Name == H(t.Slot) && k.Register == t.Register))))
                 throw new InvalidDataException($"Armageddon's {file} hasn't the constants and textures where Guerrilla's road shader reads them");
             byte[] pixel = HlslCompiler.Compile(source, "TerrainPixel", "ps_4_0", "GuerrillaTerrain.hlsl",
                                                 new Dictionary<string, string> { ["SURFACE"] = surface.ToString(), ["ROAD"] = road.ToString() });
-            CheckSignatures(e.VertexShaders[1]!, pixel, file);
-            e.PixelShaders[1] = pixel;
+            CheckSignatures(e.VertexShaders[material]!, pixel, file);
+            e.PixelShaders[material] = pixel;
             if (surface <= 2)
                 e.Constants.Add(new(H("Terrain_layer_spec_power"), 10, 0, 1, 1));
             if (surface == 3)
@@ -149,6 +209,9 @@ public static class GuerrillaShaders
         }
         return written;
     }
+
+    /// <summary>The foliage effect's constants in register order, as Armageddon's ir_foliage_clutter has them.</summary>
+    static readonly string[] FoliageConstants = ["Diffuse_Color", "Specular_Color", "Foliage_color", "Foliage_alphaClamp", "Specular_Power"];
 
     /// <summary>The road effects' constants in register order, and the textures our road shader reads, as Armageddon's road effects have them.</summary>
     static readonly string[] RoadConstants =
@@ -208,6 +271,60 @@ public static class GuerrillaShaders
             var baseConstant = from.Constants.FirstOrDefault(c => c.Register == r);
             e.Constants.Add(new(H(Constants[r]), (byte)r, baseConstant.Flags, 1, 1));
         }
+        return e;
+    }
+
+    /// <summary>
+    /// An alpha-tested surface's effect (a "c" one): Armageddon's ir_at_default's layout (the depth
+    /// pass, for shadows, then the G-buffer, plain and stippled, then the material pass, plain and for
+    /// objects fading in or out), every shader ours (<paramref name="vertex"/> and <paramref name="pixel"/>
+    /// in that order: GuerrillaSurfaces.hlsl's DepthVertex/DepthPixel, GeometryVertex/GeometryPixel and
+    /// its STIPPLED one, SurfaceVertex/SurfacePixel), each cutting the material's holes by its own alpha;
+    /// the engine's texture slots and our constants as <see cref="Effect"/>'s.
+    /// </summary>
+    static EffectFile CutOut(EffectFile cutOutBase, EffectFile from, Family family, int layers, byte[][] vertex, byte[][] pixel)
+    {
+        var full = Effect(from, family, layers, vertex[3], pixel[3]);
+        var e = new EffectFile { KindsPresent = cutOutBase.KindsPresent };
+        cutOutBase.TechniqueMap.CopyTo(e.TechniqueMap, 0);
+        e.VertexShaders.AddRange(vertex);
+        e.PixelShaders.AddRange(pixel);
+        e.Techniques.AddRange([new(0, 0, DepthTechnique, 0x8), new(1, 1, GeometryTechnique, 0x20), new(2, 2, GeometryFadingTechnique, 0x40),
+                               new(3, 3, MaterialTechnique, 0x80), new(3, 3, MaterialFadingTechnique, 0x100)]);
+        e.Textures.AddRange(full.Textures);
+        e.Constants.AddRange(full.Constants);
+        return e;
+    }
+
+    /// <summary>That Armageddon's ir_at_default (whose technique layout the cut-outs take) is still laid out as they take it.</summary>
+    static void CheckCutOut(EffectFile e, string name)
+    {
+        bool ok = e.Techniques.Count == 5
+            && e.Techniques[0] == new EffectFile.Technique(0, 0, DepthTechnique, 0x8)
+            && e.Techniques[1] == new EffectFile.Technique(1, 1, GeometryTechnique, 0x20)
+            && e.Techniques[2] == new EffectFile.Technique(2, 2, GeometryFadingTechnique, 0x40)
+            && e.Techniques[3] == new EffectFile.Technique(3, 3, MaterialTechnique, 0x80)
+            && e.Techniques[4] == new EffectFile.Technique(4, 4, MaterialFadingTechnique, 0x100);
+        if (!ok) throw new InvalidDataException($"Armageddon's {name} isn't laid out as Guerrilla's cut-outs expect");
+    }
+
+    /// <summary>
+    /// A blended surface's effect with no G-buffer pass (Guerrilla's glass, and the blended "b" ones): only the material pass, plain
+    /// and blended (kinds 6 and 7, Armageddon's alpha pass), so it neither writes the G-buffer nor casts a
+    /// shadow; the engine's texture slots and our constants as <see cref="Effect"/>'s.
+    /// </summary>
+    static EffectFile MaterialPassOnly(EffectFile from, Family family, int layers, byte[] vertex, byte[] pixel)
+    {
+        var full = Effect(from, family, layers, vertex, pixel);
+        var e = new EffectFile { KindsPresent = (1u << 6) | (1u << 7) };
+        Array.Fill(e.TechniqueMap, (sbyte)-1);
+        e.TechniqueMap[6] = 0;
+        e.TechniqueMap[7] = 1;
+        e.VertexShaders.Add(vertex);
+        e.PixelShaders.Add(pixel);
+        e.Techniques.AddRange([new(0, 0, MaterialTechnique, 0x80), new(0, 0, MaterialFadingTechnique, 0x100)]);
+        e.Textures.AddRange(full.Textures);
+        e.Constants.AddRange(full.Constants);
         return e;
     }
 

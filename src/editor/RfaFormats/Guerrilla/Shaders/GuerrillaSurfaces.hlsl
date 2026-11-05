@@ -20,9 +20,26 @@
 // Lambert + Blinn + self-illumination), 2 the metal ones (rfg-metal, rfg-e-metal, rfg-ed-metal: the
 // metal lobe), 3 the BRDF ones (rfg-brdf-*: their fitted curves, which BrdfKind.x picks, and rfg-brdf /
 // rfg-brdf-env with their look-up maps), 4 the blend-std-metal ones (metal and standard mixed by the
-// specular map's alpha); LAYERS 0, 1 or 2: the UV sets past the first the meshes have (standard:
-// Decal_Map_1 at UV1, Decal_Map_2 at UV2; the others: their layer, Environment_Map, at UV1,
-// Decal_Map_1 at UV2); INSTANCED 1 for instanced meshes (each object's matrix in the vertex stream).
+// specular map's alpha), 5 rfg-glass (blended: the ambient and the sun's shine, how much shows by the
+// colour map's alpha; drawn in the material pass only, so it is in no G-buffer, casts no shadow and
+// takes no occlusion, shadow or lamps), 6 rfg-eosglass (opaque mirror glass: a frame layer at UV1 over
+// Guerrilla's reflection cube), 7 rfg-composite (a panel over its broken core by a mask at UV1, its
+// holes where the mask has neither), 8 the vehicle paints (rfg-edf-vhc: the EDF's camouflage, its
+// tint turning with the angle between the sun and the eye; BrdfKind.x 1 rfg-colorshift: that tint
+// alone, unlit), 9 rfg-ed-oasisroof (a clear coat over a near-black base, its shine and rim fading
+// under the dirt layer); LAYERS 0, 1 or 2: the UV sets past the first the meshes have
+// (standard: Decal_Map_1 at UV1, Decal_Map_2 at UV2; the others: their layer, Environment_Map, at UV1,
+// Decal_Map_1 at UV2); INSTANCED 1 for instanced meshes (each object's matrix in the vertex stream);
+// SKINNED 1 for skinned ones (up to four bones a vertex: the glass's flying shards, which the game
+// draws with a material's "_c" effect);
+// CUTOUT 1 for alpha-tested materials (Guerrilla's flags 2): holes where the material's alpha is under
+// the engine's threshold, cut the same in every pass, so these effects have their own depth (shadow)
+// and G-buffer passes too (DepthVertex/DepthPixel, GeometryVertex/GeometryPixel, STIPPLED 1 for objects
+// fading in or out), which write the G-buffer as Armageddon's do; BLENDED 1 for blended ones (flags 1,
+// drawn in the material pass alone, by their alpha).
+//
+// The time (b8's) in the depth and G-buffer passes is the frame before's: the mod leaves b8 bound
+// after the material pass, so a scrolling cut-out's holes move with it.
 
 cbuffer Object : register(b2)   // the engine's, per object (vc2)
 {
@@ -35,7 +52,16 @@ cbuffer Object : register(b2)   // the engine's, per object (vc2)
     float4 FogDistances;        // c9: x the most fog, y where it starts, z where it is most, w its curve
     float4 Unused10[5];
     float4 ObjectRows[3];       // c15-17: the object to the world (rows of a 3 × 4)
+    float4 Unused18;
+    float4 WorldToView[3];      // c19-21: IR_World2View, the world to the camera's space (rows; directions only here)
 };
+
+#if SKINNED
+cbuffer Bones : register(b3)     // the engine's, per skinned object (vc3): 64 bones, three rows each
+{
+    float4 BoneRows[192];
+};
+#endif
 
 cbuffer Material : register(b0)  // the material's constants (vc0), laid out by the builder
 {
@@ -65,6 +91,11 @@ cbuffer Frame : register(b4)    // the engine's, per frame (vc4)
     float4 TintColour;          // c1
     float4 EngineAmbient[2];
     float4 FogColour;           // c4
+    float4 FrameUnused5[3];
+    float4 LightCategory;       // c8: added to the G-buffer's normal and shine, as the engine's G-buffer shaders do
+    float4 AlphaThreshold;      // c9: x, the alpha under which an alpha-tested surface is cut away
+    float4 FrameUnused10[4];
+    float4 StippleRepeat;       // c14: IR_Stipple_Repeat_Info, the stipple pattern's repeats across the picture
 };
 
 cbuffer Guerrilla : register(b8)  // the guerrilla_world mod's
@@ -84,6 +115,10 @@ Texture2D DecalMap2 : register(t4);
 Texture2D LayerMap : register(t5);
 Texture2D BrdfDiffuseMap : register(t6);   // rfg-brdf's look-ups: by (N·L/2 + ½, 1 − N·V)
 Texture2D BrdfSpecularMap : register(t7);  // and by (N·L, 1 − N·H)
+TextureCube ReflectionCube : register(t8);  // rfg-eosglass's reflection_map
+Texture2D AlphaMap : register(t10);         // rfg-composite's mask
+Texture2D MaskMap : register(t11);          // the vehicle paints' BRDF_Mask_Map (the camouflage's three masks)
+Texture2D StipplePattern : register(t14);   // the engine's, for objects fading in or out
 Texture2D LightBuffer : register(t12);
 Texture2D OurLight : register(t16);
 Texture2D LightBefore : register(t17);
@@ -95,6 +130,10 @@ SamplerState Decal2Sampler : register(s4);
 SamplerState LayerSampler : register(s5);
 SamplerState BrdfDiffuseSampler : register(s6);
 SamplerState BrdfSpecularSampler : register(s7);
+SamplerState ReflectionSampler : register(s8);
+SamplerState AlphaSampler : register(s10);
+SamplerState MaskSampler : register(s11);
+SamplerState StippleSampler : register(s14);
 
 struct Vertex
 {
@@ -113,7 +152,24 @@ struct Vertex
     float4 row1 : POSITION3;
     float4 row2 : POSITION4;
 #endif
+#if SKINNED
+    uint4 weights : BLENDWEIGHT;  // 0-255 each, out of their sum
+    uint4 bones : BLENDINDICES;
+#endif
 };
+
+#if SKINNED
+// A skinned vertex's position or direction in its object's space, as Armageddon's skinned shaders work
+// it out (ir_carglass_c's): the four bones' rows mixed by the weights, the position divided by their sum.
+void SkinRows(Vertex v, out float4 rows[3], out float inverseSum)
+{
+    const float4 w = (float4)v.weights;
+    inverseSum = 1 / (w.x + w.y + w.z + w.w);
+    const int4 b = (int4)v.bones * 3;
+    [unroll] for (int r = 0; r < 3; r++)
+        rows[r] = w.x * BoneRows[b.x + r] + w.y * BoneRows[b.y + r] + w.z * BoneRows[b.z + r] + w.w * BoneRows[b.w + r];
+}
+#endif
 
 struct Surface
 {
@@ -133,6 +189,17 @@ Surface SurfaceVertex(Vertex v)
     float4 rows[3] = {ObjectRows[0], ObjectRows[1], ObjectRows[2]};
 #endif
     float4 local = float4(v.position * PositionScale.xyz, 1);
+    float3 n = v.normal * 2 - 1, t = v.tangent.xyz * 2 - 1;
+#if SKINNED
+    float4 bone[3];
+    float inverseSum;
+    SkinRows(v, bone, inverseSum);
+    local = float4(float3(dot(bone[0], local), dot(bone[1], local), dot(bone[2], local)) * inverseSum, 1);
+    // The directions made unit length again, as Armageddon's skinned shaders do (the bones are mixed by
+    // the raw weights, 0-255 each; the glass's ambient reads the normal's length).
+    n = normalize(float3(dot(bone[0].xyz, n), dot(bone[1].xyz, n), dot(bone[2].xyz, n)));
+    t = normalize(float3(dot(bone[0].xyz, t), dot(bone[1].xyz, t), dot(bone[2].xyz, t)));
+#endif
     float4 world = float4(dot(rows[0], local), dot(rows[1], local), dot(rows[2], local), 1);
     Surface s;
     s.clip = float4(dot(world, ProjectionRows[0]), dot(world, ProjectionRows[1]), dot(world, ProjectionRows[2]), dot(world, ProjectionRows[3]));
@@ -148,7 +215,6 @@ Surface SurfaceVertex(Vertex v)
     s.fromEye = world.xyz - EyePosition.xyz;
     float along = saturate((length(s.fromEye) - FogDistances.y) / (FogDistances.z - FogDistances.y));
     s.uv2.w = FogDistances.x * pow(along, FogDistances.w);
-    float3 n = v.normal * 2 - 1, t = v.tangent.xyz * 2 - 1;
     s.normal = float3(dot(rows[0].xyz, n), dot(rows[1].xyz, n), dot(rows[2].xyz, n));
     s.tangent = float4(dot(rows[0].xyz, t), dot(rows[1].xyz, t), dot(rows[2].xyz, t), v.tangent.w * 2 - 1);
     return s;
@@ -171,6 +237,10 @@ float3 WorldNormal(Surface s, float3 tangentSpace)
 }
 
 float3 Ambient(float weight) { return lerp(AmbientBelow.rgb, AmbientAbove.rgb, weight); }
+
+// A map's UV: (uv + seconds × scroll) × tiling, the scroll's part kept to 0..1 (the same on a wrapping
+// texture), so hours of play cost no precision.
+float2 Scrolled(float2 uv, float2 scroll, float2 tiling, float seconds) { return uv * tiling + frac(seconds * scroll * tiling); }
 
 // The BRDF shaders' curves (pow(x, 2.2) and "screen" mixes, as their compiled shaders have them).
 float3 Screen(float3 a, float3 b) { return a + b - a * b; }
@@ -247,6 +317,39 @@ float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap,
     return ambient * colour + (sunDiffuse + sunSpecular * shineLeft) * SunColour.rgb * shadow;
 }
 
+// rfg-composite's mask: the panel's own (at UV1) and the core's (at UV1 shifted), each its picked
+// channels (BrdfDiffuse[0], [1]: 0 or 1 each), shifted by BrdfDiffuse[2].xy.
+void CompositeMask(float4 uv01, out float sub, out float top)
+{
+    const float4 a0 = AlphaMap.Sample(AlphaSampler, uv01.zw);
+    const float4 a1 = AlphaMap.Sample(AlphaSampler, uv01.zw + BrdfDiffuse[2].xy - 0.5);
+    sub = min(dot(a0.rgb, trunc(BrdfDiffuse[0].rgb)), 1);
+    top = min(dot(a1.rgb, trunc(BrdfDiffuse[1].rgb)), 1);
+}
+
+// How much of the surface is there (its alpha, as SurfacePixel works it out), for the depth and
+// G-buffer passes of alpha-tested materials.
+float SurfaceAlpha(float4 uv01, float4 uv2, float seconds)
+{
+#if FAMILY == 1
+    if (Extra.z > 0.5) return 1;
+    return DiffuseMap.Sample(DiffuseSampler, Scrolled(uv01.xy, Scroll.xy, Tiling.xy, seconds)).a;
+#elif FAMILY == 3
+    const int kind = (int)(BrdfKind.x + 0.5);
+    const float a = DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
+    return kind >= 7 && kind <= 9 ? 1 : kind == 10 ? a + BrdfKind.w * (1 - a) : a;
+#elif FAMILY == 2 || FAMILY == 5
+    return DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
+#elif FAMILY == 8
+    return BrdfKind.x > 0.5 ? 1 : DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
+#elif FAMILY == 7
+    float sub, top;
+    CompositeMask(uv01, sub, top);
+    return min(sub + top, 1);
+#else
+    return 1;
+#endif
+}
 
 float4 SurfacePixel(Surface s) : SV_Target
 {
@@ -256,20 +359,69 @@ float4 SurfacePixel(Surface s) : SV_Target
 
     // The colour, its layers and decals, and the normal.
 #if FAMILY == 1
-    float2 uvD = s.uv01.xy + seconds * Scroll.xy;
-    float4 c0 = DiffuseMap.Sample(DiffuseSampler, uvD * Tiling.xy);
+    // Each map scrolled by its own tiling × the scroll, kept to 0..1 (the same on a wrapping texture),
+    // so long play costs no precision.
+    float4 c0 = DiffuseMap.Sample(DiffuseSampler, Scrolled(s.uv01.xy, Scroll.xy, Tiling.xy, seconds));
     float3 colour = c0.rgb * DiffuseColour.rgb;
   #if LAYERS >= 1
-    float4 d1 = DecalMap1.Sample(Decal1Sampler, (s.uv01.zw + seconds * Scroll.zw) * Decals.xy);
+    float4 d1 = DecalMap1.Sample(Decal1Sampler, Scrolled(s.uv01.zw, Scroll.zw, Decals.xy, seconds));
     colour = lerp(colour, d1.rgb, d1.a * Decals.z);
   #endif
   #if LAYERS >= 2
-    float4 d2 = DecalMap2.Sample(Decal2Sampler, s.uv2.xy + seconds * Extra.xy);
+    float4 d2 = DecalMap2.Sample(Decal2Sampler, Scrolled(s.uv2.xy, Extra.xy, 1, seconds));
     colour = lerp(colour, d2.rgb, d2.a * Decals.w);
   #endif
-    float3 n = WorldNormal(s, TangentNormal(NormalMap.Sample(NormalSampler, uvD * float2(NormalTilingU.x, NormalTilingV.x)), NormalHeight.x));
-    float3 specularMap = Glow.w > 0.5 ? c0.aaa : SpecularMap.Sample(SpecularSampler, uvD * Tiling.zw).rgb * SpecularColour.rgb;
+    float3 n = WorldNormal(s, TangentNormal(NormalMap.Sample(NormalSampler, Scrolled(s.uv01.xy, Scroll.xy, float2(NormalTilingU.x, NormalTilingV.x), seconds)), NormalHeight.x));
+    float3 specularMap = Glow.w > 0.5 ? c0.aaa : SpecularMap.Sample(SpecularSampler, Scrolled(s.uv01.xy, Scroll.xy, Tiling.zw, seconds)).rgb * SpecularColour.rgb;
     float alpha = Extra.z > 0.5 ? 1 : c0.a;
+#elif FAMILY == 5
+    // rfg-glass: the colour map untiled, its alpha how much of the pane shows; no normal map.
+    float4 c0 = DiffuseMap.Sample(DiffuseSampler, s.uv01.xy);
+    float3 colour = c0.rgb * DiffuseColour.rgb;
+    float3 n = normalize(s.normal);
+    float3 specularMap = SpecularMap.Sample(SpecularSampler, s.uv01.xy * Tiling.zw).rgb * SpecularColour.rgb;
+    float alpha = min(c0.a, 1);
+#elif FAMILY == 7
+    // rfg-composite: the panel (Decal_Map_1) over the broken core (the colour map) by the core's mask,
+    // both at UV0 × the colour map's tiling; its holes where neither mask is.
+    float2 uvA = s.uv01.xy * Tiling.xy;
+    float sub, top;
+    CompositeMask(s.uv01, sub, top);
+    float3 colour = lerp(DecalMap1.Sample(Decal1Sampler, uvA).rgb, DiffuseMap.Sample(DiffuseSampler, uvA).rgb * DiffuseColour.rgb, top);
+    float3 n = WorldNormal(s, TangentNormal(NormalMap.Sample(NormalSampler, s.uv01.xy * float2(NormalTilingU.x, NormalTilingV.x)), NormalHeight.x));
+    float alpha = min(sub + top, 1);
+#elif FAMILY == 8
+    // The vehicle paints: the colour map (at its tiling) under the decal (UV1, untiled); the camouflage
+    // masks at the colour map's UV × BRDF_Map_Tiling; the paint's shine by the specular map's green.
+    float2 uvM = s.uv01.xy * Tiling.xy;
+    float4 c0 = DiffuseMap.Sample(DiffuseSampler, uvM);
+    float4 decal = DecalMap1.Sample(Decal1Sampler, s.uv01.zw);
+    float3 colour = lerp(c0.rgb * DiffuseColour.rgb, decal.rgb, decal.a * Decals.z);
+    float3 mask = MaskMap.Sample(MaskSampler, uvM * Tiling.zw).rgb;
+    float3 n = WorldNormal(s, TangentNormal(NormalMap.Sample(NormalSampler, uvM), NormalHeight.x));
+    float paintShine = SpecularMap.Sample(SpecularSampler, uvM).g;
+    float alpha = BrdfKind.x > 0.5 ? 1 : c0.a;
+#elif FAMILY == 9
+    // The clear coat: a base of Diffuse_Color under the decal (UV1 × its tiling), the dirt layer
+    // (Environment_Map at UV0) over that; no colour map; the normal and specular maps at UV0, untiled.
+    float4 decal = DecalMap1.Sample(Decal1Sampler, s.uv01.zw * Decals.xy);
+    float dd = decal.a * Decals.z;
+    float4 env = LayerMap.Sample(LayerSampler, s.uv01.xy);
+    float e = env.a * Shine.z;
+    float3 colour = lerp(lerp(DiffuseColour.rgb, decal.rgb, dd), env.rgb, e);
+    float3 n = WorldNormal(s, TangentNormal(NormalMap.Sample(NormalSampler, s.uv01.xy), NormalHeight.x));
+    float3 specularMap = SpecularMap.Sample(SpecularSampler, s.uv01.xy).rgb * SpecularColour.rgb;
+    float alpha = 1;
+#elif FAMILY == 6
+    // rfg-eosglass: the frame and decal layer (Environment_Map at UV1, by its alpha) over the glass;
+    // the colour map tints the reflection; the normal map at the colour map's tiling.
+    float2 uvM = s.uv01.xy * Tiling.xy;
+    float4 env = LayerMap.Sample(LayerSampler, s.uv01.zw);
+    float3 colour = env.rgb * env.a;
+    float glassShows = 1 - env.a;
+    float3 tangentNormal = TangentNormal(NormalMap.Sample(NormalSampler, uvM), NormalHeight.x);
+    float3 n = WorldNormal(s, tangentNormal);
+    float alpha = 1;
 #else
     // Metal, BRDF and blend-std-metal: every map at UV0 × the colour map's tiling; the layer at UV1,
     // its decal at UV2 (× Decal_Map_1's tiling, which the BRDF's don't have: 1).
@@ -300,6 +452,10 @@ float4 SurfacePixel(Surface s) : SV_Target
   #elif FAMILY == 4
     alpha = 1;
   #endif
+#endif
+
+#if CUTOUT
+    clip(alpha - AlphaThreshold.x);
 #endif
 
     // Not in the world ported from Guerrilla (the mod lights it): lit by the light buffer, as
@@ -355,6 +511,59 @@ float4 SurfacePixel(Surface s) : SV_Target
 #elif FAMILY == 3
     rgb = BrdfLight(kind, colour, c0.a, specularSample.rgb, n, toEye, nl, dot(n, halfway), occlusion, (1 - e) * (1 - d), shadow);
     rgb += lamps * colour;
+#elif FAMILY == 5
+    // Glass: the ambient by the half-Lambert of the normal as the vertices give it (not made unit length,
+    // as Guerrilla's), and the sun's shine; no Lambert, occlusion, shadow or lamps (the light buffer
+    // here is what lies behind the pane).
+    float3 specular = specularMap * pow(max(dot(n, halfway), 0), SpecularPower.x + 0.00001) * Shine.x;
+    rgb = Ambient(dot(s.normal, toLight) * 0.5 + 0.5) * colour + specular * SunColour.rgb;
+#elif FAMILY == 7
+    // The composite: the half-Lambert ambient without occlusion (as Guerrilla's, which reads none),
+    // lifted by the self-illumination (0 on every one of its materials), the sun's Lambert; no shine.
+    float3 ambient = Ambient(nl * 0.5 + 0.5);
+    ambient += Glow.x * (4 - ambient);
+    rgb = ambient * colour + colour * nlLit * SunColour.rgb * shadow;
+    rgb += lamps * colour;
+#elif FAMILY == 8
+    // The paint's tint: three colours (BRDF_Spec_1-3) on the three masks, each weighed by where the
+    // angle between the sun and the eye falls (a hue ramp), seen most face on (N·V to the 8th), not under
+    // the decal (its alpha as it is).
+    const float lv = dot(toLight, toEye);
+    const float3 w = float3(saturate(abs(3 * lv) - 1), 1 - saturate(abs(3 * lv + 1) - 1), 1 - saturate(abs(3 * lv - 1) - 1));
+    if (BrdfKind.x > 0.5)
+        rgb = mask * w * SunColour.rgb * shadow;  // rfg-colorshift: the ramp alone, no normal, no ambient
+    else
+    {
+        const float3 tint = BrdfSpecular[0].rgb * (mask.r * w.x) + BrdfSpecular[1].rgb * (mask.g * w.y) + BrdfSpecular[2].rgb * (mask.b * w.z);
+        const float3 paint = tint * (paintShine * pow(saturate(dot(toEye, n)), 8)) * (1 - decal.a);
+        rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * (colour + paint * occlusion) + (colour * occlusion * nlLit + paint * occlusion) * SunColour.rgb * shadow;
+        rgb += lamps * colour;
+    }
+#elif FAMILY == 9
+    // The coat's shine and rim (Clearcoat_Color, BrdfSpecular[0]; their powers and strengths,
+    // BrdfSpecular[1]) fade under the dirt layer past Clearcoat_Dirt_Threshold (BrdfSpecular[0].w); the
+    // specular map's shine under the decal and the layer.
+    const float nh = max(dot(n, halfway), 0), nv = max(dot(n, toEye), 0);
+    const float threshold = BrdfSpecular[0].w;
+    const float dirt = saturate((1 - e) - threshold) / (1 - threshold);
+    const float3 shine = specularMap * pow(nh, SpecularPower.x + 0.00001) * Shine.x * (1 - dd) * (1 - e);
+    const float3 coat = BrdfSpecular[0].rgb * dirt * pow(nh, BrdfSpecular[1].x + 0.00001) * BrdfSpecular[1].y;
+    const float3 rim = BrdfSpecular[0].rgb * dirt * pow(1 - nv, BrdfSpecular[1].z + 0.00001) * BrdfSpecular[1].w;
+    rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + (colour * occlusion * nlLit + (shine + coat + rim) * nlLit * occlusion) * SunColour.rgb * shadow;
+    rgb += lamps * colour;
+#elif FAMILY == 6
+    // Mirror glass: the mirror direction by the vertex normal, its x turned round, with the normal map's
+    // x and y added (Guerrilla's own way); the reflection a little darker in shadow, not lit by the sun's
+    // angle; the layer lit as the standard shaders, the glass's shine by Specular_Color alone.
+    float3 N = normalize(s.normal);
+    float3 R = 2 * dot(N, toEye) * N - toEye;
+    float3 direction = normalize(float3(tangentNormal.x - R.x, tangentNormal.y + R.y, R.z));
+    float3 reflection = DiffuseMap.Sample(DiffuseSampler, uvM).rgb * ReflectionCube.Sample(ReflectionSampler, direction).rgb
+                      * glassShows * (shadow * 0.7 + 0.3);
+    float3 specular = SpecularColour.rgb * glassShows * Shine.x * pow(saturate(dot(n, halfway)), SpecularPower.x + 0.00001);
+    rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + (colour * occlusion * nlLit + specular) * SunColour.rgb * shadow
+        + reflection * SunColour.rgb;
+    rgb += lamps * colour;
 #else
     // Blend-std-metal: the metal lobe and specular where the specular map's alpha is 1, the standard
     // Lambert and specular where it is 0 (the ambient ignores the layer and the decal, as Guerrilla's).
@@ -382,4 +591,120 @@ float4 SurfacePixel(Surface s) : SV_Target
 
     rgb = rgb * (1 - s.uv2.w) + s.uv2.w * FogColour.rgb;
     return float4(rgb, alpha) * TintColour;
+}
+
+// ---- The depth (shadow) and G-buffer passes of alpha-tested materials (CUTOUT), cutting the holes
+// SurfacePixel cuts, the G-buffer written as Armageddon's G-buffer shaders write it (ir_at_default's,
+// line by line): the normal in the camera's space, the shine, the object's id.
+
+float4 WorldPosition(Vertex v, out float4 rows[3])
+{
+#if INSTANCED
+    rows[0] = v.row0; rows[1] = v.row1; rows[2] = v.row2;
+#else
+    rows[0] = ObjectRows[0]; rows[1] = ObjectRows[1]; rows[2] = ObjectRows[2];
+#endif
+    const float4 local = float4(v.position * PositionScale.xyz, 1);
+    return float4(dot(rows[0], local), dot(rows[1], local), dot(rows[2], local), 1);
+}
+
+float4 ClipPosition(float4 world) { return float4(dot(world, ProjectionRows[0]), dot(world, ProjectionRows[1]), dot(world, ProjectionRows[2]), dot(world, ProjectionRows[3])); }
+
+void UvSets(Vertex v, out float4 uv01, out float4 uv2)
+{
+    uv01 = float4(v.uv0, 0, 0) / 1024;
+#if LAYERS >= 1
+    uv01.zw = v.uv1 / 1024.0;
+#endif
+    uv2 = 0;
+#if LAYERS >= 2
+    uv2.xy = v.uv2 / 1024.0;
+#endif
+}
+
+struct Depth
+{
+    float4 clip : SV_Position;
+    float4 uv01 : TEXCOORD0;
+    float4 uv2 : TEXCOORD1;
+};
+
+Depth DepthVertex(Vertex v)
+{
+    float4 rows[3];
+    Depth d;
+    d.clip = ClipPosition(WorldPosition(v, rows));
+    UvSets(v, d.uv01, d.uv2);
+    return d;
+}
+
+float4 DepthPixel(Depth d) : SV_Target
+{
+    const float alpha = SurfaceAlpha(d.uv01, d.uv2, Time.x);
+    clip(alpha - AlphaThreshold.x);
+    return float4(0, 0, 0, alpha);
+}
+
+struct Geometry
+{
+    float4 clip : SV_Position;
+    float4 uv01 : TEXCOORD0;
+    float4 uv2 : TEXCOORD1;
+    float3 normal : TEXCOORD2;      // in the camera's space
+    float3 tangent : TEXCOORD3;
+    float4 bitangentId : TEXCOORD4; // the bitangent; w the object's id as the G-buffer keeps it
+    float4 screen : TEXCOORD5;      // the clip position again (the stipple's)
+};
+
+Geometry GeometryVertex(Vertex v)
+{
+    float4 rows[3];
+    Geometry g;
+    g.clip = ClipPosition(WorldPosition(v, rows));
+    g.screen = g.clip;
+    UvSets(v, g.uv01, g.uv2);
+    const float3 n = v.normal * 2 - 1;
+    const float4 t = v.tangent * 2 - 1;
+    const float3 nWorld = normalize(float3(dot(rows[0].xyz, n), dot(rows[1].xyz, n), dot(rows[2].xyz, n)));
+    const float3 tWorld = normalize(float3(dot(rows[0].xyz, t.xyz), dot(rows[1].xyz, t.xyz), dot(rows[2].xyz, t.xyz)));
+    g.normal = float3(dot(nWorld, WorldToView[0].xyz), dot(nWorld, WorldToView[1].xyz), dot(nWorld, WorldToView[2].xyz));
+    g.tangent = float3(dot(tWorld, WorldToView[0].xyz), dot(tWorld, WorldToView[1].xyz), dot(tWorld, WorldToView[2].xyz));
+    // The tangent's w (0 to 1) gives the bitangent's sign and, with the object's number, its id.
+    const float w = t.w * 0.5 + 0.5;
+    const bool up = w >= 0.5;
+    g.bitangentId.xyz = cross(g.normal, g.tangent) * (up ? 1 : -1);
+    g.bitangentId.w = (ObjectParams2.x * 32640 + (w * 255 + (up ? -128 : 0))) * (1.0 / 65535);
+    return g;
+}
+
+struct GBuffer
+{
+    float4 normal : SV_Target0;
+    float4 other : SV_Target1;
+};
+
+GBuffer GeometryPixel(Geometry g)
+{
+    clip(SurfaceAlpha(g.uv01, g.uv2, Time.x) - AlphaThreshold.x);
+#if STIPPLED
+    const float2 at = g.screen.xy / g.screen.w + 1;
+    if (StipplePattern.Sample(StippleSampler, float2(at.x * StippleRepeat.x * 0.5, (1 - at.y * 0.5) * StippleRepeat.y)).x - 0.5 < 0) discard;
+#endif
+    // The normal map where SurfacePixel samples it.
+#if FAMILY == 1
+    const float2 uvN = Scrolled(g.uv01.xy, Scroll.xy, float2(NormalTilingU.x, NormalTilingV.x), Time.x);
+#elif FAMILY == 7
+    const float2 uvN = g.uv01.xy * float2(NormalTilingU.x, NormalTilingV.x);
+#else
+    const float2 uvN = g.uv01.xy * Tiling.xy;
+#endif
+    const float3 ts = TangentNormal(NormalMap.Sample(NormalSampler, uvN), NormalHeight.x);
+    float3 n = ts.x * normalize(g.tangent) + ts.y * normalize(g.bitangentId.xyz) + ts.z * normalize(g.normal);
+    n = normalize(n);
+    GBuffer o;
+    o.normal.xy = n.xy * 0.5 + LightCategory.xy + 0.5;
+    o.normal.z = max(1 - abs(n.z), 0) * (127.0 / 255) + LightCategory.z;
+    o.normal.w = max(sqrt(min(50, SpecularPower.x)) * (18.0 / 255), 1.0 / 255) + LightCategory.w;
+    o.other = float4(1, g.bitangentId.w, 0, 1);
+    return o;
 }

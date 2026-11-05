@@ -21,7 +21,9 @@
 // the same texture twice, as Armageddon's one-texture cliff shader has no blend map coordinates, so
 // couldn't fade to the colour map far off as Guerrilla's do), 5 a road (ir_terrain_road_layerN's), with ROAD 2, 3 or 4 its variant (how the
 // road's own texture lies among the zone's ground layers: see the road's weights below), 6 the far
-// ground (ir_terrain_height_mesh_lowlod_t's: the zones' far meshes, where their sub-zones aren't loaded).
+// ground (ir_terrain_height_mesh_lowlod_t's: the zones' far meshes, where their sub-zones aren't loaded),
+// 7 the undergrowth (ir_foliage_clutter's place: Guerrilla's grass and dust rocks, scattered by the game
+// over the zones' 8 m cells; lit as its rfg-foliage_clr).
 
 cbuffer Material : register(b0)  // the material's constants, at the registers Armageddon's shaders put them
 {
@@ -45,6 +47,11 @@ cbuffer Material : register(b0)  // the material's constants, at the registers A
     float4 LayerShineAlpha;     // c10 Terrain_layer_spec_alpha, a layer each
 #elif SURFACE == 6
     float4 MaterialUnused;      // the far ground's material has no constants
+#elif SURFACE == 7
+    float4 FoliageColour;       // c0 Diffuse_Color (Guerrilla's Diffuse_Color_F)
+    float4 FoliageSpecular;     // c1 Specular_Color (0: Guerrilla's undergrowth has no shine)
+    float4 FoliageTint;         // c2 Foliage_color
+    float4 FoliageClamp;        // c3 Foliage_alphaClamp: x, the alpha under which a piece is cut away
 #else
     float4 Xform[16];           // c0-15 Terrain_layer0-3_xform
     float4 SpecularPower;       // c16
@@ -58,7 +65,9 @@ cbuffer Frame : register(b4)    // the engine's, per frame (vc4)
     float4 TintColour;          // c1
     float4 EngineAmbient[2];
     float4 FogColour;           // c4
-    float4 FrameUnused[25];
+    float4 FrameUnused5[4];
+    float4 AlphaThreshold;      // c9: x, the alpha under which an alpha-tested surface is cut away
+    float4 FrameUnused10[20];
     float4 LodBlend;            // c30 Terrain_lod_blend_info: where the ground starts fading to its colour map, and over how far
 };
 
@@ -116,6 +125,9 @@ SamplerState Layer2Sampler : register(s8);
 #elif SURFACE == 6
 Texture2D ColourMap : register(t0);
 SamplerState ColourSampler : register(s0);
+#elif SURFACE == 7
+Texture2D FoliageMap : register(t0);
+SamplerState FoliageSampler : register(s0);
 #else
 Texture2D Normal0 : register(t0);
 Texture2D Normal1 : register(t1);
@@ -155,6 +167,11 @@ struct Surface
 #elif SURFACE == 6
     float4 clip : TEXCOORD0;      // o1
     float4 uvFog : TEXCOORD1;     // o2: the colour map's UV, the fog
+#elif SURFACE == 7
+    float4 tint : TEXCOORD0;      // o1: the piece's tint (its vertex colour, picked between its model's two)
+    float4 clip : TEXCOORD1;      // o2
+    float4 uvWindow : TEXCOORD2;  // o3: the UV; the distance window the piece's alpha must fall in (fading it in and out)
+    float2 fog : TEXCOORD3;       // o4: y the fog
 #else
     float2 uvSide1 : TEXCOORD0;   // o1: xform 1's UV
     float4 normal : TEXCOORD1;    // o2: the world normal, the cliff's alpha (w × 2 − 1)
@@ -188,6 +205,13 @@ void Light(int3 pixel, float4 light, out float occlusion, out float3 lamps, out 
 float FarFade(float distance) { return LodBlend.y > 0 ? saturate((distance - LodBlend.x) / LodBlend.y) : 0; }
 
 #if SURFACE <= 2 || SURFACE >= 5
+// The way to the eye from a pixel, in the camera's space.
+float3 ToEyeView(float4 position)
+{
+    const float2 at = position.xy / View.xy;
+    return -normalize(float3((at * float2(2, -2) + float2(-1, 1)) * View.zw, 1));
+}
+
 // The normal as the G-buffer holds it, in the camera's space (Armageddon's G-buffer pass wrote it:
 // the ground's mapped by its layers' normal maps, the far ground's its vertices').
 float3 ViewNormal(int3 pixel)
@@ -210,8 +234,7 @@ float3 GroundLit(float4 position, float4 light, float3 colour, float shineAmount
     float3 lamps;
     Light(pixel, light, occlusion, lamps, shadow);
     const float3 n = ViewNormal(pixel);
-    const float2 at = position.xy / View.xy;
-    const float3 toEye = -normalize(float3((at * float2(2, -2) + float2(-1, 1)) * View.zw, 1));
+    const float3 toEye = ToEyeView(position);
     const float3 toLight = SunTowardView.xyz;
     const float3 halfway = normalize(toEye + toLight);
     const float nl = dot(n, toLight), nlLit = saturate(nl);
@@ -291,6 +314,32 @@ float4 TerrainPixel(Surface s) : SV_Target
     const float shinePower = dot(LayerShinePower, w);
     const float3 rgb = GroundLit(s.position, light, colour, shineAmount, shinePower);
     return float4(rgb * (1 - fog) + fog * FogColour.rgb, 1) * TintColour;
+#elif SURFACE == 7
+    // The undergrowth: its texture × the piece's tint × Diffuse_Color (Guerrilla's Diffuse_Color_F), where
+    // its alpha is in the piece's distance window and over Foliage_alphaClamp (the cover Armageddon's
+    // foliage shader takes, as its vertex shader and G-buffer pass give it); lit as Guerrilla's
+    // rfg-foliage_clr: the normal turned to face the eye, half-Lambert ambient by the occlusion, the sun
+    // wrapped round (0.4 + 0.6 |N·L|, never under 40 %) by the shadow; no shine.
+    const float4 t = FoliageMap.Sample(FoliageSampler, s.uvWindow.xy);
+    const float2 window = max(max(saturate(s.uvWindow.zw), FoliageClamp.x), 0.01);
+    const float cover = (window.x >= 1 - t.a ? 1 : 0) * (t.a >= window.y ? 1 : 0);
+    // Cut where the G-buffer pass cut (Armageddon's colour pass cuts the same way, by the cover).
+    clip(cover - AlphaThreshold.x);
+    const float3 colour = t.rgb * s.tint.rgb * FoliageColour.rgb;
+    const float fog = s.fog.y;
+    if (SunToward.w < 0.5)
+    {
+        float3 lit = colour * light.rgb;
+        return float4(lit * (1 - fog) + fog * FogColour.rgb, cover) * TintColour;
+    }
+    float occlusion, shadow;
+    float3 lamps;
+    Light(pixel, light, occlusion, lamps, shadow);
+    float3 n = ViewNormal(pixel);
+    if (dot(n, ToEyeView(s.position)) < 0) n = -n;
+    const float nl = dot(n, SunTowardView.xyz);
+    const float3 rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + colour * (abs(nl) * 0.6 + 0.4) * SunColour.rgb * shadow + lamps * colour;
+    return float4(rgb * (1 - fog) + fog * FogColour.rgb, cover) * TintColour;
 #elif SURFACE == 6
     // The far ground: the zone's colour map, cubed, lit as Guerrilla's far ground (rl_terrain_low_lod_t):
     // half-Lambert ambient by the occlusion, the sun by its vertex normal, without shadow.

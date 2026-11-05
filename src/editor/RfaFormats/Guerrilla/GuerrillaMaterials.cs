@@ -54,6 +54,9 @@ public static class GuerrillaMaterials
     /// <summary>The reflection cube glass is given: Armageddon's own (in its dlc01_precache.vpp_pc), named as it is.</summary>
     public const string GlassReflection = "str_gls_cube_default_a";
 
+    /// <summary>Guerrilla's own reflection cube (its mirror glass's reflection_map), in its misc.vpp_pc's always_loaded textures.</summary>
+    public const string GuerrillaCube = "shd_cubeDefault";
+
     static readonly uint NormalMap = H("Normal_Map"), DiffuseMap = H("Diffuse_Map"), SpecularMap = H("Specular_Map"),
         Decal1Map = H("Decal1_Map"), Decal2Map = H("Decal2_Map"), GuerrillaDecal1 = H("Decal_Map_1"), GuerrillaDecal2 = H("Decal_Map_2"),
         GuerrillaLayer = H("Environment_Map"), PatternMap = H("Pattern_map"), ReflectionMap = H("reflection_map");
@@ -127,7 +130,7 @@ public static class GuerrillaMaterials
     /// ir_nl_vfxmask, unlit: a bend map (Decal1_Normal_Map) shifts the look-ups of the colour (×
     /// Diffuse_Color), glow (× Glow_Color × Self_Illumination × 4) and mask (the specular map's green,
     /// its alpha) maps; its vertex shader scrolls the colour map by Main_Scroll and the glow map by
-    /// Glow_Scroll. ir_defaultglow: lit, with a glow map scrolled by Glow_Scroll.
+    /// Glow_Scroll.
     /// </summary>
     static readonly Shader CarGlow = new("ir_nl_carglow", [DiffuseMap, GlowMap],
         ["Self_Illumination", "Glow_ScrollV", "Glow_ScrollU", "Glow_Color", "Diffuse_Color"]);
@@ -135,9 +138,6 @@ public static class GuerrillaMaterials
         ["SSS_Falloff_Amt", "Specular_Power", "Specular_Amount", "Specular_Alpha", "Self_Illumination", "Main_ScrollV", "Main_ScrollU",
          "Main_Opacity", "Glow_ScrollV", "Glow_ScrollU", "Glow_Falloff_Power", "Glow_Falloff_Inversion", "Glow_Color", "Diffuse_Color",
          "Decal1_TilingV", "Decal1_TilingU", "Decal1_Normal_Height"]);
-    static readonly Shader DefaultGlow = new("ir_defaultglow", [NormalMap, DiffuseMap, SpecularMap, GlowMap],
-        ["Specular_Power", "Specular_Color", "Self_Illumination", "Normal_Height", "Glow_ScrollV", "Glow_ScrollU", "Glow_Falloff_Power",
-         "Glow_Falloff_Inversion", "Glow_Color", "Diffuse_TilingV", "Diffuse_TilingU", "Diffuse_Color"]);
 
     enum EffectKind { Glow, Glow2, LightCone, AnimFade, SniperScope, MaskScroll, Shield, Animated }
 
@@ -151,8 +151,8 @@ public static class GuerrillaMaterials
     /// scaled the same (what's lost: the cone's fall-off with the angle, the vertex fades). mask-scroll
     /// and shield: a scrolling map bends the look-ups of a coloured one, pulsing, × 100 ×
     /// Self_Illumination: ir_nl_vfxmask (the pulse lost; brightness and bend strength guessed).
-    /// animated (the news kiosks' screens): a lit model shader whose colour map scrolls:
-    /// ir_defaultglow, the screen in its glow map.
+    /// animated (the news kiosks' screens): a lit model shader whose colour map scrolls, drawn by our
+    /// rewrite (gw_standard2, see <see cref="Ported"/>), as the effect meshes' other model shaders are.
     /// </summary>
     static readonly Dictionary<uint, EffectKind> EffectShaders = new()
     {
@@ -173,6 +173,25 @@ public static class GuerrillaMaterials
     /// <summary>Guerrilla's mask shaders end × 100 × Self_Illumination; Armageddon's glow layer × 4 × it: 25 × as bright (a guess, to tune in the game).</summary>
     const float MaskBrightness = 25;
 
+    /// <summary>
+    /// Every Guerrilla texture (its name without ".tga") a converted material uses as its normal map. Guerrilla
+    /// reads every texture as it is stored, but Armageddon reads one as sRGB colour unless its header says
+    /// it holds data (<see cref="PegFile.DataFlag"/>), and 16 of Guerrilla's normal maps don't say so: the
+    /// world builder sets the flag on all of these.
+    /// </summary>
+    public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> NormalMaps = new(StringComparer.OrdinalIgnoreCase);
+
+    static void NoteNormalMaps(byte[] file, int at, TextureNameList names)
+    {
+        int textureCount = BitConverter.ToUInt16(file, at + 0x10);
+        for (int t = 0; t < textureCount; t++)
+        {
+            int e = at + 0x20 + t * 12;
+            string name = names.At(BitConverter.ToInt32(file, e));
+            if (BitConverter.ToUInt32(file, e + 4) == NormalMap && !IsEmpty(name)) NormalMaps.TryAdd(Path.GetFileNameWithoutExtension(name), 0);
+        }
+    }
+
     /// <summary>Whether the Guerrilla material block at <paramref name="at"/> is glass (one of Guerrilla's glass shaders).</summary>
     internal static bool IsGlass(byte[] file, int at) => GuerrillaGlass.Contains(BitConverter.ToUInt32(file, at + 0x04));
 
@@ -182,10 +201,11 @@ public static class GuerrillaMaterials
     /// </summary>
     internal static byte[] Convert(byte[] file, int at, TextureNameList names, bool vehicle = false, bool guerrillaShaders = false)
     {
+        NoteNormalMaps(file, at, names);
         int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
         uint flags = BitConverter.ToUInt32(file, at + 0x0C), guerrillaShader = BitConverter.ToUInt32(file, at + 0x04);
-        if (guerrillaShaders && (flags & 3) == 0 && Ported.TryGetValue(guerrillaShader, out var ported))
-            return ConvertForGuerrillaShader(file, at, names, ported);
+        if (guerrillaShaders && Ported.TryGetValue(guerrillaShader, out var ported) && VariantFor(ported, flags) is { } variant)
+            return ConvertForGuerrillaShader(file, at, names, ported, variant);
         bool layered = LayerShaders.Contains(guerrillaShader), decalAtThirdUv = DecalAtThirdUv.Contains(guerrillaShader);
         var textures = new Dictionary<uint, int>();  // Armageddon's slot → where its name starts
         Layer? decal1 = null, decal2 = null;
@@ -238,7 +258,7 @@ public static class GuerrillaMaterials
 
     const string DiffuseTiling = "Diffuse_Map_Tiling", NormalTiling = "Normal_map_Tiling";
 
-    /// <summary>Guerrilla's shaders drawn by its rewrites: the standard, metal, BRDF and blend-std-metal families (opaque materials of the world's chunks and rocks).</summary>
+    /// <summary>Guerrilla's shaders drawn by its rewrites: the standard, metal, BRDF and blend-std-metal families (opaque materials of the world's chunks and rocks), and its glass.</summary>
     static readonly Dictionary<uint, PortedShader> Ported = new()
     {
         [H("rfg-nodecal")] = new(GuerrillaShaders.Family.Standard, 0, DiffuseTiling, true, NormalTiling, true),
@@ -271,6 +291,35 @@ public static class GuerrillaMaterials
         [H("rfg-brdf-ed-edf-base-panels")] = Brdf(2, 9),
         [H("rfg-brdf")] = Brdf(0, 10),
         [H("rfg-brdf-env")] = Brdf(1, 11),
+        // Blended (its every material has flags 1); the colour map untiled, the specular map tiled.
+        [H("rfg-glass")] = new(GuerrillaShaders.Family.Glass, 0, null, false, null, false),
+        // Every map at UV0 × the colour map's tiling, unguarded (13 of its 32 materials tile by 0: one texel).
+        [H("rfg-eosglass")] = new(GuerrillaShaders.Family.EosGlass, 1, DiffuseTiling, false, "Diffuse", false),
+        // Alpha-tested (flags 2 on all 101): both colour maps at UV0 × the colour map's tiling, the mask at UV1.
+        [H("rfg-composite")] = new(GuerrillaShaders.Family.Composite, 1, DiffuseTiling, false, NormalTiling, false, Specular: false),
+        // The vehicles' paint: every map at UV0 × the colour map's tiling (the masks × BRDF_Map_Tiling too), the decal at UV1.
+        [H("rfg-edf-vhc")] = new(GuerrillaShaders.Family.VehiclePaint, 1, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-colorshift")] = new(GuerrillaShaders.Family.VehiclePaint, 0, null, false, null, false, BrdfKind: 1),
+        // The Oasis roofs: every map at UV0 untiled but the decal (UV1 × its tiling).
+        [H("rfg-ed-oasisroof")] = new(GuerrillaShaders.Family.Clearcoat, 1, null, false, null, false),
+    };
+
+    /// <summary>
+    /// The variant of its shader's rewrite a material is drawn with, by its flags (1 blended, 2 alpha-tested):
+    /// glass blended, mirror glass opaque, composites cut out, the rest any of the three; null for one
+    /// that doesn't fit (left to Armageddon's shaders).
+    /// </summary>
+    static GuerrillaShaders.Variant? VariantFor(PortedShader port, uint flags) => (port.Family, flags & 3) switch
+    {
+        (GuerrillaShaders.Family.Glass, 1) => GuerrillaShaders.Variant.Plain,
+        (GuerrillaShaders.Family.Glass, _) => null,
+        (GuerrillaShaders.Family.EosGlass, 0) => GuerrillaShaders.Variant.Plain,
+        (GuerrillaShaders.Family.Composite, 2) => GuerrillaShaders.Variant.CutOut,
+        (GuerrillaShaders.Family.EosGlass or GuerrillaShaders.Family.Composite, _) => null,
+        (_, 0) => GuerrillaShaders.Variant.Plain,
+        (_, 2) => GuerrillaShaders.Variant.CutOut,
+        (_, 1) => GuerrillaShaders.Variant.Blended,
+        _ => null,
     };
 
     /// <summary>How many materials were given one of Guerrilla's own shaders, in all.</summary>
@@ -280,7 +329,7 @@ public static class GuerrillaMaterials
     /// The material block for the Guerrilla one at <paramref name="at"/> drawn by its shader's rewrite:
     /// Guerrilla's own texture slots, and its constants laid out as <see cref="GuerrillaShaders"/> says.
     /// </summary>
-    static byte[] ConvertForGuerrillaShader(byte[] file, int at, TextureNameList names, PortedShader port)
+    static byte[] ConvertForGuerrillaShader(byte[] file, int at, TextureNameList names, PortedShader port, GuerrillaShaders.Variant variant)
     {
         int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
         var textures = new Dictionary<uint, int>();  // Guerrilla's slot → where its name starts
@@ -305,8 +354,9 @@ public static class GuerrillaMaterials
 
         var diffuse = Tiling(port.Diffuse, port.DiffuseGuarded);
         var normal = port.Normal == "Diffuse" ? diffuse : Tiling(port.Normal, port.NormalGuarded);
-        var specular = port.Family == GuerrillaShaders.Family.Standard ? Tiling("Specular_Map_Tiling", false) : diffuse;
-        bool metal = port.Family == GuerrillaShaders.Family.Metal;
+        var specular = port.Family is GuerrillaShaders.Family.Standard or GuerrillaShaders.Family.Glass ? Tiling("Specular_Map_Tiling", false) : diffuse;
+        bool metal = port.Family == GuerrillaShaders.Family.Metal, composite = port.Family == GuerrillaShaders.Family.Composite,
+             paint = port.Family == GuerrillaShaders.Family.VehiclePaint, clearcoat = port.Family == GuerrillaShaders.Family.Clearcoat;
         // Metal's decal (at UV2) is its Decal_Map_1; the standard shaders' decals are Decal_Map_1 (UV1) and Decal_Map_2 (UV2).
         float decal1 = Has("Decal_Map_1") ? X("Decal_Map_1_Opacity", 1) : 0, decal2 = Has("Decal_Map_2") ? X("Decal_Map_2_Opacity", 1) : 0;
         float layer = Has("Environment_Map") ? X("Environment_Map_Opacity", 1) : 0;
@@ -318,12 +368,20 @@ public static class GuerrillaMaterials
             "gw_NormalTilingV" => new(normal.V, 0, 0, 0),
             "Diffuse_Color" => Colour("Diffuse_Color"),
             "Specular_Color" => Colour("Specular_Color"),
+            "gw_Tiling" when paint => new(diffuse.U, diffuse.V, X("BRDF_Map_TilingU", 1), X("BRDF_Map_TilingV", 1)),
             "gw_Tiling" => new(diffuse.U, diffuse.V, specular.U, specular.V),
             "gw_Decals" => new(X("Decal_Map_1_TilingU", 1), X("Decal_map_1_TilingV", 1), decal1, decal2),
             "gw_Shine" => new(port.Specular ? X("Specular_Alpha", 1) : 0, X("Metal_Base_Shine", 1), layer, X("Decal_Map_1_Overlay", 1)),
             "gw_Glow" => new(metal ? 0 : X("Self_Illumination", 0), port.LitAtNight ? 1 : 0, port.Animated ? X("illum_cycle", -1) : -1, port.SpecularFromAlpha ? 1 : 0),
             "gw_Scroll" => port.Animated ? new(X("Diffuse_Map_OffsetU", 0), X("Diffuse_Map_OffsetV", 0), X("Decal_Map_1_OffsetU", 0), X("Decal_Map_1_OffsetV", 0)) : Vector4.Zero,
             "gw_Extra" => new(port.Animated ? X("Decal_Map_2_OffsetU", 0) : 0, port.Animated ? X("Decal_Map_2_OffsetV", 0) : 0, port.SpecularFromAlpha ? 1 : 0, 0),
+            // The composite's mask: which channels pick the panel's (sub) and the core's (top), and the core's shift.
+            "BRDF_Diff_1" when composite => new(X("Alpha_Picker_Sub_R", 0), X("Alpha_Picker_Sub_G", 0), X("Alpha_Picker_Sub_B", 0), 0),
+            "BRDF_Diff_2" when composite => new(X("Alpha_Picker_Top_R", 0), X("Alpha_Picker_Top_G", 0), X("Alpha_Picker_Top_B", 0), 0),
+            "BRDF_Diff_3" when composite => new(X("Shift_U", 0), X("Shift_V", 0), 0, 0),
+            // The clear coat's colour and dirt threshold, its powers and strengths (shine, rim).
+            "BRDF_Spec_1" when clearcoat => Colour("Clearcoat_Color") with { W = X("Clearcoat_Dirt_Threshold", 0) },
+            "BRDF_Spec_2" when clearcoat => new(X("Clearcoat_Specular_Power", 1), X("Clearcoat_Specular_Alpha", 0), X("Clearcoat_Falloff_Power", 1), X("Clearcoat_Falloff_Alpha", 0)),
             "BRDF_Diff_1" or "BRDF_Diff_2" or "BRDF_Diff_3" or "BRDF_Spec_1" or "BRDF_Spec_2" or "BRDF_Spec_3" =>
                 constants.TryGetValue(H(constant), out var lobe) ? lobe : Vector4.Zero,
             "gw_Brdf" => new(port.BrdfKind, X("Specular_falloff", 0), 0, X("Opacity", 1)),
@@ -334,9 +392,11 @@ public static class GuerrillaMaterials
         };
 
         string[] slots = GuerrillaShaders.SlotsOf(port.Family, port.Layers);
-        var shader = new Shader(GuerrillaShaders.Name(port.Family, port.Layers), [.. slots.Select(H)], GuerrillaShaders.Constants[1..]);
+        var shader = new Shader(GuerrillaShaders.Name(port.Family, port.Layers, variant), [.. slots.Select(H)], GuerrillaShaders.Constants[1..]);
         Interlocked.Increment(ref GuerrillaShaderMaterials);
-        return Block(shader, file, at, 0x40u, shader.Constants.Length * 2,
+        // Blended ones are drawn in Armageddon's alpha pass, alpha-tested ones with their holes (as Guerrilla's flags say).
+        bool blended = port.Family == GuerrillaShaders.Family.Glass || variant == GuerrillaShaders.Variant.Blended;
+        return Block(shader, file, at, 0x40u | (blended ? 1u : 0u) | (variant == GuerrillaShaders.Variant.CutOut ? 2u : 0u), shader.Constants.Length * 2,
             slot => textures.TryGetValue(slot, out int n) ? n : names.Add(BuiltIn(slot) + ".tga"),
             value);
     }
@@ -388,7 +448,11 @@ public static class GuerrillaMaterials
     /// </summary>
     internal static byte[] ConvertForEffect(byte[] file, int at, TextureNameList names)
     {
-        if (!EffectShaders.TryGetValue(BitConverter.ToUInt32(file, at + 0x04), out var kind)) return Convert(file, at, names);
+        NoteNormalMaps(file, at, names);
+        // Its model shaders, and the news kiosks' scrolling screens (rfg-animated, a lit model shader), as
+        // the world's chunks are drawn: by our rewrites of Guerrilla's shaders.
+        if (!EffectShaders.TryGetValue(BitConverter.ToUInt32(file, at + 0x04), out var kind) || kind == EffectKind.Animated)
+            return Convert(file, at, names, guerrillaShaders: true);
         int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
         uint flags = 0x40u | (BitConverter.ToUInt32(file, at + 0x0C) & 3);
         var textures = new Dictionary<uint, int>();  // Guerrilla's slot → where its name starts
@@ -430,26 +494,6 @@ public static class GuerrillaMaterials
                         "Decal1_TilingU" or "Decal1_TilingV" or "Main_Opacity" or "SSS_Falloff_Amt" or "Glow_Falloff_Power" => V(1),
                         "Specular_Power" => V(100),
                         _ => V(0),  // Specular_Amount, Specular_Alpha, Glow_Falloff_Inversion
-                    });
-            }
-            case EffectKind.Animated:
-            {
-                // A lit screen whose colour map scrolls: Armageddon's scrolling layer is the glow map.
-                var scroll = new Vector2(X("Diffuse_Map_OffsetU", 0), X("Diffuse_Map_OffsetV", 0)) / ScrollScale;
-                return Block(DefaultGlow, file, at, flags, DefaultGlow.Constants.Length + 10,
-                    slot => slot == GlowMap ? Texture(DiffuseMap, DiffuseMap) : slot == DiffuseMap ? names.Add(White + ".tga") : Texture(slot, slot),
-                    constant => constant switch
-                    {
-                        "Diffuse_Color" => new Vector4(0, 0, 0, colour.W),
-                        "Glow_Color" => colour,
-                        "Self_Illumination" => V(selfLit),
-                        "Glow_ScrollU" => V(scroll.X),
-                        "Glow_ScrollV" => V(scroll.Y),
-                        "Glow_Falloff_Power" => V(0.001f),
-                        "Glow_Falloff_Inversion" or "Normal_Height" or "Diffuse_TilingU" or "Diffuse_TilingV" => V(1),
-                        "Specular_Power" => V(Math.Clamp(X("Specular_Power", 100) / (4 * 5.12f), 0, 50)),
-                        "Specular_Color" => Get("Specular_Color", Vector4.One) * X("Specular_Alpha", 1),
-                        _ => throw new InvalidOperationException($"no value for {constant}"),
                     });
             }
             default:
