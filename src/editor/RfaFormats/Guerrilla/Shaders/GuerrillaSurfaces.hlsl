@@ -243,7 +243,19 @@ float3 WorldNormal(Surface s, float3 tangentSpace)
     return normalize(tangentSpace.x * t + tangentSpace.y * b + tangentSpace.z * n);
 }
 
-float3 Ambient(float weight) { return lerp(AmbientBelow.rgb, AmbientAbove.rgb, weight); }
+// The sky's light on a surface, as Re-Mars-tered's surface shaders work it out (its indirect light; the
+// 2009 shaders blend V_back_ambient_render to V_ambient_render instead): by how much the surface faces
+// its light (facing, the half-Lambert n · L / 2 + 1/2), from the back ambient facing away to the light's
+// own colour × g_indirectLightScale (0.019, light bounced back) facing it; on a surface turned sideways
+// (facing ¼ to ¾) blended toward the ambient, by up to g_indirectLightAmount (½) at ½; all times the
+// occlusion.
+static const float kIndirectLightScale = 0.019, kIndirectLightAmount = 0.5;
+float3 Ambient(float facing, float occlusion)
+{
+    float3 light = lerp(AmbientBelow.rgb, SunColour.rgb * kIndirectLightScale, facing);
+    float side = 2 * abs(2 * facing - 1);
+    return lerp(light, AmbientAbove.rgb, max(1 - side * side, 0) * kIndirectLightAmount) * occlusion;
+}
 
 // A map's UV: (uv + seconds × scroll) × tiling, the scroll's part kept to 0..1 (the same on a wrapping
 // texture), so hours of play cost no precision.
@@ -319,7 +331,7 @@ float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap,
         float3 S = BrdfSpecularMap.Sample(BrdfSpecularSampler, LookUp(float2(nlc, 1 - nhc))).rgb * fo * ao * specularMap;
         sunSpecular = Screen3(S.r * s1, S.g * s2, S.b * s3) * Shine.x;
     }
-    float3 ambient = Ambient(ao * ambientWeight);
+    float3 ambient = Ambient(ambientWeight, ao);
     if (kind == 10) ambient = SelfLit(ambient, (1 - colourAlpha) * Glow.x);  // self-lit where the colour map is see-through
     return ambient * colour + (sunDiffuse + sunSpecular * shineLeft) * SunColour.rgb * shadow;
 }
@@ -491,7 +503,7 @@ float4 SurfacePixel(Surface s) : SV_Target
 #if FAMILY == 1
     // Lambert, Blinn, and the ambient lifted toward 4 by the self-illumination.
     float3 specular = specularMap * (pow(saturate(dot(n, halfway)), SpecularPower.x + 0.00001) * Shine.x) * nlLit;
-    float3 ambient = Ambient(occlusion * (nl * 0.5 + 0.5));
+    float3 ambient = Ambient(saturate(nl * 0.5 + 0.5), occlusion);
     float glow = Glow.y > 0.5 ? Time.w : Glow.x;
     if (Glow.z >= 0) glow *= (cos(seconds * 2 / (Glow.z + 0.01)) + 1) * 0.5;  // rfg-animated's pulse
     ambient = SelfLit(ambient, glow);
@@ -503,12 +515,12 @@ float4 SurfacePixel(Surface s) : SV_Target
     float halfLambert = nlLit * 0.5 + 0.5;
     float lobe = pow(min(nh, 1), Shine.y);
     float3 specular = specularMap * pow(nh, SpecularPower.x + 0.00001) * Shine.x;
-    float3 ambient = Ambient(occlusion * halfLambert);
+    float3 ambient = Ambient(halfLambert, occlusion);
   #if LAYERS == 0
     rgb = ambient * base + (base * occlusion * lobe * halfLambert + specular * occlusion) * SunColour.rgb * shadow;
   #elif LAYERS == 1
     float k = max(lerp(lobe * halfLambert, nlLit, e), 0);
-    rgb = ambient * colour * occlusion + (colour * k + specular * (1 - e) * occlusion) * SunColour.rgb * shadow;
+    rgb = ambient * colour + (colour * k + specular * (1 - e) * occlusion) * SunColour.rgb * shadow;  // (the occlusion in the ambient already)
   #else
     float m = max(e, d);
     float k = occlusion * max(lerp(lobe * halfLambert, nlLit, m), 0);
@@ -523,11 +535,11 @@ float4 SurfacePixel(Surface s) : SV_Target
     // as Guerrilla's), and the sun's shine; no Lambert, occlusion, shadow or lamps (the light buffer
     // here is what lies behind the pane).
     float3 specular = specularMap * pow(max(dot(n, halfway), 0), SpecularPower.x + 0.00001) * Shine.x;
-    rgb = Ambient(dot(s.normal, toLight) * 0.5 + 0.5) * colour + specular * SunColour.rgb;
+    rgb = Ambient(saturate(dot(s.normal, toLight) * 0.5 + 0.5), 1) * colour + specular * SunColour.rgb;
 #elif FAMILY == 7
     // The composite: the half-Lambert ambient without occlusion (as Guerrilla's, which reads none),
     // lifted by the self-illumination (0 on every one of its materials), the sun's Lambert; no shine.
-    float3 ambient = Ambient(nl * 0.5 + 0.5);
+    float3 ambient = Ambient(saturate(nl * 0.5 + 0.5), 1);
     ambient = SelfLit(ambient, Glow.x);
     rgb = ambient * colour + colour * nlLit * SunColour.rgb * shadow;
     rgb += lamps * colour;
@@ -543,7 +555,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     {
         const float3 tint = BrdfSpecular[0].rgb * (mask.r * w.x) + BrdfSpecular[1].rgb * (mask.g * w.y) + BrdfSpecular[2].rgb * (mask.b * w.z);
         const float3 paint = tint * (paintShine * pow(saturate(dot(toEye, n)), 8)) * (1 - decal.a);
-        rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * (colour + paint * occlusion) + (colour * occlusion * nlLit + paint * occlusion) * SunColour.rgb * shadow;
+        rgb = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * (colour + paint * occlusion) + (colour * occlusion * nlLit + paint * occlusion) * SunColour.rgb * shadow;
         rgb += lamps * colour;
     }
 #elif FAMILY == 9
@@ -556,7 +568,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     const float3 shine = specularMap * pow(nh, SpecularPower.x + 0.00001) * Shine.x * (1 - dd) * (1 - e);
     const float3 coat = BrdfSpecular[0].rgb * dirt * pow(nh, BrdfSpecular[1].x + 0.00001) * BrdfSpecular[1].y;
     const float3 rim = BrdfSpecular[0].rgb * dirt * pow(1 - nv, BrdfSpecular[1].z + 0.00001) * BrdfSpecular[1].w;
-    rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + (colour * occlusion * nlLit + (shine + coat + rim) * nlLit * occlusion) * SunColour.rgb * shadow;
+    rgb = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * colour + (colour * occlusion * nlLit + (shine + coat + rim) * nlLit * occlusion) * SunColour.rgb * shadow;
     rgb += lamps * colour;
 #elif FAMILY == 6
     // Mirror glass: the mirror direction by the vertex normal, its x turned round, with the normal map's
@@ -568,7 +580,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     float3 reflection = DiffuseMap.Sample(DiffuseSampler, uvM).rgb * ReflectionCube.Sample(ReflectionSampler, direction).rgb
                       * glassShows * (shadow * 0.7 + 0.3);
     float3 specular = SpecularColour.rgb * glassShows * Shine.x * pow(saturate(dot(n, halfway)), SpecularPower.x + 0.00001);
-    rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + (colour * occlusion * nlLit + specular) * SunColour.rgb * shadow
+    rgb = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * colour + (colour * occlusion * nlLit + specular) * SunColour.rgb * shadow
         + reflection * SunColour.rgb;
     rgb += lamps * colour;
 #else
@@ -580,7 +592,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     float pM = exp2(ln * Shine.y), pS = exp2(ln * SpecularPower.x), pMS = exp2(ln * MetalSpecularPower.x);
     float3 specular = lerp(pS * Shine.x * SpecularColour.rgb, pMS * MetalSpecular.w * MetalSpecular.rgb, a) * specularSample.rgb;
     float halfLambert = nlLit * 0.5 + 0.5;
-    float3 ambient = Ambient(occlusion * halfLambert);
+    float3 ambient = Ambient(halfLambert, 1);  // (bA carries the occlusion)
   #if LAYERS == 0
     rgb = ambient * bA + (bA * lerp(nlLit, pM * nlLit, a) + specular * occlusion) * SunColour.rgb * shadow;
   #elif LAYERS == 1
@@ -588,7 +600,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     rgb = ambient * bA + (sunlit + specular * (1 - e) * occlusion) * SunColour.rgb * shadow;
   #else
     float nl1 = nlLit + 0.00001, halfLambert1 = nl1 * 0.5 + 0.5;
-    ambient = Ambient(occlusion * halfLambert1);
+    ambient = Ambient(halfLambert1, 1);
     float k = lerp(1, pM * halfLambert1 / nl1, a);
     float3 mixed = lerp(lerp(bA * k, layer.rgb, e), decal.rgb, d) + d * e * (1 - Shine.w) * (layer.rgb - decal.rgb);
     rgb = ambient * bA + (mixed * nl1 + specular * (1 - e) * (1 - d) * occlusion) * SunColour.rgb * shadow;

@@ -182,7 +182,16 @@ struct Surface
 #endif
 };
 
-float3 Ambient(float weight) { return lerp(AmbientBelow.rgb, AmbientAbove.rgb, weight); }
+// The sky's light on the ground, as Re-Mars-tered's terrain shader works it out (its indirect light; see
+// GuerrillaSurfaces.hlsl's Ambient): from the back ambient facing away from the light to the light's
+// colour × 0.019 facing it, toward the ambient by up to ½ on ground turned sideways; times the occlusion.
+static const float kIndirectLightScale = 0.019, kIndirectLightAmount = 0.5;
+float3 Ambient(float facing, float occlusion)
+{
+    float3 light = lerp(AmbientBelow.rgb, SunColour.rgb * kIndirectLightScale, facing);
+    float side = 2 * abs(2 * facing - 1);
+    return lerp(light, AmbientAbove.rgb, max(1 - side * side, 0) * kIndirectLightAmount) * occlusion;
+}
 
 // Guerrilla's terrain normal maps: x from red × alpha, y from green (no height bend).
 float3 Decoded(float4 t)
@@ -239,8 +248,8 @@ float3 GroundLit(float4 position, float4 light, float3 colour, float shineAmount
     const float3 halfway = normalize(toEye + toLight);
     const float nl = dot(n, toLight), nlLit = saturate(nl);
     const float shine = nlLit * shineAmount * exp2((shinePower + 0.00001) * log2(saturate(dot(n, halfway))));
-    const float3 near = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + (colour * occlusion * nlLit + shine) * SunColour.rgb * shadow;
-    const float3 far = AmbientAbove.rgb * colour + colour * nlLit * SunColour.rgb * shadow;
+    const float3 near = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * colour + (colour * occlusion * nlLit + shine) * SunColour.rgb * shadow;
+    const float3 far = Ambient(saturate(nl * 0.5 + 0.5), 1) * colour + colour * nlLit * SunColour.rgb * shadow;
     return lerp(near, far, lod2) + lamps * colour;
 }
 #endif
@@ -338,7 +347,7 @@ float4 TerrainPixel(Surface s) : SV_Target
     float3 n = ViewNormal(pixel);
     if (dot(n, ToEyeView(s.position)) < 0) n = -n;
     const float nl = dot(n, SunTowardView.xyz);
-    const float3 rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + colour * (abs(nl) * 0.6 + 0.4) * SunColour.rgb * shadow + lamps * colour;
+    const float3 rgb = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * colour + colour * (abs(nl) * 0.6 + 0.4) * SunColour.rgb * shadow + lamps * colour;
     return float4(rgb * (1 - fog) + fog * FogColour.rgb, cover) * TintColour;
 #elif SURFACE == 6
     // The far ground: the zone's colour map, cubed, lit as Guerrilla's far ground (rl_terrain_low_lod_t):
@@ -355,7 +364,7 @@ float4 TerrainPixel(Surface s) : SV_Target
     float3 lamps;
     Light(pixel, light, occlusion, lamps, shadow);
     const float nl = dot(ViewNormal(pixel), SunTowardView.xyz);
-    const float3 rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + colour * saturate(nl) * SunColour.rgb + lamps * colour;
+    const float3 rgb = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * colour + colour * saturate(nl) * SunColour.rgb + lamps * colour;
     return float4(rgb * (1 - fog) + fog * FogColour.rgb, 1) * TintColour;
 #else
     // A cliff: its textures projected from the two sides (x and z), mixed by how the slope faces;
@@ -391,7 +400,7 @@ float4 TerrainPixel(Surface s) : SV_Target
     const float3 B = float3(N.y * abs(N.x), N.x * N.x + N.z * N.z, N.y * abs(N.z));
     const float3 L = normalize(float3(dot(SunToward.xyz, T), dot(SunToward.xyz, B), dot(SunToward.xyz, N)));
     const float nl = dot(n, L), nlLit = saturate(nl);
-    float3 rgb = Ambient(occlusion * (nl * 0.5 + 0.5)) * colour + colour * occlusion * nlLit * SunColour.rgb * shadow;
+    float3 rgb = Ambient(saturate(nl * 0.5 + 0.5), occlusion) * colour + colour * occlusion * nlLit * SunColour.rgb * shadow;
     rgb += lamps * colour;
     return float4(rgb * (1 - fog) + fog * FogColour.rgb, alpha) * TintColour;
 #endif

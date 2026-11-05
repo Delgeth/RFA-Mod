@@ -60,9 +60,10 @@
 // [GuerrillaWorld] Ambient=; and the light of the sun (or by night, the moon) along its path over
 // the day, tod_light_color times Sun= (both read again whenever rfa_mods.ini is saved), with its
 // shine on the surfaces that have specular maps, as Armageddon's lamps give theirs. The clouds
-// are lit from the same direction. That light, the sky, the clouds and the backdrop are multiplied
-// by Guerrilla's colour correction (color_correct_tint, ColourCorrection=), which Guerrilla applies
-// to its whole picture and Armageddon to none of it.
+// are lit from the same direction. Guerrilla's colour correction (color_correct_tint and
+// _saturation, ColourCorrection=), which Guerrilla applies to its whole picture and Armageddon to none
+// of it, is applied with Guerrilla's tone mapping to the whole scene in its last pass, as Guerrilla's
+// (Armageddon's own lamps, glows and effects with it), and without it to what the mod draws itself.
 //
 // The fog: Armageddon's is each environment box's, by distance only, and it keeps the time of day's
 // fog curves without drawing with them. Guerrilla's is height fog, thicker low down and far away,
@@ -74,13 +75,18 @@
 // The tone mapping: Armageddon turns its picture into the final one with an exposure the environment
 // box sets (3 in our zones), a curve that clips its highlights and a colour table. In our worlds the
 // mod holds that exposure at 1 and draws Guerrilla's tone mapping over the result instead: its eye
-// adapting to the picture's brightness, its exposure from the time of day's curves, and its curve that
-// rolls the highlights off (ToneMapping=, Exposure=).
+// adapting to the picture's brightness, its exposure from the time of day's curves, its bloom (the
+// glow round bright things, from the picture scaled by the eye, in three stages blurred and laid
+// together, as Guerrilla's compositor makes it; Bloom=), and its curve that rolls the highlights off
+// (ToneMapping=, Exposure=).
 //
-// The sun: Armageddon draws none in our worlds. The mod draws Guerrilla's: the sun orbital of the
-// world's global time of day (its texture, size, colour and opacity over the day) as a small bright
-// disc behind the clouds, along the sun's path; and with the tone mapping, Guerrilla's sun shafts, the
-// glow streaming from the sky round the sun past whatever stands in front of it (SunShafts=).
+// The sun and moons: Armageddon draws none in our worlds. The mod draws Guerrilla's: every orbital of
+// the world's global time of day (the sun, Phobos and Deimos; each its own path, texture, size, colour
+// and opacity over the day) as a small bright picture behind the clouds; the sun's corona (its rays,
+// glow, halo and lens flares over the picture, fading as the sun is hidden or sets); the night sky's
+// stars (from Guerrilla's star catalogue) and meteors; and with the tone mapping, Guerrilla's sun
+// shafts, the glow streaming from the sky round the sun past whatever stands in front of it
+// (SunShafts=).
 //
 // And it leaves out the game's "invalid mission info hash" report for our worlds' zones, which
 // carry no mission (one line a zone at every load).
@@ -482,11 +488,14 @@ void ReadSun() {
 
 // Guerrilla's colour correction, the time of day's color_correct_tint: Guerrilla multiplies its whole
 // picture by it, divided by its brightest channel (TOD_tint_primary_color), and ignores its fourth
-// number. Its light is pink and the tint cyan, so only the two together give its colours. Armageddon
-// doesn't colour its picture by the time of day's tint (its own sets all carry the same grey), so in
-// our worlds the mod multiplies what it draws by it: the light it adds, the sky, the clouds and the
-// backdrop. ColourCorrection=0 leaves it out (read again whenever rfa_mods.ini is saved).
-constexpr size_t kColourCorrection = 0x47A0;
+// number; before that, its saturation (color_correct_saturation) about its luminance. Its light is
+// pink and the tint cyan, so only the two together give its colours. Guerrilla does both in its last
+// pass (rl_hdr 21), on the scene alone, before its bloom and particles go over it. Armageddon doesn't
+// colour its picture by the time of day's tint (its own sets all carry the same grey), so in our
+// worlds the mod does it in its own last pass with Guerrilla's tone mapping (TonePixel), and without
+// that, multiplies what it draws itself by it (PartTint). ColourCorrection=0 leaves it out (read
+// again whenever rfa_mods.ini is saved).
+constexpr size_t kColourCorrection = 0x47A0, kColourSaturation = 0x46AC;
 bool g_colourCorrection = true;
 
 void ReadColourCorrection() {
@@ -554,6 +563,18 @@ void ReadToneMapping() {
 
 bool GuerrillaToneMapping() { return g_toneMapping && !g_toneMappingFailed; }
 
+// The colour correction what the mod draws itself (its light, the sky, clouds, sun, backdrop, fog and
+// the colours our shaders light by) takes: none with Guerrilla's tone mapping, whose last pass
+// corrects the whole picture at once (Armageddon's lamps, glows, effects and people with it), as
+// Guerrilla's does; otherwise the colour correction, as there is no other place for it.
+void PartTint(float (&out)[3]) {
+    if (GuerrillaToneMapping()) {
+        out[0] = out[1] = out[2] = 1;
+        return;
+    }
+    ColourCorrection(out);
+}
+
 // Guerrilla's particle layer with its tone mapping (Particles=; read again whenever rfa_mods.ini is
 // saved): see ParticlePhase. 0 = particles drawn into the scene as Armageddon draws them.
 bool g_particles = true;
@@ -597,6 +618,15 @@ void ReadBloom() {
 }
 
 bool SunShaftsOn() { return GuerrillaToneMapping() && g_sunShafts > 0 && !g_shaftsFailed; }
+
+// How strong the sun's corona is (SunCorona=; times Guerrilla's own; 0: none; read again whenever
+// rfa_mods.ini is saved): see "The sun's corona".
+float g_sunCorona = 1.0f;
+
+void ReadSunCorona() {
+    const float corona = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"SunCorona", L"1").c_str()));
+    g_sunCorona = corona >= 0 ? corona : 1.0f;
+}
 
 // Sharpening of the final picture in our worlds (Sharpen=, 0-100; 0: none; read again whenever
 // rfa_mods.ini is saved): see "Sharpening".
@@ -720,6 +750,9 @@ void CheckSettings() {
     const float bloomBefore = g_bloom;
     ReadBloom();
     if (g_bloom != bloomBefore) rfa::Log("Tone mapping: bloom times %.3g (was %.3g)", g_bloom, bloomBefore);
+    const float coronaBefore = g_sunCorona;
+    ReadSunCorona();
+    if (g_sunCorona != coronaBefore) rfa::Log("Corona: times %.3g (was %.3g)", g_sunCorona, coronaBefore);
 }
 
 bool InOurWorld() {
@@ -771,14 +804,21 @@ void LightToward(float hours, float leastDegrees, float (&out)[3]) {
 
 constexpr float kLightLeastDegrees = 40, kCloudLightLeastDegrees = 15;
 
+// Re-Mars-tered's balance of the light, which the 2009 game doesn't have (none of these numbers are
+// in its exe); the rfg world is lit as Re-Mars-tered lights Guerrilla's. Its renderer takes the time of
+// day's ambient light from above × 0.65 (rl_renderer::set_ambient_color), the one from below × 0.29
+// (set_back_ambient_color), and the light of its base pass, the sun's or the moon's, × 0.8
+// (rl_renderer::set_light, as begin_base_pass calls it); lamps keep theirs.
+constexpr float kRemasteredAmbient = 0.65f, kRemasteredBackAmbient = 0.29f, kRemasteredSunLight = 0.8f;
+
 // The light that shines from one direction: tod_light_color (Guerrilla's: the sun's by day, blue
-// moonlight by night) times Sun=, from Guerrilla's light direction (LightToward: never under 40°, the
-// moon's half of the day through the north), at full strength all day as Guerrilla's (its colour
-// curves dim it at dusk themselves). Toward the light, and the light.
+// moonlight by night) times Re-Mars-tered's 0.8 and Sun=, from Guerrilla's light direction
+// (LightToward: never under 40°, the moon's half of the day through the north), at full strength all
+// day as Guerrilla's (its colour curves dim it at dusk themselves). Toward the light, and the light.
 void DirectLight(float (&toward)[3], float (&out)[3]) {
     LightToward(g_timeOfDay, kLightLeastDegrees, toward);
     TodColour(kSunColour, out);
-    for (float& c : out) c *= g_sun;
+    for (float& c : out) c *= kRemasteredSunLight * g_sun;
 }
 
 // ---- The sun's shadows
@@ -920,20 +960,20 @@ void __cdecl PlaceFollowLight(Place place, Turn turn, int lightTemplate) {
 }
 
 // Replace the time of day's ambient setters: the game's own, then in our worlds the world's
-// ambient light times Ambient=.
-void ScaleAmbient(float (&colour)[3]) {
-    if (g_ambient == 1.0f || !InOurWorld()) return;
-    for (float& c : colour) c *= g_ambient;
+// ambient light times Re-Mars-tered's balance (kRemasteredAmbient, kRemasteredBackAmbient) and Ambient=.
+void ScaleAmbient(float (&colour)[3], float remastered) {
+    if (!InOurWorld()) return;
+    for (float& c : colour) c *= remastered * g_ambient;
 }
 
 void __cdecl SetAmbient(const float* colour) {
     g_setAmbient(colour);
-    ScaleAmbient(g_worldAmbient);
+    ScaleAmbient(g_worldAmbient, kRemasteredAmbient);
 }
 
 void __cdecl SetBackAmbient(const float* colour) {
     g_setBackAmbient(colour);
-    ScaleAmbient(g_worldBackAmbient);
+    ScaleAmbient(g_worldBackAmbient, kRemasteredBackAmbient);
 }
 
 void TellAmbient() {
@@ -1695,10 +1735,14 @@ LightOut LightPixel(float4 position : SV_Position)
     n = n * 2 - 1;
     float length2 = dot(n, n);
     n = length2 > 0.000001 ? n * rsqrt(length2) : UpToward.xyz;
-    // As Guerrilla's surface shaders blend V_back_ambient_render to V_ambient_render: by how much the
-    // surface faces its light (n · L / 2 + 1/2), not the sky above; the occlusion comes after, from the
-    // game's ambient occlusion, which the light buffer gets once this is drawn.
-    float3 sky = lerp(FromBelow.rgb, FromAbove.rgb, dot(n, SunToward.xyz) * 0.5 + 0.5);
+    // As Re-Mars-tered's surface shaders light with the sky (their indirect light): by how much the
+    // surface faces its light (n · L / 2 + 1/2), not the sky above, from V_back_ambient_render facing
+    // away to the light's own colour × 0.019 facing it, blended toward V_ambient_render by up to ½ on a
+    // surface turned sideways (facing ¼ to ¾); the occlusion comes after, from the game's ambient
+    // occlusion, which the light buffer gets once this is drawn.
+    float facingLight = saturate(dot(n, SunToward.xyz) * 0.5 + 0.5);
+    float side = 2 * abs(2 * facingLight - 1);
+    float3 sky = lerp(lerp(FromBelow.rgb, SunColour.rgb * 0.019, facingLight), FromAbove.rgb, max(1 - side * side, 0) * 0.5);
     float facing = dot(n, SunToward.xyz);
     float3 sun = SunColour.rgb * saturate(facing);
 
@@ -1782,6 +1826,7 @@ cbuffer ToneMapping : register(b0)
     float4 Exposure;  // x lum_range, y lum_offset, z eye_adaption_base, w eye_adaption_amount
     float4 Picture;   // x Exposure=, y bloom_amount, z w the picture's width and height
     float4 Shafts;    // x how strong the sun shafts are (SunShafts=; 0 when none were drawn)
+    float4 Tint;      // xyz the colour correction (Guerrilla's Tint_color), w its saturation (Tint_saturation.x)
 };
 
 Texture2D Scene : register(t0);
@@ -1822,24 +1867,106 @@ float4 TonePixel(float4 position : SV_Position) : SV_Target
     float4 particles = Particles.Load(int3(position.xy, 0));
     float3 laid = min(max(particles.rgb, 0), 0.996);
     float behind = saturate(1 - particles.a);
+    // The colour correction, on the scene alone as Guerrilla's last pass does it: its saturation about
+    // its luminance, then its tint; the bloom, the sun shafts and the particles go over it as they are.
+    float luminance = dot(colour, float3(0.3, 0.59, 0.11));
+    colour = (luminance + Tint.w * (colour - luminance)) * Tint.rgb;
     float3 picture = saturate(1 - (1 - laid) * exp(-exposure * (colour * behind + bloom + shafts)));
     float3 encoded = picture <= 0.0031308 ? picture * 12.92 : 1.055 * pow(picture, 1 / 2.4) - 0.055;
     return float4(encoded, 1);
 }
 )";
 
-// The sun, as Guerrilla's sky draws its orbitals (rl_skybox_renderable_instance::render_orbital_object):
-// a square facing the camera, centred one unit from the eye toward the sun and as many units across
-// as twice its scale, behind everything the world has drawn; its texture's alpha times its colour,
-// added to what is there.
+// Guerrilla's bloom, as its rl_hdr_compositor makes it (render_bloom_3; the 2009 shaders rl_downsample,
+// rl_particle_brightpass, rl_hdr 24 and 22, rl_gaussian_blur), in Guerrilla's true values (its
+// buffers keep a picture ÷ 8 and multiply by 8 again; ours keeps the true one, so neither is done).
+// BrightPixel, at a quarter of the picture's size: the scene boxed 4 × 4 times bloom_exposure ÷ the
+// eye (eye_adaption_base + _amount × (the adapted brightness − base) + 0.001); of that, as much as the
+// curve gives (its brightness L = 0.3 × (r + g + b); below bloom_theta, slope_A × L; above, slope_B ×
+// (L − theta) + theta × slope_A), times what the particles leave showing, plus the particles' own glow
+// (each 0.85 over, ÷ (that + 0.3) × 3), never below 0. BoxPixel: half the size again, 4 × 4 samples
+// a picture-texel apart (as Guerrilla's, whatever the size). BlurPixel: 9 taps along one axis
+// (a 17-tap Gaussian with each pair folded into one filtered tap). CombinePixel: 2 × the first stage +
+// 1.15 × the second + 0.45 × the third.
+constexpr char kBloomShader[] = R"(
+cbuffer Bloom : register(b0)
+{
+    float4 Bright;   // x bloom_exposure, y eye_adaption_base, z eye_adaption_amount
+    float4 Curve;    // bloom_theta, bloom_slope_A, bloom_slope_B, theta × slope_A
+    float4 Sizes;    // xy 1 ÷ the target's size, zw 1 ÷ the picture's
+    float4 Taps[9];  // xy where (in the texture), w how much
+};
+
+Texture2D Source : register(t0);
+Texture2D Adapted : register(t1);    // 1 x 1: the brightness the eye has adapted to
+Texture2D Particles : register(t2);  // their colour, and in alpha how much they cover (none: zeros)
+Texture2D Stage1 : register(t3);
+Texture2D Stage2 : register(t4);
+SamplerState Smooth : register(s0);
+
+float4 BrightPixel(float4 position : SV_Position) : SV_Target
+{
+    int2 corner = int2(position.xy) * 4;
+    float3 scene = 0, glow = 0;
+    float shows = 0;
+    [unroll] for (int y = 0; y < 4; ++y)
+        [unroll] for (int x = 0; x < 4; ++x)
+        {
+            scene += Source.Load(int3(corner + int2(x, y), 0)).rgb;
+            float4 p = Particles.Load(int3(corner + int2(x, y), 0));
+            float3 over = max(p.rgb - 0.85, 0);
+            glow += over / (over + 0.3) * 3;
+            shows += 1 - p.a;
+        }
+    scene /= 16;
+    glow /= 16;
+    shows /= 16;
+    float adapted = Adapted.Load(int3(0, 0, 0)).r;
+    float3 c = scene * (Bright.x / (Bright.y + Bright.z * (adapted - Bright.y) + 0.001));
+    float L = dot(c, 0.3);
+    float k = L < Curve.x ? Curve.y * L : Curve.z * abs(Curve.x - L) + Curve.w;
+    c = c * k / (L + 0.001);
+    return float4(min(max(c * shows + glow, 0), 65000), 1);  // (65000: a picture's inf or NaN never spreads)
+}
+
+float4 BoxPixel(float4 position : SV_Position) : SV_Target
+{
+    float2 uv = position.xy * Sizes.xy;
+    float4 sum = 0;
+    [unroll] for (int j = 0; j < 4; ++j)
+        [unroll] for (int i = 0; i < 4; ++i)
+            sum += Source.SampleLevel(Smooth, uv + float2(i - 1.5, j - 1.5) * Sizes.zw, 0);
+    return sum / 16;
+}
+
+float4 BlurPixel(float4 position : SV_Position) : SV_Target
+{
+    float2 uv = position.xy * Sizes.xy;
+    float4 sum = 0;
+    [unroll] for (int i = 0; i < 9; ++i) sum += Source.SampleLevel(Smooth, uv + Taps[i].xy, 0) * Taps[i].w;
+    return sum;
+}
+
+float4 CombinePixel(float4 position : SV_Position) : SV_Target
+{
+    float2 uv = position.xy * Sizes.xy;
+    return Source.SampleLevel(Smooth, uv, 0) * 2 + Stage1.SampleLevel(Smooth, uv, 0) * 1.15 + Stage2.SampleLevel(Smooth, uv, 0) * 0.45;
+}
+)";
+
+// The sun and moons, as Guerrilla's sky draws its orbitals (rl_skybox_renderable_instance::
+// render_orbital_object): a square facing the camera, centred one unit from the eye toward the orbital
+// and as many units across as twice its scale, behind everything the world has drawn; its texture
+// times its colour and opacity (no more than 32), added to what is there by its alpha (or blended by
+// it, for an orbital that asks: alpha_blend).
 constexpr char kSunShader[] = R"(
 cbuffer Sun : register(b0)
 {
     float4 Right;    // as the sky's
     float4 Up;
     float4 Forward;
-    float4 Centre;   // toward the sun (xyz), and its half-size one unit away (w)
-    float4 Colour;   // its colour, times its brightness and opacity
+    float4 Centre;   // toward the orbital (xyz), and its half-size one unit away (w)
+    float4 Colour;   // its colour times its brightness (rgb), and its opacity (a)
 };
 
 Texture2D Disc : register(t0);
@@ -1863,11 +1990,10 @@ SunPoint SunVertex(uint id : SV_VertexID)
     return p;
 }
 
-// As Guerrilla's rfg-orbital: the texture's colour times its cover times the orbital's colour.
+// As Guerrilla's rfg-orbital: the texture times the orbital's colour and opacity, no more than 32.
 float4 SunPixel(SunPoint p) : SV_Target
 {
-    float4 disc = Disc.Sample(Clamped, p.uv);
-    return float4(Colour.rgb * disc.rgb * disc.a, 0);
+    return min(Disc.Sample(Clamped, p.uv) * Colour, 32);
 }
 )";
 
@@ -1875,7 +2001,8 @@ float4 SunPixel(SunPoint p) : SV_Target
 // between as Re-Mars-tered's rl_hdr_compositor::render_sun_shafts takes them), each at half the
 // picture's size. SourcePixel: the sky round the sun, the picture averaged over 4 × 4 samples where
 // nothing was drawn (the depth at the far plane), times a round fall-off the sun's size across
-// (Guerrilla lays a texture there whose picture isn't known; a smooth disc stands in). BlurPixel: a
+// (Guerrilla's sun mask: a texture its compositor makes at start, rl_hdr_compositor::initialize, 64 ×
+// 64, 1 at the middle falling in a straight line to 0 at its edge, laid round the sun). BlurPixel: a
 // 5 × 5 Gaussian. RadialPixel: 16 samples on the way from the pixel toward the sun, the nearer the
 // pixel the more each counts (base − k × step ÷ 16), all times a fall-off with the distance from the
 // sun across the screen, e^(curve base × (min(distance, radius) ÷ radius)^exponent) + shift (never
@@ -1916,8 +2043,7 @@ float4 SourcePixel(float4 position : SV_Position) : SV_Target
                 sky += max(Source.SampleLevel(Smooth, tap, 0).rgb, 0);
         }
     float fromSun = length(position.xy - Sun.xy / Texel.xy) / Strength.w;  // in the sun's sizes
-    float disc = saturate(1 - 2 * fromSun);
-    return float4(sky / 16 * disc * disc, 1);
+    return float4(sky / 16 * saturate(1 - 2 * fromSun), 1);
 }
 
 float4 BlurPixel(float4 position : SV_Position) : SV_Target
@@ -2212,6 +2338,7 @@ struct ToneConstants {
     float exposure[4];
     float picture[4];
     float shafts[4];
+    float tint[4];   // the colour correction and its saturation
 };
 
 ID3D11VertexShader* g_toneVertex = nullptr;
@@ -2350,26 +2477,34 @@ ID3D11ShaderResourceView* LoadTexture(const std::wstring& path) {
     return view;
 }
 
-// The sun as Guerrilla's sky draws it: the orbital named "Sun" in the world's global time of day
+// The sun and moons as Guerrilla's sky draws them: the orbitals of the world's global time of day
 // (<world>.gtodx, which the world builder writes from Guerrilla's terr01.gtodx and the game finds among
-// the overrides), read once a world. Its texture (map_name, in mods\guerrilla_world\ as .dds) and three
-// curves over the day: scale (its half-size, in hundredths of its distance), tint (red, green, blue
-// and a brightness) and opacity. A curve's keys are half-hour slots, with a straight line between them
-// round the clock, as Guerrilla's time of day fills its slots (and its game_time_of_day_get_orbital_params
-// reads them: the colour times its brightness, the opacity apart, the scale ÷ 100).
+// the overrides; Guerrilla's are the Sun, Phobos, Deimos and a faint second Phobos), read once a world.
+// Each its path (a circle turned plane_rot_x° about x, then plane_rot_y° about y, distance_off_plane
+// off its middle, orbit_time_offset hours on), its texture (map_name, in mods\guerrilla_world\ as
+// .dds), whether it blends rather than adds (alpha_blend), and three curves over the day: scale (its
+// half-size, in hundredths of its distance), tint (red, green, blue and a brightness) and opacity. A
+// curve's keys are half-hour slots, with a straight line between them round the clock, as Guerrilla's
+// time of day fills its slots (and its game_time_of_day_get_orbital_params reads them: the colour times
+// its brightness, the opacity apart, the scale ÷ 100); a curve with no keys holds what Guerrilla's
+// tod_orbital_object::init gives it (white at brightness 1, scale 10, opacity 1).
 struct CurveKey {
     float slot = 0;
     float value[4] = {};
 };
 
 struct Orbital {
-    std::string world;  // the world it was read for
-    bool found = false;
-    std::string map;
+    std::string name, map;
+    float turnX = 0, turnY = 0, offPlane = 0, hoursOn = 0;  // degrees, degrees, -1 to 1, hours
+    bool blends = false;
     std::vector<CurveKey> scale, tint, opacity;
+    ID3D11ShaderResourceView* texture = nullptr;  // loaded when first drawn
+    bool textureTried = false;
 };
 
-Orbital g_sunOrbital;
+constexpr size_t kMostOrbitals = 15;  // Guerrilla keeps no more (farray<tod_orbital_object, 15>)
+std::string g_orbitalsWorld;          // the world they were read for
+std::vector<Orbital> g_orbitals;
 
 // The text between <tag> and </tag>, looked for from `from` and ending before `limit`.
 bool Between(const std::string& text, const char* tag, size_t from, size_t limit, size_t& start, size_t& end) {
@@ -2416,36 +2551,68 @@ void CurveAt(const std::vector<CurveKey>& keys, float hours, int count, float ot
     for (int i = 0; i < count; ++i) out[i] = before.value[i] + (after.value[i] - before.value[i]) * t;
 }
 
-void ReadSunOrbital() {
+void DropOrbitals() {
+    for (Orbital& orbital : g_orbitals)
+        if (orbital.texture) orbital.texture->Release();
+    g_orbitals.clear();
+}
+
+float NumberBetween(const std::string& text, const char* tag, size_t from, size_t limit) {
+    size_t s, e;
+    return Between(text, tag, from, limit, s, e) ? static_cast<float>(atof(text.substr(s, e - s).c_str())) : 0.0f;
+}
+
+void ReadOrbitals() {
     const char* world = WorldName();
-    if (g_sunOrbital.world == world) return;
-    g_sunOrbital = Orbital();
-    g_sunOrbital.world = world;
+    if (g_orbitalsWorld == world) return;
+    g_orbitalsWorld = world;
+    DropOrbitals();
     const std::wstring name(world, world + strlen(world));
     std::vector<BYTE> bytes;
     if (!ReadWholeFile(rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\" + name + L".gtodx", bytes)) {
-        rfa::Log("Sun: no overrides\\build\\pc\\cache\\%s.gtodx (the world builder writes it); no sun drawn", world);
+        rfa::Log("Sun and moons: no overrides\\build\\pc\\cache\\%s.gtodx (the world builder writes it); none drawn", world);
         return;
     }
     const std::string text(bytes.begin(), bytes.end());
     size_t at = 0, start, end;
-    while (Between(text, "orbital", at, text.size(), start, end)) {
+    while (g_orbitals.size() < kMostOrbitals && Between(text, "orbital", at, text.size(), start, end)) {
+        Orbital orbital;
         size_t s, e;
-        if (Between(text, "name", start, end, s, e) && text.compare(s, e - s, "Sun") == 0) {
-            g_sunOrbital.found = true;
-            if (Between(text, "map_name", start, end, s, e)) g_sunOrbital.map = text.substr(s, e - s);
-            g_sunOrbital.scale = ReadKeys(text, "scale", start, end);
-            g_sunOrbital.tint = ReadKeys(text, "tint", start, end);
-            g_sunOrbital.opacity = ReadKeys(text, "opacity", start, end);
-            break;
-        }
+        if (Between(text, "name", start, end, s, e)) orbital.name = text.substr(s, e - s);
+        if (Between(text, "map_name", start, end, s, e)) orbital.map = text.substr(s, e - s);
+        if (Between(text, "alpha_blend", start, end, s, e)) orbital.blends = text.compare(s, e - s, "true") == 0;
+        orbital.turnX = NumberBetween(text, "plane_rot_x", start, end);
+        orbital.turnY = NumberBetween(text, "plane_rot_y", start, end);
+        orbital.offPlane = NumberBetween(text, "distance_off_plane", start, end);
+        orbital.hoursOn = NumberBetween(text, "orbit_time_offset", start, end);
+        orbital.scale = ReadKeys(text, "scale", start, end);
+        orbital.tint = ReadKeys(text, "tint", start, end);
+        orbital.opacity = ReadKeys(text, "opacity", start, end);
+        rfa::Log("Sun and moons: %s from %s.gtodx: texture %s, turned %.2f° and %.2f°, %.2f h on%s; %zu scale, %zu tint and %zu opacity keys",
+                 orbital.name.c_str(), world, orbital.map.c_str(), orbital.turnX, orbital.turnY, orbital.hoursOn, orbital.blends ? ", blended" : "",
+                 orbital.scale.size(), orbital.tint.size(), orbital.opacity.size());
+        g_orbitals.push_back(std::move(orbital));
         at = end;
     }
-    if (g_sunOrbital.found)
-        rfa::Log("Sun: Guerrilla's sun orbital from %s.gtodx: texture %s, %zu scale, %zu tint and %zu opacity keys", world,
-                 g_sunOrbital.map.c_str(), g_sunOrbital.scale.size(), g_sunOrbital.tint.size(), g_sunOrbital.opacity.size());
-    else
-        rfa::Log("Sun: %s.gtodx has no orbital named Sun; no sun drawn", world);
+    if (g_orbitals.empty()) rfa::Log("Sun and moons: %s.gtodx has no orbitals; none drawn", world);
+}
+
+// Toward an orbital at a time (in hours), in the world, as Guerrilla's
+// tod_shared_calculate_orbital_position works it out: a circle of radius sin(acos(d)), d off its
+// middle, at ((hours + its offset) mod 24) ÷ 24 of a turn, turned about x, then about y (for the sun's
+// numbers this is SunToward's path).
+void OrbitalToward(const Orbital& orbital, float hours, float (&out)[3]) {
+    const float pi = 3.14159265f;
+    float t = hours + orbital.hoursOn;
+    if (t < 0) t = 24 - t;  // (as Guerrilla's)
+    const float a = fmodf(t, 24.0f) / 24.0f * 2 * pi;
+    const float r = sinf(acosf(orbital.offPlane));
+    float v[3] = {r * cosf(a), orbital.offPlane, r * sinf(a)};
+    const float x = orbital.turnX * pi / 180, y = orbital.turnY * pi / 180;
+    const float aboutX[3] = {v[0], v[1] * cosf(x) - v[2] * sinf(x), v[2] * cosf(x) + v[1] * sinf(x)};
+    out[0] = aboutX[0] * cosf(y) + aboutX[2] * sinf(y);
+    out[1] = aboutX[1];
+    out[2] = aboutX[2] * cosf(y) - aboutX[0] * sinf(y);
 }
 
 struct SunConstants {
@@ -2459,16 +2626,15 @@ struct SunConstants {
 ID3D11VertexShader* g_sunVertex = nullptr;
 ID3D11PixelShader* g_sunPixel = nullptr;
 ID3D11Buffer* g_sunConstants = nullptr;
-ID3D11ShaderResourceView* g_sunDisc = nullptr;
-ID3D11BlendState* g_sunBlend = nullptr;
+ID3D11BlendState* g_sunBlend = nullptr;    // added by its alpha
+ID3D11BlendState* g_orbitalBlend = nullptr;  // blended by its alpha (alpha_blend)
 ID3D11SamplerState* g_sunSampler = nullptr;
-std::string g_sunDiscMap;  // the texture loaded (or tried)
 bool g_sunFailed = false;
 
-// The sun's shaders and states, and its texture (mods\guerrilla_world\<map_name>.dds, which the world
-// builder writes); without the texture, no sun (logged).
+// The orbitals' shaders and states (made once).
 bool MakeSunObjects() {
-    if (!g_sunVertex) {
+    if (g_sunVertex) return true;
+    {
         ID3DBlob* vertex = Compile(kSunShader, sizeof(kSunShader) - 1, "SunVertex", "vs_4_0");
         ID3DBlob* pixel = Compile(kSunShader, sizeof(kSunShader) - 1, "SunPixel", "ps_4_0");
         bool ok = vertex && pixel &&
@@ -2482,33 +2648,43 @@ bool MakeSunObjects() {
         buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         ok = ok && SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_sunConstants));
-        D3D11_BLEND_DESC blend = {};  // added to the sky's red, green and blue
+        D3D11_BLEND_DESC blend = {};  // on the sky's red, green and blue: added by the alpha, or blended by it
         blend.RenderTarget[0].BlendEnable = TRUE;
-        blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        blend.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
         blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
         blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
         blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
         blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
         blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
         ok = ok && SUCCEEDED(g_device->CreateBlendState(&blend, &g_sunBlend));
+        blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        ok = ok && SUCCEEDED(g_device->CreateBlendState(&blend, &g_orbitalBlend));
         D3D11_SAMPLER_DESC sampler = {};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sampler.MaxLOD = D3D11_FLOAT32_MAX;
         ok = ok && SUCCEEDED(g_device->CreateSamplerState(&sampler, &g_sunSampler));
         if (!ok) {
-            rfa::Log("Could not make the sun's shaders or states; no sun");
+            rfa::Log("Could not make the sun's and moons' shaders or states; none drawn");
             return false;
         }
     }
-    if (g_sunDiscMap != g_sunOrbital.map) {
-        g_sunDiscMap = g_sunOrbital.map;
-        if (g_sunDisc) g_sunDisc->Release();
-        const std::wstring map(g_sunDiscMap.begin(), g_sunDiscMap.end());
-        g_sunDisc = g_sunDiscMap.empty() ? nullptr : LoadTexture(DataFolder() + map + L".dds");
-        if (!g_sunDisc) rfa::Log("Sun: no mods\\guerrilla_world\\%s.dds (the world builder writes it); no sun drawn", g_sunDiscMap.c_str());
-    }
     return true;
+}
+
+// An orbital's texture (mods\guerrilla_world\<map_name>.dds, which the world builder writes), loaded
+// the first time it is drawn; without it, that orbital isn't drawn (logged once).
+ID3D11ShaderResourceView* OrbitalTexture(Orbital& orbital) {
+    if (!orbital.textureTried) {
+        orbital.textureTried = true;
+        const std::wstring map(orbital.map.begin(), orbital.map.end());
+        orbital.texture = orbital.map.empty() ? nullptr : LoadTexture(DataFolder() + map + L".dds");
+        if (!orbital.texture)
+            rfa::Log("Sun and moons: no mods\\guerrilla_world\\%s.dds (the world builder writes it); %s not drawn", orbital.map.c_str(),
+                     orbital.name.c_str());
+    }
+    return orbital.texture;
 }
 
 // Guerrilla's sun shaft settings (Re-Mars-tered's Rl_sun_shafts_*, their starting values): the sun's
@@ -2535,7 +2711,8 @@ ID3D11Texture2D* g_shaft[2] = {};  // half the picture's size, 16-bit float: dra
 ID3D11RenderTargetView* g_shaftTarget[2] = {};
 ID3D11ShaderResourceView* g_shaftView[2] = {};
 UINT g_shaftWidth = 0, g_shaftHeight = 0;
-ID3D11ShaderResourceView* g_shaftDepth = nullptr;  // the G-buffer's depth, kept from the light pass for the shafts
+ID3D11ShaderResourceView* g_shaftDepth = nullptr;  // the G-buffer's depth, kept from the light pass for the shafts and the corona
+bool CoronaWanted();  // (the sun's corona, below)
 float g_farDepth = 1;                              // the depth buffer's value at the far plane (from the sky step)
 
 bool MakeShaftObjects() {
@@ -2720,7 +2897,7 @@ void MakeCloudObjects() {
 
 void SkyColours(float (&hemisphere)[10][4]) {
     float tint[3];
-    ColourCorrection(tint);
+    PartTint(tint);
     for (int c = 0; c < 10; ++c) {
         float colour[3];
         TodColour(kSkyCurves[c], colour);
@@ -2785,7 +2962,7 @@ void DrawClouds(const SkyConstants& sky) {
     g_context->RSSetState(g_cloudRaster);
     // In the model's order: the overhead clouds, the ones along the horizon, then the backdrop in front of them.
     float tint[3];
-    ColourCorrection(tint);
+    PartTint(tint);
     for (const CloudPart& part : g_cloudParts) {
         float colour[3];
         // Each part's fog by its own curves, as Guerrilla's object_skybox_update_render_all gives them:
@@ -2837,52 +3014,449 @@ void DrawClouds(const SkyConstants& sky) {
     }
 }
 
-// The sun over the sky, before the clouds: toward the sun, its scale, colour and opacity from the sun
-// orbital's curves now, the colour (times its brightness and Guerrilla's light scale, 1) times the
-// opacity, the colour correction and the sky's brightness.
-void DrawSun(const SkyConstants& sky) {
-    ReadSunOrbital();
-    if (!g_sunOrbital.found || g_sunFailed) return;
+// The sun and moons over the sky, before the clouds, in the order the time of day lists them (as
+// Guerrilla's render_orbital_objects): each toward where its path has it now, its scale, colour and
+// opacity from its curves now, the colour (times its brightness and Guerrilla's light scale, 1) times
+// the colour correction and the sky's brightness.
+void DrawOrbitals(const SkyConstants& sky) {
+    ReadOrbitals();
+    if (g_orbitals.empty() || g_sunFailed) return;
     if (!MakeSunObjects()) {
         g_sunFailed = true;
         return;
     }
-    if (!g_sunDisc) return;
-    float scale, opacity, tint[4], correction[3], toward[3];
-    CurveAt(g_sunOrbital.scale, g_timeOfDay, 1, 0, &scale);
-    CurveAt(g_sunOrbital.opacity, g_timeOfDay, 1, 0, &opacity);
-    CurveAt(g_sunOrbital.tint, g_timeOfDay, 4, 1, tint);
-    if (opacity <= 0 || scale <= 0) return;
-    ColourCorrection(correction);
-    SunToward(toward);
-    SunConstants constants = {};
-    memcpy(constants.right, sky.right, sizeof(constants.right));
-    memcpy(constants.up, sky.up, sizeof(constants.up));
-    memcpy(constants.forward, sky.forward, sizeof(constants.forward));
-    for (int i = 0; i < 3; ++i) {
-        constants.centre[i] = toward[i];
-        constants.colour[i] = tint[i] * tint[3] * opacity * correction[i] * SkyBrightness();
+    float correction[3];
+    PartTint(correction);
+    bool drawing = false;
+    for (Orbital& orbital : g_orbitals) {
+        ID3D11ShaderResourceView* texture = OrbitalTexture(orbital);
+        if (!texture) continue;
+        float scale, opacity, tint[4], toward[3];
+        CurveAt(orbital.scale, g_timeOfDay, 1, 10, &scale);
+        CurveAt(orbital.opacity, g_timeOfDay, 1, 1, &opacity);
+        CurveAt(orbital.tint, g_timeOfDay, 4, 1, tint);
+        if (opacity <= 0 || scale <= 0) continue;
+        OrbitalToward(orbital, g_timeOfDay, toward);
+        SunConstants constants = {};
+        memcpy(constants.right, sky.right, sizeof(constants.right));
+        memcpy(constants.up, sky.up, sizeof(constants.up));
+        memcpy(constants.forward, sky.forward, sizeof(constants.forward));
+        for (int i = 0; i < 3; ++i) {
+            constants.centre[i] = toward[i];
+            constants.colour[i] = tint[i] * tint[3] * correction[i] * SkyBrightness();
+        }
+        constants.colour[3] = opacity;
+        constants.centre[3] = scale / 100;
+        if (g_tellColours)
+            rfa::Log("%s at %.2f h: toward %.2f %.2f %.2f, %.4f across, colour %.3f %.3f %.3f, opacity %.3f", orbital.name.c_str(), g_timeOfDay,
+                     toward[0], toward[1], toward[2], 2 * constants.centre[3], constants.colour[0], constants.colour[1], constants.colour[2], opacity);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (FAILED(g_context->Map(g_sunConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) break;
+        memcpy(mapped.pData, &constants, sizeof(constants));
+        g_context->Unmap(g_sunConstants, 0);
+        if (!drawing) {
+            drawing = true;
+            g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            g_context->IASetInputLayout(nullptr);
+            g_context->VSSetShader(g_sunVertex, nullptr, 0);
+            g_context->PSSetShader(g_sunPixel, nullptr, 0);
+            g_context->VSSetConstantBuffers(0, 1, &g_sunConstants);
+            g_context->PSSetConstantBuffers(0, 1, &g_sunConstants);
+            g_context->PSSetSamplers(0, 1, &g_sunSampler);
+        }
+        g_context->PSSetShaderResources(0, 1, &texture);
+        const float noFactor[4] = {1, 1, 1, 1};
+        g_context->OMSetBlendState(orbital.blends ? g_orbitalBlend : g_sunBlend, noFactor, 0xFFFFFFFF);
+        g_context->Draw(4, 0);
     }
-    constants.centre[3] = scale / 100;
-    if (g_tellColours)
-        rfa::Log("Sun at %.2f h: toward %.2f %.2f %.2f, %.4f across, colour %.3f %.3f %.3f (opacity %.2f)", g_timeOfDay, toward[0], toward[1],
-                 toward[2], 2 * constants.centre[3], constants.colour[0], constants.colour[1], constants.colour[2], opacity);
+    if (drawing) g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
+// ---- The night sky's stars and meteors
+// Guerrilla's (rl_star_field, rl_meteor_shower), drawn after the sun and moons, before the clouds, as
+// its skybox does. Both fade in and out with the hour as its object_skybox_update_render_all sets
+// their strength: none from 07:00 to 17:00, rising to full by 22:00, full until 03:00, gone by 07:00.
+float Seconds();
+float NightSkyStrength(float hours) {
+    if (hours > 22) return 1;
+    if (hours > 17) return (hours - 17) / 5;
+    if (hours < 3) return 1;
+    if (hours < 7) return (7 - hours) / 4;
+    return 0;
+}
+
+// How far away Guerrilla draws them: its camera's far clip (475 m, camera_system_init); the stars one
+// metre nearer (the sky's Draw_distance).
+constexpr float kNightSkyFar = 475.0f;
+
+// The stars: Guerrilla's star catalogue (5,456 real stars, brightest first: right ascension and
+// declination in radians, and a brightness), which the world builder copies from Guerrilla's exe into
+// mods\guerrilla_world\stars.bin. Of them Guerrilla makes 1,000 small squares
+// (rl_star_field::generate_billboard_stars): going down the catalogue, each star tilted 15° (its
+// declination less π/12) and kept if then more than 4° above the horizon, its brightness a quarter of
+// the catalogue's but no less than 0.0015, and a twinkle phase from the C runtime's rand() (from its
+// first seed, as the stars are made before the game seeds it: rand() % 1001 × 0.001, one for each
+// star looked at, kept or not); each number stored as a 16-bit whole number of 4096ths.
+// (Re-Mars-tered draws only the first 555 of the 1,000, a slip in its geometry's vertex count; the
+// stars it leaves out are all at the faintest brightness. Guerrilla also has a second kind, single
+// points for the catalogue's fainter stars, which it never draws.)
+constexpr int kStarCount = 1000;
+constexpr char kStarFileMagic[8] = {'G', 'W', 'S', 'T', 'A', 'R', 'S', '1'};
+
+// As Guerrilla's rfg-skybox-stars (its billboard technique): each star a square 0.9 m across facing
+// the camera, kNightSkyFar − 1 away along its direction (heading h, pitch p: sin h cos p, −sin p,
+// cos p cos h), at the far plane; its colour the sun's texture (vfx_sun_01) without its alpha, its
+// alpha its brightness × the strength × a twinkle × 12, added to the sky by that alpha. The twinkle:
+// 1 − 0.2 sin(4π r), only while sin(6π r) ≤ 0.5, r the star's phase plus the seconds gone.
+constexpr char kStarShader[] = R"(
+cbuffer Stars : register(b0)
+{
+    float4 Right;    // as the sky's
+    float4 Up;
+    float4 Forward;
+    float4 Clock;    // x the seconds gone, y the strength, z how far away the stars are
+    float4 Colour;   // the colour correction times the sky's brightness
+};
+
+cbuffer Catalogue : register(b1)
+{
+    float4 Star[1000];  // pitch, heading, brightness, twinkle phase
+};
+
+Texture2D Picture : register(t0);
+SamplerState Clamped : register(s0);
+
+struct StarPoint
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float alpha : TEXCOORD1;
+};
+
+static const float2 kCorners[6] = {float2(0, 0), float2(1, 0), float2(0, 1), float2(0, 1), float2(1, 0), float2(1, 1)};
+
+StarPoint StarVertex(uint id : SV_VertexID)
+{
+    float4 star = Star[id / 6];
+    float2 uv = kCorners[id % 6];
+    float2 off = (uv - 0.5) * 0.9;
+    float3 toward = float3(sin(star.y) * cos(star.x), -sin(star.x), cos(star.x) * cos(star.y));
+    float3 look = toward * Clock.z + Right.xyz * off.x + Up.xyz * off.y;
+    float depth = dot(look, Forward.xyz);
+    StarPoint p;
+    p.position = float4(dot(look, Right.xyz) / Right.w, dot(look, Up.xyz) / Up.w, depth * lerp(0.000001, 0.999999, Forward.w), depth);
+    p.uv = uv;
+    float r = star.w + Clock.x;
+    float twinkle = 1 - 0.2 * sin(12.56636 * r) * (sin(18.849541 * r) <= 0.5 ? 1 : 0);
+    p.alpha = star.z * Clock.y * twinkle * 12;
+    return p;
+}
+
+float4 StarPixel(StarPoint p) : SV_Target
+{
+    return float4(Picture.Sample(Clamped, p.uv).rgb * Colour.rgb, p.alpha);
+}
+)";
+
+// The meteors, as Guerrilla's rl_meteor_shower: up to 16 at once, a new one every 2 to 12 seconds
+// while the strength isn't 0. Each starts 200 m up, a quarter of kNightSkyFar out from the camera in a
+// random direction, and flies level toward a point kNightSkyFar out on the far side (straight across,
+// give or take 30°) at 100 to 200 m/s for 2.5 to 5 seconds. Each is drawn as a line 20 m long ahead of
+// where it is, at the far plane, its alpha from 0 at the tail to its head's: its fade (rising over the
+// first half of its life, falling over the second) × (a flicker, max(0, ½(sin 23π t + sin 13π t)), and
+// 0.2 × the strength); its colour white, added by that alpha.
+constexpr int kMostMeteors = 16;
+constexpr float kMeteorDelay = 2, kMeteorDelayRandom = 10, kMeteorLifespan = 2.5f, kMeteorLifespanRandom = 2.5f, kMeteorSpeed = 100,
+                kMeteorSpeedRandom = 100, kMeteorHeight = 200, kMeteorLength = 20;
+
+constexpr char kMeteorShader[] = R"(
+cbuffer Meteors : register(b0)
+{
+    float4 Right;    // as the sky's
+    float4 Up;
+    float4 Forward;
+    float4 Clock;    // y the strength
+    float4 Colour;   // the colour correction times the sky's brightness
+    float4 Meteor[32];  // two each: where it started, from the camera (xyz), and its age in seconds (w); its velocity (xyz) and lifespan (w)
+};
+
+struct MeteorPoint
+{
+    float4 position : SV_Position;
+    float alpha : TEXCOORD0;
+};
+
+MeteorPoint MeteorVertex(uint id : SV_VertexID)
+{
+    float4 start = Meteor[(id >> 1) * 2], motion = Meteor[(id >> 1) * 2 + 1];
+    float end = id & 1;
+    float age = start.w;
+    float3 look = start.xyz + motion.xyz * age + normalize(motion.xyz) * end * 20;
+    float depth = dot(look, Forward.xyz);
+    MeteorPoint p;
+    p.position = float4(dot(look, Right.xyz) / Right.w, dot(look, Up.xyz) / Up.w, depth * lerp(0.000001, 0.999999, Forward.w), depth);
+    float life = saturate(age / motion.w);
+    float flicker = max(0, 0.5 * (sin(72.256569 * age) + sin(40.840672 * age)));
+    float fade = life < 0.5 ? 2 * life : 2 - 2 * life;
+    p.alpha = end * fade * (saturate(flicker) + 0.2 * Clock.y);
+    return p;
+}
+
+float4 MeteorPixel(MeteorPoint p) : SV_Target
+{
+    return float4(Colour.rgb, p.alpha);
+}
+)";
+
+struct NightSkyConstants {
+    float right[4];
+    float up[4];
+    float forward[4];
+    float clock[4];
+    float colour[4];
+};
+
+struct MeteorConstants {
+    NightSkyConstants sky;
+    float meteor[kMostMeteors * 2][4];
+};
+
+ID3D11VertexShader* g_starVertex = nullptr;
+ID3D11PixelShader* g_starPixel = nullptr;
+ID3D11VertexShader* g_meteorVertex = nullptr;
+ID3D11PixelShader* g_meteorPixel = nullptr;
+ID3D11Buffer* g_starConstants = nullptr;
+ID3D11Buffer* g_starCatalogue = nullptr;  // the 1,000 stars, made once
+ID3D11Buffer* g_meteorConstants = nullptr;
+ID3D11ShaderResourceView* g_starPicture = nullptr;
+int g_starsDrawn = 0;
+bool g_nightSkyTried = false, g_nightSkyFailed = false;
+
+// The MSVC C runtime's rand(), from its first seed (1), as Guerrilla's stars were made with it.
+struct RuntimeRand {
+    unsigned state = 1;
+    int Next() {
+        state = state * 214013u + 2531011u;
+        return (state >> 16) & 0x7FFF;
+    }
+};
+
+// A value as Guerrilla's star vertices hold it: a 16-bit whole number of 4096ths, cut toward 0.
+float InFourThousandNinetySixths(float value) { return static_cast<float>(static_cast<short>(static_cast<int>(value * 4096.0))) / 4096.0f; }
+
+// The 1,000 stars from mods\guerrilla_world\stars.bin, as Guerrilla makes them (see kStarCount); how
+// many, or 0 without the file (logged).
+int MakeStars(float (&stars)[kStarCount][4]) {
+    std::vector<BYTE> bytes;
+    if (!ReadWholeFile(DataFolder() + L"stars.bin", bytes) || bytes.size() < 12 || memcmp(bytes.data(), kStarFileMagic, 8) != 0) {
+        rfa::Log("Stars: no mods\\guerrilla_world\\stars.bin (the world builder writes it from Guerrilla's exe); no stars");
+        return 0;
+    }
+    int count = 0;
+    memcpy(&count, bytes.data() + 8, 4);
+    if (count < 0 || bytes.size() < 12 + static_cast<size_t>(count) * 12) {
+        rfa::Log("Stars: mods\\guerrilla_world\\stars.bin is cut short; no stars");
+        return 0;
+    }
+    const float tilt = 0.2617993950843811f;            // π/12, as Guerrilla's float
+    const double lowest = -0.069813170079773182;        // −4°
+    RuntimeRand rand;
+    int made = 0;
+    for (int i = 0; i < count && made < kStarCount; ++i) {
+        float entry[3];  // right ascension, declination, brightness
+        memcpy(entry, bytes.data() + 12 + i * 12, sizeof(entry));
+        const float pitch = entry[1] - tilt;
+        float brightness = entry[2] * 0.25f;
+        if (brightness < 0.0015f) brightness = 0.0015f;
+        const float phase = static_cast<float>(rand.Next() % 1001) * 0.001f;
+        if (!(pitch < lowest)) continue;
+        stars[made][0] = InFourThousandNinetySixths(pitch);
+        stars[made][1] = InFourThousandNinetySixths(entry[0]);
+        stars[made][2] = InFourThousandNinetySixths(brightness);
+        stars[made][3] = InFourThousandNinetySixths(phase);
+        ++made;
+    }
+    rfa::Log("Stars: %d of Guerrilla's star catalogue's %d stars, as its star field makes them", made, count);
+    return made;
+}
+
+ID3D11Buffer* MakeConstantBuffer(UINT size, const void* data) {
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = (size + 15) & ~15u;
+    desc.Usage = data ? D3D11_USAGE_IMMUTABLE : D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = data ? 0 : D3D11_CPU_ACCESS_WRITE;
+    D3D11_SUBRESOURCE_DATA initial = {data, 0, 0};
+    ID3D11Buffer* buffer = nullptr;
+    return SUCCEEDED(g_device->CreateBuffer(&desc, data ? &initial : nullptr, &buffer)) ? buffer : nullptr;
+}
+
+// The stars' and meteors' shaders, buffers and the stars themselves (made once); false if they can't
+// be drawn at all.
+bool MakeNightSkyObjects() {
+    if (g_nightSkyTried) return !g_nightSkyFailed;
+    g_nightSkyTried = true;
+    g_nightSkyFailed = true;
+    if (!MakeSunObjects()) return false;  // (its blend state and sampler)
+    ID3DBlob* blobs[4] = {Compile(kStarShader, sizeof(kStarShader) - 1, "StarVertex", "vs_4_0"),
+                          Compile(kStarShader, sizeof(kStarShader) - 1, "StarPixel", "ps_4_0"),
+                          Compile(kMeteorShader, sizeof(kMeteorShader) - 1, "MeteorVertex", "vs_4_0"),
+                          Compile(kMeteorShader, sizeof(kMeteorShader) - 1, "MeteorPixel", "ps_4_0")};
+    bool ok = blobs[0] && blobs[1] && blobs[2] && blobs[3] &&
+              SUCCEEDED(g_device->CreateVertexShader(blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &g_starVertex)) &&
+              SUCCEEDED(g_device->CreatePixelShader(blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &g_starPixel)) &&
+              SUCCEEDED(g_device->CreateVertexShader(blobs[2]->GetBufferPointer(), blobs[2]->GetBufferSize(), nullptr, &g_meteorVertex)) &&
+              SUCCEEDED(g_device->CreatePixelShader(blobs[3]->GetBufferPointer(), blobs[3]->GetBufferSize(), nullptr, &g_meteorPixel));
+    for (ID3DBlob* blob : blobs)
+        if (blob) blob->Release();
+    ok = ok && (g_starConstants = MakeConstantBuffer(sizeof(NightSkyConstants), nullptr)) && (g_meteorConstants = MakeConstantBuffer(sizeof(MeteorConstants), nullptr));
+    if (!ok) {
+        rfa::Log("Could not make the stars' and meteors' shaders or buffers; none drawn");
+        return false;
+    }
+    static float stars[kStarCount][4] = {};
+    g_starsDrawn = MakeStars(stars);
+    if (g_starsDrawn > 0) {
+        g_starCatalogue = MakeConstantBuffer(sizeof(stars), stars);
+        g_starPicture = LoadTexture(DataFolder() + L"vfx_sun_01.dds");
+        if (!g_starCatalogue || !g_starPicture) {
+            rfa::Log("Stars: %s; no stars", g_starPicture ? "could not make their buffer" : "no mods\\guerrilla_world\\vfx_sun_01.dds (the world builder writes it)");
+            g_starsDrawn = 0;
+        }
+    }
+    g_nightSkyFailed = false;
+    return true;
+}
+
+void FillNightSkyConstants(const SkyConstants& sky, float strength, NightSkyConstants& out) {
+    memcpy(out.right, sky.right, sizeof(out.right));
+    memcpy(out.up, sky.up, sizeof(out.up));
+    memcpy(out.forward, sky.forward, sizeof(out.forward));
+    out.clock[0] = Seconds();
+    out.clock[1] = strength;
+    out.clock[2] = kNightSkyFar - 1;
+    float correction[3];
+    PartTint(correction);
+    for (int i = 0; i < 3; ++i) out.colour[i] = correction[i] * SkyBrightness();
+    out.colour[3] = 1;
+}
+
+void DrawStars(const SkyConstants& sky, float strength) {
+    if (g_starsDrawn <= 0) return;
+    NightSkyConstants constants = {};
+    FillNightSkyConstants(sky, strength, constants);
     D3D11_MAPPED_SUBRESOURCE mapped;
-    if (FAILED(g_context->Map(g_sunConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    if (FAILED(g_context->Map(g_starConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     memcpy(mapped.pData, &constants, sizeof(constants));
-    g_context->Unmap(g_sunConstants, 0);
-    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    g_context->Unmap(g_starConstants, 0);
+    ID3D11Buffer* buffers[2] = {g_starConstants, g_starCatalogue};
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->IASetInputLayout(nullptr);
-    g_context->VSSetShader(g_sunVertex, nullptr, 0);
-    g_context->PSSetShader(g_sunPixel, nullptr, 0);
-    g_context->VSSetConstantBuffers(0, 1, &g_sunConstants);
-    g_context->PSSetConstantBuffers(0, 1, &g_sunConstants);
-    g_context->PSSetShaderResources(0, 1, &g_sunDisc);
+    g_context->VSSetShader(g_starVertex, nullptr, 0);
+    g_context->PSSetShader(g_starPixel, nullptr, 0);
+    g_context->VSSetConstantBuffers(0, 2, buffers);
+    g_context->PSSetConstantBuffers(0, 1, &g_starConstants);
+    g_context->PSSetShaderResources(0, 1, &g_starPicture);
     g_context->PSSetSamplers(0, 1, &g_sunSampler);
     const float noFactor[4] = {1, 1, 1, 1};
     g_context->OMSetBlendState(g_sunBlend, noFactor, 0xFFFFFFFF);
-    g_context->Draw(4, 0);
+    g_context->Draw(g_starsDrawn * 6, 0);
+}
+
+// The meteors as Guerrilla's rl_meteor_shower::update moves them (only while the strength isn't 0):
+// those past their lifespan freed; its emission clock run on by the time since it last ran (no more
+// than half a second), a meteor made each time it passes the next delay (if one is free), and the
+// clock taken back by that delay.
+struct Meteor {
+    float at[3], velocity[3];  // from the camera, metres; metres a second
+    float born = 0, lifespan = -1;  // seconds; less than 0 while free
+};
+Meteor g_meteors[kMostMeteors];
+float g_meteorsUpdated = 0, g_meteorEmission = 0, g_nextMeteor = kMeteorDelay;
+unsigned g_meteorRandom = 0x9E3779B9u;
+
+float MeteorRandom() {  // 0 to 1 (Guerrilla's fl_rand; any even spread does)
+    g_meteorRandom ^= g_meteorRandom << 13;
+    g_meteorRandom ^= g_meteorRandom >> 17;
+    g_meteorRandom ^= g_meteorRandom << 5;
+    return (g_meteorRandom >> 8) / 16777216.0f;
+}
+
+void UpdateMeteors(float now) {
+    float elapsed = now - g_meteorsUpdated;
+    if (elapsed >= 0.5f) elapsed = 0.5f;
+    g_meteorsUpdated = now;
+    for (Meteor& meteor : g_meteors)
+        if (meteor.lifespan > 0 && now - meteor.born > meteor.lifespan) meteor.lifespan = -1;
+    g_meteorEmission += elapsed;
+    const float pi = 3.14159265f;
+    while (g_meteorEmission > g_nextMeteor) {
+        for (Meteor& meteor : g_meteors) {
+            if (meteor.lifespan > 0) continue;
+            const float from = 2 * pi * MeteorRandom();
+            const float to = from + pi + (2 * MeteorRandom() - 1) * pi / 6;
+            const float speed = kMeteorSpeed + MeteorRandom() * kMeteorSpeedRandom;
+            meteor.at[0] = cosf(from) * kNightSkyFar * 0.25f;
+            meteor.at[1] = kMeteorHeight;
+            meteor.at[2] = sinf(from) * kNightSkyFar * 0.25f;
+            const float way[3] = {cosf(to) * kNightSkyFar - meteor.at[0], 0, sinf(to) * kNightSkyFar - meteor.at[2]};
+            const float length = sqrtf(way[0] * way[0] + way[2] * way[2]);
+            for (int i = 0; i < 3; ++i) meteor.velocity[i] = length > 0 ? way[i] / length * speed : 0;
+            meteor.born = now;
+            meteor.lifespan = kMeteorLifespan + MeteorRandom() * kMeteorLifespanRandom;
+            break;
+        }
+        g_meteorEmission -= g_nextMeteor;
+        g_nextMeteor = kMeteorDelay + MeteorRandom() * kMeteorDelayRandom;
+    }
+}
+
+void DrawMeteors(const SkyConstants& sky, float strength) {
+    const float now = Seconds();
+    UpdateMeteors(now);
+    MeteorConstants constants = {};
+    FillNightSkyConstants(sky, strength, constants.sky);
+    int live = 0;
+    for (const Meteor& meteor : g_meteors) {
+        if (meteor.lifespan <= 0) continue;
+        float* start = constants.meteor[live * 2];
+        float* motion = constants.meteor[live * 2 + 1];
+        for (int i = 0; i < 3; ++i) {
+            start[i] = meteor.at[i];
+            motion[i] = meteor.velocity[i];
+        }
+        start[3] = now - meteor.born;
+        motion[3] = meteor.lifespan;
+        ++live;
+    }
+    if (live == 0) return;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(g_context->Map(g_meteorConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    memcpy(mapped.pData, &constants, sizeof(constants));
+    g_context->Unmap(g_meteorConstants, 0);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+    g_context->IASetInputLayout(nullptr);
+    g_context->VSSetShader(g_meteorVertex, nullptr, 0);
+    g_context->PSSetShader(g_meteorPixel, nullptr, 0);
+    g_context->VSSetConstantBuffers(0, 1, &g_meteorConstants);
+    g_context->PSSetConstantBuffers(0, 1, &g_meteorConstants);
+    const float noFactor[4] = {1, 1, 1, 1};
+    g_context->OMSetBlendState(g_sunBlend, noFactor, 0xFFFFFFFF);
+    g_context->Draw(live * 2, 0);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
+// The stars, then the meteors, while the night sky's strength isn't 0.
+void DrawNightSky(const SkyConstants& sky) {
+    const float strength = NightSkyStrength(g_timeOfDay);
+    if (strength <= 0 || !MakeNightSkyObjects()) return;
+    static bool told = false;
+    if (!told) {
+        told = true;
+        rfa::Log("Night sky: drawn from %.2f h, strength %.2f: %d stars and up to %d meteors", g_timeOfDay, strength, g_starsDrawn, kMostMeteors);
+    }
+    DrawStars(sky, strength);
+    DrawMeteors(sky, strength);
 }
 
 const char* FormatName(DXGI_FORMAT format) {
@@ -2908,7 +3482,7 @@ struct SavedState {
     ID3D11VertexShader* vertexShader = nullptr;
     ID3D11PixelShader* pixelShader = nullptr;
     ID3D11GeometryShader* geometryShader = nullptr;
-    ID3D11Buffer* vertexConstants = nullptr;
+    ID3D11Buffer* vertexConstants[2] = {};
     ID3D11Buffer* pixelConstants[3] = {};
     ID3D11ShaderResourceView* pixelResources[3] = {};
     ID3D11SamplerState* pixelSampler = nullptr;
@@ -2925,7 +3499,7 @@ struct SavedState {
         g_context->VSGetShader(&vertexShader, nullptr, nullptr);
         g_context->PSGetShader(&pixelShader, nullptr, nullptr);
         g_context->GSGetShader(&geometryShader, nullptr, nullptr);
-        g_context->VSGetConstantBuffers(0, 1, &vertexConstants);
+        g_context->VSGetConstantBuffers(0, 2, vertexConstants);
         g_context->PSGetConstantBuffers(0, 3, pixelConstants);
         g_context->PSGetShaderResources(0, 3, pixelResources);
         g_context->PSGetSamplers(0, 1, &pixelSampler);
@@ -2941,7 +3515,7 @@ struct SavedState {
         g_context->VSSetShader(vertexShader, nullptr, 0);
         g_context->PSSetShader(pixelShader, nullptr, 0);
         g_context->GSSetShader(geometryShader, nullptr, 0);
-        g_context->VSSetConstantBuffers(0, 1, &vertexConstants);
+        g_context->VSSetConstantBuffers(0, 2, vertexConstants);
         g_context->PSSetConstantBuffers(0, 3, pixelConstants);
         g_context->PSSetShaderResources(0, 3, pixelResources);
         g_context->PSSetSamplers(0, 1, &pixelSampler);
@@ -2949,7 +3523,7 @@ struct SavedState {
         g_context->RSSetState(raster);
         for (IUnknown* held : {static_cast<IUnknown*>(layout), static_cast<IUnknown*>(vertexBuffer), static_cast<IUnknown*>(indexBuffer),
                                static_cast<IUnknown*>(vertexShader), static_cast<IUnknown*>(pixelShader), static_cast<IUnknown*>(geometryShader),
-                               static_cast<IUnknown*>(vertexConstants), static_cast<IUnknown*>(pixelConstants[0]), static_cast<IUnknown*>(pixelConstants[1]),
+                               static_cast<IUnknown*>(vertexConstants[0]), static_cast<IUnknown*>(vertexConstants[1]), static_cast<IUnknown*>(pixelConstants[0]), static_cast<IUnknown*>(pixelConstants[1]),
                                static_cast<IUnknown*>(pixelConstants[2]),
                                static_cast<IUnknown*>(pixelResources[0]), static_cast<IUnknown*>(pixelResources[1]), static_cast<IUnknown*>(pixelResources[2]),
                                static_cast<IUnknown*>(pixelSampler), static_cast<IUnknown*>(blend), static_cast<IUnknown*>(raster)})
@@ -3007,7 +3581,7 @@ void DrawSky() {
         // Guerrilla's fog over the sky: the world's fog colour and numbers, the dome's scale and offset.
         float fogColour[3], correction[3];
         TodColour(kFogColour, fogColour);
-        ColourCorrection(correction);
+        PartTint(correction);
         for (int i = 0; i < 3; ++i) constants.fogColour[i] = fogColour[i] * correction[i] * SkyBrightness();
         FogNumbers(constants.fogNumbers);
         constants.domeFog[0] = kSkyFogFar;
@@ -3038,7 +3612,8 @@ void DrawSky() {
             g_context->OMSetDepthStencilState(g_skyDepth[reversed ? 1 : 0], 0);
             g_context->RSSetState(g_skyRaster);
             g_context->Draw(3, 0);
-            DrawSun(constants);
+            DrawOrbitals(constants);
+            DrawNightSky(constants);
             if (g_cloudsOn) DrawClouds(constants);
 
             saved.Restore();
@@ -3184,7 +3759,7 @@ bool FillSurfaceConstants() {
     SurfaceConstants constants = {};
     float toward[3], sun[3], tint[3];
     DirectLight(toward, sun);
-    ColourCorrection(tint);
+    PartTint(tint);
     for (int i = 0; i < 3; ++i) {
         constants.sunToward[i] = toward[i];
         constants.sunColour[i] = sun[i] * tint[i];
@@ -3244,7 +3819,7 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     LightConstants constants = {};
     float toward[3], sun[3], tint[3];
     DirectLight(toward, sun);
-    ColourCorrection(tint);
+    PartTint(tint);
     for (int i = 0; i < 3; ++i) {
         constants.fromAbove[i] = g_worldAmbient[i] * tint[i];
         constants.fromBelow[i] = g_worldBackAmbient[i] * tint[i];
@@ -3350,7 +3925,7 @@ void DrawFog() {
     FogConstants constants = {};
     float colour[3], tint[3];
     TodColour(kFogColour, colour);
-    ColourCorrection(tint);
+    PartTint(tint);
     for (int i = 0; i < 3; ++i) constants.fogColour[i] = colour[i] * tint[i];
     FogNumbers(constants.fogNumbers);
     // The camera's space: x along its right, y its up, z its forward (its rows in the world).
@@ -3501,6 +4076,221 @@ bool g_eyeReadPending = false;
 ID3D11ShaderResourceView* g_particleView = nullptr;
 bool g_particlesReady = false;
 
+// Guerrilla's bloom (see kBloomShader), in place of Armageddon's (its stages a sixth, twelfth and
+// 24th of the picture, equal parts, clamped, from a picture not scaled by the eye): three stages of
+// half-float pictures, a quarter of the picture's size and then half that twice (Guerrilla makes
+// two more it never uses), each in two (blurred one way into the other and back), remade when the
+// picture's size changes. Its curves from the time of day (bloom_exposure, bloom_theta, _slope_A,
+// _slope_B; bloom_amount in TonePixel). Re-Mars-tered always draws with fixed values instead
+// (RL_hdr_override: exposure 0.6, theta 1.2, slopes 0 and 0.08, amount 2.5); the Steam Edition's
+// can't be read (its code is encrypted), but Armageddon's copy of the switch is off unless set from
+// the console ("return control to the environment"), and the districts' curves are tuned one by one.
+constexpr size_t kBloomExposure = 0x3678, kBloomTheta = 0x41E8, kBloomSlopeA = 0x42DC, kBloomSlopeB = 0x43D0;
+
+struct BloomConstants {
+    float bright[4];
+    float curve[4];
+    float sizes[4];
+    float taps[9][4];
+};
+
+struct BloomStage {
+    ID3D11Texture2D* texture[2] = {};
+    ID3D11RenderTargetView* target[2] = {};
+    ID3D11ShaderResourceView* view[2] = {};
+    UINT width = 0, height = 0;
+};
+
+ID3D11PixelShader* g_bloomBright = nullptr;
+ID3D11PixelShader* g_bloomBox = nullptr;
+ID3D11PixelShader* g_bloomBlur = nullptr;
+ID3D11PixelShader* g_bloomCombine = nullptr;
+ID3D11Buffer* g_bloomConstants = nullptr;
+BloomStage g_bloomStages[3];
+UINT g_bloomForWidth = 0, g_bloomForHeight = 0;  // the picture's size the stages were made for
+bool g_bloomFailed = false;                     // then Armageddon's bloom stays
+
+bool MakeBloomShaders() {
+    ID3DBlob* blobs[4] = {Compile(kBloomShader, sizeof(kBloomShader) - 1, "BrightPixel", "ps_4_0"),
+                          Compile(kBloomShader, sizeof(kBloomShader) - 1, "BoxPixel", "ps_4_0"),
+                          Compile(kBloomShader, sizeof(kBloomShader) - 1, "BlurPixel", "ps_4_0"),
+                          Compile(kBloomShader, sizeof(kBloomShader) - 1, "CombinePixel", "ps_4_0")};
+    ID3D11PixelShader** shaders[4] = {&g_bloomBright, &g_bloomBox, &g_bloomBlur, &g_bloomCombine};
+    bool ok = true;
+    for (int i = 0; i < 4; ++i)
+        ok = ok && blobs[i] && SUCCEEDED(g_device->CreatePixelShader(blobs[i]->GetBufferPointer(), blobs[i]->GetBufferSize(), nullptr, shaders[i]));
+    for (ID3DBlob* blob : blobs)
+        if (blob) blob->Release();
+    D3D11_BUFFER_DESC buffer = {};
+    buffer.ByteWidth = sizeof(BloomConstants);
+    buffer.Usage = D3D11_USAGE_DYNAMIC;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    return ok && SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_bloomConstants));
+}
+
+void DropBloomStages() {
+    for (BloomStage& stage : g_bloomStages)
+        for (int i = 0; i < 2; ++i) {
+            if (stage.view[i]) stage.view[i]->Release();
+            if (stage.target[i]) stage.target[i]->Release();
+            if (stage.texture[i]) stage.texture[i]->Release();
+            stage.view[i] = nullptr;
+            stage.target[i] = nullptr;
+            stage.texture[i] = nullptr;
+        }
+    g_bloomForWidth = g_bloomForHeight = 0;
+}
+
+// The stages for a picture this size: a quarter of it (Guerrilla's w >> 2), then each half the one
+// before, rounded (Guerrilla's (int)(size × 0.5 + 0.5)).
+bool MakeBloomStages(UINT width, UINT height) {
+    DropBloomStages();
+    UINT w = width >> 2, h = height >> 2;
+    for (int s = 0; s < 3; ++s) {
+        if (s > 0) {
+            w = static_cast<UINT>(w * 0.5f + 0.5f);
+            h = static_cast<UINT>(h * 0.5f + 0.5f);
+        }
+        if (w == 0 || h == 0) return false;
+        BloomStage& stage = g_bloomStages[s];
+        stage.width = w;
+        stage.height = h;
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = w;
+        desc.Height = h;
+        desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        for (int i = 0; i < 2; ++i)
+            if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &stage.texture[i])) ||
+                FAILED(g_device->CreateRenderTargetView(stage.texture[i], nullptr, &stage.target[i])) ||
+                FAILED(g_device->CreateShaderResourceView(stage.texture[i], nullptr, &stage.view[i])))
+                return false;
+    }
+    g_bloomForWidth = width;
+    g_bloomForHeight = height;
+    rfa::Log("Bloom: Guerrilla's, in stages of %u x %u, %u x %u and %u x %u", g_bloomStages[0].width, g_bloomStages[0].height,
+             g_bloomStages[1].width, g_bloomStages[1].height, g_bloomStages[2].width, g_bloomStages[2].height);
+    return true;
+}
+
+// A blur's 9 taps as Guerrilla lays them (rl_gaussian5x5_blur_kernel::init, then init_bilinear): 17
+// weights e^(−x² ÷ 2σ²) for x from −8 to 8, made to add up to 1; the pairs (−8, −7) … (−2, −1) each
+// folded into one tap between them (where a filtered sample weighs the two as they are), the middle
+// kept, the other side the same; along one axis, a texel the stage's width or height.
+void BloomTaps(float sigma, float texel, bool vertical, float (&taps)[9][4]) {
+    float weights[17], sum = 0;
+    for (int i = 0; i < 17; ++i) {
+        const float x = static_cast<float>(i - 8);
+        weights[i] = expf(-x * x / (2 * sigma * sigma));
+        sum += weights[i];
+    }
+    float where[9], much[9];
+    for (int k = 0; k < 4; ++k) {
+        const float a = weights[2 * k] / sum, b = weights[2 * k + 1] / sum;
+        much[k] = a + b;
+        where[k] = ((2 * k - 8) * a + (2 * k - 7) * b) / (a + b);
+    }
+    where[4] = 0;
+    much[4] = weights[8] / sum;
+    for (int k = 0; k < 4; ++k) {
+        where[5 + k] = -where[3 - k];
+        much[5 + k] = much[3 - k];
+    }
+    for (int k = 0; k < 9; ++k) {
+        taps[k][0] = vertical ? 0 : where[k] * texel;
+        taps[k][1] = vertical ? where[k] * texel : 0;
+        taps[k][2] = 0;
+        taps[k][3] = much[k];
+    }
+}
+
+// One of the bloom's passes: into a target of this size, from these pictures (t0-t4), with this shader.
+bool BloomPass(ID3D11RenderTargetView* target, UINT width, UINT height, ID3D11ShaderResourceView* const (&from)[5], ID3D11PixelShader* shader,
+               const BloomConstants& constants) {
+    ID3D11ShaderResourceView* none[5] = {};
+    g_context->PSSetShaderResources(0, 5, none);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(g_context->Map(g_bloomConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    memcpy(mapped.pData, &constants, sizeof(constants));
+    g_context->Unmap(g_bloomConstants, 0);
+    const D3D11_VIEWPORT viewport = {0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+    g_context->OMSetRenderTargets(1, &target, nullptr);
+    g_context->RSSetViewports(1, &viewport);
+    g_context->PSSetShaderResources(0, 5, from);
+    g_context->PSSetShader(shader, nullptr, 0);
+    g_context->Draw(3, 0);
+    return true;
+}
+
+// Blurs a stage in place: along its width into its second picture, then along its height back.
+bool BlurStage(BloomStage& stage, float sigma, BloomConstants& constants) {
+    constants.sizes[0] = 1.0f / stage.width;
+    constants.sizes[1] = 1.0f / stage.height;
+    BloomTaps(sigma, 1.0f / stage.width, false, constants.taps);
+    ID3D11ShaderResourceView* across[5] = {stage.view[0]};
+    if (!BloomPass(stage.target[1], stage.width, stage.height, across, g_bloomBlur, constants)) return false;
+    BloomTaps(sigma, 1.0f / stage.height, true, constants.taps);
+    ID3D11ShaderResourceView* down[5] = {stage.view[1]};
+    return BloomPass(stage.target[0], stage.width, stage.height, down, g_bloomBlur, constants);
+}
+
+// Guerrilla's bloom of this frame's scene, after the eye has been measured: the picture to lay into
+// the tone mapping (null: none made, Armageddon's stays). The caller has the tone mapping's vertex
+// shader, sampler, states and constant buffer bound, and puts the constant buffer back after.
+ID3D11ShaderResourceView* DrawGuerrillaBloom(ID3D11ShaderResourceView* scene, ID3D11ShaderResourceView* eye, ID3D11ShaderResourceView* particles,
+                                             UINT width, UINT height) {
+    if (g_bloomFailed) return nullptr;
+    if (!g_bloomBright && !MakeBloomShaders()) {
+        g_bloomFailed = true;
+        rfa::Log("Bloom: could not make Guerrilla's bloom's shaders; Armageddon's stays");
+        return nullptr;
+    }
+    if ((g_bloomForWidth != width || g_bloomForHeight != height) && !MakeBloomStages(width, height)) {
+        DropBloomStages();
+        g_bloomFailed = true;
+        rfa::Log("Bloom: could not make Guerrilla's bloom's pictures for %u x %u; Armageddon's stays", width, height);
+        return nullptr;
+    }
+    g_context->PSSetConstantBuffers(0, 1, &g_bloomConstants);
+    BloomConstants constants = {};
+    constants.bright[0] = TodNumber(kBloomExposure);
+    constants.bright[1] = TodNumber(kEyeAdaptionBase);
+    constants.bright[2] = TodNumber(kEyeAdaptionAmount);
+    constants.curve[0] = TodNumber(kBloomTheta);
+    constants.curve[1] = TodNumber(kBloomSlopeA);
+    constants.curve[2] = TodNumber(kBloomSlopeB);
+    constants.curve[3] = constants.curve[0] * constants.curve[1];
+    constants.sizes[2] = 1.0f / width;
+    constants.sizes[3] = 1.0f / height;
+    BloomStage& first = g_bloomStages[0];
+    BloomStage& second = g_bloomStages[1];
+    BloomStage& third = g_bloomStages[2];
+    // The bright pass, then the first stage blurred (σ 2); each further stage boxed down from the one
+    // before and blurred (σ 3); then the three together, into the first stage's second picture.
+    ID3D11ShaderResourceView* bright[5] = {scene, eye, particles};
+    constants.sizes[0] = 1.0f / first.width;
+    constants.sizes[1] = 1.0f / first.height;
+    bool ok = BloomPass(first.target[0], first.width, first.height, bright, g_bloomBright, constants) && BlurStage(first, 2, constants);
+    BloomStage* stages[3] = {&first, &second, &third};
+    for (int s = 1; s < 3 && ok; ++s) {
+        constants.sizes[0] = 1.0f / stages[s]->width;
+        constants.sizes[1] = 1.0f / stages[s]->height;
+        ID3D11ShaderResourceView* box[5] = {stages[s - 1]->view[0]};
+        ok = BloomPass(stages[s]->target[0], stages[s]->width, stages[s]->height, box, g_bloomBox, constants) && BlurStage(*stages[s], 3, constants);
+    }
+    constants.sizes[0] = 1.0f / first.width;
+    constants.sizes[1] = 1.0f / first.height;
+    ID3D11ShaderResourceView* together[5] = {first.view[0], nullptr, nullptr, second.view[0], third.view[0]};
+    ok = ok && BloomPass(first.target[1], first.width, first.height, together, g_bloomCombine, constants);
+    ID3D11ShaderResourceView* none[5] = {};
+    g_context->PSSetShaderResources(0, 5, none);
+    return ok ? first.view[1] : nullptr;
+}
+
 void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* scene, ID3D11ShaderResourceView* bloom, UINT width, UINT height) {
     // The frame's time, for the eye (a new start after a gap of more than a second).
     LARGE_INTEGER now, frequency;
@@ -3527,6 +4317,10 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     float sunAt[2] = {};
     const bool shafts = SunShaftsOn() && g_shaftDepth && SunOnPicture(width, height, sunAt);
     constants.shafts[0] = shafts ? g_sunShafts : 0.0f;
+    float tint[3];
+    ColourCorrection(tint);
+    for (int i = 0; i < 3; ++i) constants.tint[i] = tint[i];
+    constants.tint[3] = g_colourCorrection ? TodNumber(kColourSaturation) : 1.0f;
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(g_context->Map(g_toneConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     memcpy(mapped.pData, &constants, sizeof(constants));
@@ -3565,6 +4359,12 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     g_context->PSSetShader(g_adaptPixel, nullptr, 0);
     g_context->OMSetBlendState(g_eyeBlend, noFactor, 0xFFFFFFFF);
     g_context->Draw(3, 0);
+
+    // Guerrilla's bloom of this scene, as its own compositor makes it once the eye is measured, in
+    // place of Armageddon's (which stays if ours can't be made).
+    if (ID3D11ShaderResourceView* ours = DrawGuerrillaBloom(scene, g_eyeView[next], g_particlesReady ? g_particleView : nullptr, width, height))
+        bloom = ours;
+    g_context->PSSetConstantBuffers(0, 1, &g_toneConstants);
 
     // The sun shafts (with none drawn the shader reads nothing there).
     ID3D11ShaderResourceView* sunShafts = nullptr;
@@ -3832,7 +4632,7 @@ void __fastcall LightPass(void* renderer, void* unused) {
     DropFogInputs();
     if (g_shaftDepth) g_shaftDepth->Release();
     g_shaftDepth = nullptr;
-    g_noteFog = ours && ((g_fog > 0 && !g_fogFailed) || SunShaftsOn());
+    g_noteFog = ours && ((g_fog > 0 && !g_fogFailed) || SunShaftsOn() || CoronaWanted());
     g_lightPass(renderer, unused);
     g_noteFog = false;
     if (g_inLightPass) {
@@ -3913,8 +4713,9 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
             DrawFog();
         }
     }
-    // The depth stays for the sun shafts, drawn with the tone mapping at the end of the frame.
-    if (ours && SunShaftsOn() && g_fogDepth && !g_shaftDepth) {
+    // The depth stays for the sun's corona, drawn with the particles, and the sun shafts, drawn with
+    // the tone mapping at the end of the frame.
+    if (ours && (SunShaftsOn() || CoronaWanted()) && g_fogDepth && !g_shaftDepth) {
         g_shaftDepth = g_fogDepth;
         g_shaftDepth->AddRef();
     }
@@ -4165,6 +4966,452 @@ using CreateDeviceFn = HRESULT(WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE,
 CreateDeviceFn g_createDevice;
 
 // Notes the device the game makes (the last one, if it makes several), and keeps it alive.
+// ---- The sun's corona
+// Guerrilla's sun has a corona: its time of day gives the Sun orbital an effect (env_sun_corona_a),
+// played at each level's start and kept one metre from the camera toward the sun; its five coronas
+// (the sun's rays, a wide glow, a halo and two lens flares) are pictures laid over the screen round
+// the sun, fading as it is hidden or sets. Armageddon reads an orbital's effect but never plays it,
+// so the mod draws them as Guerrilla's corona shader (rl_corona) does, from corona.bin (each corona's
+// numbers and texture, which the world builder writes from Guerrilla's effect): at the end of the
+// particle phase, into the particle layer (Guerrilla draws coronas with its particles; without the
+// layer, into the scene as the game's particles are), each one's colour added (its additive key is 1).
+//
+// How much of each is seen, as Guerrilla measures it with two occlusion queries a frame: of a square
+// facing the camera round the sun, as wide as the corona's visibility radius one metre away, the share
+// of its pixels on the screen where nothing was drawn (the depth still at the far plane), eased over
+// the frames (while between 5% and 99%: by 0.6 × the gap × the gap each frame; else taken at once).
+// The mod samples the light pass's depth over the square (8 × 8 places) into a small texture, reading
+// last frame's back on the graphics card for the easing.
+//
+// Each corona, as rl_corona's vertex and pixel shaders work it out (the corona one metre away):
+// - shown: the visibility × its fade as the sun sets (its height ÷ 0.02, 0 to 1), less the share of the
+//   square off the screen, eased (smoothstep); its opacity × shown^(opacity visibility decay), its size
+//   × shown^(radius visibility decay);
+// - its size and colour between their start and end values by the square root of how far it is
+//   between its distances (here 1 m of 0-100: a tenth of the way);
+// - a square on the screen round the sun, its size in screen units (the width × its width scale; the
+//   height × the screen's width ÷ height), turned by its rotation offset and 2π(½ + ½ × its rotation
+//   scale × how far the sun is to the side), and moved along that turn by its position offset;
+// - its brightness 1 + intensity scale × (1 − smoothstep(how far the sun is to the side))^decay;
+// - its texture's colour, its saturation applied (from its grey 0.3/0.59/0.11), times its colour and
+//   Guerrilla's particle tint (1.6, as its particles are drawn with), the result premultiplied by its
+//   alpha and held to 0-1.
+// (Not drawn: Guerrilla's view fade, off in all five; its fog, nothing one metre away; coronas in the
+// world rather than on the screen, which the sun's has none of.)
+constexpr char kCoronaShader[] = R"(
+cbuffer Corona : register(b0)
+{
+    float4 Right;        // the camera's right (xyz), the tan of half its field of view across (w)
+    float4 Up;           // its up, the tan of half its field of view up
+    float4 Forward;      // its forward
+    float4 Sun;          // toward the sun (xyz), its fade as it sets (w)
+    float4 Screen;       // x the picture's width ÷ height, y this corona's place in the visibility texture
+    float4 ColourStart;
+    float4 ColourEnd;
+    float4 Radius;       // its size at the start and end, and the distances it goes between
+    float4 Shade;        // the distances its colour goes between, its opacity's and size's visibility decays
+    float4 Shape;        // its width scale, visibility radius, position offset and saturation
+    float4 Turn;         // its rotation scale, rotation offset (degrees), intensity scale and intensity decay
+    float4 Tint;         // Guerrilla's particle tint (rgb times SunCorona=)
+    float4 Radii[4];     // every corona's visibility radius, four a vector (the visibility pass)
+    float4 Depth;        // the depth's width and height (xy), its value at the far plane (z)
+};
+
+Texture2D DepthMap : register(t0);  // SeenPixel: the light pass's depth
+Texture2D Before : register(t1);    // SeenPixel: last frame's visibility
+Texture2D Picture : register(t2);   // CoronaPixel: the corona's texture
+Texture2D Seen : register(t3);      // CoronaVertex: this frame's visibility
+SamplerState Smooth : register(s0);
+
+float2 OnScreen(float3 look)
+{
+    float depth = dot(look, Forward.xyz);
+    return float2(dot(look, Right.xyz) / Right.w, dot(look, Up.xyz) / Up.w) / depth;
+}
+
+float4 SeenVertex(uint id : SV_VertexID) : SV_Position
+{
+    float2 corner = float2((id << 1) & 2, id & 2);
+    return float4(corner * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+
+float4 SeenPixel(float4 position : SV_Position) : SV_Target
+{
+    uint i = (uint)position.x;
+    float half = 0.5 * Radii[i / 4][i % 4];
+    float seen = 0, all = 0;
+    if (dot(Sun.xyz, Forward.xyz) > 0)
+    {
+        float2 low = OnScreen(Sun.xyz - (Right.xyz + Up.xyz) * half), high = OnScreen(Sun.xyz + (Right.xyz + Up.xyz) * half);
+        float2 a = clamp(min(low, high), -1, 1), b = clamp(max(low, high), -1, 1);
+        if (b.x > a.x && b.y > a.y)
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                {
+                    float2 at = lerp(a, b, (float2(x, y) + 0.5) / 8);
+                    int2 pixel = min(int2((at * float2(0.5, -0.5) + 0.5) * Depth.xy), int2(Depth.xy) - 1);
+                    all += 1;
+                    seen += abs(DepthMap.Load(int3(pixel, 0)).x - Depth.z) < 0.0000001 ? 1 : 0;
+                }
+    }
+    float now = all > 0 ? seen / all : 0;
+    float before = Before.Load(int3(i, 0, 0)).x;
+    return now >= 0.05 && now <= 0.99 ? before + 0.6 * abs(before - now) * (now - before) : now;
+}
+
+struct CoronaPoint
+{
+    float4 position : SV_Position;
+    float4 colour : COLOR0;
+    float2 uv : TEXCOORD0;
+    float saturation : TEXCOORD1;
+};
+
+CoronaPoint CoronaVertex(uint id : SV_VertexID)
+{
+    float2 uv = float2(id & 1, id >> 1);
+    float3 at = Sun.xyz;
+    float visibility = Seen.Load(int3((int)Screen.y, 0, 0)).x * Sun.w;
+    float half = 0.5 * Shape.y;
+    float2 topLeft = OnScreen(at - Right.xyz * half + Up.xyz * half);
+    float2 topRight = OnScreen(at + Right.xyz * half + Up.xyz * half);
+    float2 bottomRight = OnScreen(at + Right.xyz * half - Up.xyz * half);
+    float area = abs(topRight.x - topLeft.x) * abs(bottomRight.y - topRight.y);
+    float kept = abs(clamp(topRight.x, -1, 1) - clamp(topLeft.x, -1, 1)) * abs(clamp(bottomRight.y, -1, 1) - clamp(topRight.y, -1, 1));
+    float shown = visibility == 0 ? 0 : saturate((visibility * area - (area - kept)) / area);
+    shown = shown * shown * (3 - 2 * shown);
+    float opacity = shown > 0 ? pow(shown, Shade.z) : 0;
+    float size = shown > 0 ? pow(shown, Shade.w) : 0;
+
+    float distance = length(at);
+    float3 toEye = -at / distance;
+    float radius = (sqrt(max(min(distance, Radius.w) - Radius.z, 0) / (Radius.w - Radius.z)) * (Radius.y - Radius.x) + Radius.x) * size;
+    float4 colour = lerp(ColourStart, ColourEnd, sqrt(max(min(distance, Shade.y) - Shade.x, 0) / (Shade.y - Shade.x)));
+    float across = dot(toEye, Right.xyz);
+    float width = radius * Shape.x;
+    float angle = Turn.y * 0.017453 + 6.283185 * (0.5 + 0.5 * across * Turn.x);
+    float s, c;
+    sincos(angle, s, c);
+    float2 d = uv - 0.5;
+    float2 offset = float2(s * d.y * radius + c * d.x * width + c * Shape.z, -c * d.y * radius + s * d.x * width + s * Shape.z);
+
+    CoronaPoint p;
+    p.position = float4(OnScreen(at) + float2(offset.x, offset.y * Screen.x), 0, 1);
+    float side = min(abs(across), 1);
+    float intensity = pow(max(1 - side * side * (3 - 2 * side), 0.000001), Turn.w) * Turn.z + 1;
+    p.colour = float4(colour.rgb * intensity, colour.a * opacity);
+    p.uv = uv;
+    p.saturation = Shape.w;
+    return p;
+}
+
+float4 CoronaPixel(CoronaPoint p) : SV_Target
+{
+    float4 picture = Picture.Sample(Smooth, p.uv);
+    float grey = dot(picture.rgb, float3(0.3, 0.59, 0.11));
+    float4 c = float4(max(grey + p.saturation * (picture.rgb - grey), 0), picture.a) * p.colour * Tint;
+    return float4(saturate(c.a * c.rgb), 0);
+}
+)";
+
+// Guerrilla's tint on everything its particle renderer draws (render_scene_part2, into Tint_color).
+constexpr float kParticleTint = 1.6f;
+constexpr int kMostCoronas = 16;
+constexpr float kCoronaDistance = 1;  // how far from the camera toward the sun Guerrilla keeps it, metres
+constexpr char kCoronaFileMagic[8] = {'G', 'W', 'C', 'O', 'R', 'O', 'N', '1'};
+
+struct Corona {
+    std::string orbital, effect, texture;
+    int type = 0;
+    bool viewFade[3] = {};
+    float rotationOffset = 0, colourStart[4] = {}, colourEnd[4] = {};
+    float numbers[18] = {};  // as corona.bin: radius start, end, distance start, end; colour distance start, end,
+                             // opacity's and size's visibility decay; width scale, visibility radius, position
+                             // offset, saturation; rotation scale, intensity scale, intensity decay, opacity
+                             // decay; view fade scale and decay
+    ID3D11ShaderResourceView* picture = nullptr;
+};
+
+struct CoronaConstants {
+    float right[4], up[4], forward[4], sun[4], screen[4];
+    float colourStart[4], colourEnd[4], radius[4], shade[4], shape[4], turn[4], tint[4];
+    float radii[4][4];
+    float depth[4];
+};
+
+std::string g_coronaWorld;
+std::vector<Corona> g_coronas;
+ID3D11VertexShader* g_seenVertex = nullptr;
+ID3D11PixelShader* g_seenPixel = nullptr;
+ID3D11VertexShader* g_coronaVertex = nullptr;
+ID3D11PixelShader* g_coronaPixel = nullptr;
+ID3D11Buffer* g_coronaConstants = nullptr;
+ID3D11BlendState* g_coronaBlend = nullptr;
+ID3D11RasterizerState* g_coronaRaster = nullptr;
+ID3D11SamplerState* g_coronaSampler = nullptr;
+ID3D11Texture2D* g_coronaSeen[2] = {};  // the visibility, one texel a corona: drawn into in turn
+ID3D11RenderTargetView* g_coronaSeenTarget[2] = {};
+ID3D11ShaderResourceView* g_coronaSeenView[2] = {};
+int g_coronaSeenNext = 0;
+bool g_coronaFailed = false;
+ID3D11RenderTargetView* g_coronaTarget = nullptr;  // what the particle phase draws into, from its start
+
+bool CoronaWanted() { return !g_coronaFailed && g_sunCorona > 0; }
+
+void DropCoronas() {
+    for (Corona& corona : g_coronas)
+        if (corona.picture) corona.picture->Release();
+    g_coronas.clear();
+}
+
+// The world's coronas from mods\guerrilla_world\corona.bin, and their textures (once a world).
+void ReadCoronas() {
+    const char* world = WorldName();
+    if (g_coronaWorld == world) return;
+    g_coronaWorld = world;
+    DropCoronas();
+    std::vector<BYTE> bytes;
+    if (!ReadWholeFile(DataFolder() + L"corona.bin", bytes) || bytes.size() < 12 || memcmp(bytes.data(), kCoronaFileMagic, 8) != 0) {
+        rfa::Log("Corona: no mods\\guerrilla_world\\corona.bin (the world builder writes it); the sun has none");
+        g_coronaFailed = true;
+        return;
+    }
+    int count = 0;
+    memcpy(&count, bytes.data() + 8, 4);
+    constexpr size_t kEach = 32 + 32 + 64 + 4 + 4 + 4 + 16 + 16 + 18 * 4;
+    if (count < 0 || bytes.size() < 12 + static_cast<size_t>(count) * kEach) {
+        rfa::Log("Corona: mods\\guerrilla_world\\corona.bin is cut short; the sun has none");
+        g_coronaFailed = true;
+        return;
+    }
+    const BYTE* at = bytes.data() + 12;
+    auto text = [&](size_t size) {
+        std::string s(reinterpret_cast<const char*>(at), strnlen(reinterpret_cast<const char*>(at), size));
+        at += size;
+        return s;
+    };
+    auto floats = [&](float* out, int n) {
+        memcpy(out, at, n * sizeof(float));
+        at += n * sizeof(float);
+    };
+    for (int i = 0; i < count && static_cast<int>(g_coronas.size()) < kMostCoronas; ++i) {
+        Corona corona;
+        corona.orbital = text(32);
+        corona.effect = text(32);
+        corona.texture = text(64);
+        memcpy(&corona.type, at, 4);
+        at += 4;
+        for (int k = 0; k < 3; ++k) corona.viewFade[k] = at[k] != 0;
+        at += 4;
+        floats(&corona.rotationOffset, 1);
+        floats(corona.colourStart, 4);
+        floats(corona.colourEnd, 4);
+        floats(corona.numbers, 18);
+        const std::wstring texture(corona.texture.begin(), corona.texture.end());
+        corona.picture = corona.texture.empty() ? nullptr : LoadTexture(DataFolder() + texture + L".dds");
+        if (!corona.picture) rfa::Log("Corona: no mods\\guerrilla_world\\%s.dds; that corona isn't drawn", corona.texture.c_str());
+        if (corona.type != 0) rfa::Log("Corona: %s's %s (%s) is a corona in the world, which the mod doesn't draw", corona.orbital.c_str(), corona.effect.c_str(), corona.texture.c_str());
+        if (corona.viewFade[0] || corona.viewFade[1] || corona.viewFade[2])
+            rfa::Log("Corona: %s's %s (%s) has a view fade, which the mod leaves out", corona.orbital.c_str(), corona.effect.c_str(), corona.texture.c_str());
+        g_coronas.push_back(std::move(corona));
+    }
+    rfa::Log("Corona: %zu coronas from corona.bin (%s's %s)", g_coronas.size(), g_coronas.empty() ? "-" : g_coronas[0].orbital.c_str(),
+             g_coronas.empty() ? "-" : g_coronas[0].effect.c_str());
+}
+
+bool MakeCoronaObjects() {
+    if (g_coronaVertex) return true;
+    if (!LoadCompiler()) return false;
+    ID3DBlob* blobs[4] = {Compile(kCoronaShader, sizeof(kCoronaShader) - 1, "SeenVertex", "vs_4_0"),
+                          Compile(kCoronaShader, sizeof(kCoronaShader) - 1, "SeenPixel", "ps_4_0"),
+                          Compile(kCoronaShader, sizeof(kCoronaShader) - 1, "CoronaVertex", "vs_4_0"),
+                          Compile(kCoronaShader, sizeof(kCoronaShader) - 1, "CoronaPixel", "ps_4_0")};
+    bool ok = blobs[0] && blobs[1] && blobs[2] && blobs[3] &&
+              SUCCEEDED(g_device->CreateVertexShader(blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &g_seenVertex)) &&
+              SUCCEEDED(g_device->CreatePixelShader(blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &g_seenPixel)) &&
+              SUCCEEDED(g_device->CreateVertexShader(blobs[2]->GetBufferPointer(), blobs[2]->GetBufferSize(), nullptr, &g_coronaVertex)) &&
+              SUCCEEDED(g_device->CreatePixelShader(blobs[3]->GetBufferPointer(), blobs[3]->GetBufferSize(), nullptr, &g_coronaPixel));
+    for (ID3DBlob* blob : blobs)
+        if (blob) blob->Release();
+    D3D11_BUFFER_DESC buffer = {};
+    buffer.ByteWidth = sizeof(CoronaConstants);
+    buffer.Usage = D3D11_USAGE_DYNAMIC;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ok = ok && SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_coronaConstants));
+    D3D11_BLEND_DESC blend = {};  // premultiplied, as the particles are drawn
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blend.RenderTarget[0].DestBlend = blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOp = blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ok = ok && SUCCEEDED(g_device->CreateBlendState(&blend, &g_coronaBlend));
+    D3D11_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D11_FILL_SOLID;
+    raster.CullMode = D3D11_CULL_NONE;
+    raster.DepthClipEnable = TRUE;
+    ok = ok && SUCCEEDED(g_device->CreateRasterizerState(&raster, &g_coronaRaster));
+    D3D11_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    ok = ok && SUCCEEDED(g_device->CreateSamplerState(&sampler, &g_coronaSampler));
+    D3D11_TEXTURE2D_DESC seen = {};
+    seen.Width = kMostCoronas;
+    seen.Height = 1;
+    seen.MipLevels = seen.ArraySize = 1;
+    seen.Format = DXGI_FORMAT_R16_FLOAT;
+    seen.SampleDesc.Count = 1;
+    seen.Usage = D3D11_USAGE_DEFAULT;
+    seen.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    for (int i = 0; i < 2 && ok; ++i)
+        ok = SUCCEEDED(g_device->CreateTexture2D(&seen, nullptr, &g_coronaSeen[i])) &&
+             SUCCEEDED(g_device->CreateRenderTargetView(g_coronaSeen[i], nullptr, &g_coronaSeenTarget[i])) &&
+             SUCCEEDED(g_device->CreateShaderResourceView(g_coronaSeen[i], nullptr, &g_coronaSeenView[i]));
+    if (ok) {
+        const float none[4] = {0, 0, 0, 0};
+        for (ID3D11RenderTargetView* target : g_coronaSeenTarget) g_context->ClearRenderTargetView(target, none);
+    } else {
+        rfa::Log("Corona: could not make its shaders or textures; the sun has none");
+    }
+    return ok;
+}
+
+// Draws the sun's coronas into what the particle phase draws into (see above), and puts the device
+// context back as it was.
+void DrawSunCorona() {
+    ID3D11RenderTargetView* target = g_coronaTarget;
+    g_coronaTarget = nullptr;
+    if (!target) return;
+    D3D11_TEXTURE2D_DESC targetDesc, depthDesc;
+    const Orbital* sun = nullptr;
+    float toward[3] = {}, fade = 0;
+    if (!g_coronaFailed) {
+        ReadOrbitals();
+        ReadCoronas();
+        if (!g_coronas.empty())
+            for (const Orbital& orbital : g_orbitals)
+                if (orbital.name == g_coronas[0].orbital) sun = &orbital;
+        if (!g_coronas.empty() && !sun) RFA_LOG_FIRST(1, "Corona: the time of day has no orbital named %s; no corona", g_coronas[0].orbital.c_str());
+        if (sun) OrbitalToward(*sun, g_timeOfDay, toward);
+        fade = toward[1] >= 0.02f ? 1 : (toward[1] > 0 ? toward[1] / 0.02f : 0);
+    }
+    bool ready = sun && fade > 0 && g_shaftDepth && TextureOf(target, targetDesc) && TextureOf(g_shaftDepth, depthDesc) && targetDesc.Height > 0;
+    if (ready && !MakeCoronaObjects()) {
+        g_coronaFailed = true;
+        ready = false;
+    }
+    if (!ready) {
+        target->Release();
+        return;
+    }
+    RFA_LOG_FIRST(1, "Corona: drawing %s's %zu coronas in world \"%s\"", sun->name.c_str(), g_coronas.size(), WorldName());
+
+    CoronaConstants constants = {};
+    const float width = static_cast<float>(targetDesc.Width), height = static_cast<float>(targetDesc.Height);
+    const float tanUp = tanf(g_cameraFov * 3.14159265f / 360.0f);
+    for (int i = 0; i < 3; ++i) {
+        constants.right[i] = g_cameraRotation[i];
+        constants.up[i] = g_cameraRotation[3 + i];
+        constants.forward[i] = g_cameraRotation[6 + i];
+        constants.sun[i] = toward[i] * kCoronaDistance;
+        constants.tint[i] = kParticleTint * g_sunCorona;
+    }
+    constants.right[3] = tanUp * width / height;
+    constants.up[3] = tanUp;
+    constants.sun[3] = fade;
+    constants.screen[0] = width / height;
+    constants.tint[3] = 1;
+    for (size_t i = 0; i < g_coronas.size(); ++i) constants.radii[i / 4][i % 4] = g_coronas[i].numbers[9];
+    constants.depth[0] = static_cast<float>(depthDesc.Width);
+    constants.depth[1] = static_cast<float>(depthDesc.Height);
+    constants.depth[2] = g_farDepth;
+
+    SavedState saved;
+    saved.Save();
+    ID3D11RenderTargetView* gameTarget = nullptr;
+    ID3D11DepthStencilView* gameDepth = nullptr;
+    g_context->OMGetRenderTargets(1, &gameTarget, &gameDepth);
+    D3D11_VIEWPORT gameViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    g_context->RSGetViewports(&viewportCount, gameViewports);
+    ID3D11ShaderResourceView* gameVertexResource = nullptr;
+    g_context->VSGetShaderResources(3, 1, &gameVertexResource);
+    ID3D11DepthStencilState* gameDepthState = nullptr;
+    UINT stencilRef = 0;
+    g_context->OMGetDepthStencilState(&gameDepthState, &stencilRef);
+
+    auto upload = [&]() {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (FAILED(g_context->Map(g_coronaConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+        memcpy(mapped.pData, &constants, sizeof(constants));
+        g_context->Unmap(g_coronaConstants, 0);
+        return true;
+    };
+    const float noFactor[4] = {1, 1, 1, 1};
+    const int next = g_coronaSeenNext, before = 1 - next;
+    g_coronaSeenNext = before;
+    if (upload()) {
+        // How much of each is seen: one texel a corona, from the depth and last frame's.
+        ID3D11ShaderResourceView* none[2] = {};
+        g_context->VSSetShaderResources(3, 1, none);
+        g_context->OMSetRenderTargets(1, &g_coronaSeenTarget[next], nullptr);
+        D3D11_VIEWPORT seenViewport = {0, 0, static_cast<float>(g_coronas.size()), 1, 0, 1};
+        g_context->RSSetViewports(1, &seenViewport);
+        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_context->IASetInputLayout(nullptr);
+        g_context->VSSetShader(g_seenVertex, nullptr, 0);
+        g_context->PSSetShader(g_seenPixel, nullptr, 0);
+        g_context->GSSetShader(nullptr, nullptr, 0);
+        g_context->VSSetConstantBuffers(0, 1, &g_coronaConstants);
+        g_context->PSSetConstantBuffers(0, 1, &g_coronaConstants);
+        ID3D11ShaderResourceView* seenInputs[2] = {g_shaftDepth, g_coronaSeenView[before]};
+        g_context->PSSetShaderResources(0, 2, seenInputs);
+        g_context->OMSetBlendState(nullptr, noFactor, 0xFFFFFFFF);
+        g_context->OMSetDepthStencilState(nullptr, 0);
+        g_context->RSSetState(g_coronaRaster);
+        g_context->Draw(3, 0);
+        g_context->PSSetShaderResources(0, 2, none);
+
+        // The coronas, over the picture.
+        g_context->OMSetRenderTargets(1, &target, nullptr);
+        D3D11_VIEWPORT viewport = {0, 0, width, height, 0, 1};
+        g_context->RSSetViewports(1, &viewport);
+        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        g_context->VSSetShader(g_coronaVertex, nullptr, 0);
+        g_context->PSSetShader(g_coronaPixel, nullptr, 0);
+        g_context->VSSetShaderResources(3, 1, &g_coronaSeenView[next]);
+        g_context->PSSetSamplers(0, 1, &g_coronaSampler);
+        g_context->OMSetBlendState(g_coronaBlend, noFactor, 0xFFFFFFFF);
+        for (size_t i = 0; i < g_coronas.size(); ++i) {
+            const Corona& corona = g_coronas[i];
+            if (!corona.picture || corona.type != 0) continue;
+            const float* n = corona.numbers;
+            memcpy(constants.colourStart, corona.colourStart, sizeof(constants.colourStart));
+            memcpy(constants.colourEnd, corona.colourEnd, sizeof(constants.colourEnd));
+            const float radius[4] = {n[0], n[1], n[2], n[3]}, shade[4] = {n[4], n[5], n[6], n[7]}, shape[4] = {n[8], n[9], n[10], n[11]},
+                        turn[4] = {n[12], corona.rotationOffset, n[13], n[14]};
+            memcpy(constants.radius, radius, sizeof(radius));
+            memcpy(constants.shade, shade, sizeof(shade));
+            memcpy(constants.shape, shape, sizeof(shape));
+            memcpy(constants.turn, turn, sizeof(turn));
+            constants.screen[1] = static_cast<float>(i);
+            if (!upload()) break;
+            g_context->PSSetShaderResources(2, 1, &corona.picture);
+            g_context->Draw(4, 0);
+        }
+    }
+
+    g_context->VSSetShaderResources(3, 1, &gameVertexResource);
+    g_context->OMSetRenderTargets(1, &gameTarget, gameDepth);
+    g_context->RSSetViewports(viewportCount, gameViewports);
+    g_context->OMSetDepthStencilState(gameDepthState, stencilRef);
+    saved.Restore();
+    for (IUnknown* held : {static_cast<IUnknown*>(gameTarget), static_cast<IUnknown*>(gameDepth), static_cast<IUnknown*>(gameVertexResource),
+                           static_cast<IUnknown*>(gameDepthState), static_cast<IUnknown*>(target)})
+        if (held) held->Release();
+}
+
 // ---- Guerrilla's particle layer
 
 // Guerrilla draws its particles into a buffer of their own (premultiplied colour, and in alpha how
@@ -4277,13 +5524,23 @@ void TakeParticles() {
     g_particlesReady = true;
 }
 
+// At the phase's start in our worlds: what it draws into, for the sun's corona at its end.
+void NoteCoronaTarget() {
+    if (g_coronaTarget) g_coronaTarget->Release();
+    g_coronaTarget = nullptr;
+    if (InOurWorld() && CoronaWanted() && g_context) g_context->OMGetRenderTargets(1, &g_coronaTarget, nullptr);
+}
+
 void __fastcall ParticlePhase(void* renderer, void* unused, int value) {
+    NoteCoronaTarget();
     SetSceneAside();
     g_particlePhase(renderer, unused, value);
+    DrawSunCorona();  // (if the last step didn't)
     TakeParticles();
 }
 
 void __fastcall ParticleLast(void* renderer, void* unused) {
+    DrawSunCorona();
     TakeParticles();
     g_particleLast(renderer, unused);
 }
@@ -5785,6 +7042,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadFog();
     ReadToneMapping();
     ReadSunShafts();
+    ReadSunCorona();
     ReadSharpen();
     ReadSunShadows();
     ReadParticles();

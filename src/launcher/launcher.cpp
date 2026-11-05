@@ -13,6 +13,9 @@
 // With LargeAddressAware=1 it starts the game from a copy of its exe in large_address\ with the
 // "large address aware" mark set, so the 32-bit game gets 4 GB of memory to work in instead of 2
 // (see LargeAddressCopy).
+//
+// If there's a Guerrilla world here built by an older (or newer) world builder than this RFA-Mod
+// needs, it says so and asks before starting the game (see CheckGuerrillaWorld).
 #define RFA_MOD_NAME "launcher"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -71,6 +74,48 @@ int Fail(const std::wstring& message) {
     rfa::Log("ERROR: %ls", message.c_str());
     MessageBoxW(nullptr, message.c_str(), L"RFA Mod Launcher", MB_ICONERROR | MB_OK);
     return 1;
+}
+
+// The Guerrilla world's format this RFA-Mod's mods need: the world builder's GuerrillaWorld.Format
+// (raised whenever a world built before won't work with the mods any more), which it writes into
+// mods\guerrilla_world\world.txt ("RFA-Mod Guerrilla world, format N") once a world is built.
+constexpr int kGuerrillaWorldFormat = 1;
+
+// When a Guerrilla world is here (overrides\build\pc\cache\rfg_l0.vpp_pc) but its stamp is missing
+// (built before worlds were stamped) or names another format, says what to do and asks whether to
+// start the game anyway. False: don't start it.
+bool CheckGuerrillaWorld() {
+    const std::wstring root = rfa::RootDir();
+    if (!FileExists(root + L"\\overrides\\build\\pc\\cache\\rfg_l0.vpp_pc")) return true;  // no world built here
+    int format = 0;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (root + L"\\mods\\guerrilla_world\\world.txt").c_str(), L"r") == 0 && file) {
+        char line[128] = "";
+        if (fgets(line, sizeof(line), file)) sscanf_s(line, "RFA-Mod Guerrilla world, format %d", &format);
+        fclose(file);
+    }
+    if (format == kGuerrillaWorldFormat) return true;
+    const bool newer = format > kGuerrillaWorldFormat;
+    if (format == 0)
+        rfa::Log("Guerrilla world: built by an older RFA-Mod (no world.txt); this one needs format %d", kGuerrillaWorldFormat);
+    else
+        rfa::Log("Guerrilla world: format %d, but this RFA-Mod needs format %d", format, kGuerrillaWorldFormat);
+    const std::wstring message =
+        std::wstring(L"Your Guerrilla world was built by ") + (newer ? L"a newer" : L"an older") +
+        L" version of RFA-Mod, so it won't look right with this one: the ground can show as a grid, and parts "
+        L"of the world can be missing or out of place.\n\n"
+        L"Build it again with this version's tools, in this folder:\n"
+        L"    editor\\GuerrillaWorld.exe (a few minutes)\n"
+        L"    editor\\GuerrillaArsenal.exe\n"
+        L"    editor\\GuerrillaHud.exe\n\n"
+        L"Start the game anyway?";
+    const int answer = MessageBoxW(nullptr, message.c_str(), L"RFA Mod Launcher", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+    if (answer != IDYES) {
+        rfa::Log("Guerrilla world: not starting the game (you chose to build the world again first)");
+        return false;
+    }
+    rfa::Log("Guerrilla world: starting the game anyway");
+    return true;
 }
 
 std::wstring TrimSlashes(std::wstring dir) {
@@ -310,6 +355,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                     rfa::IniPath());
     const std::wstring loader = rfa::RootDir() + L"\\rfa_loader.dll";
     if (!FileExists(loader)) return Fail(L"Missing " + loader);
+    if (!CheckGuerrillaWorld()) return 0;
 
     std::wstring args = rfa::IniString(L"Launcher", L"GameArgs", kDefaultArgs);
     std::wstring cmdLine = QuoteArg(exe) + (args.empty() ? L"" : L" " + args) + passthrough;

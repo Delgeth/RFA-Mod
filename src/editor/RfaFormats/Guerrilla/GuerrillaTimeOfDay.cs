@@ -9,9 +9,10 @@ namespace RfaFormats.Guerrilla;
 /// .gtodx) and a set of curves for each of its districts (_Default.dtodx and _&lt;district&gt;.dtodx),
 /// all XML, read by Armageddon by the world's and the districts' names.
 ///
-/// The orbitals are Guerrilla's terr01.gtodx with Armageddon's names: its corona effect
-/// (env_sun_corona; Guerrilla's effects don't load in it) and texture names without the extension (as
-/// its world.gtodx; vfx_sun_01, deimos_d and phobos_d are in its misc.vpp_pc bitmaps).
+/// The orbitals are Guerrilla's terr01.gtodx with texture names without the extension (as Armageddon's
+/// world.gtodx; vfx_sun_01, deimos_d and phobos_d are in its misc.vpp_pc bitmaps). The sun's corona
+/// effect keeps Guerrilla's name (env_sun_corona_a): Armageddon reads an orbital's effect but never
+/// plays it, so the guerrilla_world mod draws it (from corona.bin, see <see cref="GuerrillaSky.WriteCorona"/>).
 ///
 /// The sets: Guerrilla gives each district its own (terr01_oasis, _eos, _badlands, ...; terr01_default
 /// where no district is) and blends those of the zone you are in and its neighbours by where you stand
@@ -65,9 +66,7 @@ public static class GuerrillaTimeOfDay
     {
         string Text(string name) =>
             Encoding.Latin1.GetString(guerrillaMisc.Read(guerrillaMisc.Find(name) ?? throw new InvalidDataException($"no {name} in {guerrillaMisc.Name}")));
-        string orbitals = Text("terr01.gtodx")
-            .Replace("<effect_name>env_sun_corona_a</effect_name>", "<effect_name>env_sun_corona</effect_name>")
-            .Replace(".cvbm_pc</map_name>", "</map_name>");
+        string orbitals = Text("terr01.gtodx").Replace(".cvbm_pc</map_name>", "</map_name>");
         var sets = new List<(string, byte[])>();
         foreach (var (name, theirs) in districts.Prepend(("Default", "Default")))
         {

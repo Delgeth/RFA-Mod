@@ -46,14 +46,26 @@ namespace RfaFormats.Guerrilla;
 /// (build\pc\cache\); Armageddon's territories.xtbl with Guerrilla's districts added (an override in
 /// build\pc\cache\table.vpp_pc\; see <see cref="GuerrillaTerritory"/>); Armageddon's texture name table
 /// with room for the world's textures (an override in build\pc\cache\misc.vpp_pc\; see
-/// <see cref="GuerrillaBitmaps"/>); and the mod's cloud files and tables (gameplay properties, draw
-/// distances, visual effects, effects and level objects, which the guerrilla_world mod hands the game).
+/// <see cref="GuerrillaBitmaps"/>); the mod's cloud files and tables (gameplay properties, draw
+/// distances, visual effects, effects and level objects, which the guerrilla_world mod hands the game);
+/// and last, world.txt, the world's format (<see cref="Format"/>), which the launcher checks.
 /// Guerrilla's files are only read, and what is made from them stays on your machine.
 /// </summary>
 public static class GuerrillaWorld
 {
     public const string World = "rfg";
     public const float ZoneWidth = 511f;
+
+    /// <summary>
+    /// The world's format, written into <see cref="StampFile"/> next to the mod's tables: raise it
+    /// whenever a change here means a world built before it won't work with the mods any more (the
+    /// launcher, RFAModLauncher.exe, expects the same number, kGuerrillaWorldFormat, and asks before
+    /// starting the game with a world of another, or with one built before worlds were stamped).
+    /// </summary>
+    public const int Format = 1;
+
+    /// <summary>The stamp's file name, in the mod's folder (mods\guerrilla_world\).</summary>
+    public const string StampFile = "world.txt";
 
     /// <summary>The start zone: in a part of the grid no precache group names (so its area is the world's).</summary>
     public static readonly (int Col, int Row) DefaultStart = (12, 11);
@@ -985,6 +997,11 @@ public static class GuerrillaWorld
             $"({GuerrillaBitmaps.Capacity(bitmaps):N0} → {GuerrillaBitmaps.Capacity(bitmaps) + extraSlots:N0}; misc.vpp_pc\\bitmaps_pc)");
         log($"World {World}: {zones.Count} zones, start {World}_{start.Col:00}_{start.Row:00}; written into {output}");
         GuerrillaSky.Write(cache, rfgCache, modFolder, log);
+        GuerrillaSky.WriteStars(guerrilla, modFolder, log);
+        GuerrillaSky.WriteCorona(rfgCache, modFolder, log);
+        // Last, once everything is written: which format this world is, for the launcher to check.
+        File.WriteAllText(Path.Combine(modFolder, StampFile),
+                          $"RFA-Mod Guerrilla world, format {Format}\r\nBuilt {DateTime.Now:yyyy-MM-dd HH:mm}, {zones.Count} zones\r\n");
     }
 
     /// <summary>
