@@ -57,10 +57,15 @@ using lua_CFunction = int(__cdecl*)(lua_State*);
 constexpr int LUA_GLOBALSINDEX = -10002;
 
 inline const auto lua_gettop = At<int(__cdecl*)(lua_State*)>(0xD904A0);
+inline const auto lua_type = At<int(__cdecl*)(lua_State*, int)>(0xD90910);        // as `type` reads it: -1 none, 0 nil, 1 boolean, 3 number, 4 string
+inline const auto lua_toboolean = At<int(__cdecl*)(lua_State*, int)>(0xD90B90);   // as `assert` reads it
+inline const auto lua_pushnil = At<void(__cdecl*)(lua_State*)>(0xD90E50);          // as `tonumber` returns nil
 inline const auto lua_tonumber = At<double(__cdecl*)(lua_State*, int)>(0xD90AE0);
 inline const auto lua_tolstring = At<const char*(__cdecl*)(lua_State*, int, size_t*)>(0xD90BE0);
 inline const auto lua_pushnumber = At<void(__cdecl*)(lua_State*, double)>(0xD90E80);
+inline const auto lua_pushstring = At<void(__cdecl*)(lua_State*, const char*)>(0xD90F70);  // as `type` returns its name
 inline const auto lua_pushcclosure = At<void(__cdecl*)(lua_State*, lua_CFunction, int)>(0xD91080);
+inline const auto lua_pushboolean = At<void(__cdecl*)(lua_State*, int)>(0xD911A0);         // as `rawequal` returns
 inline const auto lua_setfield = At<void(__cdecl*)(lua_State*, int, const char*)>(0xD91620);
 
 inline void lua_register(lua_State* L, const char* name, lua_CFunction fn) {

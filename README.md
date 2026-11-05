@@ -22,8 +22,12 @@ single-player.
 - **Red Faction: Guerrilla's world, a first look** (`guerrilla_world`, beta): Guerrilla's whole map
   as a new world, with its sky, clouds, day and night, and a longer view. You build it from your
   own copy of Guerrilla.
-- **Guerrilla's HUD, a first piece** (`guerrilla_hud`, beta): Guerrilla's health meter and blood
-  in that world, in place of Armageddon's health ring, red screen edges and compass bar.
+- **Guerrilla's HUD, the first pieces** (`guerrilla_hud`, beta): Guerrilla's health meter and blood
+  in that world, in place of Armageddon's health ring, red screen edges and compass bar; its
+  reticles and ammo count, in place of Armageddon's reticle and ammo ring (Armageddon's Nano Forge
+  meter stays); its weapon select, in place of Armageddon's weapon selector; and its minimap (the
+  map around you turning with the camera, the district's name) and its world map, which M opens
+  and closes.
 - **Guerrilla's vehicles** (`guerrilla_vehicles`, beta): Guerrilla's cars, trucks, buses, ATVs,
   rovers, EDF staff cars, scouts and APCs, Marauder raiders and more, which you can spawn and drive
   (W, S, Space and A/D, Guerrilla's keys). You get in and out the way Mason does in Guerrilla
@@ -153,6 +157,18 @@ Things to know:
   script.
 - `editor\GuerrillaHud.exe --remove` takes the HUD away. Only remove it that way: one of its files
   also holds Armageddon's own HUD pictures.
+- Guerrilla's minimap sits at the bottom left: north turns with the camera, the arrow in the middle
+  is you, and it zooms out as you drive faster. Press M (`MapKey=` under `[GuerrillaHud]`) for the
+  world map, with you on it, and M again to close it; the game keeps running while it's open. The
+  minimap shows each zone's own detailed picture once it has loaded, a moment after you come near.
+- Guerrilla's reticle sits in the middle, turning red over an enemy and green over a friend, with
+  the rounds in your magazine beside it and the rest in the box (the infinity sign where ammo is
+  unlimited), which turn red when you should reload. Armageddon's weapons all get Guerrilla's
+  assault rifle reticle for now. `Reticles=0` under `[GuerrillaHud]` brings Armageddon's back.
+- When you change weapons, Guerrilla's weapon select opens at the bottom right: your four weapons
+  on plates in a cross (key 1 is the left one, then clockwise), each with its ammo, the chosen one
+  lit with its name. The pictures are Armageddon's weapons' own. `WeaponSelect=0` brings
+  Armageddon's selector back.
 - The vehicles have no sounds, lights or turrets yet, and their glass shows too bright. Darius is a little taller than Mason, so his hands may not land exactly on the
   wheel and door. Tanks and the bulldozer aren't built yet, and walkers can't be got into yet.
   `guerrilla_vehicles` must be on: besides the keys, it makes room in the game for the vehicles

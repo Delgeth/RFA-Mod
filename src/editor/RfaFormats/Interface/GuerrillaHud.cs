@@ -31,11 +31,42 @@ public static partial class GuerrillaHud
 {
     public const string Prefix = "rfg_";
 
-    /// <summary>The documents converted, and the pictures their scripts show besides those the document names.</summary>
+    /// <summary>
+    /// The documents converted, and the pictures their scripts show besides those the document names.
+    /// The mod loads them together in Guerrilla's world, so a texture one of them brings isn't brought
+    /// again by a later one: rfg_ui_hud_health brings the sheet ui_bms_00 the others' frames are cut
+    /// from (and rfg_ui_hud_reticles' reticles, rfg_ui_hud_weapon_sel's plates), rfg_ui_hud (the
+    /// minimap) the map sheet ui_bms_maps,
+    /// rfg_ui_fullscreen (the world map) Guerrilla's world map picture.
+    /// </summary>
     public static readonly IReadOnlyList<HudDocument> Documents =
     [
         new("rfg_ui_hud_health", ["ui_hud_blood_gradient", "ui_hud_radiation"]),
+        new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true),
+        new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true),
+        new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player"]),
+        new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap]),
     ];
+
+    /// <summary>
+    /// Guerrilla's picture of its whole world (terr01_l0.vpp_pc &gt; terr01_map.str2_pc), 1024 × 1024:
+    /// its zone columns and rows 2 to 13, 85⅓ pixels a zone, north up. Its full-screen map shows it.
+    /// </summary>
+    public const string WorldMap = "terr01_map";
+
+    /// <summary>
+    /// Guerrilla's minimap shows each zone's own picture (terr01_l0.vpp_pc &gt; terr01_&lt;col&gt;_&lt;row&gt;_map.str2_pc,
+    /// 512 × 512, a metre a pixel, north up), each in a container of its own, which its streaming
+    /// loaded with the zone. Here each one comes the same way, in a document of its own that only
+    /// brings that texture (rfg_ui_map_&lt;col&gt;_&lt;row&gt;), which the mod loads while the player is near.
+    /// (Not rfg_&lt;col&gt;_&lt;row&gt;_map: Armageddon's level streaming still knows that name, &lt;world&gt;_%02d_%02d_map.)
+    /// </summary>
+    public static string ZoneDocument(int column, int row) => $"rfg_ui_map_{column:00}_{row:00}";
+    const int FirstZone = 2, LastZone = 13;
+
+    /// <summary>The districts' names by zone, for the minimap (written next to our scripts, made from the player's copy).</summary>
+    public const string DistrictsFile = "districts.txt";
+    const string Language = "us";  // Guerrilla's strings files: territories_us.le_strings, ...
 
     /// <summary>
     /// Pictures from textures that aren't brought over, and one that looks the same that is: both
@@ -73,6 +104,11 @@ public static partial class GuerrillaHud
         string guerrillaSheetsText = ReadText(guerrillaMisc, "bitmap_sheets.xtbl");
         Dictionary<string, string> sheetOf = SheetPictures(guerrillaSheetsText);  // picture -> sheet
 
+        // Guerrilla's world: its map picture, and each zone's own (see ZoneDocument).
+        Packfile guerrillaWorld = Packfile.Open(Path.Combine(guerrillaCache, "terr01_l0.vpp_pc"));
+        PegFile worldMap = ReadBitmap(guerrillaWorld, WorldMap)
+                           ?? throw new InvalidDataException($"Guerrilla's terr01_l0.vpp_pc has no {WorldMap}");
+
         // Armageddon packs each document in two containers: <doc> (document and script) and <doc>2
         // (textures). Our documents are listed like the flyer's HUD, which the game streams in while
         // playing (type 11), not like ui_hud, which it reads at start-up (type 12, as the HUD's
@@ -87,6 +123,7 @@ public static partial class GuerrillaHud
         var sheetsBrought = new List<string>();
         var wholeTextures = new List<(string Name, int Width, int Height)>();  // whole-texture pictures, each made a sheet
         var documentNames = new List<string>();
+        var texturesBrought = new HashSet<string>(StringComparer.OrdinalIgnoreCase);  // by an earlier document
         foreach (HudDocument hud in Documents)
         {
             string name = hud.Name;
@@ -96,19 +133,30 @@ public static partial class GuerrillaHud
 
             // The textures it can show: those of the texture files it depends on, from Guerrilla's
             // misc.vpp_pc (always loaded there) or the document's own texture container.
-            Packfile? ownTextures = guerrillaInterface.Find(name + ".vint_doc2.str2_pc") is { } entry
+            Packfile? guerrillaTextures = guerrillaInterface.Find(name + ".vint_doc2.str2_pc") is { } entry
                 ? Packfile.FromBytes(entry.Name, guerrillaInterface.Read(entry)) : null;
             var textures = new Dictionary<string, (PegFile Peg, PegTexture Texture)>(StringComparer.OrdinalIgnoreCase);
             foreach (VintReference dependency in document.Dependencies.Where(d => d.Kind == 0))
             {
                 string file = document.Text(dependency);
-                PegFile? peg = ReadPeg(ownTextures, file) ?? ReadPeg(guerrillaMisc, file);
+                PegFile? peg = ReadPeg(guerrillaTextures, file) ?? ReadPeg(guerrillaMisc, file);
                 if (peg == null)
                 {
                     report.Add($"{name}: Guerrilla's texture file {file} not found; its pictures are left out");
                     continue;
                 }
                 foreach (PegTexture texture in peg.Textures) textures.TryAdd(Path.GetFileNameWithoutExtension(texture.Name), (peg, texture));
+            }
+            foreach (PegTexture texture in worldMap.Textures) textures.TryAdd(Path.GetFileNameWithoutExtension(texture.Name), (worldMap, texture));
+
+            // Guerrilla's map elements were drawn by its game code (the cartographer), which
+            // Armageddon has only as a compass. Here each is a plain picture (its own picture, the
+            // minimap's frame for one), and our script builds the map around it.
+            int maps = 0;
+            foreach (VintElement element in document.Elements().Where(e => e.Type.Equals("map", StringComparison.OrdinalIgnoreCase)))
+            {
+                document.Point(element.TypeReference, "bitmap");
+                maps++;
             }
 
             // Each picture, and the texture it comes from (its own, or the sheet it is cut from).
@@ -137,6 +185,16 @@ public static partial class GuerrillaHud
             foreach (string picture in hud.ScriptPictures)
                 if (TextureFor(picture) is { } texture && !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
                 else if (TextureFor(picture) == null) report.Add($"{name}: its script's picture {picture} isn't in Guerrilla's textures");
+            // Guerrilla's own script, when it runs here too: the pictures it names come along.
+            string? guerrillaScript = hud.GuerrillaScript
+                ? ReadText(Container(guerrillaInterface, name + ".vint_doc.str2_pc"), name + ".lua") : null;
+            if (guerrillaScript != null)
+                foreach (Match literal in ScriptString().Matches(guerrillaScript))
+                    if (sheetOf.ContainsKey(literal.Groups[1].Value) && TextureFor(literal.Groups[1].Value) is { } texture &&
+                        !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
+            var shared = needed.Where(texturesBrought.Contains).ToList();
+            needed.RemoveAll(texturesBrought.Contains);
+            foreach (string texture in needed) texturesBrought.Add(texture);
 
             // One texture file with every texture it needs, renamed. The document waits for its
             // first texture file; any others it named point at one Armageddon always has loaded.
@@ -144,12 +202,16 @@ public static partial class GuerrillaHud
             // (the texture renamed <picture>_sheet): Armageddon finds sheet pictures through the
             // sheets it ties to their textures at start-up, which works for ours, while a whole
             // texture asked for by name came out as some other bitmap (black, with stray shapes).
+            // A document whose textures all came with the documents before it brings none: its
+            // texture container is empty, as Armageddon's own ui_fade_to_black2 is, and every
+            // texture file it named points at one Armageddon always has loaded.
             string textureFile = "interface-" + name;
+            bool ownTextures = needed.Count > 0;
             var dependencies = document.Dependencies.Where(d => d.Kind == 0).ToList();
-            for (int i = 0; i < dependencies.Count; i++) document.Point(dependencies[i], i == 0 ? textureFile : AlwaysLoaded);
+            for (int i = 0; i < dependencies.Count; i++) document.Point(dependencies[i], i == 0 && ownTextures ? textureFile : AlwaysLoaded);
             bool IsSheet(string texture) => sheetOf.ContainsValue(texture);
-            (byte[] pegHeader, byte[] pegData) = MergePegs(needed.Select(t =>
-                (textures[t].Peg, textures[t].Texture, Prefix + t + (IsSheet(t) ? "" : WholeSheetSuffix) + ".tga")).ToList());
+            (byte[] pegHeader, byte[] pegData) = ownTextures ? MergePegs(needed.Select(t =>
+                (textures[t].Peg, textures[t].Texture, Prefix + t + (IsSheet(t) ? "" : WholeSheetSuffix) + ".tga")).ToList()) : ([], []);
             foreach (string texture in needed)
             {
                 if (IsSheet(texture))
@@ -166,9 +228,14 @@ public static partial class GuerrillaHud
                 if (document.Text(key).Equals("lua_script_file", StringComparison.OrdinalIgnoreCase)) document.Point(value, name + ".lua");
 
             byte[] documentBytes = document.ToBytes();
-            byte[] scriptBytes = File.ReadAllBytes(script);
+            byte[] scriptBytes = guerrillaScript != null
+                ? Encoding.Latin1.GetBytes(GuerrillaScriptFor(name, guerrillaScript,
+                                                              File.ReadAllText(Path.Combine(scriptsFolder, ShimsScript), Encoding.Latin1),
+                                                              File.ReadAllText(script, Encoding.Latin1), sheetOf.Keys))
+                : File.ReadAllBytes(script);
             byte[] main = Packfile.CreateContainer(documentTemplate, [(name + ".vint_doc", documentBytes), (name + ".lua", scriptBytes)]);
-            byte[] art = Packfile.CreateContainer(textureTemplate, [(textureFile + ".cpeg_pc", pegHeader), (textureFile + ".gpeg_pc", pegData)]);
+            byte[] art = Packfile.CreateContainer(textureTemplate, ownTextures
+                ? [(textureFile + ".cpeg_pc", pegHeader), (textureFile + ".gpeg_pc", pegData)] : []);
             Write(Path.Combine(cacheOut, name + ".str2_pc"), main);
             Write(Path.Combine(cacheOut, name + "2.str2_pc"), art);
             Write(Path.Combine(cacheOut, name + ".vint_doc"), documentBytes);
@@ -179,12 +246,53 @@ public static partial class GuerrillaHud
             containers.Containers.Add(Entry(documentEntry, name, Packfile.FromBytes(name + ".str2_pc", main),
                 [(name + ".vint_doc", 0), (name + ".lua", 1)]));
             containers.Containers.Add(Entry(textureEntry, name + "2", Packfile.FromBytes(name + "2.str2_pc", art),
-                [(textureFile + ".cpeg_pc", 0)]));
+                ownTextures ? [(textureFile + ".cpeg_pc", 0)] : []));
             documentNames.Add(name);
 
-            report.Add($"{name}: {renamed.Count} pictures renamed, from {needed.Count} textures ({string.Join(", ", needed)}) in {textureFile}" +
+            report.Add($"{name}: {renamed.Count} pictures renamed, from " +
+                       (ownTextures ? $"{needed.Count} textures ({string.Join(", ", needed)}) in {textureFile}" : "no texture of its own") +
+                       (hud.GuerrillaScript ? "; Guerrilla's own script" : "") +
+                       (shared.Count > 0 ? $", and {string.Join(", ", shared)} from the documents before it" : "") +
+                       (maps > 0 ? $"; {maps} map element{(maps == 1 ? "" : "s")} made a picture" : "") +
                        (unknown.Count > 0 ? $"; not found, left as they are: {string.Join(", ", unknown)}" : ""));
         }
+
+        // Each zone's own picture, in a document of its own that brings nothing but that texture.
+        int zonePicturesBytes = 0, zonePictures = 0;
+        foreach (PackfileEntry entry in guerrillaWorld.Entries)
+        {
+            Match zone = ZoneMap().Match(entry.Name);
+            if (!zone.Success) continue;
+            string tile = Path.GetFileNameWithoutExtension(entry.Name);
+            PegFile? peg = ReadBitmap(guerrillaWorld, tile);
+            if (peg == null || peg.Textures.Count != 1) continue;
+            string name = ZoneDocument(int.Parse(zone.Groups[1].Value), int.Parse(zone.Groups[2].Value));
+            string textureFile = "interface-" + name;
+            (byte[] pegHeader, byte[] pegData) = MergePegs([(peg, peg.Textures[0], Prefix + tile + WholeSheetSuffix + ".tga")]);
+            wholeTextures.Add((tile, peg.Textures[0].Width, peg.Textures[0].Height));
+            byte[] documentBytes = VintDocument.TexturesOnly(textureFile, name, name + ".lua");
+            byte[] scriptBytes = Encoding.Latin1.GetBytes(TilesScript(name));
+            byte[] main = Packfile.CreateContainer(documentTemplate, [(name + ".vint_doc", documentBytes), (name + ".lua", scriptBytes)]);
+            byte[] art = Packfile.CreateContainer(textureTemplate, [(textureFile + ".cpeg_pc", pegHeader), (textureFile + ".gpeg_pc", pegData)]);
+            Write(Path.Combine(cacheOut, name + ".str2_pc"), main);
+            Write(Path.Combine(cacheOut, name + "2.str2_pc"), art);
+            Write(Path.Combine(cacheOut, name + ".vint_doc"), documentBytes);
+            Write(Path.Combine(cacheOut, name + ".lua"), scriptBytes);
+            containers.Containers.RemoveAll(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                                                 c.Name.Equals(name + "2", StringComparison.OrdinalIgnoreCase));
+            containers.Containers.Add(Entry(documentEntry, name, Packfile.FromBytes(name + ".str2_pc", main),
+                [(name + ".vint_doc", 0), (name + ".lua", 1)]));
+            containers.Containers.Add(Entry(textureEntry, name + "2", Packfile.FromBytes(name + "2.str2_pc", art), [(textureFile + ".cpeg_pc", 0)]));
+            documentNames.Add(name);
+            zonePictures++;
+            zonePicturesBytes += pegData.Length;
+        }
+        report.Add($"rfg_ui_map_<column>_<row>: {zonePictures} zones' own pictures, a document each ({zonePicturesBytes / 1024} KB in all)");
+
+        // The districts' names by zone, in the player's language, for the minimap.
+        List<string> districts = DistrictLines(guerrillaMisc, report);
+        Directory.CreateDirectory(scriptsFolder);
+        File.WriteAllLines(Path.Combine(scriptsFolder, DistrictsFile), districts);
 
         string listsOut = Path.Combine(cacheOut, "interface.vpp_pc");
         Write(Path.Combine(listsOut, "vint_doc_containers.asm_pc"), containers.ToBytes());
@@ -211,10 +319,15 @@ public static partial class GuerrillaHud
             File.Delete(old);
             report.Add($"Removed {Path.GetFileName(old)}, written by an earlier version");
         }
-        report.Add($"Added {string.Join(", ", documentNames)} to vint_doc_containers.asm_pc and rfg.vint_proj" +
+        var wholeNamed = wholeTextures.Where(w => !ZoneMap().IsMatch(w.Name + ".str2_pc")).Select(w => w.Name).ToList();
+        var namedDocuments = documentNames.Where(d => !d.StartsWith("rfg_ui_map_", StringComparison.OrdinalIgnoreCase)).ToList();
+        report.Add($"Added {string.Join(", ", namedDocuments)}" +
+                   (documentNames.Count > namedDocuments.Count ? $" and {documentNames.Count - namedDocuments.Count} zone pictures' documents" : "") +
+                   " to vint_doc_containers.asm_pc and rfg.vint_proj" +
                    (sheetTable != null ? $", and Guerrilla's sheets {string.Join(", ", sheetsBrought)} (renamed {Prefix}...) and one-picture " +
-                                         $"sheets for {string.Join(", ", wholeTextures.Select(w => w.Name))} to the game's sheet table as " +
-                                         $"{sheetTable}.xtbl, which rfg.vint_proj now names" : ""));
+                                         $"sheets for {string.Join(", ", wholeNamed)}" +
+                                         (zonePictures > 0 ? $" and {zonePictures} zone pictures" : "") +
+                                         $" to the game's sheet table as {sheetTable}.xtbl, which rfg.vint_proj now names" : ""));
         return report;
     }
 
@@ -224,7 +337,7 @@ public static partial class GuerrillaHud
     /// names our sheet table, which holds every picture of the game's own HUD too, so the table
     /// must never go while the project override stays. Returns what was removed, a line each.
     /// </summary>
-    public static List<string> Remove(string overridesFolder)
+    public static List<string> Remove(string overridesFolder, string? scriptsFolder = null)
     {
         string cacheOut = Path.Combine(overridesFolder, "build", "pc", "cache");
         var files = new List<string>
@@ -233,15 +346,16 @@ public static partial class GuerrillaHud
             Path.Combine(cacheOut, "interface.vpp_pc", "vint_doc_containers.asm_pc"),
             Path.Combine(cacheOut, SheetTableName + ".xtbl"),
         };
-        foreach (HudDocument hud in Documents)
+        foreach (string document in Documents.Select(d => d.Name).Concat(ZoneDocuments()))
             foreach (string file in new[] { ".str2_pc", "2.str2_pc", ".vint_doc", ".lua" })
-                files.Add(Path.Combine(cacheOut, hud.Name + file));
+                files.Add(Path.Combine(cacheOut, document + file));
+        if (scriptsFolder != null) files.Add(Path.Combine(scriptsFolder, DistrictsFile));
         files.AddRange(OldFiles(overridesFolder));
         var report = new List<string>();
         foreach (string file in files.Where(File.Exists))
         {
             File.Delete(file);
-            report.Add($"Removed {Path.GetRelativePath(overridesFolder, file)}");
+            report.Add($"Removed {(file.StartsWith(overridesFolder, StringComparison.OrdinalIgnoreCase) ? Path.GetRelativePath(overridesFolder, file) : file)}");
         }
         if (report.Count == 0) report.Add("Nothing of Guerrilla's HUD was installed");
         return report;
@@ -253,6 +367,17 @@ public static partial class GuerrillaHud
         string cacheOut = Path.Combine(overridesFolder, "build", "pc", "cache");
         yield return Path.Combine(cacheOut, "misc.vpp_pc", "bitmap_sheets.xtbl");
         yield return Path.Combine(cacheOut, "rfg_bitmap_sheets.xtbl");
+        foreach (string quarter in new[] { "nw", "ne", "sw", "se" })  // the zone pictures, four to a document at first
+            foreach (string file in new[] { ".str2_pc", "2.str2_pc", ".vint_doc", ".lua" })
+                yield return Path.Combine(cacheOut, "rfg_map_tiles_" + quarter + file);
+    }
+
+    /// <summary>Every zone's picture's document name, whether Guerrilla has that zone or not.</summary>
+    static IEnumerable<string> ZoneDocuments()
+    {
+        for (int column = FirstZone; column <= LastZone; column++)
+            for (int row = FirstZone; row <= LastZone; row++)
+                yield return ZoneDocument(column, row);
     }
 
     static byte[] Read(Packfile archive, string file) =>
@@ -266,6 +391,113 @@ public static partial class GuerrillaHud
     {
         if (archive?.Find(file + ".cpeg_pc") is not { } header || archive.Find(file + ".gpeg_pc") is not { } data) return null;
         return PegFile.Read(archive.Read(header), archive.Read(data));
+    }
+
+    /// <summary>Our shims for Guerrilla's scripts (what they call that Armageddon's interface Lua lacks), next to our scripts.</summary>
+    public const string ShimsScript = "rfg_guerrilla_shims.lua";
+
+    /// <summary>
+    /// A document's script made of Guerrilla's own (read from the player's copy) and ours: our
+    /// shims first, then Guerrilla's script with its init and cleanup renamed
+    /// &lt;document&gt;_guerrilla_init and _guerrilla_cleanup (ours, last, has the document's own and
+    /// calls them), every string that names one of Guerrilla's pictures renamed as the document's
+    /// pictures are (rfg_...), its property calls made through the shims (tints differ), and its
+    /// document clock calls naming the document, then our script.
+    /// </summary>
+    public static string GuerrillaScriptFor(string document, string guerrillaScript, string shims, string ours, IEnumerable<string> pictures)
+    {
+        var pictureNames = new HashSet<string>(pictures, StringComparer.OrdinalIgnoreCase);
+        string script = Regex.Replace(guerrillaScript, $@"\b{Regex.Escape(document)}_(init|cleanup)\b", m => $"{document}_guerrilla_{m.Groups[1].Value}");
+        script = ScriptString().Replace(script, m => pictureNames.Contains(m.Groups[1].Value) ? $"\"{Prefix}{m.Groups[1].Value}\"" : m.Value);
+        // Properties through the shims' rfg_vint_set_property / rfg_vint_get_property: Armageddon's
+        // Lua takes and gives tints as 0-255, Guerrilla's scripts as 0-1.
+        script = PropertyCall().Replace(script, m => "rfg_" + m.Value);
+        // The document's clock: both games read and set the clock of the document whose script is
+        // running when no document is named; here each call names its own.
+        string thisDocument = $"vint_document_find(\"{document}\")";
+        script = GetTimeIndexCall().Replace(script, $"vint_get_time_index({thisDocument})");
+        script = SetTimeIndexCall().Replace(script, m => $"vint_set_time_index({m.Groups[1].Value.Trim()}, {thisDocument})");
+        const string newline = "\r\n";
+        return shims.TrimEnd() + newline + newline +
+               $"-- ---- Guerrilla's own script for {document}, from your copy of Guerrilla" + newline +
+               script.TrimEnd() + newline + newline +
+               $"-- ---- Ours for {document} (guerrilla_hud)" + newline +
+               ours;
+    }
+
+    /// <summary>The script of a document of zone pictures: nothing to do, its init and cleanup only.</summary>
+    static string TilesScript(string document) =>
+        $"-- {document}: Guerrilla's zone pictures for its minimap, made by GuerrillaHud.exe from your copy of Guerrilla.\r\n" +
+        "-- The document only brings them (the guerrilla_hud mod loads it while you're near); the minimap shows them.\r\n" +
+        $"function {document}_init()\r\nend\r\n\r\nfunction {document}_cleanup()\r\nend\r\n";
+
+    /// <summary>A single bitmap (&lt;name&gt;.cvbm_pc and .gvbm_pc, laid out as a texture file) in its own container &lt;name&gt;.str2_pc.</summary>
+    static PegFile? ReadBitmap(Packfile archive, string name)
+    {
+        if (archive.Find(name + ".str2_pc") is not { } entry) return null;
+        Packfile container = Packfile.FromBytes(entry.Name, archive.Read(entry));
+        if (container.Find(name + ".cvbm_pc") is not { } header || container.Find(name + ".gvbm_pc") is not { } data) return null;
+        return PegFile.Read(container.Read(header), container.Read(data));
+    }
+
+    /// <summary>
+    /// Guerrilla's districts by zone, a line each, "CCRR=name": the zones each district of terr01
+    /// lists (territories.xtbl, Grid_index), and its name as Guerrilla's HUD shows it, from the
+    /// strings file territories_&lt;language&gt;.le_strings by its tag (its Display_name, or
+    /// TERR_&lt;its name&gt;; the Tutorial district shows TERR_PARKER), or its own name if that has no
+    /// string.
+    /// </summary>
+    static List<string> DistrictLines(Packfile guerrillaMisc, List<string> report)
+    {
+        Dictionary<uint, string> strings = guerrillaMisc.Find($"territories_{Language}.le_strings") is { } file
+            ? ReadStrings(guerrillaMisc.Read(file)) : [];
+        string table = ReadText(guerrillaMisc, "territories.xtbl");
+        Match territory = Regex.Match(table, @"<Territory>\s*<Name>terr01</Name>.*?</Territory>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (!territory.Success) throw new InvalidDataException("Guerrilla's territories.xtbl has no terr01");
+        table = territory.Value;
+        var lines = new List<string>
+        {
+            "; Guerrilla's districts by zone (column and row), as its HUD names them: made by GuerrillaHud.exe from",
+            "; your copy of Guerrilla (territories.xtbl and its strings). The minimap shows the name of the zone you're in.",
+        };
+        int count = 0;
+        foreach (Match district in DistrictBlocks().Matches(table))
+        {
+            string name = TagValue(district.Value, "Name") ?? "";
+            string tag = TagValue(district.Value, "Display_name") ?? "TERR_" + name.ToUpperInvariant().Replace(' ', '_');
+            string shown = strings.GetValueOrDefault(VintDocument.Hash(tag.ToLowerInvariant()), name);
+            foreach (Match index in GridIndexes().Matches(district.Value)) lines.Add($"{index.Groups[1].Value}={shown}");
+            count++;
+        }
+        report.Add($"{DistrictsFile}: {count} districts, {lines.Count - 2} zones, names from territories_{Language}.le_strings");
+        return lines;
+    }
+
+    static string? TagValue(string xml, string tag)
+    {
+        Match match = Regex.Match(xml, $"<{tag}>([^<]*)</{tag}>", RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value.Trim() : null;
+    }
+
+    /// <summary>
+    /// A strings file (.le_strings): signature (u32), version (u16), count (u32), then per string its
+    /// tag's hash (u32, <see cref="VintDocument.Hash"/> of the tag in lower case), its length in
+    /// bytes (u16) and the text (UTF-16, NUL-terminated), the next string starting on a 4-byte boundary.
+    /// </summary>
+    static Dictionary<uint, string> ReadStrings(byte[] data)
+    {
+        var strings = new Dictionary<uint, string>();
+        int count = (int)BitConverter.ToUInt32(data, 6);
+        int at = 10;
+        for (int i = 0; i < count && at + 6 <= data.Length; i++)
+        {
+            uint hash = BitConverter.ToUInt32(data, at);
+            int length = BitConverter.ToUInt16(data, at + 4);
+            if (at + 6 + length > data.Length) break;
+            strings.TryAdd(hash, Encoding.Unicode.GetString(data, at + 6, length).TrimEnd('\0'));
+            at = (at + 6 + length + 3) & ~3;
+        }
+        return strings;
     }
 
     static void Write(string path, byte[] bytes)
@@ -422,7 +654,37 @@ public static partial class GuerrillaHud
     // A name: the opening tag, the name, the closing tag (tags match whatever their case).
     [GeneratedRegex(@"(<Name>)([^<]*)(</Name>)", RegexOptions.IgnoreCase)]
     private static partial Regex NameTags();
+
+    // A zone's own map picture's container in Guerrilla's world archive: column, row.
+    [GeneratedRegex(@"^terr01_(\d\d)_(\d\d)_map\.str2_pc$", RegexOptions.IgnoreCase)]
+    private static partial Regex ZoneMap();
+
+    [GeneratedRegex(@"<District>.*?</District>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex DistrictBlocks();
+
+    [GeneratedRegex(@"<Index>\s*(\d{4})\s*</Index>", RegexOptions.IgnoreCase)]
+    private static partial Regex GridIndexes();
+
+    // A Lua string that is a single name ("ui_hud_reti_tank"): the name.
+    [GeneratedRegex("\"([A-Za-z0-9_]+)\"")]
+    private static partial Regex ScriptString();
+
+    // A call of vint_set_property or vint_get_property (the name, before its "(").
+    [GeneratedRegex(@"(?<![A-Za-z0-9_])vint_[sg]et_property(?=\s*\()")]
+    private static partial Regex PropertyCall();
+
+    // vint_get_time_index() with no document named.
+    [GeneratedRegex(@"(?<![A-Za-z0-9_])vint_get_time_index\s*\(\s*\)")]
+    private static partial Regex GetTimeIndexCall();
+
+    // vint_set_time_index(time) with no document named: the time.
+    [GeneratedRegex(@"(?<![A-Za-z0-9_])vint_set_time_index\s*\(([^(),]*)\)")]
+    private static partial Regex SetTimeIndexCall();
 }
 
 /// <param name="ScriptPictures">Pictures its script shows that the document doesn't name (they come along too).</param>
-public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures);
+/// <param name="GuerrillaScript">
+/// Its script is Guerrilla's own, from the player's copy, between our shims and our script for it
+/// (see <see cref="GuerrillaHud.GuerrillaScriptFor"/>); otherwise it is our script alone.
+/// </param>
+public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures, bool GuerrillaScript = false);

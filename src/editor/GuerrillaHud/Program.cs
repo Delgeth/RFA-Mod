@@ -21,7 +21,8 @@ string ini = Path.Combine(modFolder, "rfa_mods.ini");
 
 if (args.Length > 0 && args[0].Equals("--remove", StringComparison.OrdinalIgnoreCase))
 {
-    foreach (string line in GuerrillaHud.Remove(Path.Combine(modFolder, "overrides"))) Console.WriteLine(line);
+    foreach (string line in GuerrillaHud.Remove(Path.Combine(modFolder, "overrides"), Path.Combine(modFolder, "mods", "guerrilla_hud")))
+        Console.WriteLine(line);
     return 0;
 }
 

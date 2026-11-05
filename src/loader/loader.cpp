@@ -734,7 +734,9 @@ int __cdecl LuaLog(lua_State* L) {
 }
 
 // Runs instead of the game's function that registers its C functions with the menu Lua state:
-// lets it do that, then adds ours.
+// lets it do that, then adds ours, then each mod's: a mod that exports
+//     extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(rfa::game::lua_State* L);
+// adds its own functions there (rfa::game::lua_register), for its interface scripts to call.
 void __cdecl RegisterLuaFunctions(lua_State* L) {
     using namespace rfa::game;
     g_registerGameFunctions(L);
@@ -742,6 +744,14 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_set_setting", LuaSetSetting);
     lua_register(L, "rfa_log", LuaLog);
     rfa::Log("Added rfa_get_setting, rfa_set_setting and rfa_log to the game's menu Lua");
+    using RegisterLuaFn = void(__cdecl*)(lua_State*);
+    for (HMODULE mod : g_mods)
+        if (auto registerLua = reinterpret_cast<RegisterLuaFn>(GetProcAddress(mod, "RFAMod_RegisterLua"))) {
+            registerLua(L);
+            wchar_t file[MAX_PATH];
+            GetModuleFileNameW(mod, file, MAX_PATH);
+            rfa::Log("%ls added its functions to the game's menu Lua", wcsrchr(file, L'\\') ? wcsrchr(file, L'\\') + 1 : file);
+        }
 }
 
 void InstallOverrides() {

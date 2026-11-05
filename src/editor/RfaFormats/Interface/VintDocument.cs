@@ -106,7 +106,8 @@ public sealed class VintDocument
         VintElement Element()
         {
             string name = strings[(int)BitConverter.ToUInt32(data, p)];
-            string type = strings[(int)BitConverter.ToUInt32(data, p + 4)];
+            VintReference typeReference = Reference(p + 4);
+            string type = strings[typeReference.Index];
             int childCount = BitConverter.ToUInt16(data, p + 8);
             int baseAt = (int)BitConverter.ToUInt32(data, p + 11);
             int variantCount = data[p + 15];
@@ -117,12 +118,42 @@ public sealed class VintDocument
             p = ReadProperties(baseAt, null, properties);  // the base properties come last; the children follow them
             var children = new List<VintElement>(childCount);
             for (int c = 0; c < childCount; c++) children.Add(Element());
-            return new VintElement(name, type, properties, children);
+            return new VintElement(name, type, properties, children) { TypeReference = typeReference };
         }
         var roots = new List<VintElement>(rootCount);
         for (int i = 0; i < rootCount; i++) roots.Add(Element());
 
         return new VintDocument(data.AsSpan(0, stringsAt).ToArray(), strings, dependencies, metadata, roots);
+    }
+
+    /// <summary>
+    /// A document that only brings a texture file: one empty group named <paramref name="rootName"/>,
+    /// its script <paramref name="script"/> (every one of Armageddon's documents has one; the game
+    /// closed one without it as soon as it had loaded it), no animations. Loading it streams its
+    /// texture file in, whose pictures any other document can then show.
+    /// </summary>
+    public static byte[] TexturesOnly(string textureFile, string rootName, string script)
+    {
+        const int dependencyAt = 0x1E, metadataAt = dependencyAt + 5, elementAt = metadataAt + 8,
+                  propertiesAt = elementAt + 16, stringsAt = propertiesAt + 1;
+        var body = new byte[stringsAt];
+        BitConverter.TryWriteBytes(body.AsSpan(0x00), Signature);
+        BitConverter.TryWriteBytes(body.AsSpan(0x08), Version);
+        BitConverter.TryWriteBytes(body.AsSpan(0x0E), 1u);              // metadata: the script
+        BitConverter.TryWriteBytes(body.AsSpan(0x12), 1u);              // dependencies: the texture file
+        BitConverter.TryWriteBytes(body.AsSpan(0x16), (uint)stringsAt);
+        BitConverter.TryWriteBytes(body.AsSpan(0x1A), (ushort)1);       // one root element
+        BitConverter.TryWriteBytes(body.AsSpan(0x1C), (ushort)0);       // no animations
+        body[dependencyAt] = 0;                                         // a texture file
+        BitConverter.TryWriteBytes(body.AsSpan(dependencyAt + 1), 0u);  // strings[0]
+        BitConverter.TryWriteBytes(body.AsSpan(metadataAt), 3u);        // lua_script_file: strings[3]
+        BitConverter.TryWriteBytes(body.AsSpan(metadataAt + 4), 4u);    // = strings[4]
+        BitConverter.TryWriteBytes(body.AsSpan(elementAt), 1u);         // name: strings[1]
+        BitConverter.TryWriteBytes(body.AsSpan(elementAt + 4), 2u);     // type: strings[2]
+        BitConverter.TryWriteBytes(body.AsSpan(elementAt + 11), (uint)propertiesAt);
+        body[propertiesAt] = 0;                                         // no properties
+        var document = new VintDocument(body, [textureFile, rootName, "group", "lua_script_file", script], [], [], []);
+        return document.ToBytes();
     }
 
     /// <summary>The name hash of a property: CRC-32 (reflected, polynomial 0xEDB88320) started at 0, with no final inversion.</summary>
@@ -200,4 +231,8 @@ public sealed record VintProperty(byte ValueType, uint NameHash, int ValueAt, st
     public VintReference AsReference => new(ValueAt, StringIndex);
 }
 
-public sealed record VintElement(string Name, string Type, IReadOnlyList<VintProperty> Properties, IReadOnlyList<VintElement> Children);
+public sealed record VintElement(string Name, string Type, IReadOnlyList<VintProperty> Properties, IReadOnlyList<VintElement> Children)
+{
+    /// <summary>Where the element's type name is referred to, so it can be pointed at another type.</summary>
+    public VintReference TypeReference { get; init; } = new(0, -1);
+}

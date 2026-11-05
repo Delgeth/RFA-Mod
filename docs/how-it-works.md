@@ -151,7 +151,9 @@ begins (`0x50F400`).
 
 **Lua bridge**: menu scripts can call `rfa_get_setting(section, key, default)`,
 `rfa_set_setting(section, key, value)` and `rfa_log(text)`. After a change the loader calls
-`RFAMod_SettingChanged(section, key)` in every mod that exports it.
+`RFAMod_SettingChanged(section, key)` in every mod that exports it. A mod can add Lua functions
+of its own for its interface scripts: the loader calls its `RFAMod_RegisterLua(lua_State*)`
+export, if it has one, right after adding its own (`rfa::game::lua_register` in `rfa_game.h`).
 
 **In-game menus** (`menus.cpp`): the loader hosts [Dear ImGui](https://github.com/ocornut/imgui)
 (`src\third_party\imgui`, built with `NDEBUG` so its checks never stop the game) on the game's own
@@ -784,6 +786,73 @@ documents (elements driven by a Lua script).
 - `--remove` takes all of it away again. Since that sheet table now holds the pictures of
   Armageddon's own HUD too, it must never be deleted alone.
 
+**Guerrilla's map** (`Map=1`): its minimap (`rfg_ui_hud`) and its world map (`rfg_ui_fullscreen`,
+opened and closed with `MapKey=`).
+- Guerrilla drew its maps in its documents' `map` elements with game code of its own, which
+  Armageddon kept only for its compass. So `GuerrillaHud.exe` makes those elements plain pictures
+  (the minimap's is its frame: the border, its shading and the player's arrow), and our scripts
+  build the map from Guerrilla's own pictures with the interface's elements, created at load
+  (`vint_object_create`).
+- The minimap: a clip box and a square turned 45° used as a mask (`mask`) cut Guerrilla's octagon
+  (its mask picture's shape); inside, a group turned against the camera holds Guerrilla's world
+  map picture (`terr01_map`, 1024 × 1024, a zone every 85⅓ pixels) and, over it, the zones' own
+  pictures near the player (`terr01_<col>_<row>_map`, 512 × 512, a metre a pixel). It reaches
+  Guerrilla's 40 m from the player to the frame's edge, plus half the vehicle's speed while
+  driving. The district's name above it comes from Guerrilla's districts (`territories.xtbl`) and
+  their names in its strings (`territories_us.le_strings`), written by `GuerrillaHud.exe` to
+  `mods\guerrilla_hud\districts.txt`.
+- The zones' own pictures (13 MB in all) come as Guerrilla keeps them, each in a container of its
+  own: a document per zone that holds nothing but that texture (`rfg_ui_map_<col>_<row>`, 128 KB);
+  the mod loads a zone's while the player is within 250 m of it, and unloads it 20 s after.
+- **The interface's limits**, raised by the mod in plain C++ before the game starts: the project's
+  documents (a fixed array of 128 records, `0x133A5F8`, made by `0x56A7C0`; the reader's cap at
+  `0x566BC6`) to 256 (Armageddon's 115 and ours 107); documents open at once (a pool of 10 records,
+  `0x566850`) to 40; and the interface's memory (`0xA45600`: 10 MB) to 32 MB, which the game's own
+  menus and loading screens share with Guerrilla's map.
+- What the scripts need each frame, the mod gives them through Lua functions of its own, added
+  with the loader's `RFAMod_RegisterLua` export: `rfg_map_view()` (where the player is on
+  Guerrilla's map picture, which way the camera looks, the speed, the zone, the district, whether
+  the world map is open) and `rfg_map_tiles()` (the zones near the player whose pictures are in).
+  The player's position is the local player object's (`0x2271490`, `+4`), the camera's direction
+  the camera manager's (`0x11B9C40`, `+0x50`); the world keeps Guerrilla's coordinates (zone
+  column `8 + x / 511`, row `8 − z / 511`).
+
+**Guerrilla's reticles and ammo** (`Reticles=1`): its document `rfg_ui_hud_reticles`, run by
+Guerrilla's own script for it.
+- Guerrilla's script draws everything from one data item its game filled each frame, `WeaponFire`
+  (22 fields: the weapon, its reticle picture, the rounds in the magazine and the rest, whether
+  it's aimed at a friend or an enemy, a hit this frame, the heat, ...). Armageddon has no such
+  item. So the mod adds Lua functions that make a data item (`rfg_dataitem_make`, through the
+  engine's own `0xC58910`, which holds up to 128 items) and set its fields (`rfg_dataitem_set`,
+  through `0xC576E0`, which tells the subscribers), and our part of the script makes `WeaponFire`
+  and fills it from Armageddon's own items for its HUD (`reticule_hud`, `primary_weapon_hud`).
+- `GuerrillaHud.exe` builds the document's script from the player's copy of Guerrilla: our shims
+  first (`rfg_guerrilla_shims.lua`: what Guerrilla's scripts call that Armageddon's interface Lua
+  hasn't got, such as `string.find`), then Guerrilla's script with its `_init` and `_cleanup`
+  renamed and the pictures it names renamed `rfg_...`, then ours, which calls them.
+- Two differences between the games' interface Lua are bridged in Guerrilla's script there:
+  Armageddon's `vint_set_property` / `vint_get_property` take and give a `tint` as 0–255 where
+  Guerrilla's scripts use 0–1, so their calls go through the shims' `rfg_vint_set_property` /
+  `rfg_vint_get_property`; and their calls of the document clock (`vint_get_time_index()`,
+  `vint_set_time_index(t)`), which name no document and so use whichever document's script is
+  running, name their own.
+- Armageddon's reticle, ammo ring and weapon meter are faded out while it's loaded; its Nano
+  Forge meter, its magnet gun's marks and its reload and wait prompts stay.
+
+**Guerrilla's weapon select** (`WeaponSelect=1`): its document `rfg_ui_hud_weapon_sel`, run by
+Guerrilla's own script the same way, in place of Armageddon's weapon selector (which sits at the
+bottom left, over the minimap).
+- Guerrilla's script reads two items its game filled: `WeaponSlotInfo` (each of the four slots'
+  ammo, picture and name) and `WeaponShowInfo` (open or not, the chosen slot, the one before).
+  Armageddon has the same four slots: its item `weapon_radial_hud` says when its selector is open
+  and which slot is chosen (with the weapon's name), and its data responder
+  `wpn_radial_populate` gives each slot's picture and ammo, counted as Guerrilla counts it (-1
+  unlimited, -2 none). Our part makes Guerrilla's two items and fills them from those, Armageddon's
+  slot *n* as Guerrilla's plate *n*, and fades Armageddon's `weapon_selector_grp` while loaded.
+- Armageddon closes its selector about 0.7 s after a key picks a weapon, before Guerrilla's has
+  finished coming up (the weapon's name fades in after about 0.8 s), so Guerrilla's stays up 1.5 s
+  longer. How long Guerrilla's own game kept it up isn't known; that time is ours.
+
 ### guerrilla_vehicles
 
 What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself
@@ -1027,6 +1096,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() { /* install hooks *
 - Two `HookFunction`s on one address don't chain, so check no other mod hooks it first.
 - Export `RFAMod_SettingChanged(section, key)` to hear about settings changed from the game's
   menus.
+- Export `RFAMod_RegisterLua(lua_State*)` to give the interface's scripts functions of your own
+  (`rfa::game::lua_register`; push results with `lua_pushnumber`, `lua_pushstring`,
+  `lua_pushboolean`).
 - Export `RFAMod_Menu(const RFAMenu*)` to add menus and windows to the in-game menus, drawn with
   Dear ImGui (`rfa_menu.h`: start with `rfa::menu::Use(menu)`, and build ImGui's four core files
   with the mod, with `NDEBUG`, as `build.cmd` does for `rfa_qol`).
