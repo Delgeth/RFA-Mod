@@ -807,8 +807,16 @@ opened and closed with `MapKey=`).
 - **The interface's limits**, raised by the mod in plain C++ before the game starts: the project's
   documents (a fixed array of 128 records, `0x133A5F8`, made by `0x56A7C0`; the reader's cap at
   `0x566BC6`) to 256 (Armageddon's 115 and ours 107); documents open at once (a pool of 10 records,
-  `0x566850`) to 40; and the interface's memory (`0xA45600`: 10 MB) to 32 MB, which the game's own
-  menus and loading screens share with Guerrilla's map.
+  `0x566850`) to 40; the slots documents are loaded into (45, `0x28C3F48`; every document inside
+  another takes one too, and with none free a menu page waits forever) to 120, by moving the array
+  (its 14 references and its one-byte counts); the interface's lists of document handles (16 each,
+  `0x133A1A0`) to 256; the pools every element comes from (one per type: bitmaps 1,300, tweens 820,
+  ...; an element that doesn't fit is left out, and a menu page missing its parts can crash) to
+  three times as many, with their memory pool "vint_perm" from 640 KB to 4 MB; and the interface's
+  memory (`0xA45600`: 10 MB) to 32 MB, which the game's own menus and loading screens share with
+  Guerrilla's map.
+- Script errors in the interface's Lua (which the game otherwise only keeps, so a broken menu just
+  stays empty) are written to `logs\rfa_mods.log` by the loader ("Lua error: ...").
 - What the scripts need each frame, the mod gives them through Lua functions of its own, added
   with the loader's `RFAMod_RegisterLua` export: `rfg_map_view()` (where the player is on
   Guerrilla's map picture, which way the camera looks, the speed, the zone, the district, whether

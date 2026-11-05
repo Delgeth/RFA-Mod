@@ -503,9 +503,31 @@ void FindOverrides(const std::wstring& root, const std::wstring& relative) {
     FindClose(find);
 }
 
+// The game's Lua hands each run-time error of a script (the message, with the script and line) to
+// one callback: 0xD93590 calls the pointer at 0x34FA99C, which 0xD935D0 sets. The game's own
+// (0xB77320, set by its script start-up, 0xB77240) only keeps the last message in a buffer, so a
+// menu whose script fails just stays empty. Ours writes each error to the log too, then passes it
+// on. It is put in place (again, if the game has set its own since) whenever a script is compiled.
+using LuaErrorCallbackFn = void(__cdecl*)(lua_State*, const char*);
+auto& g_luaErrorCallback = *reinterpret_cast<LuaErrorCallbackFn*>(0x34FA99C);
+auto const SetLuaErrorCallback = reinterpret_cast<void(__cdecl*)(LuaErrorCallbackFn)>(0xD935D0);
+LuaErrorCallbackFn g_gameLuaErrorCallback;
+
+void __cdecl LogLuaError(lua_State* L, const char* message) {
+    RFA_LOG_FIRST(100, "Lua error: %s", message ? message : "(no message)");
+    if (g_gameLuaErrorCallback) g_gameLuaErrorCallback(L, message);
+}
+
+void WatchLuaErrors() {
+    if (g_luaErrorCallback == &LogLuaError) return;
+    g_gameLuaErrorCallback = g_luaErrorCallback;
+    SetLuaErrorCallback(&LogLuaError);
+}
+
 // Every Lua chunk the game compiles passes through here; an override with the same file name
 // replaces it.
 int __cdecl LoadBufferHook(lua_State* L, const char* buffer, size_t size, const char* chunkName) {
+    WatchLuaErrors();
     const std::string name = ScriptFileName(chunkName);
     if (!name.empty()) {
         RFA_LOG_FIRST(60, "Lua script loaded: %s", chunkName);
@@ -744,6 +766,8 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_set_setting", LuaSetSetting);
     lua_register(L, "rfa_log", LuaLog);
     rfa::Log("Added rfa_get_setting, rfa_set_setting and rfa_log to the game's menu Lua");
+    WatchLuaErrors();
+    rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");
     using RegisterLuaFn = void(__cdecl*)(lua_State*);
     for (HMODULE mod : g_mods)
         if (auto registerLua = reinterpret_cast<RegisterLuaFn>(GetProcAddress(mod, "RFAMod_RegisterLua"))) {

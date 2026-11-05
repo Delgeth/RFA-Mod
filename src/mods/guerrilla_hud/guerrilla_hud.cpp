@@ -187,6 +187,92 @@ void __fastcall OpenPoolInit(void* pool, void* unused, void* gameMempool, unsign
     rfa::Log("Interface documents: %d open at once (the game's %u)", kMaxOpenDocuments, count);
 }
 
+// The interface keeps the documents it is loading, unloading and drawing in eight lists of handles
+// (0x133A1A0, 0x2C bytes apart: data pointer, capacity, count, then room for 16 handles), each made
+// by 0x566960 with its own 16 and no way to grow (the grow step, 0x7476F0, always refuses; an add
+// that doesn't fit is dropped). One of them, 0x133A224, takes every document streamed in (load mode
+// 0: the menus' and ours) until the interface works through it (0x563770); a document that doesn't
+// get in reports itself not loading (0x565DA0) and never comes up. Entering Guerrilla's world puts
+// 9 there at once (Guerrilla's HUD and the zone pictures near the player), and each HUD piece to
+// come adds one; so, before they fill it, each list is given room of ours when it is made
+// (0x47CE00 points it at the room, as the game's own constructor does at its 16).
+constexpr DWORD kDocumentLists = 0x133A1A0;
+constexpr int kDocumentListCount = 8;
+constexpr DWORD kDocumentListStride = 0x2C;
+constexpr DWORD kStreamingQueue = 0x133A224;  // the one streamed documents wait in
+constexpr int kDocumentListRoom = 256;
+constexpr int kGameDocumentListRoom = 16;
+unsigned short g_documentListRoom[kDocumentListCount][kDocumentListRoom];
+ThisFn g_documentListMake;
+
+void* __fastcall DocumentListMake(void* list, void* unused) {
+    void* made = g_documentListMake(list, unused);
+    const DWORD at = reinterpret_cast<DWORD>(list);
+    if (at >= kDocumentLists && at < kDocumentLists + kDocumentListCount * kDocumentListStride &&
+        (at - kDocumentLists) % kDocumentListStride == 0) {
+        const int index = static_cast<int>((at - kDocumentLists) / kDocumentListStride);
+        ArraySet(list, nullptr, g_documentListRoom[index], kDocumentListRoom, 0);
+        RFA_LOG_FIRST(kDocumentListCount, "Interface document list 0x%08lX: room for %d (the game's %d)", at,
+                      kDocumentListRoom, kGameDocumentListRoom);
+    }
+    return made;
+}
+
+// How many documents wait in the streaming queue (for the log: the most there have been).
+int StreamingQueueCount() { return *reinterpret_cast<const int*>(kStreamingQueue + 8); }
+
+// The interface loads each document, and each document inside one, into one of 45 slots (0x28C3F48,
+// 0x5B0 bytes each): a static array the start-up code constructs (0xF5AAD0) and destroys (0xF66610),
+// which 0xC529B0 links into its free list; 0xC524B0 finds a document's slot by its handle, 0xC527C0
+// a slot's number. With none free, a document asked for waits for one, without a word. In
+// Guerrilla's world, Armageddon's HUD (with its 18 documents inside), Guerrilla's HUD and the zone
+// pictures near the player held so many that the pause menu's pages (a dozen documents with theirs)
+// never came up and couldn't be left, and a level load then waited forever (2026-11-05: the Video
+// page's request still waiting in a dump of the stuck game). So the array is moved to one of ours:
+// its 14 references in the game's code (each to the first slot, +0 or +4) and its count, a one-byte
+// value in each of the five places that use it and in the debug display's two "%u/%u" (so the
+// count stays below 128). Each is checked before anything is changed, before the start-up code
+// constructs the slots.
+constexpr DWORD kDocumentSlots = 0x28C3F48;
+constexpr DWORD kDocumentSlotSize = 0x5B0;
+constexpr BYTE kGameDocumentSlots = 45;
+constexpr BYTE kDocumentSlotCount = 120;
+constexpr DWORD kDocumentSlotReferences[] = {0xC5251C, 0xC52897, 0xC52A18, 0xC52A6F, 0xC52A7E, 0xC52A8C, 0xC52A9B,
+                                             0xC52AAA, 0xC52ACA, 0xC52ADF, 0xC52AEE, 0xC52B07, 0xF5AAE0, 0xF66620};
+constexpr DWORD kDocumentSlotCounts[] = {0xC52509, 0xC52A0A, 0xC52A54, 0xF5AAD9, 0xF66619, 0x5655F2, 0x565635};
+alignas(16) BYTE g_documentSlots[kDocumentSlotCount * kDocumentSlotSize];
+
+void MoveDocumentSlots() {
+    for (DWORD at : kDocumentSlotCounts)
+        if (*reinterpret_cast<const BYTE*>(at) != kGameDocumentSlots) {
+            rfa::Log("Interface document slots: the game's count at 0x%08lX isn't %u; it keeps its %u", at,
+                     kGameDocumentSlots, kGameDocumentSlots);
+            return;
+        }
+    for (DWORD at : kDocumentSlotReferences) {
+        const DWORD value = rfa::CodeValue(at);
+        if (value < kDocumentSlots || value >= kDocumentSlots + kDocumentSlotSize) {
+            rfa::Log("Interface document slots: the game's code at 0x%08lX isn't as expected (0x%08lX); it keeps its %u",
+                     at, value, kGameDocumentSlots);
+            return;
+        }
+    }
+    const DWORD ours = reinterpret_cast<DWORD>(g_documentSlots);
+    for (DWORD at : kDocumentSlotReferences) {
+        const DWORD value = ours + (rfa::CodeValue(at) - kDocumentSlots);
+        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &value, sizeof(value))) {
+            rfa::Log("Interface document slots: could not change the game's code at 0x%08lX", at);
+            return;
+        }
+    }
+    for (DWORD at : kDocumentSlotCounts)
+        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &kDocumentSlotCount, sizeof(kDocumentSlotCount))) {
+            rfa::Log("Interface document slots: could not change the game's count at 0x%08lX", at);
+            return;
+        }
+    rfa::Log("Interface document slots: %u (the game's %u), moved to 0x%08lX", kDocumentSlotCount, kGameDocumentSlots, ours);
+}
+
 // The project's reader (vint_project.cpp, 0xC50360) keeps the documents it reads from rfg.vint_proj
 // in a table of its own: 128 records of 0xC8 bytes at 0x28BC7C8 (two numbers, then the document's
 // file name at +8, its name at +0x48 and +0x88), their count at 0x28C3B08, and stops the game at
@@ -209,7 +295,73 @@ constexpr DWORD kAssetNameSizes[] = {0x566A96, 0x566ADC};  // push 2710h, push 2
 constexpr DWORD kGameAssetNameBytes = 10000;
 constexpr DWORD kAssetNameBytes = 64 * 1024;
 
+// Every element of every loaded document (bitmap, text, group, tween, ...) comes from a pool of its
+// type, made when the interface registers the type, with a fixed number (pushed just before the
+// pool's set-up call) out of one 640 KB memory pool, "vint_perm" (made at start-up, 0xA46AC1 the
+// block and 0xA46ADA the pool, 0xA0000 each). The pools hand out what they hold and then nothing:
+// an element that doesn't fit is left out of its document. In Guerrilla's world, with Armageddon's
+// HUD and Guerrilla's loaded, a dump showed the tweens full (820 of 820) and the bitmaps at 1,212 of
+// 1,300; the Options page Video then lost its buttons' backgrounds, its script failed ("bg_x" nil)
+// and the game crashed (2026-11-05). So each pool gets three times its number, and vint_perm room
+// for them: the six pools are about 550 KB of its 640, three times that 1.7 MB, so 4 MB.
+struct ElementPool {
+    const char* type;
+    DWORD sizeAt;     // the 4-byte value pushed (push imm32), or the byte (push imm8)
+    bool oneByte;
+    DWORD game;
+    DWORD ours;
+};
+constexpr ElementPool kElementPools[] = {
+    {"tween", 0xC6717E, false, 0x334, 3 * 0x334},          // 196 bytes each
+    {"document", 0xC6EC32, false, 0xC4, 3 * 0xC4},         // 128
+    {"group", 0xC6F122, false, 0x1DC, 3 * 0x1DC},          // 120
+    {"text", 0xC6F822, false, 0x118, 3 * 0x118},           // 208
+    {"bitmap", 0xC71AD2, false, 0x514, 3 * 0x514},         // 168
+    {"animation", 0xC7258E, false, 0x16C, 3 * 0x16C},      // 88
+    {"clip", 0xC6DB82, true, 0x10, 0x40},                  // one byte: stays below 128
+    {"bitmap_circle", 0xC6D052, true, 0x14, 0x40},
+};
+constexpr DWORD kVintPermSizes[] = {0xA46AC2, 0xA46ADB};  // push 0A0000h (the block), push 0A0000h (the pool)
+constexpr DWORD kGameVintPerm = 0xA0000;
+constexpr DWORD kVintPermOurs = 4 * 1024 * 1024;
+
+void RaiseElementPools() {
+    for (DWORD at : kVintPermSizes)
+        if (rfa::CodeValue(at) != kGameVintPerm) {
+            rfa::Log("Interface elements: the game's code at 0x%08lX isn't as expected (0x%08lX); the pools keep their sizes",
+                     at, rfa::CodeValue(at));
+            return;
+        }
+    for (const ElementPool& pool : kElementPools) {
+        const DWORD value = pool.oneByte ? *reinterpret_cast<const BYTE*>(pool.sizeAt) : rfa::CodeValue(pool.sizeAt);
+        if (value != pool.game) {
+            rfa::Log("Interface elements: the %s pool's size at 0x%08lX isn't %lu (it's %lu); the pools keep their sizes",
+                     pool.type, pool.sizeAt, pool.game, value);
+            return;
+        }
+    }
+    for (DWORD at : kVintPermSizes)
+        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &kVintPermOurs, sizeof(kVintPermOurs))) {
+            rfa::Log("Interface elements: could not change the game's code at 0x%08lX", at);
+            return;
+        }
+    for (const ElementPool& pool : kElementPools) {
+        const BYTE small = static_cast<BYTE>(pool.ours);
+        const bool changed = pool.oneByte ? rfa::PatchCode(reinterpret_cast<void*>(pool.sizeAt), &small, 1)
+                                          : rfa::PatchCode(reinterpret_cast<void*>(pool.sizeAt), &pool.ours, sizeof(pool.ours));
+        if (!changed) {
+            rfa::Log("Interface elements: could not change the %s pool's size", pool.type);
+            return;
+        }
+    }
+    rfa::Log("Interface elements: three times the game's pools (bitmaps %lu, tweens %lu, groups %lu, texts %lu, "
+             "animations %lu, documents %lu), in %lu MB (the game's 640 KB)", 3 * 0x514ul, 3 * 0x334ul, 3 * 0x1DCul,
+             3 * 0x118ul, 3 * 0x16Cul, 3 * 0xC4ul, kVintPermOurs / (1024 * 1024));
+}
+
 void RaiseDocumentLimits() {
+    RaiseElementPools();
+    MoveDocumentSlots();
     if (!rfa::MoveTable("Interface project documents", kProjectTable, kProjectRecordSize, kGameMaxDocuments,
                         kProjectTableReferences, kProjectTableLimits, g_projectTable, kMaxDocuments))
         return;  // MoveTable says why; the game keeps all its 128s
@@ -236,6 +388,9 @@ void RaiseDocumentLimits() {
     for (DWORD at : kDocumentLimitValues) rfa::PatchCode(reinterpret_cast<void*>(at), &ours, sizeof(ours));
     g_openPoolInit = reinterpret_cast<PoolInitFn>(rfa::HookFunction(0x566850, 7, reinterpret_cast<void*>(&OpenPoolInit)));
     if (!g_openPoolInit) rfa::Log("Interface documents: could not hook the open documents' pool; at most 10 open at once");
+    // push ebp / mov ebp,esp / push ecx / mov [ebp-4],ecx
+    g_documentListMake = reinterpret_cast<ThisFn>(rfa::HookFunction(0x566960, 7, reinterpret_cast<void*>(&DocumentListMake)));
+    if (!g_documentListMake) rfa::Log("Interface documents: could not hook the document lists; each keeps its 16");
 }
 
 // The loader's answer to "are its menus (or the developer console) up?" (RFALoader_MenusWant(0)).
@@ -551,6 +706,26 @@ void __cdecl HudUpdate(void* hud) {
     g_hudUpdate(hud);
     g_lastHudUpdate = GetTickCount64();
     FollowTheWorld();
+    // For the log: an element pool past the game's own size (each pool: +0x0C in use, +0x10 room).
+    struct PoolWatch { const char* type; DWORD pool; DWORD game; DWORD logged; };
+    static PoolWatch watched[] = {{"tween", 0x28EEB00, 0x334, 0}, {"document", 0x28F15CC, 0xC4, 0},
+                                  {"group", 0x28F1684, 0x1DC, 0}, {"text", 0x28F18D0, 0x118, 0},
+                                  {"bitmap", 0x28F19FC, 0x514, 0}, {"animation", 0x28F1B4C, 0x16C, 0}};
+    for (PoolWatch& watch : watched) {
+        const DWORD inUse = *reinterpret_cast<const DWORD*>(watch.pool + 0x0C);
+        if (inUse > watch.game && inUse > watch.logged + 50) {
+            watch.logged = inUse;
+            RFA_LOG_FIRST(30, "Interface elements: %lu %ss in use (the game had room for %lu, now %lu)", inUse, watch.type,
+                          watch.game, *reinterpret_cast<const DWORD*>(watch.pool + 0x10));
+        }
+    }
+    // For the log: the most documents the streaming queue has held (the game's lists held 16).
+    static int mostQueued = kGameDocumentListRoom / 2;
+    if (const int queued = StreamingQueueCount(); queued > mostQueued) {
+        mostQueued = queued;
+        RFA_LOG_FIRST(30, "Interface: %d documents waiting in the streaming queue (the game had room for %d)", queued,
+                      kGameDocumentListRoom);
+    }
 }
 
 // Before each draw pass: our loaded documents on the draw list while the HUD runs (the world map
