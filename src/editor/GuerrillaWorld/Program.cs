@@ -80,6 +80,8 @@ try
     Console.WriteLine($"Building {zones.Count} of Guerrilla's zones (this takes a while for many)...");
     GuerrillaWorld.Build(guerrilla, game, Path.Combine(modFolder, "overrides"), Path.Combine(modFolder, "mods", "guerrilla_world"), zones,
                          GuerrillaWorld.DefaultStart, Console.WriteLine, props, propZones);
+    Console.WriteLine($"Materials: {GuerrillaMaterials.LayeredMaterials:N0} given their layer (dirt, grime, snow, logos) as a decal, " +
+                      $"{GuerrillaMaterials.ThirdUvDecals:N0} their decal at the third UV set");
 }
 catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or NotSupportedException)
 {

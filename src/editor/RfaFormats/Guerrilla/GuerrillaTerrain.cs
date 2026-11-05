@@ -111,6 +111,47 @@ public static class GuerrillaTerrain
         return (cells, names);
     }
 
+    /// <summary>
+    /// Where the zone's far meshes are (see <see cref="FarGround.FromGuerrilla"/>): their nine 48-byte
+    /// records, the first of their nine version-6 blocks (8-byte vertices of format 15, one right after
+    /// another), and where the last ends.
+    /// </summary>
+    public static (int Records, int First, int End) FarMeshes(byte[] terrain)
+    {
+        int I(int at) => BitConverter.ToInt32(terrain, at);
+        var candidates = new HashSet<int>();
+        for (int a = 0; a + 0x30 <= terrain.Length; a += 4)
+            if (I(a) == 6 && terrain[a + 0x1C] == 8 && terrain[a + 0x1D] == 15) candidates.Add(a);
+        var runs = new List<(int First, int End)>();
+        foreach (int start in candidates)
+        {
+            if (candidates.Any(c => c < start && c + I(c + 8) == start)) continue;
+            int at = start, k = 0;
+            while (k < 9 && candidates.Contains(at)) { at += I(at + 8); k++; }
+            if (k == 9 && !candidates.Contains(at)) runs.Add((start, at));
+        }
+        if (runs.Count != 1) throw new InvalidDataException($"Guerrilla's terrain file has {runs.Count} runs of nine far mesh blocks, not one");
+        return (runs[0].First - 9 * 48, runs[0].First, runs[0].End);
+    }
+
+    /// <summary>
+    /// The zone's occluders, as the file keeps them (after the far meshes' material, from a multiple of
+    /// 4): 24 bytes each (terrain_occluder: its bottom and top heights, then its two ends' x and z, in
+    /// the world: an upright wall the renderer hides what is behind), as many as terrain_data's +0x20
+    /// says. Armageddon's terrain files keep theirs the same way.
+    /// </summary>
+    public static byte[] Occluders(byte[] terrain)
+    {
+        int count = BitConverter.ToInt32(terrain, DataAt(terrain) + 0x20);
+        if (count <= 0) return [];
+        int at = To(SkipFarMaterial(terrain, FarMeshes(terrain).End), 4);
+        if (at + count * 24 > terrain.Length) throw new InvalidDataException($"Guerrilla's {count} occluders don't fit the terrain file");
+        for (int k = 0; k < count; k++)
+            if (!(BitConverter.ToSingle(terrain, at + k * 24) <= BitConverter.ToSingle(terrain, at + k * 24 + 4)))
+                throw new InvalidDataException($"Guerrilla's occluder {k} at 0x{at + k * 24:X} has its bottom over its top: not where its occluders are");
+        return terrain[at..(at + count * 24)];
+    }
+
     /// <summary>Where terrain_data starts: after the 36-byte header, the texture names, the stitch names and placements and the foliage mesh names, each to 4.</summary>
     static int DataAt(byte[] terrain)
     {
@@ -119,6 +160,21 @@ public static class GuerrillaTerrain
         int p = To(0x24 + (int)U(12), 4);
         p = To(p + (int)U(24) + (int)U(32) * 20, 4);
         return To(p + (int)U(20), 4);
+    }
+
+    /// <summary>
+    /// Past the far meshes' material set at <paramref name="p"/>, laid out as Armageddon's: its names block
+    /// (its size, then the names), then from a multiple of 16 a word and its map (a count, a word each),
+    /// then from a multiple of 16 its one material (its size first).
+    /// </summary>
+    static int SkipFarMaterial(byte[] f, int p)
+    {
+        int I(int at) => BitConverter.ToInt32(f, at);
+        p = To(p + 4 + I(p), 16);
+        p = To(p + 8 + I(p + 4) * 4, 16);
+        int size = I(p);
+        if (size <= 0 || p + size > f.Length) throw new InvalidDataException($"Guerrilla's far mesh material at 0x{p:X} has size {size}");
+        return p + size;
     }
 
     /// <summary>Past a material set (names block, words, map, slots, materials), as <see cref="TerrainFile"/> reads the ground's.</summary>

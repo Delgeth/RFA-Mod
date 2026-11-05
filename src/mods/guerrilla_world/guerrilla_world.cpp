@@ -109,9 +109,11 @@
 #include "rfa_game.h"
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <intrin.h>
 #include <math.h>
 #include <stdarg.h>
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -425,6 +427,11 @@ void ReadStreamRadius() {
     g_streamRadius = radius >= 0 ? radius : kDefaultStreamRadius;
 }
 
+// Whether our worlds draw their ground as far as Guerrilla does (GroundDetail=; see RunGroundDetail).
+// Also read again whenever rfa_mods.ini is saved.
+bool g_groundDetail = true;
+void ReadGroundDetail() { g_groundDetail = rfa::IniInt(L"GuerrillaWorld", L"GroundDetail", 1) != 0; }
+
 // The most a layer's radius may be in our worlds: under two of its cells (sub-zones a third of a
 // zone, zones a zone), so its box meets at most 5 × 5 cells, 25 of the 35 a layer tracks (a box
 // exactly four cells wide can meet six a side; Guerrilla's size makes the sub-zones' own radius,
@@ -550,6 +557,26 @@ void ReadSunShafts() {
     g_sunShafts = shafts >= 0 ? shafts : 1.0f;
 }
 
+// How strong the sun's shine on surfaces is (Shine=; 1 as drawn so far, 0 none; read again whenever
+// rfa_mods.ini is saved): the highlight the mod's light writes for every surface, which each material
+// then takes times its specular map and colour (see kLightShader).
+float g_shine = 1.0f;
+
+void ReadShine() {
+    const float shine = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"Shine", L"1").c_str()));
+    g_shine = shine >= 0 ? shine : 1.0f;
+}
+
+// How strong the glow round bright things is, with Guerrilla's tone mapping (Bloom=; times the time of
+// day's bloom_amount; 1 as drawn so far, 0 none; read again whenever rfa_mods.ini is saved). The glow
+// itself is Armageddon's bright pass's (see DrawToneMapping).
+float g_bloom = 1.0f;
+
+void ReadBloom() {
+    const float bloom = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"Bloom", L"1").c_str()));
+    g_bloom = bloom >= 0 ? bloom : 1.0f;
+}
+
 bool SunShaftsOn() { return GuerrillaToneMapping() && g_sunShafts > 0 && !g_shaftsFailed; }
 
 // Sharpening of the final picture in our worlds (Sharpen=, 0-100; 0: none; read again whenever
@@ -667,6 +694,13 @@ void CheckSettings() {
     const float radiusBefore = g_streamRadius;
     ReadStreamRadius();
     if (g_streamRadius != radiusBefore) rfa::Log("Streaming: radius %.0f m (was %.0f; 0 = the game's own)", g_streamRadius, radiusBefore);
+    ReadGroundDetail();
+    const float shineBefore = g_shine;
+    ReadShine();
+    if (g_shine != shineBefore) rfa::Log("Light: the sun's shine times %.3g (was %.3g)", g_shine, shineBefore);
+    const float bloomBefore = g_bloom;
+    ReadBloom();
+    if (g_bloom != bloomBefore) rfa::Log("Tone mapping: bloom times %.3g (was %.3g)", g_bloom, bloomBefore);
 }
 
 bool InOurWorld() {
@@ -696,18 +730,36 @@ bool SunUp() {
     return toward[1] >= 0;
 }
 
+// Where Guerrilla's light comes from, which isn't the sun's disc: its time of day lights the world
+// (and, with a lower floor, its clouds) from tod_shared_calcaulate_light_direction_at_time, which
+// Armageddon keeps too (0x55A850) with the same constants: an arc that rises in the east at 7:30,
+// crosses south at 13:30 and sets in the west at 19:30, at night mirrored back through the north,
+// never lower than `leastDegrees` above the horizon (Tod_light_min_angle_to_horizon 40; the clouds 15),
+// turned about y by TOD_rot_around_y (0 in Guerrilla's world). Toward the light, in the world.
+void LightToward(float hours, float leastDegrees, float (&out)[3]) {
+    const float pi = 3.14159265f;
+    float t = hours - 7.5f;
+    if (t < 0) t += 24;
+    const float a = pi * (t / 12 - 1);
+    float y = fabsf(sinf(a));
+    const float least = sinf(leastDegrees * pi / 180);
+    if (y < least) y = least;
+    if (y > 1) y = 1;
+    const float v[3] = {-cosf(a), y, 0.53f * sinf(a)};
+    const float length = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    for (int i = 0; i < 3; ++i) out[i] = v[i] / length;
+}
+
+constexpr float kLightLeastDegrees = 40, kCloudLightLeastDegrees = 15;
+
 // The light that shines from one direction: tod_light_color (Guerrilla's: the sun's by day, blue
-// moonlight by night) times Sun=, from the sun while it is up and from the opposite side of the sky
-// (the moon, roughly) while it is down, fading out as either nears the horizon. Toward the light,
-// and the light.
+// moonlight by night) times Sun=, from Guerrilla's light direction (LightToward: never under 40°, the
+// moon's half of the day through the north), at full strength all day as Guerrilla's (its colour
+// curves dim it at dusk themselves). Toward the light, and the light.
 void DirectLight(float (&toward)[3], float (&out)[3]) {
-    SunToward(toward);
-    if (toward[1] < 0)
-        for (float& v : toward) v = -v;
+    LightToward(g_timeOfDay, kLightLeastDegrees, toward);
     TodColour(kSunColour, out);
-    float up = (toward[1] - 0.01f) / 0.1f;  // 0 at the horizon, 1 at 6° up
-    up = up < 0 ? 0 : up > 1 ? 1 : up;
-    for (float& c : out) c *= g_sun * up * up * (3 - 2 * up);
+    for (float& c : out) c *= g_sun;
 }
 
 // ---- The sun's shadows
@@ -929,6 +981,40 @@ void RunStreaming(bool ours) {
         if (layers == g_streamLayers) {
             SetStreamRadius(manager, nullptr, kZoneLayer, g_streamRadiusBefore);
             rfa::Log("Streaming: back to the game's radius %.0f m in world \"%s\"", g_streamRadiusBefore, WorldName());
+        }
+    }
+}
+
+// The ground's detail distances, the console floats Rl_terrain_fade_start and _end: Armageddon draws
+// a sub-zone's ground with all its layers to 125 m, fades it to the colour map by 150 m and draws none
+// past that (0xF039A0: its far ground, 4.3 m cells laid up to 18 m under the real ground, shows from
+// there), so buildings and rocks 150 m off stood over ground that sank away. Guerrilla draws every
+// loaded sub-zone's ground, its layers to 250 m and the colour map beyond, and its far ground only past
+// 320 m (rl_terrain_renderer::prerender; the camera's high-detail far clip). Armageddon's fade end is
+// also its cut-off and its far ground's start, so in our worlds (GroundDetail=1) the two get 250 and
+// 320, and the game's own come back elsewhere (unless changed in the console meanwhile).
+float& g_terrainFadeStart = *reinterpret_cast<float*>(0x1130BD0);
+float& g_terrainFadeEnd = *reinterpret_cast<float*>(0x1130BD4);
+constexpr float kGuerrillaFadeStart = 250.0f, kGuerrillaFadeEnd = 320.0f;
+bool g_groundDetailOurs = false;
+float g_fadeStartBefore = 125.0f, g_fadeEndBefore = 150.0f;
+
+// Each frame: Guerrilla's distances on entering one of our worlds, the game's back on leaving it.
+void RunGroundDetail(bool ours) {
+    if (ours && g_groundDetail && !g_groundDetailOurs) {
+        g_fadeStartBefore = g_terrainFadeStart;
+        g_fadeEndBefore = g_terrainFadeEnd;
+        g_terrainFadeStart = kGuerrillaFadeStart;
+        g_terrainFadeEnd = kGuerrillaFadeEnd;
+        g_groundDetailOurs = true;
+        rfa::Log("Ground: detailed to %.0f m, far ground from %.0f m, as Guerrilla's (the game's %.0f and %.0f m; GroundDetail=)",
+                 kGuerrillaFadeStart, kGuerrillaFadeEnd, g_fadeStartBefore, g_fadeEndBefore);
+    } else if ((!ours || !g_groundDetail) && g_groundDetailOurs) {
+        g_groundDetailOurs = false;
+        if (g_terrainFadeStart == kGuerrillaFadeStart && g_terrainFadeEnd == kGuerrillaFadeEnd) {
+            g_terrainFadeStart = g_fadeStartBefore;
+            g_terrainFadeEnd = g_fadeEndBefore;
+            rfa::Log("Ground: back to the game's detail distances, %.0f and %.0f m", g_fadeStartBefore, g_fadeEndBefore);
         }
     }
 }
@@ -1378,7 +1464,7 @@ cbuffer Clouds : register(b0)
     float4 Strengths;  // the four layers' strengths
     float4 Shape;      // x: the height they fade in from, y: the height they are full at, z: rim light strength, w: rim light power
     float4 Drift;      // x: layers 0-1's sideways offset, y: layers 2-3's
-    float4 Ambient;    // the time of day's ambient light (added to the clouds' light)
+    float4 Ambient;    // added to the clouds' light: 0, as Guerrilla's sky ambient
     float4 FogColour;  // the fog's colour
     float4 FogNumbers; // as the world's fog: x the fall-off with height, y the density at the camera's height, w the offset
     float4 FogScale;   // x the far clip ÷ the part's half-width, y the fog scale ÷ its half-height, z the far clip ÷ its half-depth, w its half-height
@@ -1433,7 +1519,7 @@ float4 CloudPixel(CloudPoint p) : SV_Target
     light = saturate(through.w * light + cover.w * fade * layers23.b);
     // Front or rear light by which way the cloud faces the light; a rim where it is thin, towards the sun.
     float3 lit = lerp(Front.rgb, Rear.rgb, dot(normalize(p.normal), Light.xyz) * 0.5 + 0.5);
-    float rim = min(exp(-covered * Shape.w), 1);
+    float rim = min(exp2(-covered * Shape.w), 1);  // base 2, as Guerrilla's shader's exp
     float towardsSun = pow(saturate(dot(normalize(p.look), Light.xyz)), 30);
     lit += Front.rgb * Shape.z * rim * towardsSun;
     float alpha = covered * covered;
@@ -1472,13 +1558,13 @@ float4 BackdropPixel(CloudPoint p) : SV_Target
 constexpr char kLightShader[] = R"(
 cbuffer Light : register(b0)
 {
-    float4 FromAbove;   // the sky's light on a surface facing straight up
-    float4 FromBelow;   // and facing straight down
+    float4 FromAbove;   // the sky's light on a surface facing the light (Guerrilla's V_ambient_render)
+    float4 FromBelow;   // and facing away from it (V_back_ambient_render)
     float4 SunColour;   // the sun's light on a surface facing it (0 while it is down)
     float4 SunToward;   // toward the sun, in the camera's space
     float4 UpToward;    // straight up, in the camera's space
     float4 TargetSize;  // the light buffer's width and height, and the tangents of half the field of view across and up
-    float4 Parts;       // x 1: the sky's light; y 1: the sun's; z 1: the sun's through the lamp's shadow map
+    float4 Parts;       // x 1: the sky's light; y 1: the sun's; z 1: the sun's through the lamp's shadow map; w the shine's strength (Shine=)
 };
 
 cbuffer Game : register(b1)
@@ -1501,9 +1587,11 @@ Texture2D ShadowMap : register(t1);
 Texture2D Depth : register(t2);
 SamplerState Nearest : register(s0);
 
-// n: the surface's normal, facing: how squarely it faces the sun (n · toward the sun). The normals
-// are in the camera's space as the positions worked out here are (the game's lamps light with both).
-float SunShadow(float2 at, float3 n, float facing)
+// facing: how squarely the surface faces the sun (its normal · toward the sun); away: which way
+// to move the point looked up off the surface (its normal, or toward the sun where the normal faces
+// away). The normals are in the camera's space as the positions worked out here are (the game's lamps
+// light with both).
+float SunShadow(float2 at, float3 away, float facing)
 {
     float depth = Depth.SampleLevel(Nearest, at, 0).x;
     float ahead = 1 / (SimilarityData.z * depth + SimilarityData.w);
@@ -1518,7 +1606,7 @@ float SunShadow(float2 at, float3 n, float facing)
     // roof's edge just above a wall) casting their shadow on what is under them.
     float texel = ShadowFade.w / length(ShadowRows[0].xyz);
     float slant = sqrt(saturate(1 - facing * facing));
-    float4 lookup = float4(surface.xyz + n * texel * (1 + 2 * slant), 1);
+    float4 lookup = float4(surface.xyz + away * texel * (1 + 2 * slant), 1);
     float4 inMap = float4(dot(ShadowRows[0], lookup), dot(ShadowRows[1], lookup), dot(ShadowRows[2], lookup), dot(ShadowRows[3], lookup));
     float3 mapped = inMap.xyz / inMap.w;
     if (any(mapped.xy < 0) || any(mapped.xy > 1)) return 1;
@@ -1552,7 +1640,15 @@ float4 LightVertex(uint id : SV_VertexID) : SV_Position
     return float4(corner * float2(2, -2) + float2(-1, 1), 0, 1);
 }
 
-float4 LightPixel(float4 position : SV_Position) : SV_Target
+// Two targets: the light buffer, and the mod's own light for Guerrilla's material shaders (the same
+// light, before the game's ambient occlusion, and in alpha the sun's shadow: see SurfaceInputs).
+struct LightOut
+{
+    float4 light : SV_Target0;
+    float4 ours : SV_Target1;
+};
+
+LightOut LightPixel(float4 position : SV_Position)
 {
     float2 at = position.xy / TargetSize.xy;
     float4 stored = Normals.Sample(Nearest, at);
@@ -1561,7 +1657,10 @@ float4 LightPixel(float4 position : SV_Position) : SV_Target
     n = n * 2 - 1;
     float length2 = dot(n, n);
     n = length2 > 0.000001 ? n * rsqrt(length2) : UpToward.xyz;
-    float3 sky = lerp(FromBelow.rgb, FromAbove.rgb, dot(n, UpToward.xyz) * 0.5 + 0.5);
+    // As Guerrilla's surface shaders blend V_back_ambient_render to V_ambient_render: by how much the
+    // surface faces its light (n · L / 2 + 1/2), not the sky above; the occlusion comes after, from the
+    // game's ambient occlusion, which the light buffer gets once this is drawn.
+    float3 sky = lerp(FromBelow.rgb, FromAbove.rgb, dot(n, SunToward.xyz) * 0.5 + 0.5);
     float facing = dot(n, SunToward.xyz);
     float3 sun = SunColour.rgb * saturate(facing);
 
@@ -1571,8 +1670,15 @@ float4 LightPixel(float4 position : SV_Position) : SV_Target
     float3 reflection = 2 * facing * n - SunToward.xyz;
     float toEye = max(saturate(dot(reflection, -eye)), 0.000001);
     float shine = saturate(facing) * pow(toEye, sharpness) * dot(SunColour.rgb, float3(0.3, 0.59, 0.11));
-    float shadow = Parts.z > 0 && facing > 0 ? SunShadow(at, n, facing) : 1;
-    return float4(sky * Parts.x + sun * Parts.y * shadow, shine * Parts.y * shadow);
+    // Worked out facing away from the sun too: Guerrilla's metal is lit there (its lobe), shadowed. There
+    // the point looked up is moved toward the sun, not along the normal: a normal facing away (the
+    // ground's, under a cliff fading over it on a steep wall) would move it into the rock, and the
+    // surface shadowed itself (straight-edged dark triangles).
+    float shadow = Parts.z > 0 ? SunShadow(at, facing > 0 ? n : SunToward.xyz, max(facing, 0.05)) : 1;
+    LightOut o;
+    o.light = float4(sky * Parts.x + sun * Parts.y * shadow, shine * Parts.y * shadow * Parts.w);
+    o.ours = float4(o.light.rgb, Parts.y * shadow);
+    return o;
 }
 )";
 
@@ -2600,8 +2706,8 @@ void DrawClouds(const SkyConstants& sky) {
     memcpy(constants.up, sky.up, sizeof(constants.up));
     memcpy(constants.forward, sky.forward, sizeof(constants.forward));
     if (g_lightOn) {
-        float toward[3], unused[3];  // lit by our sun (or moon)
-        DirectLight(toward, unused);
+        float toward[3];  // lit as Guerrilla's clouds are (game_time_of_day_get_cloud_lighting: its light direction, at least 15° up)
+        LightToward(g_timeOfDay, kCloudLightLeastDegrees, toward);
         for (int i = 0; i < 3; ++i) constants.light[i] = toward[i];
     } else {
         float length = sqrtf(g_lightDirection[0] * g_lightDirection[0] + g_lightDirection[1] * g_lightDirection[1] + g_lightDirection[2] * g_lightDirection[2]);
@@ -2611,10 +2717,11 @@ void DrawClouds(const SkyConstants& sky) {
     constants.shape[3] = TodNumber(kBacklightPower);
     constants.drift[0] = g_drift[0];
     constants.drift[1] = g_drift[1];
-    // The ambient light and the fog's colour and numbers, as the sky's (its own scale and offset each part).
-    float correction[3];
-    ColourCorrection(correction);
-    for (int i = 0; i < 3; ++i) constants.ambient[i] = g_worldAmbient[i] * correction[i] * SkyBrightness();
+    // No ambient light: Guerrilla draws its sky with the renderer's ambient set to RL_skybox_ambient
+    // (rl_skybox_renderable_instance::render), which nothing ever sets, so its clouds' ambient term is
+    // black (with the world's added, ours came out up to 100 times too bright: grey-blue sheets where
+    // Guerrilla's are dark streaks). The fog's colour and numbers as the sky's (its own scale and offset each part).
+    for (float& a : constants.ambient) a = 0;
     memcpy(constants.fogColour, sky.fogColour, sizeof(constants.fogColour));
     memcpy(constants.fogNumbers, sky.fogNumbers, sizeof(constants.fogNumbers));
 
@@ -2900,9 +3007,159 @@ struct SunShadowInputs {
     ID3D11Buffer* lamp;
 };
 
+// What Guerrilla's material shaders (the world builder's gw_* effect files, see LoadShaders) are given
+// in the material pass, in registers the engine never binds (it binds textures t0-t15 and constant
+// buffers b0-b7 only): the mod's own light as it added it to the light buffer, before the game's
+// ambient occlusion, with the sun's shadow in alpha (t16); the light buffer as it was just before the
+// occlusion (t17); and the frame's sun, sky and time (b8). From those a shader has the occlusion (the
+// light buffer then and now), the lamps' light (the light buffer less the mod's) and the shadow, and
+// lights its surface as Guerrilla's shader does. Made by the light pass in our worlds only; without
+// them (b8 unbound) the shaders light by the light buffer, as Armageddon's do.
+struct SurfaceConstants {
+    float sunToward[4];  // toward the sun or moon, in the world; w 1: given
+    float sunColour[4];  // Guerrilla's V_light_color (× the colour correction)
+    float above[4];      // V_ambient_render: the sky's light facing the light
+    float below[4];      // V_back_ambient_render: facing away from it
+    float time[4];       // x seconds; w the lamps' night level (Guerrilla's Time.w)
+    float sunTowardView[4];  // the sun's toward, in the camera's space (the terrain lights by the G-buffer's normals, in it)
+    float view[4];       // the picture's width and height; the tangents of half the field of view across and up
+};
+
+ID3D11Texture2D* g_ourLightTexture = nullptr;
+ID3D11RenderTargetView* g_ourLightTarget = nullptr;
+ID3D11ShaderResourceView* g_ourLightView = nullptr;
+ID3D11Texture2D* g_beforeTexture = nullptr;
+ID3D11ShaderResourceView* g_beforeView = nullptr;
+ID3D11Buffer* g_surfaceConstants = nullptr;
+ID3D11ShaderResourceView* g_surfaceNormals = nullptr;  // the G-buffer's normals, for the terrain's material pass (t18)
+bool g_ourLightCleared = false;  // this light pass's
+bool g_beforeCopied = false;     // this light pass's
+bool g_surfaceInputsMade = false;  // by this frame's light pass, for its material pass
+bool g_surfaceInputsFailed = false;
+
+void DropSurfaceTargets() {
+    for (IUnknown** held : {reinterpret_cast<IUnknown**>(&g_ourLightView), reinterpret_cast<IUnknown**>(&g_ourLightTarget),
+                            reinterpret_cast<IUnknown**>(&g_ourLightTexture), reinterpret_cast<IUnknown**>(&g_beforeView),
+                            reinterpret_cast<IUnknown**>(&g_beforeTexture)})
+        if (*held) {
+            (*held)->Release();
+            *held = nullptr;
+        }
+}
+
+// The two textures, as the light buffer is (its size and format), made again when it changes.
+bool MakeSurfaceTargets(const D3D11_TEXTURE2D_DESC& light) {
+    if (g_surfaceInputsFailed) return false;
+    if (g_ourLightTexture) {
+        D3D11_TEXTURE2D_DESC have = {};
+        g_ourLightTexture->GetDesc(&have);
+        if (have.Width == light.Width && have.Height == light.Height && have.Format == light.Format) return true;
+        DropSurfaceTargets();
+    }
+    D3D11_TEXTURE2D_DESC desc = light;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags = 0;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    bool ok = SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &g_ourLightTexture)) &&
+              SUCCEEDED(g_device->CreateRenderTargetView(g_ourLightTexture, nullptr, &g_ourLightTarget)) &&
+              SUCCEEDED(g_device->CreateShaderResourceView(g_ourLightTexture, nullptr, &g_ourLightView));
+    // The copy must match the light buffer exactly for CopyResource: its own description, read only.
+    D3D11_TEXTURE2D_DESC copy = light;
+    copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    copy.Usage = D3D11_USAGE_DEFAULT;
+    copy.CPUAccessFlags = 0;
+    copy.MiscFlags = 0;
+    ok = ok && SUCCEEDED(g_device->CreateTexture2D(&copy, nullptr, &g_beforeTexture)) &&
+         SUCCEEDED(g_device->CreateShaderResourceView(g_beforeTexture, nullptr, &g_beforeView));
+    if (ok && !g_surfaceConstants) {
+        D3D11_BUFFER_DESC buffer = {};
+        buffer.ByteWidth = sizeof(SurfaceConstants);
+        buffer.Usage = D3D11_USAGE_DYNAMIC;
+        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ok = SUCCEEDED(g_device->CreateBuffer(&buffer, nullptr, &g_surfaceConstants));
+    }
+    if (!ok) {
+        rfa::Log("Couldn't make what Guerrilla's material shaders are lit with; they light by the light buffer");
+        DropSurfaceTargets();
+        g_surfaceInputsFailed = true;
+        return false;
+    }
+    rfa::Log("Guerrilla's material shaders: lit by the mod's own light (%u x %u)", light.Width, light.Height);
+    return true;
+}
+
+// The light buffer as it is now, kept for the material pass (just before the game's occlusion).
+void CopyLightBefore(ID3D11RenderTargetView* buffer) {
+    if (!g_beforeTexture || g_beforeCopied) return;
+    ID3D11Resource* resource = nullptr;
+    buffer->GetResource(&resource);
+    if (!resource) return;
+    g_context->CopyResource(g_beforeTexture, resource);
+    resource->Release();
+    g_beforeCopied = true;
+}
+
+// Guerrilla's lamps' night level (its TOD_light_on_off: 7.5, 8.5, 17.5, 18.5): 1 at night, falling to
+// 0 from 7:30 to 8:30, 0 by day, back to 1 from 17:30 to 18:30.
+float NightLevel(float hours) {
+    if (hours < 7.5f) return 1;
+    if (hours < 8.5f) return 8.5f - hours;
+    if (hours < 17.5f) return 0;
+    if (hours < 18.5f) return hours - 17.5f;
+    return 1;
+}
+
+float Seconds() {
+    static LARGE_INTEGER frequency = {}, start = {};
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (frequency.QuadPart == 0) {
+        QueryPerformanceFrequency(&frequency);
+        start = now;
+    }
+    return static_cast<float>(static_cast<double>(now.QuadPart - start.QuadPart) / static_cast<double>(frequency.QuadPart));
+}
+
+// The frame's constants, once the light pass has drawn the mod's light into both targets.
+bool FillSurfaceConstants() {
+    if (!g_surfaceConstants) return false;
+    SurfaceConstants constants = {};
+    float toward[3], sun[3], tint[3];
+    DirectLight(toward, sun);
+    ColourCorrection(tint);
+    for (int i = 0; i < 3; ++i) {
+        constants.sunToward[i] = toward[i];
+        constants.sunColour[i] = sun[i] * tint[i];
+        constants.above[i] = g_worldAmbient[i] * tint[i];
+        constants.below[i] = g_worldBackAmbient[i] * tint[i];
+    }
+    constants.sunToward[3] = 1;
+    constants.time[0] = Seconds();
+    constants.time[3] = NightLevel(g_timeOfDay);
+    // The camera's space as DrawLight's: x along its right, y its up, z its forward.
+    const float* axes[3] = {&g_cameraRotation[0], &g_cameraRotation[3], &g_cameraRotation[6]};
+    for (int i = 0; i < 3; ++i) constants.sunTowardView[i] = toward[0] * axes[i][0] + toward[1] * axes[i][1] + toward[2] * axes[i][2];
+    D3D11_TEXTURE2D_DESC size = {};
+    if (g_ourLightTexture) g_ourLightTexture->GetDesc(&size);
+    constants.view[0] = static_cast<float>(size.Width);
+    constants.view[1] = static_cast<float>(size.Height);
+    constants.view[3] = tanf(g_cameraFov * 3.14159265f / 360.0f);
+    constants.view[2] = size.Height ? constants.view[3] * size.Width / size.Height : constants.view[3];
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(g_context->Map(g_surfaceConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    memcpy(mapped.pData, &constants, sizeof(constants));
+    g_context->Unmap(g_surfaceConstants, 0);
+    return true;
+}
+
 // Adds the sky's light and the sun into the light buffer the light pass fills (its lamps' light), over
 // the whole buffer, and puts the device context back as it was: either or both, the sun through its
-// lamp's shadow map when given.
+// lamp's shadow map when given. The same light goes into the mod's own target for Guerrilla's
+// material shaders (SurfaceConstants), cleared before the first of a pass.
 void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals, bool withSky, bool withSun, const SunShadowInputs* shadow) {
     ID3D11Resource* resource = nullptr;
     buffer->GetResource(&resource);
@@ -2914,6 +3171,11 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     }
     if (resource) resource->Release();
     if (desc.Width == 0 || desc.Height == 0) return;
+    if (MakeSurfaceTargets(desc) && !g_ourLightCleared) {
+        const float none[4] = {0, 0, 0, 0};
+        g_context->ClearRenderTargetView(g_ourLightTarget, none);
+        g_ourLightCleared = true;
+    }
     static bool told = false;
     if (!told) {
         told = true;
@@ -2945,6 +3207,7 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     constants.parts[0] = withSky ? 1.0f : 0.0f;
     constants.parts[1] = withSun ? 1.0f : 0.0f;
     constants.parts[2] = shadow ? 1.0f : 0.0f;
+    constants.parts[3] = g_shine;
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (FAILED(g_context->Map(g_lightConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
     memcpy(mapped.pData, &constants, sizeof(constants));
@@ -2963,7 +3226,8 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     g_context->RSGetViewports(&viewportCount, gameViewports);
 
     const D3D11_VIEWPORT viewport = {0, 0, static_cast<float>(desc.Width), static_cast<float>(desc.Height), 0, 1};
-    g_context->OMSetRenderTargets(1, &buffer, nullptr);
+    ID3D11RenderTargetView* targets[2] = {buffer, g_ourLightTarget};
+    g_context->OMSetRenderTargets(g_ourLightTarget ? 2 : 1, targets, nullptr);
     g_context->RSSetViewports(1, &viewport);
     g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_context->IASetInputLayout(nullptr);
@@ -3201,7 +3465,7 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     constants.exposure[2] = TodNumber(kEyeAdaptionBase);
     constants.exposure[3] = TodNumber(kEyeAdaptionAmount);
     constants.picture[0] = g_exposure;
-    constants.picture[1] = TodNumber(kBloomAmount);
+    constants.picture[1] = TodNumber(kBloomAmount) * g_bloom;
     constants.picture[2] = static_cast<float>(width);
     constants.picture[3] = static_cast<float>(height);
     float sunAt[2] = {};
@@ -3348,12 +3612,20 @@ void ToneMapAfterComposite() {
 
 // During the light pass in our worlds, the first time its check runs (all is bound by then), the
 // mod notes the light buffer it draws into and the G-buffer's normals (and, for the fog, its depth and
-// the game's constants); once the pass is done it adds its light there.
+// the game's constants). It adds the sky's light (and the sun's, if not drawn through its lamp) on the
+// check the pass makes after its lamps and right before it applies the ambient occlusion to the light
+// buffer (the call at 0xEF9136, back to 0xEF913B; the apply 0xC2FF50 at 0xEF9142), so that, as in
+// Guerrilla (whose surfaces weigh the sky's light by the occlusion), corners, crevices and insides are
+// darker; or after the pass, if that check never came.
 bool g_inLightPass = false;
+bool g_sunDrawn = false;       // the sun's light drawn in this light pass (through its shadow map, or with the sky's)
+bool g_skyLightDrawn = false;  // the sky's light drawn into this light pass's buffer
 ID3D11RenderTargetView* g_lightBuffer = nullptr;
 ID3D11ShaderResourceView* g_lightNormals = nullptr;
+constexpr DWORD kCheckBeforeOcclusion = 0xEF913B;
 
 bool __cdecl LightCheck() {
+    const DWORD returnTo = reinterpret_cast<DWORD>(_ReturnAddress());
     if (g_inLightPass && !g_lightBuffer) {
         g_context->OMGetRenderTargets(1, &g_lightBuffer, nullptr);
         g_context->PSGetShaderResources(13, 1, &g_lightNormals);
@@ -3361,6 +3633,13 @@ bool __cdecl LightCheck() {
     if (g_noteFog && !g_fogDepth) {
         g_context->PSGetShaderResources(14, 1, &g_fogDepth);
         g_context->PSGetConstantBuffers(4, 1, &g_gameConstants);
+    }
+    if (g_inLightPass && !g_skyLightDrawn && returnTo == kCheckBeforeOcclusion && g_lightBuffer && g_lightNormals) {
+        RFA_LOG_FIRST(1, "Light: the sky's light drawn before the ambient occlusion in world \"%s\"", WorldName());
+        DrawLight(g_lightBuffer, g_lightNormals, true, !g_sunDrawn, nullptr);
+        g_skyLightDrawn = true;
+        g_sunDrawn = true;
+        CopyLightBefore(g_lightBuffer);  // the lamps' light and ours, before the occlusion
     }
     return g_lightCheck();
 }
@@ -3376,7 +3655,6 @@ constexpr size_t kDrawLampPrologue = 6;  // push ebx / mov ebx,esp / sub esp,8
 using DrawLampFn = void(__fastcall*)(void* renderer, void* unused, BYTE* entry, BYTE* shadowEntry);
 DrawLampFn g_drawLamp;
 constexpr size_t kEntryLight = 0x10;
-bool g_sunDrawn = false;  // the sun's light drawn through its shadow map in this light pass
 
 // Once: what the sun's lamp was drawn with (its shadow map, and its constants read back from the card).
 void TellSunLamp(ID3D11ShaderResourceView* map, ID3D11Buffer* lamp) {
@@ -3491,6 +3769,10 @@ void __fastcall LightPass(void* renderer, void* unused) {
         g_inLightPass = false;
     }
     g_sunDrawn = false;
+    g_skyLightDrawn = false;
+    g_ourLightCleared = false;
+    g_beforeCopied = false;
+    g_surfaceInputsMade = false;
     DropFogInputs();
     if (g_shaftDepth) g_shaftDepth->Release();
     g_shaftDepth = nullptr;
@@ -3499,17 +3781,53 @@ void __fastcall LightPass(void* renderer, void* unused) {
     g_noteFog = false;
     if (g_inLightPass) {
         g_inLightPass = false;
-        if (g_lightBuffer && g_lightNormals) {
-            RFA_LOG_FIRST(1, "Light: lighting world \"%s\" with the sky's light and the sun", WorldName());
+        if (g_skyLightDrawn) {
+            // drawn before the occlusion (LightCheck)
+        } else if (g_lightBuffer && g_lightNormals) {
+            RFA_LOG_FIRST(1, "Light: lighting world \"%s\" with the sky's light and the sun after the pass (no ambient occlusion on it)", WorldName());
             DrawLight(g_lightBuffer, g_lightNormals, true, !g_sunDrawn, nullptr);
+            CopyLightBefore(g_lightBuffer);  // (no occlusion: the same)
         } else {
             RFA_LOG_FIRST(1, "Light: a light pass showed no light buffer or normals (this is logged once); no light added to it");
         }
+        g_surfaceInputsMade = g_ourLightCleared && g_beforeCopied && FillSurfaceConstants();
+        if (g_surfaceNormals) g_surfaceNormals->Release();
+        g_surfaceNormals = g_surfaceInputsMade ? g_lightNormals : nullptr;
+        if (g_surfaceNormals) g_surfaceNormals->AddRef();
     }
     if (g_lightBuffer) g_lightBuffer->Release();
     if (g_lightNormals) g_lightNormals->Release();
     g_lightBuffer = nullptr;
     g_lightNormals = nullptr;
+}
+
+// The scene renderer's material pass (0xEF9290, right after the light pass: each surface drawn again
+// with its colours, lit by the light buffer). In our worlds, while it runs, Guerrilla's material
+// shaders are given what the light pass made for them (SurfaceConstants), and the G-buffer's normals
+// (t18, for the terrain's), unbound after it, as the next light pass draws into those textures.
+constexpr DWORD kMaterialPass = 0xEF9290;
+constexpr size_t kMaterialPassPrologue = 5;  // push ebp / mov ebp,esp / push -1
+using MaterialPassFn = void(__fastcall*)(void* renderer, void* unused);
+MaterialPassFn g_materialPass;
+
+void __fastcall MaterialPass(void* renderer, void* unused) {
+    const bool give = g_surfaceInputsMade && g_context && g_ourLightView && g_beforeView && g_surfaceConstants;
+    if (give) {
+        RFA_LOG_FIRST(1, "Guerrilla's material shaders: given the mod's light in world \"%s\"", WorldName());
+        ID3D11ShaderResourceView* views[3] = {g_ourLightView, g_beforeView, g_surfaceNormals};
+        g_context->PSSetShaderResources(16, 3, views);
+        g_context->PSSetConstantBuffers(8, 1, &g_surfaceConstants);
+    }
+    g_materialPass(renderer, unused);
+    if (give) {
+        ID3D11ShaderResourceView* none[3] = {nullptr, nullptr, nullptr};
+        ID3D11Buffer* noBuffer = nullptr;
+        g_context->PSSetShaderResources(16, 3, none);
+        g_context->PSSetConstantBuffers(8, 1, &noBuffer);
+    }
+    if (g_surfaceNormals) g_surfaceNormals->Release();
+    g_surfaceNormals = nullptr;
+    g_surfaceInputsMade = false;
 }
 
 // Replaces the scene renderer's sky step: the game's own, then, in our worlds, the clock,
@@ -3524,6 +3842,7 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
     }
     RunClock(ours);
     RunStreaming(ours);
+    RunGroundDetail(ours);
     if (ours && g_fog > 0 && !g_fogFailed && g_context) {
         if (!g_fogDepth || !g_gameConstants) {
             RFA_LOG_FIRST(1, "Fog: the light pass showed no depth or constants (this is logged once); no fog");
@@ -4406,26 +4725,73 @@ void __cdecl EffectsUpdate(float seconds) {
 // Render_offset, 18). The road's own texture doesn't use them, so if the engine doesn't set them
 // for a road, only its edges go wrong. With RoadLog=1 the mod notes the game's terrain vertex
 // shaders as the game makes them (by the constants they name: a road's names Edge_fade__use_spec_map),
-// and in our worlds logs those registers for draws with values not yet logged, to compare a road
-// with the ground round it. Reading them back stalls the frame, so it stops after a few hundred.
+// keeps a copy of what the game writes into each constant buffer (Map/Unmap and UpdateSubresource),
+// and at each draw with a terrain shader logs that buffer's registers when their values are new, on
+// the game's main context and any deferred one it makes. Every few seconds in our worlds it also
+// logs how many draws of each kind it saw, so a log without values still says why.
 bool g_roadLog = false;
 using CreateVertexShaderFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device* device, const void* code, SIZE_T size,
                                                          ID3D11ClassLinkage* linkage, ID3D11VertexShader** shader);
+using CreateDeferredContextFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device* device, UINT flags, ID3D11DeviceContext** context);
 using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext* context, UINT count, UINT first, INT base);
+using DrawIndexedInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext* context, UINT count, UINT instances, UINT first,
+                                                        INT base, UINT firstInstance);
+using MapFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource, D3D11_MAP type,
+                                          UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped);
+using UnmapFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource);
+using UpdateSubresourceFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource,
+                                                     const D3D11_BOX* box, const void* data, UINT rowPitch, UINT depthPitch);
+// Slots in the methods' tables: ID3D11Device after IUnknown's 3 (CreateBuffer is 3); ID3D11DeviceContext
+// after IUnknown's 3 and ID3D11DeviceChild's 4 (VSSetConstantBuffers is 7).
+constexpr int kCreateVertexShaderSlot = 12, kCreateDeferredContextSlot = 27;
+constexpr int kDrawIndexedSlot = 12, kMapSlot = 14, kUnmapSlot = 15, kDrawIndexedInstancedSlot = 20, kUpdateSubresourceSlot = 48;
 CreateVertexShaderFn g_createVertexShader = nullptr;
-DrawIndexedFn g_drawIndexed = nullptr;
-constexpr int kCreateVertexShaderSlot = 12;  // ID3D11Device: IUnknown's 3, then CreateBuffer ... CreateInputLayout
-constexpr int kDrawIndexedSlot = 12;         // ID3D11DeviceContext: IUnknown's 3, ID3D11DeviceChild's 4, then VSSetConstantBuffers ...
-std::vector<ID3D11VertexShader*> g_roadShaders, g_groundShaders;
-ID3D11Buffer* g_roadLogCopy = nullptr;
-int g_roadLogReads = 0, g_roadLogLines = 0;
-constexpr int kRoadLogReads = 600, kRoadLogLines = 120;
+CreateDeferredContextFn g_createDeferredContext = nullptr;
+// The context methods as the game's main context has them; a deferred context's table is another,
+// with its own originals.
+struct ContextMethods {
+    void** table;
+    DrawIndexedFn drawIndexed;
+    DrawIndexedInstancedFn drawIndexedInstanced;
+    MapFn map;
+    UnmapFn unmap;
+    UpdateSubresourceFn updateSubresource;
+};
+std::vector<ContextMethods> g_contextMethods;
+ContextMethods* MethodsOf(ID3D11DeviceContext* context) {
+    void** table = *reinterpret_cast<void***>(context);
+    for (ContextMethods& methods : g_contextMethods)
+        if (methods.table == table) return &methods;
+    return nullptr;
+}
+
 constexpr UINT kTerrainRegisters = 24;
+struct Constants {
+    ID3D11Resource* buffer;
+    float values[kTerrainRegisters * 4];
+};
+struct Mapped {
+    ID3D11DeviceContext* context;
+    ID3D11Resource* buffer;
+    void* data;
+};
+SRWLOCK g_roadLogLock = SRWLOCK_INIT;
+std::vector<ID3D11VertexShader*> g_roadShaders, g_groundShaders;
+std::vector<Constants> g_constants;  // the last values written into each constant buffer big enough
+std::unordered_map<ID3D11Resource*, size_t> g_constantIndex;  // where each buffer's are in g_constants
+std::vector<Mapped> g_mapped;        // buffers mapped for writing, not yet unmapped
 struct LoggedTerrain {
     bool road;
     float values[7];  // Terrain_uv_params, Terrain_subzone_offset
 };
 std::vector<LoggedTerrain> g_roadLogged;
+int g_roadLogLines = 0, g_roadLogSummaries = 0;
+constexpr int kRoadLogLines = 120, kRoadLogSummaries = 16;
+long g_vertexShadersMade = 0, g_deferredContexts = 0, g_drawsIndexed = 0, g_drawsInstanced = 0, g_roadDraws = 0, g_groundDraws = 0,
+     g_terrainWithoutValues = 0, g_constantWrites = 0, g_drawRewraps = 0;
+ULONGLONG g_roadLogSummaryAt = 0;
+ULONGLONG g_inWorldSince = 0;              // when the log first saw our world
+constexpr ULONGLONG kRoadLogTime = 60000;  // how long it logs there, in ms
 
 bool Names(const void* code, SIZE_T size, const char* name) {
     const char* start = static_cast<const char*>(code);
@@ -4433,83 +4799,272 @@ bool Names(const void* code, SIZE_T size, const char* name) {
     return std::search(start, start + size, name, name + length) != start + size;
 }
 
-HRESULT STDMETHODCALLTYPE CreateVertexShaderNoted(ID3D11Device* device, const void* code, SIZE_T size, ID3D11ClassLinkage* linkage,
-                                                  ID3D11VertexShader** shader) {
-    const HRESULT result = g_createVertexShader(device, code, size, linkage, shader);
-    if (SUCCEEDED(result) && shader && *shader && code && Names(code, size, "Terrain_uv_params")) {
-        if (Names(code, size, "Edge_fade__use_spec_map")) g_roadShaders.push_back(*shader);
-        else g_groundShaders.push_back(*shader);
+// A constant buffer of at least the terrain's 24 registers, or null.
+ID3D11Buffer* BigConstantBuffer(ID3D11Resource* resource) {
+    if (!resource) return nullptr;
+    D3D11_RESOURCE_DIMENSION dimension;
+    resource->GetType(&dimension);
+    if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) return nullptr;
+    auto* buffer = static_cast<ID3D11Buffer*>(resource);
+    D3D11_BUFFER_DESC desc;
+    buffer->GetDesc(&desc);
+    return (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) && desc.ByteWidth >= kTerrainRegisters * 16 ? buffer : nullptr;
+}
+
+bool RoadLogging();
+void SummariseRoadLog();
+void KeepDrawSlots(ID3D11DeviceContext* context);
+
+// Keeps what the game wrote into a constant buffer, only while the log is still writing in our
+// worlds: reading back a buffer the game maps for writing is slow.
+void KeepConstants(ID3D11Resource* buffer, const void* data) {
+    if (!RoadLogging()) return;
+    AcquireSRWLockExclusive(&g_roadLogLock);
+    ++g_constantWrites;
+    auto found = g_constantIndex.find(buffer);
+    Constants* kept;
+    if (found != g_constantIndex.end()) {
+        kept = &g_constants[found->second];
+    } else if (g_constants.size() < g_constants.capacity()) {
+        g_constantIndex[buffer] = g_constants.size();
+        g_constants.push_back({buffer, {}});
+        kept = &g_constants.back();
+    } else {
+        kept = nullptr;
+    }
+    if (kept) memcpy(kept->values, data, sizeof(kept->values));
+    ReleaseSRWLockExclusive(&g_roadLogLock);
+}
+
+HRESULT STDMETHODCALLTYPE MapNoted(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource, D3D11_MAP type, UINT flags,
+                                   D3D11_MAPPED_SUBRESOURCE* mapped) {
+    RFA_LOG_FIRST(1, "Road log: the first Map through the log's wrapper (in our world: %d)", InOurWorld());
+    SummariseRoadLog();
+    KeepDrawSlots(context);
+    const ContextMethods* methods = MethodsOf(context);
+    const HRESULT result = methods->map(context, resource, subresource, type, flags, mapped);
+    if (SUCCEEDED(result) && mapped && mapped->pData && (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE) &&
+        RoadLogging() && BigConstantBuffer(resource)) {
+        AcquireSRWLockExclusive(&g_roadLogLock);
+        g_mapped.push_back({context, resource, mapped->pData});
+        ReleaseSRWLockExclusive(&g_roadLogLock);
     }
     return result;
 }
 
-void LogTerrainDraw(ID3D11DeviceContext* context) {
+void STDMETHODCALLTYPE UnmapNoted(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource) {
+    void* data = nullptr;
+    AcquireSRWLockExclusive(&g_roadLogLock);
+    for (size_t i = 0; i < g_mapped.size(); ++i)
+        if (g_mapped[i].context == context && g_mapped[i].buffer == resource) {
+            data = g_mapped[i].data;
+            g_mapped.erase(g_mapped.begin() + i);
+            break;
+        }
+    ReleaseSRWLockExclusive(&g_roadLogLock);
+    if (data) KeepConstants(resource, data);  // still mapped: read before the game's Unmap
+    MethodsOf(context)->unmap(context, resource, subresource);
+}
+
+void STDMETHODCALLTYPE UpdateSubresourceNoted(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource, const D3D11_BOX* box,
+                                              const void* data, UINT rowPitch, UINT depthPitch) {
+    if (data && !box && BigConstantBuffer(resource)) KeepConstants(resource, data);
+    MethodsOf(context)->updateSubresource(context, resource, subresource, box, data, rowPitch, depthPitch);
+}
+
+HRESULT STDMETHODCALLTYPE CreateVertexShaderNoted(ID3D11Device* device, const void* code, SIZE_T size, ID3D11ClassLinkage* linkage,
+                                                  ID3D11VertexShader** shader) {
+    const HRESULT result = g_createVertexShader(device, code, size, linkage, shader);
+    RFA_LOG_FIRST(1, "Road log: the first CreateVertexShader through the log's wrapper");
+    if (SUCCEEDED(result) && shader && *shader && code) {
+        AcquireSRWLockExclusive(&g_roadLogLock);
+        ++g_vertexShadersMade;
+        if (Names(code, size, "Terrain_uv_params")) {
+            if (Names(code, size, "Edge_fade__use_spec_map")) g_roadShaders.push_back(*shader);
+            else g_groundShaders.push_back(*shader);
+        }
+        ReleaseSRWLockExclusive(&g_roadLogLock);
+    }
+    return result;
+}
+
+void STDMETHODCALLTYPE DrawIndexedLogged(ID3D11DeviceContext* context, UINT count, UINT first, INT base);
+void STDMETHODCALLTYPE DrawIndexedInstancedLogged(ID3D11DeviceContext* context, UINT count, UINT instances, UINT first, INT base,
+                                                  UINT firstInstance);
+void** g_mainContextTable = nullptr;
+
+// The file name of the module `address` is in ("?" if none).
+const char* ModuleOf(const void* address, char (&name)[MAX_PATH]) {
+    HMODULE module = nullptr;
+    strcpy_s(name, "?");
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(address), &module))
+        GetModuleFileNameA(module, name, MAX_PATH);
+    const char* slash = strrchr(name, '\\');
+    return slash ? slash + 1 : name;
+}
+
+// Every 5 s (from any wrapper, in any world): what the log has seen, whether we're in our world, and
+// whether the main context's draw slots still hold the log's wrappers.
+void SummariseRoadLog() {
+    const ULONGLONG now = GetTickCount64();
+    if (g_roadLogSummaries >= kRoadLogSummaries || now - g_roadLogSummaryAt < 5000) return;
+    g_roadLogSummaryAt = now;
+    ++g_roadLogSummaries;
+    const bool drawOurs = g_mainContextTable && g_mainContextTable[kDrawIndexedSlot] == reinterpret_cast<void*>(&DrawIndexedLogged);
+    const bool instancedOurs =
+        g_mainContextTable && g_mainContextTable[kDrawIndexedInstancedSlot] == reinterpret_cast<void*>(&DrawIndexedInstancedLogged);
+    char module[MAX_PATH];
+    rfa::Log("Road log: so far %ld vertex shaders made (%u road, %u ground), %ld deferred contexts; draws: %ld indexed, %ld instanced; "
+             "with a terrain shader: %ld road, %ld ground (%ld without values kept); constant buffer writes kept: %ld; world \"%s\" "
+             "(ours: %d); the draw slots still ours: %d %d (now in %s), wrapped again %ld times",
+             g_vertexShadersMade, static_cast<unsigned>(g_roadShaders.size()), static_cast<unsigned>(g_groundShaders.size()),
+             g_deferredContexts, g_drawsIndexed, g_drawsInstanced, g_roadDraws, g_groundDraws, g_terrainWithoutValues, g_constantWrites,
+             WorldName(), InOurWorld(), drawOurs, instancedOurs,
+             g_mainContextTable ? ModuleOf(g_mainContextTable[kDrawIndexedSlot], module) : "?", g_drawRewraps);
+}
+
+void LogTerrainDraw(ID3D11DeviceContext* context, bool instanced) {
+    instanced ? ++g_drawsInstanced : ++g_drawsIndexed;
     ID3D11VertexShader* shader = nullptr;
     context->VSGetShader(&shader, nullptr, nullptr);
     if (!shader) return;
+    AcquireSRWLockShared(&g_roadLogLock);
     const bool road = std::find(g_roadShaders.begin(), g_roadShaders.end(), shader) != g_roadShaders.end();
     const bool ground = !road && std::find(g_groundShaders.begin(), g_groundShaders.end(), shader) != g_groundShaders.end();
+    ReleaseSRWLockShared(&g_roadLogLock);
     shader->Release();
     if (!road && !ground) return;
-    ID3D11Buffer* constants = nullptr;
-    context->VSGetConstantBuffers(2, 1, &constants);
-    if (!constants) return;
-    D3D11_BUFFER_DESC desc;
-    constants->GetDesc(&desc);
-    if (desc.ByteWidth < kTerrainRegisters * 16) {
-        constants->Release();
+    road ? ++g_roadDraws : ++g_groundDraws;
+    ID3D11Buffer* bound = nullptr;
+    context->VSGetConstantBuffers(2, 1, &bound);
+    if (!bound) return;
+    float c[kTerrainRegisters * 4];
+    bool found = false;
+    AcquireSRWLockShared(&g_roadLogLock);
+    auto index = g_constantIndex.find(bound);
+    if (index != g_constantIndex.end()) {
+        memcpy(c, g_constants[index->second].values, sizeof(c));
+        found = true;
+    }
+    ReleaseSRWLockShared(&g_roadLogLock);
+    bound->Release();
+    if (!found) {
+        ++g_terrainWithoutValues;
         return;
     }
-    if (!g_roadLogCopy) {
-        D3D11_BUFFER_DESC copy = {};
-        copy.ByteWidth = kTerrainRegisters * 16;
-        copy.Usage = D3D11_USAGE_STAGING;
-        copy.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(g_device->CreateBuffer(&copy, nullptr, &g_roadLogCopy))) {
-            constants->Release();
-            g_roadLogReads = kRoadLogReads;
-            rfa::Log("Road log: could not make a buffer to read the constants into; nothing logged");
-            return;
-        }
-    }
-    const D3D11_BOX box = {0, 0, 0, kTerrainRegisters * 16, 1, 1};
-    context->CopySubresourceRegion(g_roadLogCopy, 0, 0, 0, 0, constants, 0, &box);
-    constants->Release();
-    ++g_roadLogReads;
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (FAILED(context->Map(g_roadLogCopy, 0, D3D11_MAP_READ, 0, &mapped))) return;
-    float c[kTerrainRegisters * 4];
-    memcpy(c, mapped.pData, sizeof(c));
-    context->Unmap(g_roadLogCopy, 0);
     LoggedTerrain seen = {road, {c[24], c[25], c[26], c[27], c[92], c[93], c[94]}};
+    AcquireSRWLockExclusive(&g_roadLogLock);
+    bool known = false;
     for (const LoggedTerrain& logged : g_roadLogged)
-        if (logged.road == seen.road && memcmp(logged.values, seen.values, sizeof(seen.values)) == 0) return;
-    g_roadLogged.push_back(seen);
+        if (logged.road == seen.road && memcmp(logged.values, seen.values, sizeof(seen.values)) == 0) known = true;
+    if (!known) g_roadLogged.push_back(seen);
+    ReleaseSRWLockExclusive(&g_roadLogLock);
+    if (known || g_roadLogLines >= kRoadLogLines) return;
     ++g_roadLogLines;
-    rfa::Log("Road log: %s  uv_params (%.6g, %.6g, %.6g, %.6g)  subzone_offset (%.6g, %.6g, %.6g)  objTM at (%.6g, %.6g, %.6g)  "
+    rfa::Log("Road log: %s%s  uv_params (%.6g, %.6g, %.6g, %.6g)  subzone_offset (%.6g, %.6g, %.6g)  objTM at (%.6g, %.6g, %.6g)  "
              "render_offset (%.6g, %.6g, %.6g)  position_scale (%.6g, %.6g, %.6g)",
-             road ? "ROAD  " : "ground", c[24], c[25], c[26], c[27], c[92], c[93], c[94], c[63], c[67], c[71], c[72], c[73], c[74],
-             c[28], c[29], c[30]);
+             road ? "ROAD  " : "ground", instanced ? " (instanced)" : "", c[24], c[25], c[26], c[27], c[92], c[93], c[94], c[63], c[67],
+             c[71], c[72], c[73], c[74], c[28], c[29], c[30]);
+}
+
+// While the log writes: in our worlds, for its first minute there, until it has its lines.
+bool RoadLogging() {
+    if (g_roadLogLines >= kRoadLogLines || !InOurWorld()) return false;
+    const ULONGLONG now = GetTickCount64();
+    if (!g_inWorldSince) g_inWorldSince = now;
+    return now - g_inWorldSince < kRoadLogTime;
 }
 
 void STDMETHODCALLTYPE DrawIndexedLogged(ID3D11DeviceContext* context, UINT count, UINT first, INT base) {
-    if (g_roadLogReads < kRoadLogReads && g_roadLogLines < kRoadLogLines && InOurWorld()) LogTerrainDraw(context);
-    g_drawIndexed(context, count, first, base);
+    RFA_LOG_FIRST(1, "Road log: the first DrawIndexed through the log's wrapper (in our world: %d)", InOurWorld());
+    SummariseRoadLog();
+    if (RoadLogging()) LogTerrainDraw(context, false);
+    MethodsOf(context)->drawIndexed(context, count, first, base);
 }
 
-// Puts `replacement` in slot `slot` of a COM object's table of methods, keeping the old one.
+void STDMETHODCALLTYPE DrawIndexedInstancedLogged(ID3D11DeviceContext* context, UINT count, UINT instances, UINT first, INT base,
+                                                  UINT firstInstance) {
+    RFA_LOG_FIRST(1, "Road log: the first DrawIndexedInstanced through the log's wrapper (in our world: %d)", InOurWorld());
+    SummariseRoadLog();
+    if (RoadLogging()) LogTerrainDraw(context, true);
+    MethodsOf(context)->drawIndexedInstanced(context, count, instances, first, base, firstInstance);
+}
+
+// Puts `replacement` in slot `slot` of a table of methods, keeping the old one.
 template <typename Fn>
-bool WrapSlot(void* object, int slot, Fn replacement, Fn* original) {
-    void** table = *static_cast<void***>(object);
+bool WrapSlot(void** table, int slot, Fn replacement, Fn* original) {
     *original = reinterpret_cast<Fn>(table[slot]);
     void* value = reinterpret_cast<void*>(replacement);
     return rfa::PatchCode(&table[slot], &value, sizeof(value));
 }
 
+// Direct3D's runtime puts its own draw methods back in a context's table now and then (it swaps
+// between versions of them as the context's state changes; the first road logs lost theirs within
+// seconds, while Map kept its wrapper). So while the log writes, each Map checks the two draw slots
+// and, where the runtime has put one back, takes that as the original and wraps it again.
+void KeepDrawSlots(ID3D11DeviceContext* context) {
+    if (!RoadLogging()) return;
+    ContextMethods* methods = MethodsOf(context);
+    if (!methods) return;
+    void** table = methods->table;
+    if (table[kDrawIndexedSlot] != reinterpret_cast<void*>(&DrawIndexedLogged)) {
+        DrawIndexedFn now = reinterpret_cast<DrawIndexedFn>(table[kDrawIndexedSlot]);
+        methods->drawIndexed = now;
+        WrapSlot(table, kDrawIndexedSlot, &DrawIndexedLogged, &now);
+        ++g_drawRewraps;
+    }
+    if (table[kDrawIndexedInstancedSlot] != reinterpret_cast<void*>(&DrawIndexedInstancedLogged)) {
+        DrawIndexedInstancedFn now = reinterpret_cast<DrawIndexedInstancedFn>(table[kDrawIndexedInstancedSlot]);
+        methods->drawIndexedInstanced = now;
+        WrapSlot(table, kDrawIndexedInstancedSlot, &DrawIndexedInstancedLogged, &now);
+        ++g_drawRewraps;
+    }
+}
+
+// Wraps a context's methods, once for each table of them (the main context's, a deferred one's).
+bool WrapContext(ID3D11DeviceContext* context) {
+    void** table = *reinterpret_cast<void***>(context);
+    if (MethodsOf(context)) return true;
+    if (g_contextMethods.size() == g_contextMethods.capacity()) return false;  // no room left without moving the list
+    ContextMethods methods = {table, nullptr, nullptr, nullptr, nullptr, nullptr};
+    methods.drawIndexed = reinterpret_cast<DrawIndexedFn>(table[kDrawIndexedSlot]);
+    methods.drawIndexedInstanced = reinterpret_cast<DrawIndexedInstancedFn>(table[kDrawIndexedInstancedSlot]);
+    methods.map = reinterpret_cast<MapFn>(table[kMapSlot]);
+    methods.unmap = reinterpret_cast<UnmapFn>(table[kUnmapSlot]);
+    methods.updateSubresource = reinterpret_cast<UpdateSubresourceFn>(table[kUpdateSubresourceSlot]);
+    g_contextMethods.push_back(methods);  // before the table changes, so a call already finds its originals
+    if (!g_mainContextTable) g_mainContextTable = table;
+    char drawModule[MAX_PATH], mapModule[MAX_PATH];
+    rfa::Log("Road log: a context's methods at %p: DrawIndexed in %s, Map in %s", static_cast<void*>(table),
+             ModuleOf(reinterpret_cast<void*>(methods.drawIndexed), drawModule), ModuleOf(reinterpret_cast<void*>(methods.map), mapModule));
+    DrawIndexedFn drawIndexed;
+    DrawIndexedInstancedFn drawIndexedInstanced;
+    MapFn map;
+    UnmapFn unmap;
+    UpdateSubresourceFn updateSubresource;
+    return WrapSlot(table, kMapSlot, &MapNoted, &map) && WrapSlot(table, kUnmapSlot, &UnmapNoted, &unmap) &&
+           WrapSlot(table, kUpdateSubresourceSlot, &UpdateSubresourceNoted, &updateSubresource) &&
+           WrapSlot(table, kDrawIndexedSlot, &DrawIndexedLogged, &drawIndexed) &&
+           WrapSlot(table, kDrawIndexedInstancedSlot, &DrawIndexedInstancedLogged, &drawIndexedInstanced);
+}
+
+HRESULT STDMETHODCALLTYPE CreateDeferredContextNoted(ID3D11Device* device, UINT flags, ID3D11DeviceContext** context) {
+    const HRESULT result = g_createDeferredContext(device, flags, context);
+    if (SUCCEEDED(result) && context && *context) {
+        ++g_deferredContexts;
+        if (!WrapContext(*context)) rfa::Log("Road log: could not wrap a deferred context's methods");
+    }
+    return result;
+}
+
 void StartRoadLog(ID3D11Device* device, ID3D11DeviceContext* context) {
     if (g_createVertexShader) return;
-    if (WrapSlot(device, kCreateVertexShaderSlot, &CreateVertexShaderNoted, &g_createVertexShader) &&
-        WrapSlot(context, kDrawIndexedSlot, &DrawIndexedLogged, &g_drawIndexed))
+    g_contextMethods.reserve(8);  // never moved while the game calls through it
+    g_constants.reserve(4096);
+    void** deviceTable = *reinterpret_cast<void***>(device);
+    if (WrapSlot(deviceTable, kCreateVertexShaderSlot, &CreateVertexShaderNoted, &g_createVertexShader) &&
+        WrapSlot(deviceTable, kCreateDeferredContextSlot, &CreateDeferredContextNoted, &g_createDeferredContext) && WrapContext(context))
         rfa::Log("Road log: on (RoadLog=1); the terrain's constants are logged in our worlds");
     else
         rfa::Log("Road log: could not wrap the device's methods; nothing logged");
@@ -4563,6 +5118,34 @@ constexpr DWORD kExplosionLimits[] = {0x6E9D00};
 constexpr DWORD kMaxExplosions = 256;
 alignas(16) BYTE g_explosions[kMaxExplosions * kExplosionSize];  // the new table, filled by the game
 
+// ---- Room for more particle emitters
+
+// The renderer keeps one "renderable particles" entry for each emitter of every effect loaded, in a
+// pool of 1,900 (Guerrilla's: 2,048) that its setup (0x7676B0) sizes with `push 76Ch` at 0x7677AA
+// (stored at 0x306EE8C by 0x767AF0; the pool's memory is made from it afterwards). Armageddon's own
+// preloaded effects take 1,175, and the effects our worlds stream in with their zones passed the rest:
+// an emitter that finds the pool full is set up without one (0xB6FBAB) and never draws while its effect
+// stays loaded (flames, smoke or sparks missing without a word; the game's debug overlay reports
+// "Maximum ...'s exceeded, max is 1900"). The mod gives it room for 4,096 (0x18 bytes each).
+constexpr DWORD kParticlePoolSize = 0x7677AB;   // the push's value
+constexpr DWORD kParticlePoolSet = 0x306EE8C;  // where the setup stores it
+constexpr DWORD kGameParticlePool = 1900, kParticlePool = 4096;
+
+void MoreParticleRoom() {
+    if (rfa::CodeValue(kParticlePoolSize) != kGameParticlePool) {
+        rfa::Log("Particles: the renderer's setup isn't as expected (0x%08lX); the game keeps its %lu emitters", rfa::CodeValue(kParticlePoolSize),
+                 kGameParticlePool);
+        return;
+    }
+    if (*reinterpret_cast<const DWORD*>(kParticlePoolSet) != 0) {
+        rfa::Log("Particles: the renderer was set up already; the game keeps its %lu emitters", kGameParticlePool);
+        return;
+    }
+    const DWORD room = kParticlePool;
+    if (rfa::PatchCode(reinterpret_cast<void*>(kParticlePoolSize), &room, sizeof(room)))
+        rfa::Log("Particles: room for %lu emitters (the game's %lu)", kParticlePool, kGameParticlePool);
+}
+
 // ---- Room for more visual effects
 
 // The game keeps every visual effect vfx.xtbl describes (and a DLC level's, while it's loaded) in a
@@ -4595,6 +5178,68 @@ void MoveVisuals() {
     rfa::MoveTable("Visual effects", kVisuals, kVisualSize, kGameMaxVisuals, kVisualReferences, kVisualLimits, g_visuals, kMaxVisuals);
 }
 
+// Guerrilla's material shaders. The world builder rewrites them for Armageddon's renderer as effect
+// files of the game's own kind (overrides\build\pc\cache\gw_*.fxo_pc_dx11, one name a family of
+// Guerrilla's shaders: _s for still meshes, _bs instanced ones, _c skinned ones), and names them in
+// the world's materials. The game only loads the effect files inside its archives, all at start-up
+// (rl_shader_library::load_shaders, 0xD4CD30, and again for the console's reload_shaders), so once it
+// has loaded its own this loads ours as it does each of its: a shader object from its pool
+// (0xC3D730), the object's load (the 5th function in its table: it opens the file by name, which the
+// loader hands out from overrides\), then the library registers it under the file's name (0xD4D3D0).
+// A material whose shader isn't loaded is drawn red (the game's rl_debug_highlight), so a missing
+// file shows.
+constexpr DWORD kLoadShaders = 0xD4CD30;
+constexpr size_t kLoadShadersPrologue = 9;  // push ebp / mov ebp,esp / sub esp,11Ch
+using LoadShadersFn = bool(__fastcall*)(void* library, void* unused);
+LoadShadersFn g_loadShaders;
+auto const NewShader = reinterpret_cast<void*(__cdecl*)()>(0xC3D730);
+auto const RegisterShader = reinterpret_cast<bool(__fastcall*)(void* library, void* unused, const char* file, void* shader)>(0xD4D3D0);
+using ShaderLoadFn = bool(__fastcall*)(void* shader, void* unused, const char* file);  // the shader's table +0x10
+using ShaderReleaseFn = void(__fastcall*)(void* shader, void* unused);                  // its table +0x08
+
+// Our effect files' names (gw_*.fxo_pc_dx11 in overrides\build\pc\cache\), instanced and skinned
+// variants first, as the game's own archive lists them.
+std::vector<std::string> OurShaderFiles() {
+    std::vector<std::string> files;
+    WIN32_FIND_DATAW found;
+    const std::wstring pattern = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\gw_*.fxo_pc_dx11";
+    HANDLE search = FindFirstFileW(pattern.c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return files;
+    do {
+        std::string name;  // the builder names them in plain ASCII
+        for (const wchar_t* c = found.cFileName; *c; ++c) name += static_cast<char>(*c);
+        files.push_back(name);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+bool __fastcall LoadShaders(void* library, void* unused) {
+    const bool loaded = g_loadShaders(library, unused);  // the game's own
+    int count = 0;
+    for (const std::string& file : OurShaderFiles()) {
+        void* shader = NewShader();
+        if (!shader) {
+            rfa::Log("No room for more shaders: Guerrilla's from %s on aren't loaded (their materials draw red)", file.c_str());
+            break;
+        }
+        void** functions = *static_cast<void***>(shader);
+        if (!reinterpret_cast<ShaderLoadFn>(functions[4])(shader, nullptr, file.c_str())) {
+            rfa::Log("Couldn't load the shader %s (its materials draw red)", file.c_str());
+            reinterpret_cast<ShaderReleaseFn>(functions[2])(shader, nullptr);
+            continue;
+        }
+        if (!RegisterShader(library, nullptr, file.c_str(), shader)) {
+            rfa::Log("Couldn't add the shader %s (its name taken, or the shader library full)", file.c_str());
+            continue;
+        }
+        ++count;
+    }
+    if (count > 0) rfa::Log("Guerrilla's material shaders: %d files loaded", count);
+    return loaded;
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -4605,7 +5250,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     rfa::MoveTable("Explosions", kExplosions, kExplosionSize, kGameMaxExplosions, kExplosionReferences, kExplosionLimits, g_explosions,
                    kMaxExplosions);
     MoveVisuals();
-    g_roadLog = rfa::IniInt(L"GuerrillaWorld", L"RoadLog", 0) != 0;
+    MoreParticleRoom();
+    g_loadShaders = reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
+    if (!g_loadShaders) rfa::Log("Could not add Guerrilla's material shaders to the game's; materials using them draw red");
+    g_roadLog =rfa::IniInt(L"GuerrillaWorld", L"RoadLog", 0) != 0;
     g_skyOn = rfa::IniInt(L"GuerrillaWorld", L"Sky", 1) != 0;
     g_cloudsOn = rfa::IniInt(L"GuerrillaWorld", L"Clouds", 1) != 0;
     g_worlds = SplitList(rfa::IniString(L"GuerrillaWorld", L"Worlds", L"rfg"));
@@ -4614,6 +5262,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadClockSpeed();
     ReadZoneSize();
     ReadStreamRadius();
+    ReadGroundDetail();
+    ReadShine();
+    ReadBloom();
     ReadAmbient();
     ReadSun();
     ReadColourCorrection();
@@ -4704,6 +5355,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         // For the sun's shadows: the follow player light switched on and put along the sun, and each
         // lamp's drawing (hooks that didn't go in leave the sun unshadowed, and only pass through).
         if (g_lightOn) {
+            g_materialPass = reinterpret_cast<MaterialPassFn>(
+                rfa::HookFunction(kMaterialPass, kMaterialPassPrologue, reinterpret_cast<void*>(&MaterialPass)));
+            if (!g_materialPass) rfa::Log("Could not hook the game's material pass; Guerrilla's material shaders light by the light buffer");
             g_followLights = reinterpret_cast<FollowLightsFn>(
                 rfa::HookFunction(kFollowLights, kFollowLightsPrologue, reinterpret_cast<void*>(&FollowLights)));
             g_placeFollowLight = reinterpret_cast<PlaceFollowLightFn>(

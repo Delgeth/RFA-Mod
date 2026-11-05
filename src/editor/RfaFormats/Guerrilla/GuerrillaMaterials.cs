@@ -9,9 +9,11 @@ namespace RfaFormats.Guerrilla;
 /// ("rfg-nodecal", "rfg-nospecnodecal", "rfg-metal", "rfg-singledecal", "rfg-standard", ...: 33 in
 /// its world chunk files), none of which Armageddon has, so each material is written for the
 /// nearest of Armageddon's by the textures it has: colour, normal and specular map ir_default (as
-/// Guerrilla's metal, brdf and environment-mapped kinds, which lose their extras); colour and normal
-/// ir_nospec; colour and specular ir_nonormal; colour only ir_nospec_nonormal; with a decal
-/// ir_singledecal, with two ir_twodecal. A cut-out material (flags 2) is ir_at_default, and so is
+/// Guerrilla's metal and brdf kinds, which lose their extras); colour and normal ir_nospec; colour
+/// and specular ir_nonormal; colour only ir_nospec_nonormal; with a decal ir_singledecal, with two
+/// ir_twodecal. The layer of Guerrilla's "e" shaders (in their Environment_Map slot, see
+/// <see cref="LayerShaders"/>) is a decal too, and the "ed" ones' decal over it the second
+/// (<see cref="DecalAtThirdUv"/>). A cut-out material (flags 2) is ir_at_default, and so is
 /// any other see-through one (flags 1). Guerrilla's glass (its shaders rfg-glass, flags 1, and
 /// rfg-eosglass, flags 0) is ir_carglass, the shader Armageddon's glass buildings draw their whole
 /// panes with, blended (flags 0x41) as Armageddon's glass is: Guerrilla's colour map (its alpha the
@@ -54,10 +56,44 @@ public static class GuerrillaMaterials
 
     static readonly uint NormalMap = H("Normal_Map"), DiffuseMap = H("Diffuse_Map"), SpecularMap = H("Specular_Map"),
         Decal1Map = H("Decal1_Map"), Decal2Map = H("Decal2_Map"), GuerrillaDecal1 = H("Decal_Map_1"), GuerrillaDecal2 = H("Decal_Map_2"),
-        PatternMap = H("Pattern_map"), ReflectionMap = H("reflection_map");
+        GuerrillaLayer = H("Environment_Map"), PatternMap = H("Pattern_map"), ReflectionMap = H("reflection_map");
 
     /// <summary>Guerrilla's glass shaders.</summary>
     static readonly HashSet<uint> GuerrillaGlass = [H("rfg-glass"), H("rfg-eosglass")];
+
+    /// <summary>
+    /// Guerrilla's shaders whose Environment_Map is no reflection but a layer over the colour at the
+    /// second UV set (UV1): dirt, rust and damage streaks, snow caps, EDF grime, Ultor logos
+    /// (dcl_eg_extPanel1Dirt_D, wa_snow_decal_2, ultor_decal_1, ...). Their compiled pixel shaders
+    /// blend it as lerp(colour × Diffuse_Color, layer, layer alpha × Environment_Map_Opacity) and take
+    /// the shine away under it, as Armageddon's ir_singledecal does its decal at UV1, so the layer is
+    /// that shader's Decal1_Map. Not rfg-eosglass (glass, drawn as glass) nor rfg-ed-oasisroof, which
+    /// reads its layer at UV0, over its decal: no shader of Armageddon's lays them so, and it keeps
+    /// only its decal.
+    /// </summary>
+    static readonly HashSet<uint> LayerShaders =
+    [
+        H("rfg-e-metal"), H("rfg-ed-metal"), H("rfg-e-blend-std-metal"), H("rfg-ed-blend-std-metal"), H("rfg-brdf-env"),
+        H("rfg-brdf-e-concrete"), H("rfg-brdf-e-dull-paint-met"), H("rfg-brdf-e-shiny-comp-metal"),
+        H("rfg-brdf-e-edf-base-panels"), H("rfg-brdf-ed-edf-base-panels"),
+    ];
+
+    /// <summary>
+    /// Guerrilla's shaders that read Decal_Map_1 at the third UV set (UV2), over their layer: so does
+    /// Armageddon's ir_twodecal its Decal2_Map, over its Decal1_Map. (Its other decal shaders read
+    /// Decal_Map_1 at UV1, as Armageddon's Decal1_Map.)
+    /// </summary>
+    static readonly HashSet<uint> DecalAtThirdUv = [H("rfg-ed-metal"), H("rfg-ed-blend-std-metal"), H("rfg-brdf-ed-edf-base-panels")];
+
+    /// <summary>Where one of Armageddon's decal layers comes from: the Guerrilla constants for its opacity and tiling (none: 1).</summary>
+    sealed record Layer(string Opacity, string? TilingU = null, string? TilingV = null);
+
+    /// <summary>How many materials were given their layer as a decal, and their decal as the second (at the third UV set), in all.</summary>
+    public static int LayeredMaterials, ThirdUvDecals;
+
+    static readonly Layer LayerFromEnvironment = new("Environment_Map_Opacity"),
+        LayerFromDecal1 = new("Decal_Map_1_Opacity", "Decal_Map_1_TilingU", "Decal_map_1_TilingV"),
+        LayerFromDecal2 = new("Decal_Map_2_Opacity");
 
     /// <summary>One of Armageddon's shaders: its texture slots in its sampler order, and its constants (from the shader's header, without the engine's own).</summary>
     sealed record Shader(string Name, uint[] Slots, string[] Constants);
@@ -144,18 +180,30 @@ public static class GuerrillaMaterials
     /// Armageddon's material block for the Guerrilla one at <paramref name="at"/> in <paramref name="file"/>.
     /// Its textures' names are in <paramref name="names"/>, and the built-ins it needs are added there.
     /// </summary>
-    internal static byte[] Convert(byte[] file, int at, TextureNameList names, bool vehicle = false)
+    internal static byte[] Convert(byte[] file, int at, TextureNameList names, bool vehicle = false, bool guerrillaShaders = false)
     {
         int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
-        uint flags = BitConverter.ToUInt32(file, at + 0x0C);
-        var textures = new Dictionary<uint, int>();  // slot → where its name starts
+        uint flags = BitConverter.ToUInt32(file, at + 0x0C), guerrillaShader = BitConverter.ToUInt32(file, at + 0x04);
+        if (guerrillaShaders && (flags & 3) == 0 && Ported.TryGetValue(guerrillaShader, out var ported))
+            return ConvertForGuerrillaShader(file, at, names, ported);
+        bool layered = LayerShaders.Contains(guerrillaShader), decalAtThirdUv = DecalAtThirdUv.Contains(guerrillaShader);
+        var textures = new Dictionary<uint, int>();  // Armageddon's slot → where its name starts
+        Layer? decal1 = null, decal2 = null;
         for (int t = 0; t < textureCount; t++)
         {
             int e = at + 0x20 + t * 12;
             uint slot = BitConverter.ToUInt32(file, e + 4);
             if (IsEmpty(names.At(BitConverter.ToInt32(file, e)))) continue;
-            textures.TryAdd(slot == GuerrillaDecal1 ? Decal1Map : slot == GuerrillaDecal2 ? Decal2Map : slot, BitConverter.ToInt32(file, e));
+            (uint to, Layer? layer) = slot == GuerrillaDecal1 ? decalAtThirdUv ? (Decal2Map, LayerFromDecal1) : (Decal1Map, LayerFromDecal1)
+                : slot == GuerrillaDecal2 ? (Decal2Map, LayerFromDecal2)
+                : slot == GuerrillaLayer && layered ? (Decal1Map, LayerFromEnvironment)
+                : (slot, (Layer?)null);
+            if (!textures.TryAdd(to, BitConverter.ToInt32(file, e))) continue;
+            if (to == Decal1Map) decal1 = layer;
+            else if (to == Decal2Map) decal2 = layer;
         }
+        if (decal1 == LayerFromEnvironment) Interlocked.Increment(ref LayeredMaterials);
+        if (decal2 == LayerFromDecal1) Interlocked.Increment(ref ThirdUvDecals);
         var constants = new Dictionary<uint, Vector4>();
         int hashesAt = at + 0x20 + textureCount * 12, valuesAt = at + Align(0x20 + textureCount * 12 + constantCount * 4, 16);
         for (int c = 0; c < constantCount; c++)
@@ -173,19 +221,141 @@ public static class GuerrillaMaterials
 
         return Block(shader, file, at, 0x40u | (glass ? 1u : cutOut ? 2u : 0u), shader.Constants.Length * 2,
             slot => textures.TryGetValue(slot, out int n) && slot != ReflectionMap ? n : names.Add(BuiltIn(slot) + ".tga"),
-            constant => Value(constant, constants, glass, glass && !vehicle));
+            constant => Value(constant, constants, glass, glass && !vehicle, decal1, decal2));
+    }
+
+    /// <summary>
+    /// How one of Guerrilla's shaders is drawn by its rewrite (<see cref="GuerrillaShaders"/>): the family and
+    /// UV sets, and where its maps' tilings come from, as its compiled shader does it. A tiling named is
+    /// the Guerrilla constant (U and V: its name + "U" / "V"; one it hasn't is 1), none is untiled; guarded,
+    /// a tiling of 0 counts as 1 (only some of its shaders do that). Normal "Diffuse" is the colour map's.
+    /// </summary>
+    sealed record PortedShader(GuerrillaShaders.Family Family, int Layers, string? Diffuse, bool DiffuseGuarded, string? Normal, bool NormalGuarded,
+                               bool Specular = true, bool SpecularFromAlpha = false, bool Animated = false, bool LitAtNight = false, int BrdfKind = 0);
+
+    /// <summary>A BRDF shader (every map at UV0 × the colour map's tiling, as metal's) by its curves' number in GuerrillaSurfaces.hlsl's BrdfLight.</summary>
+    static PortedShader Brdf(int layers, int kind) => new(GuerrillaShaders.Family.Brdf, layers, DiffuseTiling, false, "Diffuse", false, BrdfKind: kind);
+
+    const string DiffuseTiling = "Diffuse_Map_Tiling", NormalTiling = "Normal_map_Tiling";
+
+    /// <summary>Guerrilla's shaders drawn by its rewrites: the standard, metal, BRDF and blend-std-metal families (opaque materials of the world's chunks and rocks).</summary>
+    static readonly Dictionary<uint, PortedShader> Ported = new()
+    {
+        [H("rfg-nodecal")] = new(GuerrillaShaders.Family.Standard, 0, DiffuseTiling, true, NormalTiling, true),
+        [H("rfg-nospecnodecal")] = new(GuerrillaShaders.Family.Standard, 0, DiffuseTiling, true, NormalTiling, false, Specular: false),
+        [H("rfg-lightsource")] = new(GuerrillaShaders.Family.Standard, 0, DiffuseTiling, true, null, false, LitAtNight: true),
+        [H("rfg-singledecal")] = new(GuerrillaShaders.Family.Standard, 1, null, false, NormalTiling, false),
+        [H("rfg-nospecsingledecal")] = new(GuerrillaShaders.Family.Standard, 1, DiffuseTiling, false, NormalTiling, false, Specular: false),
+        [H("rfg-standard")] = new(GuerrillaShaders.Family.Standard, 2, null, false, NormalTiling, false),
+        [H("rfg-nospec")] = new(GuerrillaShaders.Family.Standard, 2, null, false, NormalTiling, false, Specular: false),
+        [H("rfg-stitchpiece")] = new(GuerrillaShaders.Family.Standard, 2, null, false, NormalTiling, false, SpecularFromAlpha: true),
+        [H("rfg-animated")] = new(GuerrillaShaders.Family.Standard, 2, null, false, NormalTiling, false, Animated: true),
+        [H("rfg-metal")] = new(GuerrillaShaders.Family.Metal, 0, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-e-metal")] = new(GuerrillaShaders.Family.Metal, 1, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-ed-metal")] = new(GuerrillaShaders.Family.Metal, 2, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-blend-std-metal")] = new(GuerrillaShaders.Family.BlendMetal, 0, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-e-blend-std-metal")] = new(GuerrillaShaders.Family.BlendMetal, 1, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-ed-blend-std-metal")] = new(GuerrillaShaders.Family.BlendMetal, 2, DiffuseTiling, false, "Diffuse", false),
+        [H("rfg-brdf-concrete")] = Brdf(0, 1),
+        [H("rfg-brdf-e-concrete")] = Brdf(1, 1),
+        [H("rfg-brdf-dull-met")] = Brdf(0, 2),
+        [H("rfg-brdf-dull-paint-met")] = Brdf(0, 3),
+        [H("rfg-brdf-e-dull-paint-met")] = Brdf(1, 3),
+        [H("rfg-brdf-paint-metal")] = Brdf(0, 4),
+        [H("rfg-brdf-rust-paint-met")] = Brdf(0, 5),
+        [H("rfg-brdf-edf-base")] = Brdf(0, 6),
+        [H("rfg-brdf-shiny-comp-metal")] = Brdf(0, 7),
+        [H("rfg-brdf-e-shiny-comp-metal")] = Brdf(1, 7),
+        [H("rfg-brdf-edf-base-panels")] = Brdf(0, 8),
+        [H("rfg-brdf-e-edf-base-panels")] = Brdf(1, 9),
+        [H("rfg-brdf-ed-edf-base-panels")] = Brdf(2, 9),
+        [H("rfg-brdf")] = Brdf(0, 10),
+        [H("rfg-brdf-env")] = Brdf(1, 11),
+    };
+
+    /// <summary>How many materials were given one of Guerrilla's own shaders, in all.</summary>
+    public static int GuerrillaShaderMaterials;
+
+    /// <summary>
+    /// The material block for the Guerrilla one at <paramref name="at"/> drawn by its shader's rewrite:
+    /// Guerrilla's own texture slots, and its constants laid out as <see cref="GuerrillaShaders"/> says.
+    /// </summary>
+    static byte[] ConvertForGuerrillaShader(byte[] file, int at, TextureNameList names, PortedShader port)
+    {
+        int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
+        var textures = new Dictionary<uint, int>();  // Guerrilla's slot → where its name starts
+        for (int t = 0; t < textureCount; t++)
+        {
+            int e = at + 0x20 + t * 12;
+            if (!IsEmpty(names.At(BitConverter.ToInt32(file, e)))) textures.TryAdd(BitConverter.ToUInt32(file, e + 4), BitConverter.ToInt32(file, e));
+        }
+        var constants = new Dictionary<uint, Vector4>();
+        int hashesAt = at + 0x20 + textureCount * 12, valuesAt = at + Align(0x20 + textureCount * 12 + constantCount * 4, 16);
+        for (int c = 0; c < constantCount; c++)
+            constants[BitConverter.ToUInt32(file, hashesAt + c * 4)] = Read(file, valuesAt + c * 16);
+        float X(string name, float otherwise) => constants.TryGetValue(H(name), out var v) ? v.X : otherwise;
+        Vector4 Colour(string name) => constants.TryGetValue(H(name), out var v) ? v : Vector4.One;
+        (float U, float V) Tiling(string? name, bool guarded)
+        {
+            if (name == null) return (1, 1);
+            float u = X(name + "U", 1), v = X(name + "V", 1);
+            return guarded ? (u == 0 ? 1 : u, v == 0 ? 1 : v) : (u, v);
+        }
+        bool Has(string slot) => textures.ContainsKey(H(slot));
+
+        var diffuse = Tiling(port.Diffuse, port.DiffuseGuarded);
+        var normal = port.Normal == "Diffuse" ? diffuse : Tiling(port.Normal, port.NormalGuarded);
+        var specular = port.Family == GuerrillaShaders.Family.Standard ? Tiling("Specular_Map_Tiling", false) : diffuse;
+        bool metal = port.Family == GuerrillaShaders.Family.Metal;
+        // Metal's decal (at UV2) is its Decal_Map_1; the standard shaders' decals are Decal_Map_1 (UV1) and Decal_Map_2 (UV2).
+        float decal1 = Has("Decal_Map_1") ? X("Decal_Map_1_Opacity", 1) : 0, decal2 = Has("Decal_Map_2") ? X("Decal_Map_2_Opacity", 1) : 0;
+        float layer = Has("Environment_Map") ? X("Environment_Map_Opacity", 1) : 0;
+        Vector4 value(string constant) => constant switch
+        {
+            "Normal_Map_Height" => new(X("Normal_Map_Height", 1), 0, 0, 0),
+            "Specular_Power" => new(X("Specular_Power", 100), 0, 0, 0),
+            "gw_NormalTilingU" => new(normal.U, 0, 0, 0),
+            "gw_NormalTilingV" => new(normal.V, 0, 0, 0),
+            "Diffuse_Color" => Colour("Diffuse_Color"),
+            "Specular_Color" => Colour("Specular_Color"),
+            "gw_Tiling" => new(diffuse.U, diffuse.V, specular.U, specular.V),
+            "gw_Decals" => new(X("Decal_Map_1_TilingU", 1), X("Decal_map_1_TilingV", 1), decal1, decal2),
+            "gw_Shine" => new(port.Specular ? X("Specular_Alpha", 1) : 0, X("Metal_Base_Shine", 1), layer, X("Decal_Map_1_Overlay", 1)),
+            "gw_Glow" => new(metal ? 0 : X("Self_Illumination", 0), port.LitAtNight ? 1 : 0, port.Animated ? X("illum_cycle", -1) : -1, port.SpecularFromAlpha ? 1 : 0),
+            "gw_Scroll" => port.Animated ? new(X("Diffuse_Map_OffsetU", 0), X("Diffuse_Map_OffsetV", 0), X("Decal_Map_1_OffsetU", 0), X("Decal_Map_1_OffsetV", 0)) : Vector4.Zero,
+            "gw_Extra" => new(port.Animated ? X("Decal_Map_2_OffsetU", 0) : 0, port.Animated ? X("Decal_Map_2_OffsetV", 0) : 0, port.SpecularFromAlpha ? 1 : 0, 0),
+            "BRDF_Diff_1" or "BRDF_Diff_2" or "BRDF_Diff_3" or "BRDF_Spec_1" or "BRDF_Spec_2" or "BRDF_Spec_3" =>
+                constants.TryGetValue(H(constant), out var lobe) ? lobe : Vector4.Zero,
+            "gw_Brdf" => new(port.BrdfKind, X("Specular_falloff", 0), 0, X("Opacity", 1)),
+            "gw_MetalSpecular" => constants.TryGetValue(H("Metal_Specular_Color"), out var metalSpecular)
+                ? metalSpecular with { W = X("Metal_Specular_Alpha", 1) } : new(0, 0, 0, X("Metal_Specular_Alpha", 1)),
+            "gw_MetalSpecularPower" => new(X("Metal_Specular_Power", 100), 0, 0, 0),
+            _ => throw new InvalidOperationException($"no value for {constant}"),
+        };
+
+        string[] slots = GuerrillaShaders.SlotsOf(port.Family, port.Layers);
+        var shader = new Shader(GuerrillaShaders.Name(port.Family, port.Layers), [.. slots.Select(H)], GuerrillaShaders.Constants[1..]);
+        Interlocked.Increment(ref GuerrillaShaderMaterials);
+        return Block(shader, file, at, 0x40u, shader.Constants.Length * 2,
+            slot => textures.TryGetValue(slot, out int n) ? n : names.Add(BuiltIn(slot) + ".tga"),
+            value);
     }
 
     /// <summary>The built-in texture filling a slot a material hasn't.</summary>
     static string BuiltIn(uint slot) => slot == NormalMap ? FlatNormal : slot == SpecularMap ? NoSpecular : slot == ReflectionMap ? GlassReflection : White;
 
+    /// <summary>Guerrilla's material flag for both sides drawn (its renderer's RL_CULL_NONE), and Armageddon's.</summary>
+    const uint GuerrillaTwoSided = 0x40, TwoSided = 0x80;
+
     /// <summary>
     /// An Armageddon material block for <paramref name="shader"/>: the Guerrilla block at <paramref name="at"/>'s
-    /// own name hash and run-time words, the flags given, room for <paramref name="room"/> constants, each
+    /// own name hash and run-time words, the flags given (and both sides drawn where Guerrilla's are:
+    /// its 0x40, Armageddon's 0x80; its potted plants), room for <paramref name="room"/> constants, each
     /// slot's texture (where its name starts) and each constant's value as the functions give them.
     /// </summary>
     static byte[] Block(Shader shader, byte[] file, int at, uint flags, int room, Func<uint, int> texture, Func<string, Vector4> value)
     {
+        if ((BitConverter.ToUInt32(file, at + 0x0C) & GuerrillaTwoSided) != 0) flags |= TwoSided;
         int hashes = 0x24 + shader.Slots.Length * 12, values = Align(hashes + shader.Constants.Length * 4, 16), size = values + room * 16;
         var block = new byte[size];
         void Put(int o, uint v) => BitConverter.TryWriteBytes(block.AsSpan(o), v);
@@ -316,11 +486,17 @@ public static class GuerrillaMaterials
     static bool IsEmpty(string texture) =>
         string.Equals(texture, "missing", StringComparison.OrdinalIgnoreCase) || string.Equals(texture, "missing.tga", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>An Armageddon constant's value from the Guerrilla material's constants.</summary>
-    static Vector4 Value(string constant, Dictionary<uint, Vector4> from, bool glass, bool reflects)
+    /// <summary>
+    /// An Armageddon constant's value from the Guerrilla material's constants; its decal layers'
+    /// opacity and tiling from where <paramref name="decal1"/> and <paramref name="decal2"/> say (a
+    /// layer the material hasn't: opacity 0, over the white its slot is given).
+    /// </summary>
+    static Vector4 Value(string constant, Dictionary<uint, Vector4> from, bool glass, bool reflects, Layer? decal1 = null, Layer? decal2 = null)
     {
         Vector4? Get(string name) => from.TryGetValue(H(name), out var v) ? v : null;
         static Vector4 X(float x) => new(x, 0, 0, 0);
+        Vector4 Opacity(Layer? layer) => layer is null ? X(0) : Get(layer.Opacity) ?? X(1);
+        Vector4 Tiling(string? name) => name is null ? X(1) : Get(name) ?? X(1);
         return constant switch
         {
             "Diffuse_color" => Get("Diffuse_Color") ?? Vector4.One,
@@ -329,11 +505,12 @@ public static class GuerrillaMaterials
             "Normal_Height" => Get("Normal_Map_Height") ?? X(1),
             "Specular_Power" => X(Math.Clamp((Get("Specular_Power")?.X ?? 100) / (4 * 5.12f), 0, 50)),
             "Specular_Color" => (Get("Specular_Color") ?? Vector4.One) * (Get("Specular_Alpha")?.X ?? 1),
-            "Decal1_TilingU" => Get("Decal_Map_1_TilingU") ?? X(1),
-            "Decal1_TilingV" => Get("Decal_map_1_TilingV") ?? X(1),
-            "Decal1_Opacity" => Get("Decal_Map_1_Opacity") ?? X(1),
-            "Decal2_Opacity" => Get("Decal_Map_2_Opacity") ?? X(1),
-            "decal2_tilingU" or "decal2_tilingV" => X(1),
+            "Decal1_TilingU" => Tiling(decal1?.TilingU),
+            "Decal1_TilingV" => Tiling(decal1?.TilingV),
+            "Decal1_Opacity" => Opacity(decal1),
+            "Decal2_Opacity" => Opacity(decal2),
+            "decal2_tilingU" => Tiling(decal2?.TilingU),
+            "decal2_tilingV" => Tiling(decal2?.TilingV),
             "Decal1_Color" or "decal2_color" => Vector4.One,
             "reflection_brightness" => X(reflects ? 0.5f : 0),
             "reflection_contrast" => X(reflects ? 0.1f : 0),

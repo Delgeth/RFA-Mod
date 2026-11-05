@@ -10,4 +10,9 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Guerrilla's material shaders in HLSL, which the world builder compiles (GuerrillaShaders.cs) -->
+    <EmbeddedResource Include="Guerrilla\Shaders\*.hlsl" LogicalName="%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

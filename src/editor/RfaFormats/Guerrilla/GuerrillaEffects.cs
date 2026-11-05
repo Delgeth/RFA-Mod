@@ -258,6 +258,15 @@ public static class GuerrillaEffects
         var block = new Piece(new byte[EmitterBlockSize]);
         var b = block.Bytes;
         foreach (var (to, from, size) in BlockCopy) Array.Copy(c, e + from, b, to, size);
+        float[] scale = ColourScale(c, e);
+        void Scaled(byte[] bytes, int at)
+        {
+            for (int k = 0; k < 3; k++)
+                BitConverter.TryWriteBytes(bytes.AsSpan(at + k * 4), BitConverter.ToSingle(bytes, at + k * 4) * scale[k]);
+        }
+        foreach (int at in KeyColours) Scaled(b, at);
+        Scaled(material.Bytes, 0x44);  // the ambient colour
+        Scaled(material.Bytes, 0x50);  // and the diffuse
         b[0x02] = (byte)(I(e + 0x188) switch { 5 => 6, 6 => 5, var t => t });  // particle type: Guerrilla's nodes 5 and radial 6 swapped
         b[0x10] = (byte)Math.Clamp(I(e + 0x184), 0, 255);                       // tails
         // Guerrilla's loader turns on every emitter's size and colour variances (its files have no
@@ -282,6 +291,33 @@ public static class GuerrillaEffects
         var unique = source.Field(e + 0x2D0);
         block.Link(0x2E4, extra == 0 ? unique : new Piece([.. unique?.Bytes.AsSpan(0, uniqueSize).ToArray() ?? new byte[uniqueSize], .. new byte[extra]]));
         heads.Link(head + 0x18, block);
+    }
+
+    /// <summary>Guerrilla's tint on every particle: its scene renderer draws them with (1.6, 1.6, 1.6, 1) (render_scene_part2, into Tint_color).</summary>
+    const float ParticleTint = 1.6f;
+
+    /// <summary>The emitter block's key colours and their variances (rgba each), in Armageddon's layout.</summary>
+    static readonly int[] KeyColours = [0x54, 0x64, 0x78, 0x8C, 0x9C, 0xAC, 0xBC, 0xCC];
+
+    /// <summary>
+    /// How much brighter Guerrilla draws an emitter's particles than its colours say, per channel.
+    /// Guerrilla multiplies each particle's colour (its key colour plus the material's ambient and
+    /// diffuse, then the texture) by its emitter's own colour-correction matrix (a 3 × 3 at the file
+    /// offset in +0x15C, 0 or −1 for none; vfx_effect_template::init sets it on the emitter's
+    /// renderable, rl_particle_renderer::render hands it to the shader each draw), and by the tint its
+    /// renderer passes for particles (<see cref="ParticleTint"/>). Armageddon's particle shader takes one
+    /// matrix for the whole frame and its renderer no tint, so the converter bakes both into the colours
+    /// they multiply: the matrix's diagonal (the rest of it is small in all of Guerrilla's: a uniform
+    /// scale in most, mostly 2 to 6, up to 21 on a barrel's flash) times the tint. Without it four in ten
+    /// of Guerrilla's emitters drew 2 to 20 times too dark (dull sparks, brown-black debris).
+    /// </summary>
+    static float[] ColourScale(byte[] c, int e)
+    {
+        uint at = BitConverter.ToUInt32(c, e + 0x15C);
+        float[] scale = [ParticleTint, ParticleTint, ParticleTint];
+        if (at != 0 && at != uint.MaxValue && at + 36 <= c.Length)
+            for (int k = 0; k < 3; k++) scale[k] *= BitConverter.ToSingle(c, (int)at + k * 16);  // its 1st, 5th and 9th entries
+        return scale;
     }
 
     /// <summary>The emitter block's values copied from Guerrilla's emitter: (Armageddon's block offset, Guerrilla's offset, size).</summary>

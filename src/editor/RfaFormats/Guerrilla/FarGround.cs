@@ -19,7 +19,10 @@ namespace RfaFormats.Guerrilla;
 /// block's box again (from the zone's corner), then the zone's corner in the world (x, 0, z) at +0x24
 /// (world_08_02's 0, 0, 1275).
 ///
-/// Each new mesh is a regular grid over its sub-zone's third of the zone both ways (edges shared with
+/// The world builder takes Guerrilla's own (see <see cref="FromGuerrilla"/>); <see cref="Build"/> makes
+/// them from the height field where a zone's can't be taken.
+///
+/// Each mesh <see cref="Build"/> makes is a regular grid over its sub-zone's third of the zone both ways (edges shared with
 /// the next, so no cracks), 40 cells a side, normals from the height field. It lies under the
 /// detailed ground, as the game's own do (world_08_02's are 0.5 m under it on flat ground, never
 /// above, and up to 22 m under on steep ground): the game draws a sub-zone's far mesh near the
@@ -144,6 +147,111 @@ public static class FarGround
             for (int k = 0; k < placing.Length; k++) BitConverter.TryWriteBytes(records.AsSpan(n * 48 + 0x0C + k * 4), placing[k]);
         }
         return (records, blocks, data.ToArray());
+    }
+
+    /// <summary>Our far meshes' vertex format (Guerrilla's 15 is the same 8 bytes: see the top).</summary>
+    const byte FarFormat = 25;
+
+    /// <summary>How far under the ground (at its samples) a far mesh taken from Guerrilla must stay (m); lower, it is lowered (see <see cref="FromGuerrilla"/>).</summary>
+    const float GuerrillaSinkKept = 0.05f;
+
+    /// <summary>
+    /// A zone's far meshes from Guerrilla's own, for our terrain file and .gterrain_pc (as
+    /// <see cref="Build"/>'s): Guerrilla's terrain file (<paramref name="terrain"/>, its .cterrain_pc)
+    /// keeps them as Armageddon's does, nine 48-byte records then nine mesh blocks, but of version 6
+    /// with vertex format 15 (the same 8 bytes as Armageddon's 25, the normal's z byte's top bit flipped
+    /// as well), near the file's end; their buffers are its .gterrain_pc's first bytes (<paramref name="data"/>),
+    /// block after block, each from where the last ends, its indices and vertices at multiples of 16 in
+    /// the file. Each block is made version 9 (<see cref="MeshBlockConversion"/>) with format 25, the
+    /// buffers kept where they are (so their alignment holds), the records as Guerrilla's. Guerrilla's
+    /// lie half a metre under its ground (more on steep ground) on an adaptive mesh, where ours from the
+    /// height field are a regular grid sunk deeper. Where one would come within
+    /// <see cref="GuerrillaSinkKept"/> of our ground (our <paramref name="heights"/>, the height field's,
+    /// <paramref name="samples"/> across, <paramref name="step"/> apart) at a sample inside one of its
+    /// triangles, that triangle's corners go down by the difference (the game draws some far meshes
+    /// near the camera too: see the top). Returns those and how many vertices were lowered.
+    /// </summary>
+    public static (byte[] Records, List<byte[]> Blocks, byte[] Data, int Lowered) FromGuerrilla(byte[] terrain, byte[] data, float[] heights, int samples, float step, Vector2 corner)
+    {
+        int I(byte[] d, int at) => BitConverter.ToInt32(d, at);
+        var (records, first, _) = GuerrillaTerrain.FarMeshes(terrain);
+        var blocksAt = new List<int>();
+        for (int at = first, k = 0; k < 9; k++, at += I(terrain, at + 8)) blocksAt.Add(at);
+        byte[] placing = terrain[records..first];
+        for (int k = 0; k < 9; k++)
+        {
+            float cx = BitConverter.ToSingle(placing, k * 48 + 0x24), cz = BitConverter.ToSingle(placing, k * 48 + 0x2C);
+            if (MathF.Abs(cx - corner.X) > 0.01f || MathF.Abs(cz - corner.Y) > 0.01f)
+                throw new InvalidDataException($"Guerrilla's far mesh record {k} places it at ({cx}, {cz}), not the zone's corner ({corner.X}, {corner.Y})");
+        }
+
+        float Ground(int xi, int zi) => heights[Math.Clamp(zi, 0, samples - 1) * samples + Math.Clamp(xi, 0, samples - 1)];
+        var blocks = new List<byte[]>();
+        int g = 0, lowered = 0;
+        var buffers = new MemoryStream();
+        foreach (int at in blocksAt)
+        {
+            uint checksum = BitConverter.ToUInt32(terrain, at + 4);
+            int size = I(terrain, at + 0x0C), vertices = I(terrain, at + 0x18), vertexOffset = I(terrain, at + 0x20);
+            int indices = I(terrain, at + 0x24), indexOffset = I(terrain, at + 0x28);
+            if (g + size > data.Length || BitConverter.ToUInt32(data, g) != checksum || BitConverter.ToUInt32(data, g + size - 4) != checksum ||
+                vertexOffset + vertices * 8 > size || indexOffset + indices * 2 > size || terrain[at + 0x2C] != 2 || terrain[at + 0x2D] != 0)
+                throw new InvalidDataException($"Guerrilla's far mesh block at 0x{at:X} doesn't match its buffer at {g}");
+            byte[] buffer = data[g..(g + size)];
+            short Y(int v) => BitConverter.ToInt16(buffer, vertexOffset + v * 8 + 2);
+            Vector2 Place(int v) => new((BitConverter.ToInt16(buffer, vertexOffset + v * 8) + 32704) / 128f, (BitConverter.ToInt16(buffer, vertexOffset + v * 8 + 4) + 32704) / 128f);
+            // Each triangle of the strip (repeats skip), and how far each vertex must go down.
+            var down = new float[vertices];
+            for (int i = 0; i + 2 < indices; i++)
+            {
+                int a = BitConverter.ToUInt16(buffer, indexOffset + i * 2), b = BitConverter.ToUInt16(buffer, indexOffset + i * 2 + 2), c = BitConverter.ToUInt16(buffer, indexOffset + i * 2 + 4);
+                if (a == b || b == c || a == c || a >= vertices || b >= vertices || c >= vertices) continue;
+                Vector2 pa = Place(a), pb = Place(b), pc = Place(c);
+                float ya = Y(a) / 64f, yb = Y(b) / 64f, yc = Y(c) / 64f;
+                float area = (pb.X - pa.X) * (pc.Y - pa.Y) - (pc.X - pa.X) * (pb.Y - pa.Y);
+                if (MathF.Abs(area) < 1e-9f) continue;
+                float over = 0;
+                int x1 = (int)MathF.Ceiling(MathF.Min(pa.X, MathF.Min(pb.X, pc.X)) / step), x2 = (int)MathF.Floor(MathF.Max(pa.X, MathF.Max(pb.X, pc.X)) / step);
+                int z1 = (int)MathF.Ceiling(MathF.Min(pa.Y, MathF.Min(pb.Y, pc.Y)) / step), z2 = (int)MathF.Floor(MathF.Max(pa.Y, MathF.Max(pb.Y, pc.Y)) / step);
+                for (int zi = Math.Max(z1, 0); zi <= Math.Min(z2, samples - 1); zi++)
+                    for (int xi = Math.Max(x1, 0); xi <= Math.Min(x2, samples - 1); xi++)
+                    {
+                        float px = xi * step, pz = zi * step;
+                        float wa = ((pb.X - px) * (pc.Y - pz) - (pc.X - px) * (pb.Y - pz)) / area;
+                        float wb = ((pc.X - px) * (pa.Y - pz) - (pa.X - px) * (pc.Y - pz)) / area;
+                        float wc = 1 - wa - wb;
+                        if (wa < -1e-4f || wb < -1e-4f || wc < -1e-4f) continue;
+                        over = MathF.Max(over, wa * ya + wb * yb + wc * yc - (Ground(xi, zi) - GuerrillaSinkKept));
+                    }
+                if (over <= 0) continue;
+                down[a] = MathF.Max(down[a], over);
+                down[b] = MathF.Max(down[b], over);
+                down[c] = MathF.Max(down[c], over);
+            }
+            float lowest = float.MaxValue;
+            for (int v = 0; v < vertices; v++)
+            {
+                if (down[v] > 0)
+                {
+                    short y = (short)Math.Clamp(MathF.Floor(Y(v) - down[v] * 64), short.MinValue, short.MaxValue);
+                    BitConverter.TryWriteBytes(buffer.AsSpan(vertexOffset + v * 8 + 2), y);
+                    lowered++;
+                }
+                lowest = MathF.Min(lowest, Y(v) / 64f);
+            }
+            buffers.Write(buffer);
+
+            byte[] block = MeshBlockConversion.FromVersion6(terrain, at);
+            block[0x21] = FarFormat;
+            // The boxes (the record's and the submesh's) down to the lowest vertex.
+            int k = blocks.Count;
+            float recordLow = BitConverter.ToSingle(placing, k * 48 + 0x10);
+            if (lowest < recordLow) BitConverter.TryWriteBytes(placing.AsSpan(k * 48 + 0x10), lowest);
+            if (lowest < BitConverter.ToSingle(block, 0x74)) BitConverter.TryWriteBytes(block.AsSpan(0x74), lowest);
+            blocks.Add(block);
+            g += size;
+        }
+        return (placing, blocks, buffers.ToArray(), lowered);
     }
 
     /// <summary>

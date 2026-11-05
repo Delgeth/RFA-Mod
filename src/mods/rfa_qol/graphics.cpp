@@ -38,6 +38,8 @@ Slider g_sliders[] = {
     {L"Brightness", "Sky brightness", 0, 10, 5, false, "The sky's time-of-day colours times this. 5 = Guerrilla's with its tone mapping", 0},
     {L"Ambient", "Sky light", 0, 3, 1, false, "The time of day's ambient light on the ground times this", 0},
     {L"Sun", "Sunlight", 0, 3, 1, false, "The sun's and moon's light times this", 0},
+    {L"Shine", "Sun's shine", 0, 1, 1, false, "The sun's highlights on surfaces (by their specular maps). 0 = none", 0},
+    {L"Bloom", "Bloom", 0, 2, 1, false, "With Guerrilla's tone mapping: the glow round bright things. 1 = as now, 0 = none", 0},
     {L"SunShafts", "Sun shafts", 0, 3, 1, false, "With Guerrilla's tone mapping: the glow streaming round the sun. 1 = Guerrilla's, 0 = none", 0},
     {L"Fog", "Fog", 0, 3, 1, false, "How thick Guerrilla's haze is. 1 = Guerrilla's, 0 = none", 0},
     {L"Sharpen", "Sharpening", 0, 100, 40, true, "Contrast-adaptive sharpening under the HUD. 0 = none, 100 = strongest", 0},

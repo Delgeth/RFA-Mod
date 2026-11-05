@@ -90,7 +90,7 @@ public static class GuerrillaChunks
         int at = blocks;
         for (int k = 0; k < materialCount; k++)
         {
-            materials.Add(GuerrillaMaterials.Convert(g, at, nameList));
+            materials.Add(GuerrillaMaterials.Convert(g, at, nameList, guerrillaShaders: true));
             at += I(at);
         }
         int materialsEnd = at;

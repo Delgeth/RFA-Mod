@@ -78,6 +78,17 @@ public static class GuerrillaWorld
     /// A zone's look from its Guerrilla terrain file: its ground layers' textures (colour and normal, four
     /// layers, without ".tga") and constants, blend and colour maps, cliff materials and layer map.
     /// </summary>
+    /// <summary>The most cliff materials a zone's terrain file is given: Guerrilla's zones have up to six.</summary>
+    const int MaxCliffMaterials = 6;
+
+    /// <summary>
+    /// Whether a zone's terrain file gets the zone's own cliff materials (it has some, every one with its
+    /// textures and side projections), else three made from its ground's layers.
+    /// </summary>
+    static bool OwnCliffs(Look look) =>
+        look.Cliffs.Count is > 0 and <= MaxCliffMaterials &&
+        Enumerable.Range(0, look.Cliffs.Count).All(k => look.CliffPairs(k).Count > 0 && look.Cliffs[k].Constants.ContainsKey(NameHashes.PropertyHash("Terrain_layer0_xform")));
+
     sealed record Look(string[] Textures, Vector4[] Constants, RgbaImage Blend, RgbaImage Colour,
                        List<GuerrillaTerrain.CliffMaterial> Cliffs, (byte[] Cells, List<string> Names)? LayerMap)
     {
@@ -95,9 +106,10 @@ public static class GuerrillaWorld
                 .ToList();
         }
 
-        /// <summary>Every ground and cliff texture the zone's terrain file names (without ".tga").</summary>
+        /// <summary>Every ground and cliff texture the zone's terrain file names (without ".tga"), and the cliffs' dither map.</summary>
         public IEnumerable<string> TerrainTextures =>
             Textures.Take(8).Concat(Enumerable.Range(0, Cliffs.Count).SelectMany(CliffPairs).SelectMany(p => new[] { p.Colour, p.Normal }))
+                .Append(GuerrillaBuiltIns.CliffDither)
                 .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -217,6 +229,8 @@ public static class GuerrillaWorld
         int S = Layout.Samples, last = S - 1;
         var heights = new Dictionary<(int, int), float[]>();
         var holes = new Dictionary<(int, int), SquareCut[]>();
+        var roadSurfaces = new Dictionary<(int, int), float[]?>();
+        var cliffCovers = new Dictionary<(int, int), GuerrillaGround.CliffCover>();
         var subzoneCache = new Dictionary<(int, int, int), TerrainSubzone?>();
         var roadDecals = new Dictionary<(int, int, int), IReadOnlyList<GuerrillaRoadDecal>>();
         TerrainSubzone? Subzone(int col, int row, int n)
@@ -243,12 +257,14 @@ public static class GuerrillaWorld
             var over = subzones.Where(s => s.Positions.Length > 0 && s.Positions.Max(p => p.X) >= corner.X - 1 && s.Positions.Min(p => p.X) <= corner.X + ZoneWidth + 1 &&
                                            s.Positions.Max(p => p.Z) >= corner.Y - 1 && s.Positions.Min(p => p.Z) <= corner.Y + ZoneWidth + 1);
             heights[(col, row)] = GuerrillaGround.Sample(over, corner, Layout, RockCorners(col, row)) ?? throw new InvalidDataException($"no Guerrilla ground for terr01_{col:00}_{row:00}");
-            holes[(col, row)] = GuerrillaGround.RoadHoles(over, corner, Layout);
+            (holes[(col, row)], roadSurfaces[(col, row)]) = GuerrillaGround.UnderRoads(over, corner, Layout, heights[(col, row)]);
+            cliffCovers[(col, row)] = GuerrillaGround.Cliffs(over, corner, Layout);
             foreach (var ((doneCol, doneRow), lastBy) in lastSampledBy)
                 if (lastBy == i)
                     for (int n = 0; n < 9; n++) subzoneCache.Remove((doneCol, doneRow, n));
         }
-        log($"Ground: {zones.Count} zones sampled, {S} × {S} samples each");
+        log($"Ground: {zones.Count} zones sampled, {S} × {S} samples each; under the road decals {GuerrillaGround.RoadTriangles[0]:N0} triangles " +
+            $"kept under them, {GuerrillaGround.RoadTriangles[1]:N0} left out (all covered, but showing through), {GuerrillaGround.RoadTriangles[2]:N0} showing through by their edges");
         // The triangles (in the world) of the rocks placed in a zone and those around it: where the
         // ground has a hole under one, the rock closes it (see GuerrillaGround.Sample).
         IEnumerable<Vector3> RockCorners(int col, int row)
@@ -360,7 +376,8 @@ public static class GuerrillaWorld
                 }
             roadsIn[(col, row)] = lists;
         }
-        log($"Roads: {roadsIn.Values.Sum(l => l.Sum(d => d.Count))} road decals, {roadTextures.Count} textures");
+        log($"Roads: {roadsIn.Values.Sum(l => l.Sum(d => d.Count))} road decals ({string.Join(", ", GuerrillaRoads.Variants.OrderBy(v => v.Key).Select(v => $"{v.Value} {v.Key}"))}), " +
+            $"{roadTextures.Count} textures; of their {GuerrillaRoads.VerticesSeen:N0} vertices {GuerrillaRoads.VerticesRaised:N0} at the road's edge made none of it as Armageddon reads it");
         // A road decal's texture's new name: the zone's blend map ours (terr01_05_05_alpha00 is
         // rfg0505_a00, as the ground's), the rest as the ground's textures.
         static bool IsBlendMap(string texture) => texture.StartsWith("terr01_", StringComparison.OrdinalIgnoreCase) && texture.EndsWith("_alpha00", StringComparison.OrdinalIgnoreCase);
@@ -743,18 +760,20 @@ public static class GuerrillaWorld
             var zoneMiddle = new Vector3(corner.X + ZoneWidth / 2, 0, corner.Y + ZoneWidth / 2);
             uint prefix = (uint)(col * 16 + row) << 24;
 
-            // The ground. The blend map's alpha is its cliff weight too (red: the cliff shader mixes its
-            // two textures by alpha, which the ground's shader doesn't read).
+            // The ground, its cliffs where Guerrilla's sub-zones draw theirs. The blend map as Guerrilla's
+            // (ARGB): its alpha is how the two-texture cliffs mix their textures (the ground's shader
+            // doesn't read it); close to its red, the cliff weight, but painted on its own (terr01_12_11's
+            // differs from red by more than 8 in 3% of texels).
             var blend = new RgbaImage(look.Blend.Width, look.Blend.Height);
             Array.Copy(look.Blend.Pixels, blend.Pixels, blend.Pixels.Length);
-            for (int p = 0; p < blend.Pixels.Length; p += 4) blend.Pixels[p + 3] = blend.Pixels[p];
-            var cliff = new byte[S * S];
-            for (int z = 0; z < S; z++)
-                for (int x = 0; x < S; x++)
-                    cliff[z * S + x] = blend.Pixels[(Math.Min(z, blend.Height - 1) * blend.Width + Math.Min(x, blend.Width - 1)) * 4];
-            var subzones = GuerrillaGround.Subzones(h, corner, null, cliff, Layout, holes[(col, row)], roadsIn[(col, row)]);
+            // Drawn under the road decals (see GuerrillaGround.UnderRoads); walked on as sampled.
+            var subzones = GuerrillaGround.Subzones(GuerrillaGround.BelowRoads(h, roadSurfaces[(col, row)]), corner, null, cliffCovers[(col, row)], Layout,
+                                                    holes[(col, row)], roadsIn[(col, row)], OwnCliffs(look) ? look.Cliffs.Count : 3);
             string blendName = $"rfg{col:00}{row:00}_a00", colourName = $"rfg{col:00}{row:00}cmb";
-            var (terrainFile, terrainData) = ZoneTerrain(h, corner, look, barriers[(col, row)], zone, blendName, colourName);
+            string guerrillaZone = $"terr01_{col:00}_{row:00}";
+            var (terrainFile, terrainData, farLowered) = ZoneTerrain(h, corner, look, barriers[(col, row)], zone, blendName, colourName,
+                RfgFile(col, row, guerrillaZone + ".cterrain_pc") ?? throw new InvalidDataException($"no {guerrillaZone}.cterrain_pc"),
+                RfgFile(col, row, guerrillaZone + ".gterrain_pc", 1) ?? throw new InvalidDataException($"no {guerrillaZone}.gterrain_pc"));
             // The blend map uncompressed with one level, data not colour; the colour map DXT1 with its
             // levels down to 4 × 4: as the game's own ground maps are kept.
             byte[] blendData = TextureCodec.Encode(TextureFormat.Argb8888, blend);
@@ -828,7 +847,8 @@ public static class GuerrillaWorld
             for (int n = 0; n < 9; n++)
                 Pack($"0h_c{col * 3 + n % 3:00}{(15 - row) * 3 + n / 3:00}", zoneLayer: false,
                      [($"{zone}_{n}.ctmesh_pc", subzones[n].Header), ($"{zone}_{n}.gtmesh_pc", subzones[n].Data), .. sharedParts[n]]);
-            log($"{zone}{(isStart ? " (start)" : "")}: ground {h.Min():0} to {h.Max():0} m, {rocks.Count} rocks, {propsIn[(col, row)].Count} destructible objects ({links.Length / ZoneFile.DestructionLinkSize} links), {files.Sum(f => (long)f.Data.Length) / 1024:N0} KB of files in the zone's container");
+            log($"{zone}{(isStart ? " (start)" : "")}: ground {h.Min():0} to {h.Max():0} m, {rocks.Count} rocks, {propsIn[(col, row)].Count} destructible objects ({links.Length / ZoneFile.DestructionLinkSize} links), {files.Sum(f => (long)f.Data.Length) / 1024:N0} KB of files in the zone's container, " +
+                $"{(OwnCliffs(look) ? $"its {look.Cliffs.Count} cliff materials" : "3 cliff materials from its ground")}, Guerrilla's far meshes ({farLowered} vertices lowered under our ground)");
             // What was made for this zone alone isn't needed again.
             heights.Remove((col, row));
             looks.Remove((col, row));
@@ -874,6 +894,10 @@ public static class GuerrillaWorld
 
         string output = Path.Combine(overrides, "build", "pc", "cache");
         Directory.CreateDirectory(output);
+        // Guerrilla's material shaders rewritten for Armageddon's renderer, which the chunks' and rocks'
+        // materials name (the guerrilla_world mod has the game load them).
+        var shaderFiles = GuerrillaShaders.Write(cache, output);
+        log($"Shaders: {shaderFiles.Count} effect files of Guerrilla's material shaders; {GuerrillaMaterials.GuerrillaShaderMaterials:N0} materials drawn with them");
         // Written straight into their files: with Guerrilla's buildings the layers pass 2 GB. The zone
         // files are stored compressed, as the game's own zonescript_world.vpp_pc is: the game reads the
         // archive's stored bytes through a 20 MB pool, and with Guerrilla's objects they come to 26 MB.
@@ -1009,16 +1033,18 @@ public static class GuerrillaWorld
     /// <summary>
     /// A zone's terrain file, written from its parts (see <see cref="TerrainFile"/>): terrain_data field by field;
     /// every material written from code (<see cref="TerrainMaterials"/>): the ground's with Guerrilla's
-    /// layer textures, scales, offsets and tints, the three cliff kinds from Guerrilla's own cliff
-    /// materials (textures, projections, tints; a zone with none: the ground's layers 0 and 3), the far
+    /// layer textures, scales, offsets and tints, Guerrilla's own cliff materials (textures,
+    /// projections, tints; a zone with none: three made from the ground's layers 0 and 3), the far
     /// meshes' with the zone's colour map; Guerrilla's barriers and layer map; no foliage (Guerrilla's is
     /// still to port); the texture list of what the materials name; the height field's Havok packfile
-    /// (<see cref="TerrainHeightField.Section"/>) and the far meshes and their buffer (<see cref="FarGround"/>)
-    /// from the zone's heights. Nothing of another level's terrain file is used. Returns the terrain
-    /// file and its .gterrain_pc.
+    /// (<see cref="TerrainHeightField.Section"/>) from the zone's heights, and Guerrilla's own far
+    /// meshes and their buffer (from <paramref name="guerrillaTerrain"/> and <paramref name="guerrillaData"/>,
+    /// its terrain file and .gterrain_pc; see <see cref="FarGround.FromGuerrilla"/>), kept under the
+    /// heights. Nothing of another level's terrain file is used. Returns the terrain file, its
+    /// .gterrain_pc and how many far vertices were lowered.
     /// </summary>
-    static (byte[] Terrain, byte[] Data) ZoneTerrain(float[] heights, Vector2 corner, Look look, IReadOnlyList<ChunkShape> barriers,
-                                                     string zone, string blendName, string colourName)
+    static (byte[] Terrain, byte[] Data, int FarLowered) ZoneTerrain(float[] heights, Vector2 corner, Look look, IReadOnlyList<ChunkShape> barriers,
+                                                                     string zone, string blendName, string colourName, byte[] guerrillaTerrain, byte[] guerrillaData)
     {
         var t = new TerrainFile { HasGround = true };
         string Tga(string name) => name + ".tga";
@@ -1034,8 +1060,9 @@ public static class GuerrillaWorld
         float low = samples.Min() * SampleScale + SampleOffset, high = samples.Max() * SampleScale + SampleOffset;
         t.SubzoneSlots = new byte[9 * 4];
 
-        // The far-away meshes, from the heights as stored.
-        var (farRecords, farBlocks, farData) = FarGround.Build(samples.Select(s => s * SampleScale + SampleOffset).ToArray(), FieldSamples, fieldStep, corner, ZoneWidth);
+        // The far-away meshes: Guerrilla's own (its terrain file's and .gterrain_pc's), kept under the heights as stored.
+        var (farRecords, farBlocks, farData, farLowered) = FarGround.FromGuerrilla(guerrillaTerrain, guerrillaData,
+            samples.Select(s => s * SampleScale + SampleOffset).ToArray(), FieldSamples, fieldStep, corner);
         t.FarRecords = farRecords;
         t.FarBlocks.AddRange(farBlocks);
 
@@ -1044,9 +1071,11 @@ public static class GuerrillaWorld
             [look.Constants[0], look.Constants[2], look.Constants[4], look.Constants[6]], [look.Constants[1], look.Constants[3], look.Constants[5], look.Constants[7]],
             look.Constants[8], look.Constants[9]);
 
-        // The cliffs, as the game's three kinds: texture A alone, A blended into B, B alone. From Guerrilla's
-        // first three cliff materials, which are those kinds in most zones (fewer: A from its first, B from
-        // its last; none: the ground's layers 0 and 3, as the game's terrain repeats them, and their tints).
+        // The cliffs: Guerrilla's own cliff materials, each as it is (its one or two textures, their side
+        // projections and tints), in its order, as many as it has (up to six): its sub-zones' cliff blocks
+        // name them by number (render block material 3 + n), and ours keep its numbers. A zone with none
+        // usable gets the game's three kinds made from the ground's layers 0 and 3 (texture A alone, A
+        // blended into B, B alone), as the game's terrain repeats them, and their tints.
         var specular = new Vector4(1, 1, 1, 1);
         uint xform0 = NameHashes.PropertyHash("Terrain_layer0_xform"), xform1 = NameHashes.PropertyHash("Terrain_layer1_xform");
         uint xform2 = NameHashes.PropertyHash("Terrain_layer2_xform"), xform3 = NameHashes.PropertyHash("Terrain_layer3_xform");
@@ -1068,12 +1097,28 @@ public static class GuerrillaWorld
         ((string Colour, string Normal) Pair, Vector4[][] Xforms, Vector4 Tint, Vector4 Specular) sideB = withPairs.Count > 0 ? Side(withPairs[^1], last: true)
             : ((look.Textures[6], look.Textures[7]), TerrainMaterials.SideProjections(MathF.Abs(look.Constants[6].X) / ZoneWidth, ZoneWidth / 2), look.Constants[7], specular);
         (string, string) Named((string Colour, string Normal) pair) => (Tga(Alias(pair.Colour)), Tga(Alias(pair.Normal)));
-        var cliffs = new List<(byte[] Names, byte[] Material)>
+        string cliffDither = Tga(Alias(GuerrillaBuiltIns.CliffDither));  // (see there: the ring's normals smooth)
+        var cliffs = new List<(byte[] Names, byte[] Material)>();
+        if (OwnCliffs(look))
+            for (int k = 0; k < look.Cliffs.Count; k++)
+            {
+                // Its first texture by xforms 0 and 1 and Diffuse_color_0; a second by xforms 2 and 3 and Diffuse_color_1.
+                var first = Side(k, last: false);
+                if (look.CliffPairs(k).Count > 1)
+                {
+                    var second = Side(k, last: true);
+                    cliffs.Add(TerrainMaterials.Cliff(Named(first.Pair), Named(second.Pair), Tga(blendName), Tga(colourName),
+                                                      [.. first.Xforms, .. second.Xforms], [first.Tint, second.Tint], first.Specular, cliffDither));
+                }
+                else
+                    cliffs.Add(TerrainMaterials.Cliff(Named(first.Pair), null, Tga(blendName), Tga(colourName), first.Xforms, [first.Tint], first.Specular, cliffDither));
+            }
+        else
         {
-            TerrainMaterials.Cliff(Named(sideA.Pair), null, Tga(blendName), Tga(colourName), sideA.Xforms, [sideA.Tint], sideA.Specular),
-            TerrainMaterials.Cliff(Named(sideA.Pair), Named(sideB.Pair), Tga(blendName), Tga(colourName), [.. sideA.Xforms, .. sideB.Xforms], [sideA.Tint, sideB.Tint], sideA.Specular),
-            TerrainMaterials.Cliff(Named(sideB.Pair), null, Tga(blendName), Tga(colourName), sideB.Xforms, [sideB.Tint], sideB.Specular),
-        };
+            cliffs.Add(TerrainMaterials.Cliff(Named(sideA.Pair), null, Tga(blendName), Tga(colourName), sideA.Xforms, [sideA.Tint], sideA.Specular, cliffDither));
+            cliffs.Add(TerrainMaterials.Cliff(Named(sideA.Pair), Named(sideB.Pair), Tga(blendName), Tga(colourName), [.. sideA.Xforms, .. sideB.Xforms], [sideA.Tint, sideB.Tint], sideA.Specular, cliffDither));
+            cliffs.Add(TerrainMaterials.Cliff(Named(sideB.Pair), null, Tga(blendName), Tga(colourName), sideB.Xforms, [sideB.Tint], sideB.Specular, cliffDither));
+        }
         t.Cliffs.Clear();
         t.Cliffs.AddRange(cliffs);
         t.CliffHeader = new byte[8 + cliffs.Count * 8];
@@ -1098,7 +1143,7 @@ public static class GuerrillaWorld
         var effectNames = TerrainFile.LayerMapPart.PaddedNames(guerrillaNames,
             ["Terrain", "Dirt", "Ice", "Steel", "Rubber", "Concrete", "Composite", "Unobtanium", "Electronics"]);
         t.LayerMap = new TerrainFile.LayerMapPart(cells, new byte[effectNames.Count * 4], effectNames, new byte[effectNames.Count * 4]);
-        t.Occluders = [];
+        t.Occluders = GuerrillaTerrain.Occluders(guerrillaTerrain);
 
         // terrain_data, field by field (the box's heights the height field's).
         var data = new byte[TerrainFile.DataSize];
@@ -1108,7 +1153,7 @@ public static class GuerrillaWorld
         Float(0x04, corner.X); Float(0x08, low); Float(0x0C, corner.Y);
         Float(0x10, corner.X + ZoneWidth); Float(0x14, high); Float(0x18, corner.Y + ZoneWidth);
         Word(0x1C, FieldSamples); Word(0x20, FieldSamples);
-        Word(0x24, 0);                                  // occluders
+        Word(0x24, t.Occluders.Length / 24);            // occluders (Guerrilla's)
         Word(0x4C, t.SubzoneSlots.Length / 4);          // sub-zones
         Word(0x58, 512); Word(0x5C, 512); Word(0x60, 2); Word(0x64, cells.Length); Word(0x6C, effectNames.Count);
         Word(0x94, barriers.Count);
@@ -1123,7 +1168,7 @@ public static class GuerrillaWorld
         t.TextureNames = TerrainFile.NameList(listed).Bytes;
         t.TextureNameCount = listed.Count;
         t.Id = (NameHashes.PropertyHash(zone) & 0xFFFF0000) | 0x20;
-        return (t.Write(), farData);
+        return (t.Write(), farData, farLowered);
 
     }
 

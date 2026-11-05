@@ -93,6 +93,17 @@ public sealed class TerrainSubzone
     /// <summary>The triangles of each patch (its submesh), in the patches' order.</summary>
     public IReadOnlyList<int[]> PatchTriangles { get; }
 
+    /// <summary>
+    /// Each triangle's render block's material word (as <see cref="Triangles"/>, a third as long): 0 the
+    /// ground seen from above, 3 and up a cliff, its textures projected from the side (Guerrilla's
+    /// sub-zones: its zone's cliff materials 3-8). Guerrilla's cliff blocks overlap its ground in a
+    /// ring round each cliff, where the cliff fades in by <see cref="CliffAlpha"/>.
+    /// </summary>
+    public uint[] TriangleKinds { get; }
+
+    /// <summary>Each vertex's normal's 4th byte: how much of a cliff shows there (0x7F none, 0xFF all; the ground's shader doesn't read it).</summary>
+    public byte[] CliffAlpha { get; }
+
     /// <summary>Guerrilla's skirts and road decals in the sub-zone (what fills the ground's cut-outs), three corners a triangle, in the world (empty for Armageddon's).</summary>
     public Vector3[] Paving { get; } = [];
 
@@ -129,6 +140,8 @@ public sealed class TerrainSubzone
             Positions = Normals = [];
             Triangles = [];
             PatchTriangles = [];
+            TriangleKinds = [];
+            CliffAlpha = [];
             return;
         }
 
@@ -168,12 +181,14 @@ public sealed class TerrainSubzone
         float step = Step;
         Positions = new Vector3[vertexCount];
         Normals = new Vector3[vertexCount];
+        CliffAlpha = new byte[vertexCount];
         for (int v = 0; v < vertexCount; v++)
         {
             int p = vertexOffset + v * vertexSize;
             int xStep = data[p + 2], zStep = (data[p + 3] + 128) & 0xFF;
             Positions[v] = new Vector3(Origin.X + xStep * step, BitConverter.ToInt16(data, p) / 64f, Origin.Y + zStep * step);
             Normals[v] = Vector3.Normalize(new Vector3(data[p + 4], data[p + 5], data[p + 6]) / 127.5f - Vector3.One);
+            CliffAlpha[v] = data[p + 7];
         }
 
         var indices = new int[indexCount];
@@ -182,6 +197,7 @@ public sealed class TerrainSubzone
         int submeshSize = guerrilla ? 44 : 48;
         int blockTable = submeshTable + submeshCount * submeshSize;
         var patches = new List<int[]>();
+        var kinds = new List<uint>();
         for (int s = 0, b = 0; s < submeshCount; s++)
         {
             var triangles = new List<int>();
@@ -189,11 +205,14 @@ public sealed class TerrainSubzone
             {
                 int r = blockTable + b * 20;
                 int first = (int)U32(header, r + 4), count = (int)U32(header, r + 8);
+                int before = triangles.Count;
                 triangles.AddRange(topology == 0 ? ModelFile.StripToTriangles(indices, first, count) : ModelFile.ListTriangles(indices, first, count));
+                for (int t = before; t < triangles.Count; t += 3) kinds.Add(BitConverter.ToUInt16(header, r));
             }
             patches.Add([.. triangles]);
         }
         PatchTriangles = patches;
+        TriangleKinds = [.. kinds];
         Triangles = [.. patches.SelectMany(p => p)];
         Roads = ReadRoads(header, data, fields, at, guerrilla);
         if (guerrilla) (Paving, RoadDecals) = GuerrillaFill(header, data, fields, at);
@@ -325,7 +344,7 @@ public sealed class TerrainSubzone
             for (int c = 0; c < constantCount; c++)
                 constants[U32(header, hashes + c * 4)] = new Vector4(F32(header, values + c * 16), F32(header, values + c * 16 + 4), F32(header, values + c * 16 + 8), F32(header, values + c * 16 + 12));
             decals.Add(new GuerrillaRoadDecal(header[d.Record..(d.Record + 40)], position, header[d.Mesh..(d.Mesh + (int)U32(header, d.Mesh + 8))],
-                                              data[d.Data..(d.Data + gSize)], names, slots, constants, triangles));
+                                              data[d.Data..(d.Data + gSize)], names, U32(header, d.Material + 0x04), slots, constants, triangles));
         }
         return ([.. corners], decals);
     }
@@ -542,7 +561,7 @@ public sealed class TerrainSubzone
             // (ir_terrain_sidemap_t, _single_t) take it as w × 2 − 1 and drop each pixel where that is
             // under a dither pattern, so 0x80 shows none of a cliff (it drew black) and 0xFF all of
             // it; the ground's shader doesn't read it.
-            g.Write(NormalByte(n.X)); g.Write(NormalByte(n.Y)); g.Write(NormalByte(n.Z)); g.Write((byte)0xFF);
+            g.Write(NormalByte(n.X)); g.Write(NormalByte(n.Y)); g.Write(NormalByte(n.Z)); g.Write(v.CliffAlpha);
         }
         g.Write(dataTail);
         byte[] dataBytes = data.ToArray();
@@ -664,14 +683,16 @@ public sealed class TerrainSubzone
 }
 
 /// <summary>A vertex of ground to write (see <see cref="TerrainSubzone.Write"/>): its place on the sub-zone's grid (0-255 steps from its origin), its height in metres, and its normal.</summary>
-public readonly record struct GroundVertex(int XStep, int ZStep, float Height, Vector3 Normal);
+/// <summary>A ground vertex: its grid steps, height and normal, and how much of a cliff shows there (see <see cref="TerrainSubzone.CliffAlpha"/>).</summary>
+public readonly record struct GroundVertex(int XStep, int ZStep, float Height, Vector3 Normal, byte CliffAlpha = 0xFF);
 
 /// <summary>
 /// One of Guerrilla's road decal meshes: its 40-byte record, its position (the zone's centre, its
 /// vertices' origin), its version-6 mesh block and g-data, its texture name list, its material's
-/// slots (slot hash, texture) and constants (name hash, value), and its triangles in the world.
+/// shader (the name hash of rl_terrain_road_layer2, 3 or 4), slots (slot hash, texture) and constants
+/// (name hash, value), and its triangles in the world.
 /// </summary>
-public sealed record GuerrillaRoadDecal(byte[] Record, Vector3 Position, byte[] MeshBlock, byte[] MeshData, IReadOnlyList<string> Names,
+public sealed record GuerrillaRoadDecal(byte[] Record, Vector3 Position, byte[] MeshBlock, byte[] MeshData, IReadOnlyList<string> Names, uint Shader,
                                         IReadOnlyList<(uint Slot, string Texture)> Slots, IReadOnlyDictionary<uint, Vector4> Constants, Vector3[] Corners);
 
 /// <summary>
