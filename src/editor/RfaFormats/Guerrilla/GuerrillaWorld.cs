@@ -761,7 +761,6 @@ public static class GuerrillaWorld
         }
         bool Shared(string name) => inPrecache.Contains(name);
         var precacheFiles = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        var normalAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var textureFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);  // every texture file in the world's containers
         long before = 0, after = 0;
         // A container of the world (0h_cXXYY for a sub-zone, 1h_cXXYY for a zone, which goes in the
@@ -769,12 +768,6 @@ public static class GuerrillaWorld
         // entries made.
         void Pack(string name, bool zoneLayer, IReadOnlyList<(string Name, byte[] Data)> files)
         {
-            // Guerrilla's normal maps marked as data (see GuerrillaMaterials.NormalMaps): every material is
-            // converted by now.
-            if (normalAliases.Count != GuerrillaMaterials.NormalMaps.Count)
-                normalAliases = GuerrillaMaterials.NormalMaps.Keys.Select(Alias).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            files = [.. files.Select(f => f.Name.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase) || f.Name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase)
-                                          ? (f.Name, PegFile.WithDataFlag(f.Data, normalAliases.Contains)) : f)];
             var kept = files.Where(f => !Shared(f.Name)).ToList();
             var fromPrecache = files.Where(f => Shared(f.Name)).ToList();
             before += files.Sum(f => (long)f.Data.Length);

@@ -442,8 +442,6 @@ public static class GuerrillaArsenal
                 while (levels < t.MipLevels && Math.Min(t.Width >> levels, t.Height >> levels) >= 4) levels++;
             }
             var (header, data) = peg.Single(t, name + ".tga", levels);
-            // A normal map marked as data (see GuerrillaMaterials.NormalMaps; the vehicle's materials are converted by now).
-            if (GuerrillaMaterials.NormalMaps.ContainsKey(texture)) header = PegFile.WithDataFlag(header, _ => true);
             return [(name + ".cvbm_pc", header), (name + ".gvbm_pc", data)];
         }
         return null;

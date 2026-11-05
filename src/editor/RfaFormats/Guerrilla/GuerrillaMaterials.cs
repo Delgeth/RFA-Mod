@@ -173,25 +173,6 @@ public static class GuerrillaMaterials
     /// <summary>Guerrilla's mask shaders end × 100 × Self_Illumination; Armageddon's glow layer × 4 × it: 25 × as bright (a guess, to tune in the game).</summary>
     const float MaskBrightness = 25;
 
-    /// <summary>
-    /// Every Guerrilla texture (its name without ".tga") a converted material uses as its normal map. Guerrilla
-    /// reads every texture as it is stored, but Armageddon reads one as sRGB colour unless its header says
-    /// it holds data (<see cref="PegFile.DataFlag"/>), and 16 of Guerrilla's normal maps don't say so: the
-    /// world builder sets the flag on all of these.
-    /// </summary>
-    public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> NormalMaps = new(StringComparer.OrdinalIgnoreCase);
-
-    static void NoteNormalMaps(byte[] file, int at, TextureNameList names)
-    {
-        int textureCount = BitConverter.ToUInt16(file, at + 0x10);
-        for (int t = 0; t < textureCount; t++)
-        {
-            int e = at + 0x20 + t * 12;
-            string name = names.At(BitConverter.ToInt32(file, e));
-            if (BitConverter.ToUInt32(file, e + 4) == NormalMap && !IsEmpty(name)) NormalMaps.TryAdd(Path.GetFileNameWithoutExtension(name), 0);
-        }
-    }
-
     /// <summary>Whether the Guerrilla material block at <paramref name="at"/> is glass (one of Guerrilla's glass shaders).</summary>
     internal static bool IsGlass(byte[] file, int at) => GuerrillaGlass.Contains(BitConverter.ToUInt32(file, at + 0x04));
 
@@ -201,7 +182,6 @@ public static class GuerrillaMaterials
     /// </summary>
     internal static byte[] Convert(byte[] file, int at, TextureNameList names, bool vehicle = false, bool guerrillaShaders = false)
     {
-        NoteNormalMaps(file, at, names);
         int textureCount = BitConverter.ToUInt16(file, at + 0x10), constantCount = file[at + 0x12];
         uint flags = BitConverter.ToUInt32(file, at + 0x0C), guerrillaShader = BitConverter.ToUInt32(file, at + 0x04);
         if (guerrillaShaders && Ported.TryGetValue(guerrillaShader, out var ported) && VariantFor(ported, flags) is { } variant)
@@ -448,7 +428,6 @@ public static class GuerrillaMaterials
     /// </summary>
     internal static byte[] ConvertForEffect(byte[] file, int at, TextureNameList names)
     {
-        NoteNormalMaps(file, at, names);
         // Its model shaders, and the news kiosks' scrolling screens (rfg-animated, a lit model shader), as
         // the world's chunks are drawn: by our rewrites of Guerrilla's shaders.
         if (!EffectShaders.TryGetValue(BitConverter.ToUInt32(file, at + 0x04), out var kind) || kind == EffectKind.Animated)

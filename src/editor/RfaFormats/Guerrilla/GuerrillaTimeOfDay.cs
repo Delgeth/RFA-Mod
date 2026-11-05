@@ -26,8 +26,8 @@ namespace RfaFormats.Guerrilla;
 /// the bloom and the colour correction. Only where Armageddon reads a curve otherwise than Guerrilla is
 /// it converted:
 /// - the ambient light from above and below: Armageddon turns a key's brightness b into
-///   (b − ldr_min) / ldr_max held to 0–1, where Guerrilla (its HDR on) uses it as it is, so each key's
-///   brightness is folded into its colour and set to ldr_max (see <see cref="Linear"/>);
+///   (b − ldr_min) / ldr_max held to 0–1, where Guerrilla (its HDR on) uses it as it is, so the
+///   brightness is folded into the colour and set to ldr_max, at every half hour (see <see cref="Folded"/>);
 /// - ldr_min and ldr_max themselves: Guerrilla's districts that key them have 0 and 3 all day; Badlands
 ///   and Eos leave them empty, which Guerrilla never reads but Armageddon would take as the default 0
 ///   to 32 (dividing the brightness of the ambient, the sun's and the fog's colours and the
@@ -113,7 +113,7 @@ public static class GuerrillaTimeOfDay
         {
             var keys = name switch
             {
-                "ambient_color" or "back_ambient_color" => Linear(Of(name), name, LdrMax),
+                "ambient_color" or "back_ambient_color" => Folded(Of(name), name, LdrMax),
                 "ldr_min" => Ldr(name, LdrMin),
                 "ldr_max" => Ldr(name, LdrMax),
                 _ => Of(name),
@@ -127,20 +127,44 @@ public static class GuerrillaTimeOfDay
     }
 
     /// <summary>
-    /// A colour curve's keys with each key's brightness folded into its colour, and the brightness
-    /// set to the given one. For the ambient light: Armageddon (without Tod_hdr_enabled) turns an
-    /// ambient brightness b into (b − ldr_min) / ldr_max held to 0–1, so a colour is never brighter
-    /// than its own red, green and blue; Guerrilla used the brightness as it is.
+    /// A colour curve for the ambient light, keyed at every half hour with Guerrilla's value there:
+    /// its colour and its brightness each filled in between Guerrilla's keys (as both games fill a
+    /// curve's half-hour slots), then the colour times the brightness, the brightness set to the given
+    /// one. Armageddon (without Tod_hdr_enabled) turns an ambient brightness b into (b − ldr_min) /
+    /// ldr_max held to 0–1, so a colour is never brighter than its own red, green and blue; Guerrilla
+    /// uses the brightness as it is. Folding only Guerrilla's own keys made the light drift between
+    /// them (Armageddon fills in the product, Guerrilla multiplies what it filled in: up to 1.9 times
+    /// at 8:00 in Oasis); keyed every half hour it is Guerrilla's at each, and within a half hour a
+    /// straight line between them. (A key's time is the slot it fills, 0–47.)
     /// </summary>
-    static List<Key> Linear(List<Key> keys, string name, float brightness) =>
-        [.. keys.Select(k =>
+    static List<Key> Folded(List<Key> keys, string name, float brightness)
+    {
+        if (keys.Count == 0) return keys;
+        var known = keys.Select(k => (Time: float.Parse(k.Time, CultureInfo.InvariantCulture), Value: Values(k.Value))).OrderBy(k => k.Time).ToList();
+        if (known.Any(k => k.Value.Length != 4)) throw new InvalidDataException($"{name} isn't a colour curve");
+        var folded = new List<Key>();
+        for (int slot = 0; slot < 48; slot++)
         {
-            float[] v = Values(k.Value);
-            if (v.Length != 4) throw new InvalidDataException($"{name} isn't a colour curve");
+            float[] v = Filled(known, slot);
             for (int i = 0; i < 3; i++) v[i] *= v[3];
             v[3] = brightness;
-            return k with { Value = string.Join(" ", v.Select(Number)) };
-        })];
+            folded.Add(new Key(slot.ToString(CultureInfo.InvariantCulture), string.Join(" ", v.Select(Number))));
+        }
+        return folded;
+    }
+
+    /// <summary>A curve's value at a half hour, as both games fill a slot between keys: on the straight line between the keys either side of it, round the clock.</summary>
+    static float[] Filled(List<(float Time, float[] Value)> keys, int slot)
+    {
+        int next = 0;
+        while (next < keys.Count && keys[next].Time <= slot) next++;
+        var (afterTime, after) = keys[next % keys.Count];
+        var (beforeTime, before) = keys[(next - 1 + keys.Count) % keys.Count];
+        if (beforeTime > slot) beforeTime -= 48;
+        if (afterTime <= slot) afterTime += 48;
+        float t = afterTime > beforeTime ? (slot - beforeTime) / (afterTime - beforeTime) : 0;
+        return [.. before.Zip(after, (a, b) => a + (b - a) * t)];
+    }
 
     static float[] Values(string text) => text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
 

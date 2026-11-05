@@ -116,7 +116,9 @@ public static class GuerrillaEffects
             // (+0x04: 0, or 0xF00 in two lights) have no place.
             BitConverter.TryWriteBytes(lights.Bytes.AsSpan(to + 0x04), BitConverter.ToUInt16(c, from + 0x06) == 1 ? 0 : 1);
             BitConverter.TryWriteBytes(lights.Bytes.AsSpan(to + 0x3C), 1f);
-            BitConverter.TryWriteBytes(lights.Bytes.AsSpan(to + 0x40), 2f);
+            // The fall-off's power: Armageddon's lamp shader lights by (1 − the way from the reach's
+            // start to its end)^power, Guerrilla's falls off in a straight line (sat((end − d) ÷ (end − start))).
+            BitConverter.TryWriteBytes(lights.Bytes.AsSpan(to + 0x40), 1f);
             lights.Link(to + 0x4C, null);
             BitConverter.TryWriteBytes(lights.Bytes.AsSpan(to + 0x64), 1);
             lights.Link(to + 0x68, zeroKey ??= Key(0, 0));

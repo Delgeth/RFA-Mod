@@ -16,7 +16,9 @@
 // clouds are lit by blending a front and a rear light colour (clouds_front/rear_light_color, or the
 // clouds_horizon_ ones) by which way they face the time of day's light, with a rim of light where
 // they are thin and between the eye and the sun (cloud_backlight_strength, _power); layers 0-1 and
-// 2-3 drift sideways at their own speeds (cloud_layer01_speed, cloud_layer23_speed). In front of
+// 2-3 move at their own speeds (cloud_layer01_speed, cloud_layer23_speed): along the horizon they
+// slide round it, overhead (rfg-skybox-clouds-2_s) they turn about the top of the sky, tiled 4 and
+// 4.5 times. In front of
 // them a ring of far mountains, the backdrop (rfg-skybox-matte_s, vfx_sky_backdrop_01): its picture
 // mixed with a haze colour (horizon_mountain_fog_color, _density), lit by blending the mountains'
 // colour on the side facing the light and on the far side (horizon_mountain_color, _back).
@@ -364,16 +366,19 @@ constexpr size_t kLightCheckPrologue = 11;  // push ebp / mov ebp,esp / push ecx
 using LightCheckFn = bool(__cdecl*)();
 LightCheckFn g_lightCheck;
 
-// A colour curve now: every loaded set's value at the time of day times the set's weight, added up
-// (as the game does), the colour times its own brightness.
+// A colour curve now, as Guerrilla's game_time_of_day_render_update blends one over the loaded sets
+// (the districts round the camera): red, green, blue and the brightness each added up by the sets'
+// weights, then the colour times the brightness. (Adding up each set's colour times its own
+// brightness, as before, came out wrong near district borders: down to a third of the sun there.)
 void TodColour(size_t offset, float (&out)[3]) {
-    out[0] = out[1] = out[2] = 0;
+    float sum[4] = {0, 0, 0, 0};
     for (int set = 0; set < 4; ++set) {
         if (!g_todSets[set] || g_todWeights[set] == 0) continue;
         float value[4] = {0, 0, 0, 0};
         ColourAt(g_todSets[set] + offset, nullptr, value, g_timeOfDay);
-        for (int i = 0; i < 3; ++i) out[i] += value[i] * value[3] * g_todWeights[set];
+        for (int i = 0; i < 4; ++i) sum[i] += value[i] * g_todWeights[set];
     }
+    for (int i = 0; i < 3; ++i) out[i] = sum[i] * sum[3];
 }
 
 // A number curve now, the same way.
@@ -832,10 +837,11 @@ auto& g_lightTemplates = *reinterpret_cast<BYTE**>(0x1CD07FC);
 constexpr size_t kLightTemplateSize = 0x2A0;
 constexpr size_t kTemplateNumbers[5] = {0x50, 0x54, 0x5C, 0x60, 0x70};  // reach start, reach range, hotspot, falloff, shadow distance
 // The sun's: the lamp 150 m along the sun with a reach of 400 m (so its map holds what stands
-// between the sun and the camera and beyond), a cone of 36° (a map about 300 m across, 7 cm a
-// texel), the shadows to 150 m round the camera.
+// between the sun and the camera and beyond), a cone of 27° (a map about 204 m across, 5 cm a
+// texel), the shadows to 100 m round the camera, fading from 80 m: as far as Guerrilla's
+// (build_shadow_params_base_clb: shadow_max_dist 100, shadow_fade_start 0.8).
 constexpr float kSunLampDistance = 150.0f;
-constexpr float kSunTemplateNumbers[5] = {400.0f, 10.0f, 30.0f, 6.0f, 150.0f};
+constexpr float kSunTemplateNumbers[5] = {400.0f, 10.0f, 21.0f, 6.0f, 100.0f};
 
 BYTE* g_sunLight = nullptr;          // the follow light's light while it gives the sun its shadows
 bool g_followLightOurs = false;      // its template chosen by the mod
@@ -1413,7 +1419,10 @@ cbuffer Sky : register(b0)
     float4 DomeFog;         // x the far clip, y the fog scale, z the fog offset less the camera's height
 };
 
-static const float kDomeRadius = 75, kDomeHalfHeight = 49.088144;  // (75 + 23.176287) ÷ 2
+// Guerrilla's own dome (skybox.vpp_pc): a sphere of radius 10 in 16 rings 7.5° apart, from 16.2°
+// below the horizon to the top, so half as high as from its lowest point to its top: 6.39495.
+// (Armageddon's copy of the dome is 75 across; the fog follows the dome's own numbers.)
+static const float kDomeRadius = 10, kDomeHalfHeight = 6.39495;
 
 // Guerrilla's height fog at a point (from the camera): 1 − min(2^(−(term × distance × density − offset)), 1).
 float HeightFog(float3 at)
@@ -1477,7 +1486,7 @@ cbuffer Clouds : register(b0)
     float4 Rear;
     float4 Strengths;  // the four layers' strengths
     float4 Shape;      // x: the height they fade in from, y: the height they are full at, z: rim light strength, w: rim light power
-    float4 Drift;      // x: layers 0-1's sideways offset, y: layers 2-3's
+    float4 Drift;      // x: layers 0-1's offset, y: layers 2-3's; z: 1 for the overhead clouds (turned, not slid)
     float4 Ambient;    // added to the clouds' light: 0, as Guerrilla's sky ambient
     float4 FogColour;  // the fog's colour
     float4 FogNumbers; // as the world's fog: x the fall-off with height, y the density at the camera's height, w the offset
@@ -1513,7 +1522,22 @@ CloudPoint CloudVertex(float3 position : POSITION, float3 normal : NORMAL, float
     p.position = float4(dot(look, Right.xyz) / Right.w, dot(look, Up.xyz) / Up.w, depth * lerp(0.000001, 0.999999, Forward.w), depth);
     p.normal = normal;
     p.look = look;
-    p.layers = float4(uv.x + Drift.x, uv.y, uv.x + Drift.y, uv.y);
+    if (Drift.z > 0.5)
+    {
+        // The overhead clouds, as Guerrilla's rfg-skybox-clouds-2 lays them: each pair of layers turned
+        // about the top of the dome by its offset (half a turn an offset of 1) and tiled 4 and 4.5 times.
+        float2 c = float2(uv.x - 0.5, uv.y + 0.5);
+        float s01, c01, s23, c23;
+        sincos(-3.14159 * Drift.x, s01, c01);
+        sincos(-3.14159 * Drift.y, s23, c23);
+        p.layers.xy = (float2(c.x * c01 - c.y * s01, c.y * c01 + c.x * s01) + 0.5) * 4.0;
+        p.layers.zw = (float2(c.x * c23 - c.y * s23, c.y * c23 + c.x * s23) + 0.5) * 4.5;
+    }
+    else
+    {
+        // The ones along the horizon (rfg-skybox-clouds): slid round it.
+        p.layers = float4(uv.x + Drift.x, uv.y, uv.x + Drift.y, uv.y);
+    }
     p.fog = HeightFog(float3(position.x * FogScale.x, (position.y + FogScale.w) * FogScale.y + FogRaise.x, position.z * FogScale.z));
     return p;
 }
@@ -1839,9 +1863,11 @@ SunPoint SunVertex(uint id : SV_VertexID)
     return p;
 }
 
+// As Guerrilla's rfg-orbital: the texture's colour times its cover times the orbital's colour.
 float4 SunPixel(SunPoint p) : SV_Target
 {
-    return float4(Colour.rgb * Disc.Sample(Clamped, p.uv).a, 0);
+    float4 disc = Disc.Sample(Clamped, p.uv);
+    return float4(Colour.rgb * disc.rgb * disc.a, 0);
 }
 )";
 
@@ -2287,7 +2313,9 @@ T ReadAt(const std::vector<BYTE>& bytes, size_t at) {
 }
 
 // A texture from a .dds file: 32-bit (blue, green, red, alpha, as the world builder writes them),
-// with its mip levels.
+// with its mip levels, read as sRGB colour: Guerrilla's renderer reads every texture whose header
+// doesn't say it holds data (0x200: its normal maps) that way (rl_render_lib::load_texture), its
+// sky's, sun's and moons' included.
 ID3D11ShaderResourceView* LoadTexture(const std::wstring& path) {
     std::vector<BYTE> dds;
     if (!ReadWholeFile(path, dds) || dds.size() < 128 || memcmp(dds.data(), "DDS ", 4) != 0) return nullptr;
@@ -2309,7 +2337,7 @@ ID3D11ShaderResourceView* LoadTexture(const std::wstring& path) {
     desc.Height = height;
     desc.MipLevels = mips;
     desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_IMMUTABLE;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -2701,15 +2729,20 @@ void SkyColours(float (&hemisphere)[10][4]) {
     }
 }
 
-// The clouds' drift: layers 0-1 and 2-3 move sideways at their speeds (texture widths per
-// 240 seconds at speed 1).
+// The clouds' drift, as Guerrilla's game_time_of_day_do_frame moves them: layers 0-1's and 2-3's
+// offsets grow by their speeds times the real hours gone times Cloud_scroll_separate_clock_scale_factor
+// (150: a texture width in 24 seconds at speed 1), taken back by 10 when they reach 10.
+constexpr float kCloudClockScale = 150.0f;
 void Drift() {
     const ULONGLONG now = GetTickCount64();
     const float seconds = g_lastDrift ? (now - g_lastDrift) / 1000.0f : 0.0f;
     g_lastDrift = now;
     if (seconds > 1) return;  // paused, loading
-    g_drift[0] = fmodf(g_drift[0] + TodNumber(kLayer01Speed) * seconds / 240.0f, 1.0f);
-    g_drift[1] = fmodf(g_drift[1] + TodNumber(kLayer23Speed) * seconds / 240.0f, 1.0f);
+    const float hours = seconds / 3600.0f * kCloudClockScale;
+    g_drift[0] += TodNumber(kLayer01Speed) * hours;
+    g_drift[1] += TodNumber(kLayer23Speed) * hours;
+    for (float& drift : g_drift)
+        if (drift >= 10) drift -= 10;
 }
 
 void DrawClouds(const SkyConstants& sky) {
@@ -2755,8 +2788,14 @@ void DrawClouds(const SkyConstants& sky) {
     ColourCorrection(tint);
     for (const CloudPart& part : g_cloudParts) {
         float colour[3];
-        const float fogScale = TodNumber(part.kind == 2 ? kMatteFogScale : kCloudsFogScale);
-        const float fogOffset = TodNumber(part.kind == 2 ? kMatteFogOffset : kCloudsFogOffset);
+        // Each part's fog by its own curves, as Guerrilla's object_skybox_update_render_all gives them:
+        // the overhead clouds the sky's (fog_skybox_), the ones along the horizon the clouds'
+        // (fog_clouds_), the backdrop the matte's (fog_matte_).
+        const size_t kFogScales[3] = {kSkyFogScale, kCloudsFogScale, kMatteFogScale};
+        const size_t kFogOffsets[3] = {kSkyFogOffset, kCloudsFogOffset, kMatteFogOffset};
+        const float fogScale = TodNumber(kFogScales[part.kind]);
+        const float fogOffset = TodNumber(kFogOffsets[part.kind]);
+        constants.drift[2] = part.kind == 0 ? 1.0f : 0.0f;
         constants.fogScale[0] = kSkyFogFar / part.half[0];
         constants.fogScale[1] = fogScale / part.half[1];
         constants.fogScale[2] = kSkyFogFar / part.half[2];
@@ -3037,6 +3076,7 @@ struct SurfaceConstants {
     float time[4];       // x seconds; w the lamps' night level (Guerrilla's Time.w)
     float sunTowardView[4];  // the sun's toward, in the camera's space (the terrain lights by the G-buffer's normals, in it)
     float view[4];       // the picture's width and height; the tangents of half the field of view across and up
+    float tint[4];       // the colour correction the light above is already multiplied by (Guerrilla's Tint_color)
 };
 
 ID3D11Texture2D* g_ourLightTexture = nullptr;
@@ -3150,7 +3190,9 @@ bool FillSurfaceConstants() {
         constants.sunColour[i] = sun[i] * tint[i];
         constants.above[i] = g_worldAmbient[i] * tint[i];
         constants.below[i] = g_worldBackAmbient[i] * tint[i];
+        constants.tint[i] = tint[i];
     }
+    constants.tint[3] = 1;
     constants.sunToward[3] = 1;
     constants.time[0] = Seconds();
     constants.time[3] = NightLevel(g_timeOfDay);

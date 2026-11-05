@@ -105,7 +105,14 @@ cbuffer Guerrilla : register(b8)  // the guerrilla_world mod's
     float4 AmbientAbove;        // V_ambient_render: on a surface facing the light
     float4 AmbientBelow;        // V_back_ambient_render: facing away from it
     float4 Time;                // x seconds; w the lamps' night level (1 at night, 0 by day)
+    float4 SunTowardView;       // (the terrain's)
+    float4 View;                // (the terrain's)
+    float4 Tint;                // the colour correction (Guerrilla's Tint_color) the colours above already carry
 };
+
+// The ambient lifted toward 4 by a self-illumination, as Guerrilla's shaders lift it: toward 4 before
+// their whole result is tinted, so toward 4 × the tint here, where the ambient comes tinted.
+float3 SelfLit(float3 ambient, float glow) { return ambient + glow * (4 * Tint.rgb - ambient); }
 
 Texture2D NormalMap : register(t0);
 Texture2D DiffuseMap : register(t1);
@@ -313,7 +320,7 @@ float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap,
         sunSpecular = Screen3(S.r * s1, S.g * s2, S.b * s3) * Shine.x;
     }
     float3 ambient = Ambient(ao * ambientWeight);
-    if (kind == 10) ambient += ((1 - colourAlpha) * Glow.x) * (4 - ambient);  // self-lit where the colour map is see-through
+    if (kind == 10) ambient = SelfLit(ambient, (1 - colourAlpha) * Glow.x);  // self-lit where the colour map is see-through
     return ambient * colour + (sunDiffuse + sunSpecular * shineLeft) * SunColour.rgb * shadow;
 }
 
@@ -487,7 +494,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     float3 ambient = Ambient(occlusion * (nl * 0.5 + 0.5));
     float glow = Glow.y > 0.5 ? Time.w : Glow.x;
     if (Glow.z >= 0) glow *= (cos(seconds * 2 / (Glow.z + 0.01)) + 1) * 0.5;  // rfg-animated's pulse
-    ambient += glow * (4 - ambient);
+    ambient = SelfLit(ambient, glow);
     rgb = ambient * colour + (colour * occlusion * nlLit + specular) * SunColour.rgb * shadow;
     rgb += lamps * colour;
 #elif FAMILY == 2
@@ -521,7 +528,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     // The composite: the half-Lambert ambient without occlusion (as Guerrilla's, which reads none),
     // lifted by the self-illumination (0 on every one of its materials), the sun's Lambert; no shine.
     float3 ambient = Ambient(nl * 0.5 + 0.5);
-    ambient += Glow.x * (4 - ambient);
+    ambient = SelfLit(ambient, Glow.x);
     rgb = ambient * colour + colour * nlLit * SunColour.rgb * shadow;
     rgb += lamps * colour;
 #elif FAMILY == 8

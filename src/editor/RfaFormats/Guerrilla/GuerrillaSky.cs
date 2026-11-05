@@ -14,8 +14,8 @@ namespace RfaFormats.Guerrilla;
 /// horizon (radius 16), each with two textures of two cloud layers, and a backdrop ring (radius 18,
 /// one texture, vfx_sky_backdrop_01: the far horizon). The textures are Guerrilla's own (the cloud
 /// layers from its skybox.vpp_pc; the backdrop, the sun's and the moons' from its misc.vpp_pc &gt;
-/// always_loaded), decoded and saved as 32-bit DDS with their mip levels made, so they aren't
-/// compressed twice.
+/// always_loaded), decoded and saved as 32-bit DDS with as many mip levels as Guerrilla's (made
+/// again), so they aren't compressed twice; the mod reads them as sRGB colour, as Guerrilla does.
 ///
 /// clouds.bin (little-endian):
 ///   "GWCLOUD1"
@@ -51,8 +51,10 @@ public static class GuerrillaSky
         foreach (var (pegFile, texture) in peg.Textures.Select(t => (peg, t))
                      .Concat(always.Textures.Where(t => FromAlwaysLoaded.Contains(Path.GetFileNameWithoutExtension(t.Name), StringComparer.OrdinalIgnoreCase)).Select(t => (always, t))))
         {
+            // With as many mip levels as Guerrilla's own (its cloud layers and backdrop 1, the sun and
+            // moons 4), made again from the picture.
             var image = pegFile.Decode(texture);
-            int mips = 1 + (int)Math.Log2(Math.Min(image.Width, image.Height));
+            int mips = Math.Clamp(texture.MipLevels, 1, 1 + (int)Math.Log2(Math.Min(image.Width, image.Height)));
             var dds = new DdsImage(TextureFormat.Argb8888, image.Width, image.Height, mips, TextureCodec.EncodeWithMips(TextureFormat.Argb8888, image, mips));
             File.WriteAllBytes(Path.Combine(output, Path.GetFileNameWithoutExtension(texture.Name) + ".dds"), dds.ToBytes());
         }
