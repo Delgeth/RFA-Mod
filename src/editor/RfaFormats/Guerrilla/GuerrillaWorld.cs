@@ -503,6 +503,10 @@ public static class GuerrillaWorld
         File.WriteAllBytes(Path.Combine(modFolder, "lod_properties.xtbl"), lod.Text);
         log($"Draw distances: {lod.EntryOf.Count} of Guerrilla's LOD classes on the objects, {lod.Added} added to Armageddon's table (mods\\guerrilla_world\\lod_properties.xtbl)");
         string? LodProps(string name) => gameplay.LodOf.GetValueOrDefault(name) is { } c ? lod.EntryOf.GetValueOrDefault(c) : null;
+        // Guerrilla's glass tints (see GuerrillaGlass), under our textures' names.
+        var glass = GuerrillaGlass.Build(misc, rfgTables, Alias);
+        File.WriteAllBytes(Path.Combine(modFolder, "glass.xtbl"), glass.Text);
+        log($"Glass tints: {glass.Added} of Guerrilla's added to Armageddon's table under our textures' names (mods\\guerrilla_world\\glass.xtbl)");
         // Guerrilla's effects (see GuerrillaEffectTables): the level objects the objects name, their effects
         // and the visual effects those show, added to Armageddon's tables for the mod to hand the game; each
         // object names its level object there. The visual effects' files, converted (see GuerrillaEffects),

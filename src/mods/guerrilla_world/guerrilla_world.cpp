@@ -103,7 +103,15 @@
 // shows when it breaks or is hit), effects.xtbl and vfx.xtbl (the visual effects and their files),
 // and explosions.xtbl (what an object dies in), each Armageddon's with Guerrilla's entries the world
 // uses added under "rfg_" names; and vehicles.xtbl and vehicle_interactions.xtbl, Armageddon's with
-// Guerrilla's vehicles that GuerrillaArsenal.exe made added under their own names.
+// Guerrilla's vehicles that GuerrillaArsenal.exe made added under their own names; and glass.xtbl
+// (the colour a pane's shatter is tinted by its texture), Armageddon's with Guerrilla's entries added
+// under our worlds' texture names.
+//
+// Broken glass: Armageddon makes no bullet marks on glass at all, so in our worlds the mod makes
+// Guerrilla's (its bullet hole on both faces of a pane, and mostly a crack effect and two or three
+// cracks running out from it), on the game's own decals and settings (BulletDecal); and it shatters
+// panes with Guerrilla's settings, all the small shards round the hit kept and thrown and spun as
+// hard (GlassUpdate).
 //
 // The undergrowth: Guerrilla's grass and dust rocks, which its zones' terrain files scatter over 8 m
 // cells and Armageddon's undergrowth code still loads, scatters and draws. Its random scatter puts
@@ -282,7 +290,7 @@ NamePoolInitFn g_namePoolInit;
 // distances (LOD classes), and the effects (visual effects, effects, explosions, level objects), each
 // read at start-up (the visual effects before the effects, which name them, and those before the
 // level objects, which name the effects; the explosions name effects too, and level objects name
-// explosions). The vehicles and their interactions (where and how people get in; Armageddon's with
+// explosions), and the glass tints. The vehicles and their interactions (where and how people get in; Armageddon's with
 // Guerrilla's added) are written by GuerrillaArsenal.exe, and so are the animation lists their
 // animation sets need: the sets (anim_set_filenames.xtbl, read first; each set's own table is a new
 // file the game then finds by name), every animation's triggers and flags (anim_files.xtbl), and the
@@ -305,6 +313,7 @@ BuiltTable g_builtTables[] = {
     {"anim_files.xtbl", "Animation files", {}},
     {"anim_states.xtbl", "Animation states", {}},
     {"anim_actions.xtbl", "Animation actions", {}},
+    {"glass.xtbl", "Glass tints", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";
@@ -4717,9 +4726,12 @@ void GuerrillaParticleLight() {
     }
 }
 
+void GlassUpdate();  // (below, with Guerrilla's broken glass)
+
 void __cdecl EffectsUpdate(float seconds) {
     if (InOurWorld()) GuerrillaWindUpdate(seconds);
     else g_wind.started = false;
+    GlassUpdate();
     g_effectsUpdate(seconds);
     DustUpdate();
     if (InOurWorld()) GuerrillaParticleLight();
@@ -5425,6 +5437,274 @@ void __cdecl RandomlyPlace(GrowthCell** cells, int count, uint8_t* zone, GrowthL
     }
 }
 
+// ---- Guerrilla's broken glass (bullet holes and cracks on its panes, its shatter)
+
+// A bullet's mark (object_decal_create_bullet_impact_decal, 0x4F23B0, cdecl): the hit object, the
+// shooter, the bullet's kind (its first byte), the weapon's decal size, where and on what surface
+// facing (normal) it hit, the hit's damage, and the shot (+0x40 the hit piece, +0x44 its part, +0x69
+// the effect material, 0xFF for the object's own). Armageddon's makes no mark at all on glass (it
+// returns at once for the effect material Glass); Guerrilla's makes the bullet's hole on both faces
+// of the pane and, mostly, a crack effect and two or three cracks running out from it, on both faces
+// too, all with the decals and settings Armageddon still loads (Glass_radial_decal_prob,
+// Glass_min/max_radial_decals; decal_bullet_glass_crack_1-3; des_glass_crack_md). So in our worlds
+// glass gets Guerrilla's (GuerrillaGlassDecals), on the game's own helpers; every other mark is the
+// game's.
+constexpr DWORD kBulletDecal = 0x4F23B0;
+constexpr size_t kBulletDecalPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0DCh
+
+struct GameVector { float x, y, z; };
+
+using BulletDecalFn = void(__cdecl*)(void* hit, void* shooter, const uint8_t* bulletKind, float size, const GameVector* at,
+                                     const GameVector* normal, float damage, const uint8_t* shot);
+BulletDecalFn g_bulletDecal;
+
+constexpr size_t kShotPiece = 0x40, kShotPart = 0x44, kShotMaterial = 0x69;
+constexpr uint8_t kOwnMaterial = 0xFF;
+constexpr size_t kMaterialAtSlot = 0x68 / 4;  // the object's method: its effect material at a piece and place
+
+// A decal's settings (rl_decal_parameters: the game's own make up to 0xA8 bytes): where (+0x04), its
+// rows (right +0x10, up +0x1C, forward +0x28, the way it faces), whether it is kept (+0x34; bullet
+// marks never are), its width and length (+0x84, +0x88).
+constexpr size_t kDecalSize = 0xC0;
+constexpr size_t kDecalAt = 0x04, kDecalRows = 0x10, kDecalRight = 0x10, kDecalForward = 0x28, kDecalKept = 0x34, kDecalWidth = 0x84,
+                 kDecalLength = 0x88;
+
+// The game's switches and settings for marks (its tweak table's): decals on (R_enable_decals), how far
+// from the camera a bullet's mark is made (the player's: Bullet_hole_decal_max_dist_player, 50 m; anyone
+// else's: Bullet_hole_decal_max_dist, 15 m), how much a hole's size varies (Bullet_hole_decal_size_variation).
+const auto& kDecalsOn = *reinterpret_cast<const bool*>(0x1100890);
+const auto& kPlayerMarkReach = *reinterpret_cast<const float*>(0x124F95C);
+const auto& kOtherMarkReach = *reinterpret_cast<const float*>(0x124F960);
+const auto& kHoleSizeVariation = *reinterpret_cast<const float*>(0x124F958);
+// What the game's glass decal set-up (0x4F37A0) finds: the effect material Glass, the three crack
+// decals, the crack effect; and the crack settings (Glass_radial_decal_prob, out of 100, and
+// Glass_min/max_radial_decals).
+const auto& kGlassMaterial = *reinterpret_cast<const uint8_t*>(0x124F974);
+const auto& kCrackDecals = *reinterpret_cast<const int(*)[3]>(0x124F968);
+const auto& kCrackEffect = *reinterpret_cast<const uint32_t*>(0x10F7C84);
+const auto& kCrackChance = *reinterpret_cast<const int*>(0x10F7C90);
+const auto& kFewestCracks = *reinterpret_cast<const int*>(0x10F7C88);
+const auto& kMostCracks = *reinterpret_cast<const int*>(0x10F7C8C);
+constexpr uint32_t kNoEffect = 0xFFFFFFFF;
+constexpr float kFullTurn = 6.2831855f;
+
+// What the hit is: its type (+0x7A; 2 a building or other mover, 3 a vehicle, as Guerrilla's
+// object_type), and for a mover (rfg_mover), its flags (+0x150; 8 invulnerable, as the console's
+// building_invulnerability clears) and its pieces: a piece (40 bytes) +0x23 how many links it has
+// left; a link, how much damage breaks it (rfg_link yield_limit).
+constexpr size_t kObjectType = 0x7A;
+constexpr int8_t kVehicleType = 3;
+constexpr size_t kMoverFlags = 0x150;
+constexpr uint32_t kMoverInvulnerable = 8;
+constexpr size_t kPieceLinkCount = 0x23;
+
+using MaterialAtFn = uint8_t(__fastcall*)(void* object, void* unused, int piece, const GameVector* at, int zero);
+using EffectMaterialFn = void*(__cdecl*)(uint32_t material);                                       // 0x683AC0
+using BulletDecalOfFn = int(__fastcall*)(void* effectMaterial, void* unused, uint32_t bulletKind);  // 0x6842E0, -1 for none
+using DecalInitFn = void(__fastcall*)(uint8_t* decal, void* unused);                               // 0x4F2210
+using DecalInfoFn = void(__cdecl*)(uint8_t* decal, int info);                                      // 0x9721C0 (nothing for -1)
+using FaceAlongFn = void(__fastcall*)(float* rows, void* unused, const GameVector* forward);        // 0xC9DA10, matrix::make
+using TurnAboutForwardFn = void(__fastcall*)(float* rows, void* unused, float angle);              // 0xC9E800
+using RandomBetweenFn = float(__cdecl*)(float low, float high);                                    // 0xC8BC00
+using RandomWholeFn = int(__cdecl*)(int low, int high);                                            // 0xC8BBE0, both ends included
+using ChanceFn = int(__cdecl*)(int percent);                                                       // 0x42D7B0
+using ApplyDecalFn = uint32_t(__cdecl*)(void* object, const uint8_t* decal, float zero, int piece, int part, int none);  // 0x4F0F80
+using IsPlayerFn = bool(__cdecl*)(void* object);                                                   // 0x7B2660
+using MoverOfFn = uint8_t*(__fastcall*)(void* world, void* unused, void* object);                  // 0x4243C0, null if not one
+using ShapeOfFn = uint8_t*(__fastcall*)(uint8_t* mover, void* unused);                             // 0x42A1F0
+using IsShatterableFn = bool(__fastcall*)(uint8_t* mover, void* unused, int piece);                // 0x68ADB0
+using PieceOfFn = uint8_t*(__fastcall*)(uint8_t* shape, void* unused, int piece);                  // 0x4A3400
+using LinkOfFn = const int*(__fastcall*)(uint8_t* shape, void* unused, const uint8_t* piece, int link);  // 0x663620
+using PlayEffectAtFn = uint32_t(__cdecl*)(uint32_t effect, const GameVector* at, const float* rows, int a, int b, int c, int d, int e,
+                                          int f, int g);  // effects_play, 0x4EB460
+
+const auto EffectMaterial = reinterpret_cast<EffectMaterialFn>(0x683AC0);
+const auto BulletDecalOf = reinterpret_cast<BulletDecalOfFn>(0x6842E0);
+const auto DecalInit = reinterpret_cast<DecalInitFn>(0x4F2210);
+const auto DecalInfo = reinterpret_cast<DecalInfoFn>(0x9721C0);
+const auto FaceAlong = reinterpret_cast<FaceAlongFn>(0xC9DA10);
+const auto TurnAboutForward = reinterpret_cast<TurnAboutForwardFn>(0xC9E800);
+const auto RandomBetween = reinterpret_cast<RandomBetweenFn>(0xC8BC00);
+const auto RandomWhole = reinterpret_cast<RandomWholeFn>(0xC8BBE0);
+const auto Chance = reinterpret_cast<ChanceFn>(0x42D7B0);
+const auto ApplyDecal = reinterpret_cast<ApplyDecalFn>(0x4F0F80);
+const auto IsPlayer = reinterpret_cast<IsPlayerFn>(0x7B2660);
+const auto MoverOf = reinterpret_cast<MoverOfFn>(0x4243C0);
+const auto ShapeOf = reinterpret_cast<ShapeOfFn>(0x42A1F0);
+const auto IsShatterable = reinterpret_cast<IsShatterableFn>(0x68ADB0);
+const auto PieceOf = reinterpret_cast<PieceOfFn>(0x4A3400);
+const auto LinkOf = reinterpret_cast<LinkOfFn>(0x663620);
+const auto PlayEffectAt = reinterpret_cast<PlayEffectAtFn>(0x4EB460);
+
+int g_glassMarksLogged = 0;
+constexpr int kGlassMarksLogged = 12;
+
+// Says (for the first few glass hits) what became of one: its marks, or why it got none or fewer.
+void GlassLog(const char* what, int piece, float damage) {
+    if (g_glassMarksLogged >= kGlassMarksLogged) return;
+    ++g_glassMarksLogged;
+    rfa::Log("Glass: a shot on piece %d (damage %.0f): %s", piece, damage, what);
+}
+
+float& DecalFloat(uint8_t* decal, size_t at) { return *reinterpret_cast<float*>(decal + at); }
+
+// Puts a decal on the hit piece of the object (as the game puts every mark: only on that piece).
+void PutDecal(void* hit, const uint8_t* decal, int piece, int part) { ApplyDecal(hit, decal, 0.0f, piece, part, -1); }
+
+// Turns a decal round to face the other way (its forward row turned round), for the pane's far face.
+void TurnRound(uint8_t* decal) {
+    for (size_t c = 0; c < 3; ++c) DecalFloat(decal, kDecalForward + c * 4) = -DecalFloat(decal, kDecalForward + c * 4);
+}
+
+// Guerrilla's marks on glass (its object_decal_create_bullet_impact_decal's glass part), in its order.
+void GuerrillaGlassMarks(void* hit, void* shooter, uint8_t bulletKind, float size, const GameVector& at, const GameVector& normal, float damage,
+                         int piece, int part, uint8_t material) {
+    if (!kDecalsOn) return GlassLog("none, decals are off", piece, damage);
+    // Near enough to the camera: anyone's shots, the player's farther off (Armageddon makes only the
+    // player's marks; Guerrilla, everyone's).
+    const float reach = IsPlayer(shooter) ? kPlayerMarkReach : kOtherMarkReach;
+    const float dx = g_cameraPosition[0] - at.x, dy = g_cameraPosition[1] - at.y, dz = g_cameraPosition[2] - at.z;
+    if (dx * dx + dy * dy + dz * dz > reach * reach) return GlassLog("none, too far from the camera", piece, damage);
+    // A pane that shatters is gone at once (its piece deleted), so nothing is put on it. (Guerrilla puts
+    // the front hole there and no more, unseen; leaving it out spares the game a decal on a piece it is
+    // deleting.)
+    uint8_t* mover = MoverOf(kWorld, nullptr, hit);
+    if (mover && piece >= 0 && IsShatterable(mover, nullptr, piece)) return GlassLog("none, the pane shatters", piece, damage);
+    // The hole, as the game makes every bullet's: its effect material's decal for this kind of bullet,
+    // at the hit, facing along the surface's normal, turned at random, sized by the weapon and varied.
+    void* effectMaterial = EffectMaterial(material);
+    if (!effectMaterial) return GlassLog("none, no effect material", piece, damage);
+    const int hole = BulletDecalOf(effectMaterial, nullptr, bulletKind);
+    if (hole == -1) return GlassLog("none, no hole decal for this bullet", piece, damage);
+    alignas(16) uint8_t decal[kDecalSize] = {};
+    DecalInit(decal, nullptr);
+    DecalInfo(decal, hole);
+    decal[kDecalKept] = 0;
+    *reinterpret_cast<GameVector*>(decal + kDecalAt) = at;
+    float* rows = reinterpret_cast<float*>(decal + kDecalRows);
+    FaceAlong(rows, nullptr, &normal);
+    TurnAboutForward(rows, nullptr, RandomBetween(0.0f, kFullTurn));
+    const float scale = size * RandomBetween(1.0f - kHoleSizeVariation, 1.0f + kHoleSizeVariation);
+    DecalFloat(decal, kDecalWidth) *= scale;
+    DecalFloat(decal, kDecalLength) *= scale;
+    PutDecal(hit, decal, piece, part);
+    // The rest only on a pane the hit leaves standing: not a vehicle's, not an invulnerable building's,
+    // and not one whose links this hit's damage breaks.
+    if (*(reinterpret_cast<const int8_t*>(hit) + kObjectType) == kVehicleType) return GlassLog("the hole, on a vehicle", piece, damage);
+    if (mover) {
+        if (*reinterpret_cast<const uint32_t*>(mover + kMoverFlags) & kMoverInvulnerable)
+            return GlassLog("the hole, on an invulnerable building", piece, damage);
+        uint8_t* shape = piece >= 0 ? ShapeOf(mover, nullptr) : nullptr;
+        if (const uint8_t* own = shape ? PieceOf(shape, nullptr, piece) : nullptr)
+            for (int l = 0; l < own[kPieceLinkCount]; ++l)
+                if (const int* breaksAt = LinkOf(shape, nullptr, own, l); breaksAt && *breaksAt <= static_cast<int>(damage)) {
+                    char what[96];
+                    sprintf_s(what, "the hole, as the hit breaks the pane's link %d (it holds to %d)", l, *breaksAt);
+                    return GlassLog(what, piece, damage);
+                }
+    }
+    // The hole on the far face.
+    TurnRound(decal);
+    PutDecal(hit, decal, piece, part);
+    // Mostly, the crack effect, and two or three cracks running out from the hole in turn round it,
+    // each from the hole outwards (its middle half its width from the hit), on both faces.
+    if (!Chance(kCrackChance)) return GlassLog("the hole on both faces, no cracks this time", piece, damage);
+    if (kCrackEffect != kNoEffect) {
+        alignas(16) float facing[9] = {};
+        FaceAlong(facing, nullptr, &normal);
+        PlayEffectAt(kCrackEffect, &at, facing, 0, -1, -1, -1, 0, 1, 0);  // as the game plays its shatter's
+    }
+    const int cracks = RandomWhole(kFewestCracks, kMostCracks);
+    if (cracks <= 0) return;
+    const float slice = kFullTurn / static_cast<float>(cracks);
+    for (int i = 0; i < cracks; ++i) {
+        alignas(16) uint8_t crack[kDecalSize] = {};
+        DecalInit(crack, nullptr);
+        const int info = kCrackDecals[RandomWhole(0, 2)];
+        if (info == -1) continue;
+        DecalInfo(crack, info);
+        crack[kDecalKept] = 0;
+        float* crackRows = reinterpret_cast<float*>(crack + kDecalRows);
+        FaceAlong(crackRows, nullptr, &normal);
+        TurnAboutForward(crackRows, nullptr, RandomBetween(static_cast<float>(i) * slice, static_cast<float>(i + 1) * slice));
+        const float half = DecalFloat(crack, kDecalWidth) * 0.5f;
+        const float* right = reinterpret_cast<const float*>(crack + kDecalRight);
+        *reinterpret_cast<GameVector*>(crack + kDecalAt) = {at.x - right[0] * half, at.y - right[1] * half, at.z - right[2] * half};
+        PutDecal(hit, crack, piece, part);
+        TurnRound(crack);
+        PutDecal(hit, crack, piece, part);
+    }
+    char what[64];
+    sprintf_s(what, "the hole and %d cracks, on both faces", cracks);
+    GlassLog(what, piece, damage);
+}
+
+void __cdecl BulletDecal(void* hit, void* shooter, const uint8_t* bulletKind, float size, const GameVector* at, const GameVector* normal,
+                         float damage, const uint8_t* shot) {
+    if (hit && bulletKind && at && normal && InOurWorld()) {
+        // The effect material hit, as the game finds it: the shot's, or the object's own there.
+        const int piece = shot ? *reinterpret_cast<const int*>(shot + kShotPiece) : -1;
+        const int part = shot ? *reinterpret_cast<const int*>(shot + kShotPart) : -1;
+        uint8_t material = shot ? shot[kShotMaterial] : kOwnMaterial;
+        if (material == kOwnMaterial) {
+            const auto materialAt = reinterpret_cast<MaterialAtFn>((*reinterpret_cast<void***>(hit))[kMaterialAtSlot]);
+            material = materialAt(hit, nullptr, piece, at, 0);
+        }
+        if (material == kGlassMaterial) {
+            GuerrillaGlassMarks(hit, shooter, *bulletKind, size, *at, *normal, damage, piece, part, material);
+            return;
+        }
+    }
+    g_bulletDecal(hit, shooter, bulletKind, size, at, normal, damage, shot);
+}
+
+// Guerrilla's shatter: the same pattern of shards as Armageddon's (create_shatter_effect), but
+// Armageddon leaves out the small shards round the hit (Glass_lod_enable: its inner bands, and half of
+// the rest when the shard pool is half full; Guerrilla has no such setting) and throws and spins its
+// shards far more gently. In our worlds the game's settings are Guerrilla's (Re-Mars-tered's values),
+// and Armageddon's are put back elsewhere. They are read as each pane breaks and its shards move.
+auto& g_glassLod = *reinterpret_cast<uint8_t*>(0x10FF422);
+struct GlassSetting {
+    const char* name;
+    DWORD address;
+    float guerrilla;
+};
+constexpr GlassSetting kGlassSettings[] = {
+    {"Glass_impact_force_max", 0x10FF400, 100.0f},  // Armageddon's 15
+    {"Glass_rotation_min", 0x10FF404, 1.0f},        // 3
+    {"Glass_rotation_max", 0x10FF408, 100.0f},      // 10
+    {"Glass_rotational_damping", 0x10FF414, 1.0f},  // 3
+    {"Glass_rotation_scale", 0x10FF418, 100.0f},    // 10
+};
+float g_glassSettingsBefore[std::size(kGlassSettings)];
+uint8_t g_glassLodBefore;
+bool g_glassOurs;
+
+void GlassUpdate() {
+    const bool ours = InOurWorld();
+    if (ours == g_glassOurs) return;
+    g_glassOurs = ours;
+    for (size_t i = 0; i < std::size(kGlassSettings); ++i) {
+        float& setting = *reinterpret_cast<float*>(kGlassSettings[i].address);
+        if (ours) {
+            g_glassSettingsBefore[i] = setting;
+            setting = kGlassSettings[i].guerrilla;
+        } else {
+            setting = g_glassSettingsBefore[i];
+        }
+    }
+    if (ours) {
+        g_glassLodBefore = g_glassLod;
+        g_glassLod = 0;
+    } else {
+        g_glassLod = g_glassLodBefore;
+    }
+    rfa::Log("Glass: %s shatter (impact force %.0f, rotation %.0f-%.0f, damping %.0f, scale %.0f, fewer shards %s)", ours ? "Guerrilla's" : "the game's own",
+             *reinterpret_cast<const float*>(kGlassSettings[0].address), *reinterpret_cast<const float*>(kGlassSettings[1].address),
+             *reinterpret_cast<const float*>(kGlassSettings[2].address), *reinterpret_cast<const float*>(kGlassSettings[3].address),
+             *reinterpret_cast<const float*>(kGlassSettings[4].address), g_glassLod ? "on" : "off");
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -5441,6 +5721,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     // Guerrilla's undergrowth: its random scatter with the pieces on the ground (see RandomlyPlace).
     if (!rfa::HookFunction(kRandomlyPlace, kRandomlyPlacePrologue, reinterpret_cast<void*>(&RandomlyPlace)))
         rfa::Log("Could not replace the undergrowth's random scatter; its pieces lie at height 0");
+    // Guerrilla's bullet holes and cracks on glass (see BulletDecal); its shatter is set each frame
+    // with the effects (GlassUpdate).
+    g_bulletDecal = reinterpret_cast<BulletDecalFn>(rfa::HookFunction(kBulletDecal, kBulletDecalPrologue, reinterpret_cast<void*>(&BulletDecal)));
+    if (!g_bulletDecal) rfa::Log("Could not hook the game's bullet marks; glass gets none, as in Armageddon");
     g_roadLog =rfa::IniInt(L"GuerrillaWorld", L"RoadLog", 0) != 0;
     g_skyOn = rfa::IniInt(L"GuerrillaWorld", L"Sky", 1) != 0;
     g_cloudsOn = rfa::IniInt(L"GuerrillaWorld", L"Clouds", 1) != 0;
