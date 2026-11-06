@@ -52,6 +52,7 @@ Switch g_switches[] = {
     {L"ColourCorrection", "Guerrilla's colour correction", true, "Its time of day's tint over the light and sky. Off = pinker", false},
     {L"SunShadows", "Sun and moon shadows", true, "Off = sunlight goes through buildings", false},
     {L"Particles", "Particles as Guerrilla's", true, "With its tone mapping: fire and smoke in a layer of their own, keeping their colours", false},
+    {L"ParticleFog", "Fogged particles", true, "Smoke, fire and explosions fade into the haze far off, as Guerrilla's", false},
     {L"Dust", "Dust on the wind", true, "Guerrilla's dust blowing round you, thicker the stronger the wind", false},
 };
 

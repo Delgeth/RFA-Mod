@@ -581,6 +581,12 @@ bool g_particles = true;
 
 void ReadParticles() { g_particles = rfa::IniInt(L"GuerrillaWorld", L"Particles", 1) != 0; }
 
+// Guerrilla's fog on particles (ParticleFog=; read again whenever rfa_mods.ini is saved): see
+// "Guerrilla's fog on particles". 0: none, as Armageddon draws them in our worlds.
+bool g_particleFog = true;
+
+void ReadParticleFog() { g_particleFog = rfa::IniInt(L"GuerrillaWorld", L"ParticleFog", 1) != 0; }
+
 // Guerrilla's dust round the camera (Dust=; read again whenever rfa_mods.ini is saved): see DustUpdate.
 // 0: none.
 bool g_dust = true;
@@ -730,6 +736,9 @@ void CheckSettings() {
     const bool particlesBefore = g_particles;
     ReadParticles();
     if (g_particles != particlesBefore) rfa::Log("Particles: %s", g_particles ? "in a layer of their own, as Guerrilla's" : "drawn into the scene, as Armageddon's");
+    const bool particleFogBefore = g_particleFog;
+    ReadParticleFog();
+    if (g_particleFog != particleFogBefore) rfa::Log("Particles: %s", g_particleFog ? "fogged as Guerrilla's" : "not fogged");
     const bool dustBefore = g_dust;
     ReadDust();
     if (g_dust != dustBefore) rfa::Log("Dust: %s", g_dust ? "on" : "off");
@@ -1809,16 +1818,19 @@ float4 FogPixel(float4 position : SV_Position) : SV_Target
 }
 )";
 
-// Guerrilla's tone mapping (its rl_hdr passes 11-13, 12 and 21), drawn over Armageddon's final picture
-// from the scene it was made from (held at exposure 1, so Guerrilla's own values). AdaptPixel, into a
-// 1 x 1 target: the picture's brightness as Guerrilla measures it, 4.5 × each sample's luminance
-// (Rec. 709; its scene buffer keeps the picture ÷ 8 and its measure takes 36 ×), each held to
-// luminance_min-max, averaged over a grid, and the eye's brightness eased toward it, by
-// 1 − 2^(−0.8744 × the frame's time × iris_rate). ToneMapPixel: the exposure, lum_range ÷ max(1 +
-// lum_offset × (base + amount × (adapted − base)), 0.1) (eye_adaption_base, _amount), times Exposure=;
-// the picture 1 − e^(−exposure × (scene + (bloom + sun shafts) × bloom_amount)), encoded for the
-// screen (sRGB: Guerrilla's display gamma, 2.4). Guerrilla draws its sun shafts into the texture its
-// bloom is then laid into, so they go with the bloom.
+// Guerrilla's tone mapping (its rl_hdr passes 11-13, 12 and 19), drawn over Armageddon's final picture
+// from the scene it was made from (held at exposure 1, so Guerrilla's own values). Guerrilla's scene
+// holds the picture ÷ 8 (its lights, sky and fog colours as the time of day gives them), and every
+// pass that reads it takes it × 8 (pass 19: `mul r3, r0, 8`; the bright pass 24 the same); ours holds
+// the same values (the same lights, sky and fog), so these passes take it × 8 too (kSceneScale).
+// AdaptPixel, into a 1 x 1 target: the picture's brightness as Guerrilla measures it, 36 × each
+// sample's luminance (Rec. 709, on the scene as kept), each held to luminance_min-max, averaged over a
+// grid, and the eye's brightness eased toward it, by 1 − 2^(−0.8744 × the frame's time × iris_rate).
+// ToneMapPixel: the exposure, lum_range ÷ max(1 + lum_offset × (base + amount × (adapted − base)),
+// 0.1) (eye_adaption_base, _amount), times Exposure=; the picture 1 − e^(−exposure × (8 × scene +
+// (bloom + 8 × sun shafts) × bloom_amount)), encoded for the screen (sRGB: Guerrilla's display gamma,
+// 2.4). Guerrilla draws its sun shafts into the texture its bloom is then laid into, so they go with
+// the bloom; our bloom is made × 8 already (see kBloomShader), our shafts from the scene as kept.
 constexpr char kToneMappingShader[] = R"(
 cbuffer ToneMapping : register(b0)
 {
@@ -1836,6 +1848,8 @@ Texture2D SunShafts : register(t3);
 Texture2D Particles : register(t4);  // Guerrilla's particle layer: their colour, and in alpha how much they cover (none: zeros)
 SamplerState Smooth : register(s0);
 
+static const float kSceneScale = 8;  // Guerrilla's scene holds the picture ÷ 8
+
 float4 ToneVertex(uint id : SV_VertexID) : SV_Position
 {
     float2 corner = float2((id << 1) & 2, id & 2);
@@ -1850,7 +1864,7 @@ float4 AdaptPixel(float4 position : SV_Position) : SV_Target
         {
             int2 at = int2((x + 0.5) * Picture.z / 32, (y + 0.5) * Picture.w / 18);
             float3 colour = max(Scene.Load(int3(at, 0)).rgb, 0);
-            total += clamp(4.5 * dot(colour, float3(0.2125, 0.7154, 0.0721)), Adapt.y, Adapt.z);
+            total += clamp(4.5 * kSceneScale * dot(colour, float3(0.2125, 0.7154, 0.0721)), Adapt.y, Adapt.z);
         }
     float measured = total / 576;
     float before = Adapted.Load(int3(0, 0, 0)).r;
@@ -1859,9 +1873,9 @@ float4 AdaptPixel(float4 position : SV_Position) : SV_Target
 
 float4 TonePixel(float4 position : SV_Position) : SV_Target
 {
-    float3 colour = max(Scene.Load(int3(position.xy, 0)).rgb, 0);
+    float3 colour = max(Scene.Load(int3(position.xy, 0)).rgb, 0) * kSceneScale;
     float3 bloom = max(Bloom.Sample(Smooth, position.xy / Picture.zw).rgb, 0) * Picture.y;
-    float3 shafts = max(SunShafts.Sample(Smooth, position.xy / Picture.zw).rgb, 0) * Picture.y * Shafts.x;
+    float3 shafts = max(SunShafts.Sample(Smooth, position.xy / Picture.zw).rgb, 0) * kSceneScale * Picture.y * Shafts.x;
     float adapted = Adapted.Load(int3(0, 0, 0)).r;
     float exposure = Exposure.x / max(1 + Exposure.y * (Exposure.z + Exposure.w * (adapted - Exposure.z)), 0.1) * Picture.x;
     float4 particles = Particles.Load(int3(position.xy, 0));
@@ -1878,8 +1892,9 @@ float4 TonePixel(float4 position : SV_Position) : SV_Target
 )";
 
 // Guerrilla's bloom, as its rl_hdr_compositor makes it (render_bloom_3; the 2009 shaders rl_downsample,
-// rl_particle_brightpass, rl_hdr 24 and 22, rl_gaussian_blur), in Guerrilla's true values (its
-// buffers keep a picture ÷ 8 and multiply by 8 again; ours keeps the true one, so neither is done).
+// rl_particle_brightpass, rl_hdr 24 and 22, rl_gaussian_blur), in true values: Guerrilla's bright
+// pass takes its scene (the picture ÷ 8, as ours) × 8 and stores its bloom × 0.125 for the last pass
+// to take × 8 again; ours takes the scene × 8 (kSceneScale) and keeps the bloom as it is.
 // BrightPixel, at a quarter of the picture's size: the scene boxed 4 × 4 times bloom_exposure ÷ the
 // eye (eye_adaption_base + _amount × (the adapted brightness − base) + 0.001); of that, as much as the
 // curve gives (its brightness L = 0.3 × (r + g + b); below bloom_theta, slope_A × L; above, slope_B ×
@@ -1922,7 +1937,7 @@ float4 BrightPixel(float4 position : SV_Position) : SV_Target
     glow /= 16;
     shows /= 16;
     float adapted = Adapted.Load(int3(0, 0, 0)).r;
-    float3 c = scene * (Bright.x / (Bright.y + Bright.z * (adapted - Bright.y) + 0.001));
+    float3 c = scene * 8 * (Bright.x / (Bright.y + Bright.z * (adapted - Bright.y) + 0.001));  // (the scene × 8, as the tone mapping's kSceneScale)
     float L = dot(c, 0.3);
     float k = L < Curve.x ? Curve.y * L : Curve.z * abs(Curve.x - L) + Curve.w;
     c = c * k / (L + 0.001);
@@ -3890,21 +3905,61 @@ void DrawLight(ID3D11RenderTargetView* buffer, ID3D11ShaderResourceView* normals
     if (gameDepth) gameDepth->Release();
 }
 
-// For the fog, drawn later in the frame (at the sky step): the G-buffer's depth (t14) and the game's
-// own constants (vc4, whose IR_Similarity_Data turns depth into distance), noted during the light pass.
+// For the fog, drawn later in the frame (as the particles begin): the G-buffer's depth (t14) and the
+// game's own constants (vc4, whose IR_Similarity_Data turns depth into distance), noted during the
+// light pass. The game keeps changing that buffer after the light pass, so the fog reads a copy of it
+// as the light pass had it (g_fogGameCopy), as the mod's light does live.
 bool g_noteFog = false;
 ID3D11ShaderResourceView* g_fogDepth = nullptr;
 ID3D11Buffer* g_gameConstants = nullptr;
+ID3D11Buffer* g_fogGameCopy = nullptr;
+// The fog waits from the sky step for the particles (see ParticlePhase): Armageddon's sky step draws
+// into a layer of its own (8× multisampled, black before it), laid over the scene only where nothing
+// was drawn, so fog drawn there was lost on everything but the sky; the particles draw into the lit
+// scene itself, once the sky is laid in.
+bool g_fogPending = false;
+bool g_fogAtParticles = false;  // the particle phase is hooked (else the fog is drawn at the sky step)
+bool TextureOf(ID3D11View* view, D3D11_TEXTURE2D_DESC& desc);
+bool g_fogGameCopied = false;  // this frame's copy is made
+// During the light pass: the game's constants copied for the fog, from the light pass's first check
+// and again (as the mod's light reads them) right after the sun's lamp is drawn.
+void CopyGameConstants(ID3D11Buffer* from) {
+    if (!from || !g_device) return;
+    D3D11_BUFFER_DESC desc;
+    from->GetDesc(&desc);
+    if (g_fogGameCopy) {
+        D3D11_BUFFER_DESC have;
+        g_fogGameCopy->GetDesc(&have);
+        if (have.ByteWidth != desc.ByteWidth) {
+            g_fogGameCopy->Release();
+            g_fogGameCopy = nullptr;
+        }
+    }
+    if (!g_fogGameCopy) {
+        D3D11_BUFFER_DESC copy = {};
+        copy.ByteWidth = desc.ByteWidth;
+        copy.Usage = D3D11_USAGE_DEFAULT;
+        copy.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(g_device->CreateBuffer(&copy, nullptr, &g_fogGameCopy))) {
+            RFA_LOG_FIRST(1, "Fog: could not copy the game's constants (%u bytes); the fog reads them at the sky step", desc.ByteWidth);
+            g_fogGameCopy = nullptr;
+            return;
+        }
+    }
+    g_context->CopyResource(g_fogGameCopy, from);
+    g_fogGameCopied = true;
+}
 
 void DropFogInputs() {
+    g_fogGameCopied = false;
     if (g_fogDepth) g_fogDepth->Release();
     if (g_gameConstants) g_gameConstants->Release();
     g_fogDepth = nullptr;
     g_gameConstants = nullptr;
 }
 
-// Draws Guerrilla's fog over what the world has drawn into the game's current target, and puts the
-// device context back as it was.
+// Draws Guerrilla's fog over what the world has drawn into the game's current target (the lit scene, as
+// the particles begin), and puts the device context back as it was.
 void DrawFog() {
     ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     ID3D11DepthStencilView* depthView = nullptr;
@@ -3916,9 +3971,19 @@ void DrawFog() {
     gameDepthDesc.DepthFunc = D3D11_COMPARISON_LESS;  // what no state means
     if (gameDepth) gameDepth->GetDesc(&gameDepthDesc);
     const bool reversed = gameDepthDesc.DepthFunc == D3D11_COMPARISON_GREATER || gameDepthDesc.DepthFunc == D3D11_COMPARISON_GREATER_EQUAL;
-    D3D11_VIEWPORT viewport = {};
-    UINT viewports = 1;
-    g_context->RSGetViewports(&viewports, &viewport);
+    D3D11_VIEWPORT gameViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    g_context->RSGetViewports(&viewportCount, gameViewports);
+    D3D11_VIEWPORT viewport = viewportCount > 0 ? gameViewports[0] : D3D11_VIEWPORT{};
+    ID3D11RenderTargetView* into = targets[0];
+    D3D11_TEXTURE2D_DESC scene = {};
+    if (into && TextureOf(into, scene) && scene.SampleDesc.Count == 1) {
+        viewport = {0, 0, static_cast<float>(scene.Width), static_cast<float>(scene.Height), 0, 1};
+        RFA_LOG_FIRST(1, "Fog: drawn into the lit scene (%u x %u, format %d) as the particles begin", scene.Width, scene.Height, static_cast<int>(scene.Format));
+    } else {
+        RFA_LOG_FIRST(1, "Fog: the picture as the particles begin is format %d with %u samples, not the lit scene expected",
+                      static_cast<int>(scene.Format), scene.SampleDesc.Count);
+    }
     D3D11_BUFFER_DESC gameConstantsDesc = {};
     g_gameConstants->GetDesc(&gameConstantsDesc);
 
@@ -3944,7 +4009,7 @@ void DrawFog() {
     }
 
     D3D11_MAPPED_SUBRESOURCE mapped;
-    if (!targets[0] || viewport.Width <= 0 || viewport.Height <= 0 || gameConstantsDesc.ByteWidth < 13 * 16) {
+    if (!into || viewport.Width <= 0 || viewport.Height <= 0 || gameConstantsDesc.ByteWidth < 13 * 16) {
         RFA_LOG_FIRST(1, "Fog: nothing to draw into, or the game's constants are not the ones expected (%u bytes); no fog",
                       gameConstantsDesc.ByteWidth);
     } else if (SUCCEEDED(g_context->Map(g_fogConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
@@ -3952,13 +4017,14 @@ void DrawFog() {
         g_context->Unmap(g_fogConstants, 0);
         SavedState saved;
         saved.Save();
-        g_context->OMSetRenderTargets(1, &targets[0], nullptr);  // the depth is read, so it can't stay bound for testing
+        g_context->OMSetRenderTargets(1, &into, nullptr);  // the depth is read, so it can't stay bound for testing
+        g_context->RSSetViewports(1, &viewport);
         g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         g_context->IASetInputLayout(nullptr);
         g_context->VSSetShader(g_fogVertex, nullptr, 0);
         g_context->PSSetShader(g_fogPixel, nullptr, 0);
         g_context->GSSetShader(nullptr, nullptr, 0);
-        ID3D11Buffer* buffers[2] = {g_fogConstants, g_gameConstants};
+        ID3D11Buffer* buffers[2] = {g_fogConstants, g_fogGameCopied ? g_fogGameCopy : g_gameConstants};
         g_context->PSSetConstantBuffers(0, 2, buffers);
         g_context->PSSetShaderResources(0, 1, &g_fogDepth);
         g_context->PSSetSamplers(0, 1, &g_fogSampler);
@@ -3967,8 +4033,9 @@ void DrawFog() {
         g_context->OMSetDepthStencilState(g_fogDepthTest, 0);
         g_context->RSSetState(g_fogRaster);
         g_context->Draw(3, 0);
-        saved.Restore();
         g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, depthView);
+        g_context->RSSetViewports(viewportCount, gameViewports);
+        saved.Restore();
         g_context->OMSetDepthStencilState(gameDepth, stencilRef);
     }
     for (ID3D11RenderTargetView* target : targets)
@@ -4071,6 +4138,7 @@ bool g_eyeFresh = true;     // start the eye at the measure (the first frame, or
 LARGE_INTEGER g_toneLast = {};
 ULONGLONG g_lastEyeLog = 0;
 bool g_eyeReadPending = false;
+float g_eyeBrightness = -1;  // as last read back (< 0: not yet)
 
 // Guerrilla's particle layer (see ParticlePhase): this frame's particles, once the phase has drawn them.
 ID3D11ShaderResourceView* g_particleView = nullptr;
@@ -4399,23 +4467,28 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
     if (gameDepth) gameDepth->Release();
     g_eyeNow = next;
 
-    // Every 10 seconds, the eye's brightness read back (a frame or two later, never waiting) for the log.
+    // The eye's brightness read back (a frame or two later, never waiting), for the particles' fog
+    // colour (see ParticleFogColour), and every 10 seconds into the log.
     if (g_eyeReadPending) {
         D3D11_MAPPED_SUBRESOURCE eye;
         if (SUCCEEDED(g_context->Map(g_eyeReadback, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &eye))) {
             const float adapted = *static_cast<const float*>(eye.pData);
             g_context->Unmap(g_eyeReadback, 0);
             g_eyeReadPending = false;
-            float lit = 1 + constants.exposure[1] * (constants.exposure[2] + constants.exposure[3] * (adapted - constants.exposure[2]));
-            if (lit < 0.1f) lit = 0.1f;
-            static int told = 0;
-            if (told++ < 60)
-                rfa::Log("Tone mapping at %.2f h: the eye's brightness %.3f, exposure %.3f (range %.3g, offset %.3g, base %.3g, amount %.3g, "
-                         "Exposure=%.3g)", g_timeOfDay, adapted, constants.exposure[0] / lit * g_exposure, constants.exposure[0],
-                         constants.exposure[1], constants.exposure[2], constants.exposure[3], g_exposure);
+            g_eyeBrightness = adapted;
+            if (GetTickCount64() - g_lastEyeLog >= 10000) {
+                g_lastEyeLog = GetTickCount64();
+                float lit = 1 + constants.exposure[1] * (constants.exposure[2] + constants.exposure[3] * (adapted - constants.exposure[2]));
+                if (lit < 0.1f) lit = 0.1f;
+                static int told = 0;
+                if (told++ < 60)
+                    rfa::Log("Tone mapping at %.2f h: the eye's brightness %.3f, exposure %.3f (range %.3g, offset %.3g, base %.3g, amount %.3g, "
+                             "Exposure=%.3g)", g_timeOfDay, adapted, constants.exposure[0] / lit * g_exposure, constants.exposure[0],
+                             constants.exposure[1], constants.exposure[2], constants.exposure[3], g_exposure);
+            }
         }
-    } else if (GetTickCount64() - g_lastEyeLog >= 10000) {
-        g_lastEyeLog = GetTickCount64();
+    }
+    if (!g_eyeReadPending) {
         g_context->CopyResource(g_eyeReadback, g_eye[g_eyeNow]);
         g_eyeReadPending = true;
     }
@@ -4489,6 +4562,7 @@ bool __cdecl LightCheck() {
     if (g_noteFog && !g_fogDepth) {
         g_context->PSGetShaderResources(14, 1, &g_fogDepth);
         g_context->PSGetConstantBuffers(4, 1, &g_gameConstants);
+        CopyGameConstants(g_gameConstants);
     }
     if (g_inLightPass && !g_skyLightDrawn && returnTo == kCheckBeforeOcclusion && g_lightBuffer && g_lightNormals) {
         RFA_LOG_FIRST(1, "Light: the sky's light drawn before the ambient occlusion in world \"%s\"", WorldName());
@@ -4566,6 +4640,17 @@ bool DrawSunThroughLamp() {
     g_context->PSGetConstantBuffers(0, 1, &lamp);
     g_context->PSGetConstantBuffers(4, 1, &game);
     const bool all = buffer && map && normals && depth && lamp && game;
+    // For the fog: the depth and the game's constants as the lamp was lit with them (the light pass's
+    // first check may come while other textures and values are still bound).
+    if (g_noteFog && depth && game) {
+        if (g_fogDepth != depth) {
+            RFA_LOG_FIRST(1, "Fog: the light pass's first check had another texture at t14 than the sun's lamp; the fog takes the lamp's");
+            if (g_fogDepth) g_fogDepth->Release();
+            g_fogDepth = depth;
+            g_fogDepth->AddRef();
+        }
+        CopyGameConstants(game);
+    }
     if (all) {
         static bool told = false;
         if (!told) {
@@ -4690,8 +4775,8 @@ void __fastcall MaterialPass(void* renderer, void* unused) {
     g_surfaceInputsMade = false;
 }
 
-// Replaces the scene renderer's sky step: the game's own, then, in our worlds, the clock,
-// Guerrilla's fog over what the world has drawn, and Guerrilla's sky behind it.
+// Replaces the scene renderer's sky step: the game's own, then, in our worlds, the clock, Guerrilla's
+// fog made ready (drawn over what the world has drawn as the particles begin) and Guerrilla's sky behind it.
 void __fastcall RenderSkybox(void* renderer, void* unused) {
     g_renderSkybox(renderer, unused);
     RFA_LOG_FIRST(1, "Sky: the game's sky step runs (world \"%s\")", WorldName());
@@ -4709,8 +4794,12 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
         } else if (!g_fogVertex && !MakeFogObjects()) {
             g_fogFailed = true;
         } else {
-            RFA_LOG_FIRST(1, "Fog: drawing Guerrilla's fog in world \"%s\"", WorldName());
-            DrawFog();
+            if (g_fogAtParticles) {
+                g_fogPending = true;  // drawn as the particles begin (see ParticlePhase)
+            } else {
+                RFA_LOG_FIRST(1, "Fog: drawing Guerrilla's fog in world \"%s\" at the sky step (the particle phase isn't hooked)", WorldName());
+                DrawFog();
+            }
         }
     }
     // The depth stays for the sun's corona, drawn with the particles, and the sun shafts, drawn with
@@ -4719,7 +4808,7 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
         g_shaftDepth = g_fogDepth;
         g_shaftDepth->AddRef();
     }
-    DropFogInputs();
+    if (!g_fogPending) DropFogInputs();
     if (!ours || !g_skyOn || g_drawingFailed || !g_context) return;
     if (!g_skyVertex) {
         if (!MakeSkyObjects()) {
@@ -5531,7 +5620,16 @@ void NoteCoronaTarget() {
     if (InOurWorld() && CoronaWanted() && g_context) g_context->OMGetRenderTargets(1, &g_coronaTarget, nullptr);
 }
 
+void NoteParticleFog();  // (see "Guerrilla's fog on particles")
+
 void __fastcall ParticlePhase(void* renderer, void* unused, int value) {
+    if (g_fogPending) {
+        g_fogPending = false;
+        RFA_LOG_FIRST(1, "Fog: drawing Guerrilla's fog in world \"%s\"", WorldName());
+        DrawFog();
+        DropFogInputs();
+    }
+    NoteParticleFog();
     NoteCoronaTarget();
     SetSceneAside();
     g_particlePhase(renderer, unused, value);
@@ -5543,6 +5641,223 @@ void __fastcall ParticleLast(void* renderer, void* unused) {
     DrawSunCorona();
     TakeParticles();
     g_particleLast(renderer, unused);
+}
+
+// ---- Guerrilla's fog on particles
+
+// Guerrilla fogs every particle as its surfaces (its rl_particle_standard_* vertex shaders, the same
+// in 2009 and Re-Mars-tered): its height fog at each corner, f = 1 − min(2^(−(term × distance ×
+// density − offset)), 1), term = (1 − e^(−k·dy)) ÷ (k·dy) (1 when nearly level), with the time of
+// day's numbers as for its surfaces (see FogNumbers). Its pixel shaders then take the particle's
+// colour and alpha toward (F, 0) by f, and its tint (1.6, see kParticleTint) over that: so far off a
+// particle turns the haze's colour as it fades out, and lost in the fog it is gone. F is the colour a
+// surface lost in the fog shows on the screen (calculate_particle_fog_color, drawn once a frame
+// before the particles: 1 − e^(−8 × exposure × the fog colour, saturated and tinted as the last pass
+// does)), since its particles go over the tone-mapped picture.
+//
+// Fog at one point seen from the camera, as Guerrilla's particles' vertex shaders work it out.
+float FogAt(const float (&numbers)[4], const float* at) {
+    const float d[3] = {at[0] - g_cameraPosition[0], at[1] - g_cameraPosition[1], at[2] - g_cameraPosition[2]};
+    const float distance = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const float kh = d[1] * numbers[0];
+    const float term = fabsf(d[1]) > 0.01f ? (1 - exp2f(kh * -1.442695f)) / kh : 1;
+    float fog = 1 - exp2f(-(term * distance * numbers[1] - numbers[3]));
+    if (fog < 0) fog = 0;
+    if (fog > 1) fog = 1;
+    return fog;
+}
+
+// The colour particles are fogged toward (in Armageddon's Fog_color, which its particle pixel shaders
+// mix toward by their fog), times Guerrilla's particle tint, which multiplies it in Guerrilla's
+// shaders and which the world builder bakes into our particles' own colours (Armageddon's renderer has
+// none). In Guerrilla's particle layer (ParticlesWanted) it is F, as the tone mapping draws a surface
+// lost in the fog (TonePixel: its saturation and tint, then 1 − e^(−8 × exposure × that), the exposure
+// from the eye's brightness a frame or two back); drawn into the scene instead, the fog's own colour,
+// as the fog over the world.
+void ParticleFogColour(float (&out)[4]) {
+    float colour[3], tint[3];
+    TodColour(kFogColour, colour);
+    PartTint(tint);
+    for (int i = 0; i < 3; ++i) colour[i] *= tint[i];
+    if (ParticlesWanted()) {
+        float correction[3];
+        ColourCorrection(correction);
+        const float saturation = g_colourCorrection ? TodNumber(kColourSaturation) : 1.0f;
+        const float base = TodNumber(kEyeAdaptionBase);
+        const float adapted = g_eyeBrightness >= 0 ? g_eyeBrightness : base;
+        float lit = 1 + TodNumber(kLumOffset) * (base + TodNumber(kEyeAdaptionAmount) * (adapted - base));
+        if (lit < 0.1f) lit = 0.1f;
+        const float exposure = 8 * TodNumber(kLumRange) / lit * g_exposure;  // (× 8: the scene's scale, see kToneMappingShader)
+        const float luminance = colour[0] * 0.3f + colour[1] * 0.59f + colour[2] * 0.11f;
+        for (int i = 0; i < 3; ++i) {
+            float seen = (luminance + saturation * (colour[i] - luminance)) * correction[i];
+            if (seen < 0) seen = 0;
+            colour[i] = 1 - expf(-exposure * seen);
+        }
+    }
+    for (int i = 0; i < 3; ++i) out[i] = colour[i] * kParticleTint;
+    out[3] = 0;
+}
+
+// Armageddon fogs its particles by their distance alone (each vertex Fog_dist.x × sat((d − y) ÷ (z −
+// y))^w, its pixel shaders mixing the colour toward Fog_color by that, never fading them out), from
+// its environment boxes, whose fog our worlds hold at 100,000 m: none. So in our worlds each effect is
+// drawn with Guerrilla's fog. The particle renderer's draw of one effect (0xC25030, thiscall, the
+// effect's instance; it draws with the renderer's +0x2E4 set, and otherwise only sorts the instance
+// into its step's list) is wrapped: Guerrilla's fog f is worked out at the effect's particles (the
+// mean over up to 32 of them), and the effect drawn with Fog_dist (f, −1, 0, 1), which gives every
+// vertex f, Fog_color as ParticleFogColour, and its opacity (the instance's +0xE8, which the draw
+// hands the vertex shader as Effect_opacity.x: it multiplies the particles' alpha and so, as they are
+// premultiplied, their colour) times 1 − f; then all are put back (the getters 0xC35900, 0xC35960;
+// the draw goes out inside, and a value left set would reach the next). Heat haze (the distortion
+// step, the renderer's +0x2A1 set through it) is left as it is. Guerrilla works f out at each corner;
+// once an effect, the far ones (all about one distance off) are as Guerrilla's, while a big one near
+// by (a smoke column) is fogged evenly through.
+//
+// The instance (rl_renderable_particles_instance): +0xE0 its renderable (+0x04 flags: 8 the particles
+// simulated on the CPU, 1 their positions the emitter's own), +0x50 the CPU's particles (records of
+// 0x80 bytes, the position first), +0x64 the GPU's (parametric, 0x40 bytes, where each set off from
+// first; the shader moves it on), each a pointer and at +8 a count; +0x4C the GPU particles' constants
+// (+0xD4 above 0: their positions the emitter's own); +0x7C the emitter's position and +0x88 its turn
+// (3 × 3, rows) for those; +0xE8 the opacity. Positions are the world's.
+//
+// Guerrilla fogs its coronas (lamps' glows) too: its corona vertex shader works out the same fog and
+// its pixel shader takes the colour down by 1 − f, as Armageddon's rl_corona does from Fog_dist. The
+// corona's draw (0xC33820, thiscall: the corona, the pass) is wrapped as the particles' is, f at the
+// corona (+0x10, its position in the world), in the pass that draws it (0; passes 1 and 2 ask the GPU
+// how much of it shows).
+constexpr DWORD kParticleDraw = 0xC25030, kCoronaDraw = 0xC33820;
+constexpr size_t kParticleDrawPrologue = 6;  // push ebp / mov ebp,esp / sub esp,70h
+constexpr size_t kCoronaDrawPrologue = 6;    // push ebx / mov ebx,esp / sub esp,8
+constexpr size_t kRendererDrawing = 0x2E4, kRendererDistortion = 0x2A1;
+constexpr size_t kInstanceGpuConstants = 0x4C, kInstanceCpuParticles = 0x50, kInstanceGpuParticles = 0x64, kInstanceEmitterAt = 0x7C,
+                 kInstanceEmitterTurn = 0x88, kInstanceRenderable = 0xE0, kInstanceOpacity = 0xE8;
+constexpr size_t kRenderableFlags = 0x04, kGpuConstantsLocal = 0xD4, kCoronaAt = 0x10;
+constexpr DWORD kRenderableOnCpu = 8, kRenderableLocal = 1;
+using ParticleDrawFn = void(__fastcall*)(void* renderer, void* unused, BYTE* instance);
+using CoronaDrawFn = void(__fastcall*)(void* renderer, void* unused, BYTE* corona, int pass);
+ParticleDrawFn g_particleDraw;
+CoronaDrawFn g_coronaDraw;
+// The renderer's fog (on the render context; the object they are called on goes unused).
+auto const SetFogDistance = reinterpret_cast<void(__fastcall*)(void* renderer, void* unused, float x, float y, float z, float w)>(0xC35880);
+auto const GetFogDistance = reinterpret_cast<void(__fastcall*)(void* renderer, void* unused, float* x, float* y, float* z, float* w)>(0xC35900);
+auto const SetFogColour = reinterpret_cast<void(__fastcall*)(void* renderer, void* unused, const float* colour)>(0xC35510);
+auto const GetFogColour = reinterpret_cast<void(__fastcall*)(void* renderer, void* unused, float* colour)>(0xC35960);
+
+// This frame's fog for particles, set as the particle phase starts.
+bool g_particleFogNow = false;
+float g_particleFogNumbers[4] = {};
+float g_particleFogColour[4] = {};
+
+void NoteParticleFog() {
+    g_particleFogNow = g_particleFog && InOurWorld();
+    if (!g_particleFogNow) return;
+    FogNumbers(g_particleFogNumbers);
+    ParticleFogColour(g_particleFogColour);
+}
+
+// Guerrilla's fog at an effect's particles: the mean over up to 32 of them, spread through its list
+// (0 with none). `distance`: how far off the first of them is (for the log).
+float EffectFog(BYTE* instance, float& distance) {
+    distance = 0;
+    const BYTE* renderable = *reinterpret_cast<BYTE* const*>(instance + kInstanceRenderable);
+    if (!renderable) return 0;
+    const DWORD flags = *reinterpret_cast<const DWORD*>(renderable + kRenderableFlags);
+    const bool onCpu = (flags & kRenderableOnCpu) != 0;
+    const BYTE* list = instance + (onCpu ? kInstanceCpuParticles : kInstanceGpuParticles);
+    const BYTE* records = *reinterpret_cast<const BYTE* const*>(list);
+    const int count = *reinterpret_cast<const int*>(list + 8);
+    if (!records || count <= 0) return 0;
+    const size_t size = onCpu ? 0x80 : 0x40;
+    bool local = (flags & kRenderableLocal) != 0;
+    if (!onCpu) {
+        const BYTE* constants = *reinterpret_cast<const BYTE* const*>(instance + kInstanceGpuConstants);
+        local = constants && *reinterpret_cast<const float*>(constants + kGpuConstantsLocal) > 0;
+    }
+    const float* emitter = reinterpret_cast<const float*>(instance + kInstanceEmitterAt);
+    const float* turn = reinterpret_cast<const float*>(instance + kInstanceEmitterTurn);
+    const int samples = count < 32 ? count : 32;
+    float total = 0;
+    for (int s = 0; s < samples; ++s) {
+        const float* p = reinterpret_cast<const float*>(records + static_cast<size_t>(s) * count / samples * size);
+        float at[3];
+        for (int i = 0; i < 3; ++i) at[i] = local ? emitter[i] + p[0] * turn[i] + p[1] * turn[3 + i] + p[2] * turn[6 + i] : p[i];
+        if (s == 0) {
+            const float d[3] = {at[0] - g_cameraPosition[0], at[1] - g_cameraPosition[1], at[2] - g_cameraPosition[2]};
+            distance = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        }
+        total += FogAt(g_particleFogNumbers, at);
+    }
+    return total / samples;
+}
+
+// Draws with Fog_dist giving every vertex `fog` and Fog_color as given (null: left), then puts both back.
+template <typename Draw>
+void DrawFogged(float fog, const float* colour, Draw draw) {
+    void* renderer = *reinterpret_cast<void**>(kRenderer);
+    float before[4] = {}, colourBefore[4] = {};
+    GetFogDistance(renderer, nullptr, &before[0], &before[1], &before[2], &before[3]);
+    if (colour) GetFogColour(renderer, nullptr, colourBefore);
+    SetFogDistance(renderer, nullptr, fog, -1, 0, 1);
+    if (colour) SetFogColour(renderer, nullptr, colour);
+    draw();
+    SetFogDistance(renderer, nullptr, before[0], before[1], before[2], before[3]);
+    if (colour) SetFogColour(renderer, nullptr, colourBefore);
+}
+
+void __fastcall ParticleDraw(void* renderer, void* unused, BYTE* instance) {
+    const BYTE* drawing = static_cast<const BYTE*>(renderer);
+    float distance = 0;
+    const float fog = g_particleFogNow && instance && drawing[kRendererDrawing] != 0 && drawing[kRendererDistortion] == 0
+                          ? EffectFog(instance, distance) : 0.0f;
+    if (fog < 0.0005f) {
+        g_particleDraw(renderer, unused, instance);
+        return;
+    }
+    RFA_LOG_FIRST(3, "Particles: an effect %.0f m off fogged %.2f as Guerrilla's (toward %.3f %.3f %.3f)", distance, fog,
+                  g_particleFogColour[0], g_particleFogColour[1], g_particleFogColour[2]);
+    float& opacity = *reinterpret_cast<float*>(instance + kInstanceOpacity);
+    const float opacityBefore = opacity;
+    opacity = opacityBefore * (1 - fog);
+    DrawFogged(fog, g_particleFogColour, [&] { g_particleDraw(renderer, unused, instance); });
+    opacity = opacityBefore;
+}
+
+void __fastcall CoronaDraw(void* renderer, void* unused, BYTE* corona, int pass) {
+    const float fog = g_particleFogNow && corona && pass == 0 ? FogAt(g_particleFogNumbers, reinterpret_cast<const float*>(corona + kCoronaAt)) : 0.0f;
+    if (fog < 0.0005f) {
+        g_coronaDraw(renderer, unused, corona, pass);
+        return;
+    }
+    const float* at = reinterpret_cast<const float*>(corona + kCoronaAt);
+    RFA_LOG_FIRST(2, "Particles: a corona %.0f m off fogged %.2f as Guerrilla's",
+                  sqrtf((at[0] - g_cameraPosition[0]) * (at[0] - g_cameraPosition[0]) + (at[1] - g_cameraPosition[1]) * (at[1] - g_cameraPosition[1]) +
+                        (at[2] - g_cameraPosition[2]) * (at[2] - g_cameraPosition[2])), fog);
+    DrawFogged(fog, nullptr, [&] { g_coronaDraw(renderer, unused, corona, pass); });
+}
+
+// ---- Armageddon's mission start in our worlds
+
+// Armageddon starts (or starts again) its current mission from F9, one of its developer keys (the key
+// handler 0x4D5580, scan code 0x43, in play), and from the console's mission_start with no name
+// (0x504E50): both call 0x4FD750 (cdecl, none), which builds a `mission_start "<name>"` and runs it.
+// Our worlds have none of Armageddon's missions; there the start trips one of the game's own checks
+// (0xC99A60, "Concurrency bug, another thread using this object pool", from 0x4283FF), whose
+// breakpoint makes the game write its dump and quit (and its exit then crashes in a static
+// destructor, on a lock already deleted). So in our worlds it does nothing but say so.
+constexpr DWORD kStartMission = 0x4FD750;
+constexpr size_t kStartMissionPrologue = 9;  // push ebp / mov ebp,esp / sub esp,344h
+using StartMissionFn = void(__cdecl*)();
+StartMissionFn g_startMission;
+auto const ConsolePrint = reinterpret_cast<void(__cdecl*)(const char* text, int flags)>(0xC7C310);
+
+void __cdecl StartMission() {
+    if (!InOurWorld()) {
+        g_startMission();
+        return;
+    }
+    rfa::Log("Missions: F9 or mission_start would start one of Armageddon's missions, which world \"%s\" hasn't (left alone)", WorldName());
+    ConsolePrint("Guerrilla's world has none of Armageddon's missions to start (F9, mission_start).\n", 0);
 }
 
 // ---- Guerrilla's wind
@@ -7046,6 +7361,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadSharpen();
     ReadSunShadows();
     ReadParticles();
+    ReadParticleFog();
     ReadDust();
     // Our worlds' zone size (and a physics world wide enough for them), and the streaming radii held
     // to what the game can track.
@@ -7143,10 +7459,18 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     // Guerrilla's particle layer (with its tone mapping).
     g_particlePhase = reinterpret_cast<ParticlePhaseFn>(rfa::HookFunction(kParticlePhase, kParticlePhasePrologue, reinterpret_cast<void*>(&ParticlePhase)));
     g_particleLast = reinterpret_cast<ParticleLastFn>(rfa::HookFunction(kParticleLast, kParticlePhasePrologue, reinterpret_cast<void*>(&ParticleLast)));
+    g_fogAtParticles = g_particlePhase != nullptr;
     if (!g_particlePhase || !g_particleLast) {
         rfa::Log("Could not hook the particle phase; the game draws its particles its own way");
         g_particleLayerFailed = true;  // (a hook that did go in only passes through)
     }
+    // Guerrilla's fog on particles and coronas.
+    g_particleDraw = reinterpret_cast<ParticleDrawFn>(rfa::HookFunction(kParticleDraw, kParticleDrawPrologue, reinterpret_cast<void*>(&ParticleDraw)));
+    g_coronaDraw = reinterpret_cast<CoronaDrawFn>(rfa::HookFunction(kCoronaDraw, kCoronaDrawPrologue, reinterpret_cast<void*>(&CoronaDraw)));
+    if (!g_particleDraw || !g_coronaDraw) rfa::Log("Could not hook the particles' draw; they aren't fogged");
+    // Armageddon's mission start (F9, mission_start), left alone in our worlds.
+    g_startMission = reinterpret_cast<StartMissionFn>(rfa::HookFunction(kStartMission, kStartMissionPrologue, reinterpret_cast<void*>(&StartMission)));
+    if (!g_startMission) rfa::Log("Could not hook the mission start; F9 in our worlds still quits the game");
     // Guerrilla's dust, after the game's effects update each frame.
     g_effectsUpdate = reinterpret_cast<EffectsUpdateFn>(rfa::HookFunction(kEffectsUpdate, kEffectsUpdatePrologue, reinterpret_cast<void*>(&EffectsUpdate)));
     if (!g_effectsUpdate) rfa::Log("Could not hook the game's effects update; no dust, and Armageddon's wind");
