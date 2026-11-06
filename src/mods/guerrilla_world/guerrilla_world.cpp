@@ -111,7 +111,7 @@
 // shows when it breaks or is hit), effects.xtbl and vfx.xtbl (the visual effects and their files),
 // and explosions.xtbl (what an object dies in), each Armageddon's with Guerrilla's entries the world
 // uses added under "rfg_" names; and vehicles.xtbl and vehicle_interactions.xtbl, Armageddon's with
-// Guerrilla's vehicles that GuerrillaArsenal.exe made added under their own names; and glass.xtbl
+// Guerrilla's vehicles that GuerrillaBuilder.exe made added under their own names; and glass.xtbl
 // (the colour a pane's shatter is tinted by its texture), Armageddon's with Guerrilla's entries added
 // under our worlds' texture names.
 //
@@ -299,7 +299,7 @@ NamePoolInitFn g_namePoolInit;
 // read at start-up (the visual effects before the effects, which name them, and those before the
 // level objects, which name the effects; the explosions name effects too, and level objects name
 // explosions), and the glass tints. The vehicles and their interactions (where and how people get in; Armageddon's with
-// Guerrilla's added) are written by GuerrillaArsenal.exe, and so are the animation lists their
+// Guerrilla's added) are written by GuerrillaBuilder.exe, and so are the animation lists their
 // animation sets need: the sets (anim_set_filenames.xtbl, read first; each set's own table is a new
 // file the game then finds by name), every animation's triggers and flags (anim_files.xtbl), and the
 // state and action names (anim_states.xtbl, anim_actions.xtbl), each Armageddon's with Guerrilla's added.
@@ -322,6 +322,34 @@ BuiltTable g_builtTables[] = {
     {"anim_states.xtbl", "Animation states", {}},
     {"anim_actions.xtbl", "Animation actions", {}},
     {"glass.xtbl", "Glass tints", {}},
+    // Guerrilla's weapons (GuerrillaBuilder.exe's weapons; each Armageddon's with Guerrilla's added): the
+    // weapons, their items (models in the hand and on the ground; the inventory items name them), their
+    // inventory items, ammo types (Guerrilla's ammo is each weapon's own), and the NPCs' firing patterns
+    // and aim drift where Guerrilla's differ from Armageddon's of the same name. The game reads the
+    // inventory items and items before the weapons, which name them.
+    {"weapons.xtbl", "Weapons", {}},
+    {"items_3d.xtbl", "Items", {}},
+    {"items_inventory.xtbl", "Inventory items", {}},
+    {"ammo.xtbl", "Ammo types", {}},
+    {"weapon_firing_patterns.xtbl", "NPC firing patterns", {}},
+    {"aim_drift.xtbl", "NPC aim drift", {}},
+    {"camera_shake.xtbl", "Camera shakes", {}},  // Guerrilla's weapons' where they differ from Armageddon's of the name
+    // Guerrilla's people (GuerrillaBuilder.exe's people; Armageddon's characters with Guerrilla's added). Their
+    // animation sets go into the four animation lists above, which it shares with the vehicles.
+    {"character.xtbl", "Characters", {}},
+    // Guerrilla's squads (their members as Armageddon names them) and their weapons (loadouts), the
+    // squads its zones' patrols and spawn nodes put down (GuerrillaBuilder.exe).
+    {"squads.xtbl", "Squads", {}},
+    {"squad_loadout.xtbl", "Squad loadouts", {}},
+    // The Guerrilla world's spawn resource (rfg_Default: the people its zones stream in), which every
+    // zone of it names, in place of Armageddon's Default (its aliens and soldiers).
+    {"spawn_resource.xtbl", "Spawn resources", {}},
+    // Guerrilla's human ragdoll (its numbers from its code, in Armageddon's ragdoll table's layout), which
+    // the people's character entries name; the game reads every ragdoll table a character names at start-up.
+    {"ragdoll_rfg_human.xtbl", "Guerrilla's ragdoll", {}},
+    // Guerrilla's player's spine bend and arms (Armageddon's tables name Darius's bones; Mason's entries added).
+    {"spinebend.xtbl", "Spine bends", {}},
+    {"ik_limbs.xtbl", "Limbs", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";
@@ -6170,7 +6198,7 @@ void DustUpdate() {
 
     if (g_dustEffect == -2) {
         g_dustEffect = EffectNumber(kDustEffect);
-        if (g_dustEffect < 0) rfa::Log("Dust: the game has no effect %s (build the world again with this version's GuerrillaWorld.exe); no dust", kDustEffect);
+        if (g_dustEffect < 0) rfa::Log("Dust: the game has no effect %s (build the world again with this version's editor\\GuerrillaBuilder.exe); no dust", kDustEffect);
     }
     if (g_dustEffect < 0) return;
     BYTE* effect = g_dustHandle != -1 ? ObjectFromHandle(kWorld, nullptr, g_dustHandle) : nullptr;
@@ -6761,10 +6789,12 @@ alignas(16) BYTE g_explosions[kMaxExplosions * kExplosionSize];  // the new tabl
 // preloaded effects take 1,175, and the effects our worlds stream in with their zones passed the rest:
 // an emitter that finds the pool full is set up without one (0xB6FBAB) and never draws while its effect
 // stays loaded (flames, smoke or sparks missing without a word; the game's debug overlay reports
-// "Maximum ...'s exceeded, max is 1900"). The mod gives it room for 4,096 (0x18 bytes each).
+// "Maximum ...'s exceeded, max is 1900"). Worse, the template's load then uses the emitter's missing
+// one unchecked (0xB6FE60) and the game crashes: at rfg_10_08 once the effect templates were no longer
+// held to 350 (2026-11-06). The mod gives it room for 16,384 (0x18 bytes each; 4,096 until then).
 constexpr DWORD kParticlePoolSize = 0x7677AB;   // the push's value
 constexpr DWORD kParticlePoolSet = 0x306EE8C;  // where the setup stores it
-constexpr DWORD kGameParticlePool = 1900, kParticlePool = 4096;
+constexpr DWORD kGameParticlePool = 1900, kParticlePool = 16384;  // 4096 filled at rfg_10_08 with the templates at 1024 (2026-11-06)
 
 void MoreParticleRoom() {
     if (rfa::CodeValue(kParticlePoolSize) != kGameParticlePool) {
@@ -6781,6 +6811,79 @@ void MoreParticleRoom() {
         rfa::Log("Particles: room for %lu emitters (the game's %lu)", kParticlePool, kGameParticlePool);
 }
 
+// ---- Room for more effect templates
+
+// Each effect file the game loads (.cefct_pc: its own, and the Guerrilla world's, vehicles' and
+// weapons') becomes a template from one pool, "vfx_effect_template": 350 of 0x1C bytes. The pool
+// object is at 0x26BF43C, set up by the start-up constructor 0xF58190 (0xB6BF70: +8 its name, +0xC
+// the name's hash, +0x10 the size 0x1C, +0x14 its init 0xB6C0A0, +0x1C the count from push 15Eh, so
+// the count is 0x26BF458). The game makes its memory pools in one go (0xD2E740, from 0xD2E5C4, after
+// the mods load): it adds up count × size of every registered pool (the list at 0x2E7A6AC), allocates
+// one block of that size (0xA509F0), and calls each pool's init (+0x14) with an allocator over it
+// (0x2E7A710); the template pool's init allocates count × 0x1C from it and lists them all free. When
+// the pool is empty, the template's allocation (0xB6C120) gives none and the effect-file loader
+// (0xB5AC10) calls into it at 0xB5AC28: the game crashes. Armageddon's own preloaded effects take about
+// 200 and the Guerrilla world's 150 more; a zone's characters loading theirs filled it (a crash at
+// rfg_10_08 after 300-odd effect files, 2026-11-06). The mod wraps the pools' set-up and raises the
+// count before it adds up the sizes, so the block and the pool are both made for 1024 (a value in the
+// game's data, not its code; raising it any later would make the pool bigger than its share of the block).
+//
+// The emitters of the effects those templates hold come from pools of their own, made the same way: a
+// template's load gives each emitter a "renderable particles" object (0xD5EDC0 from 0x306EE70, the pool
+// the renderer sizes itself, see "Room for more particle emitters") and, with none left, sets the
+// emitter up without one (0xB6FBAB) and then uses it unchecked (0xB6FE60, from 0xB6FF60): a crash at
+// rfg_10_08 once the templates were no longer held to 350 (2026-11-06; 0x47CE1B writing 0x44). So the
+// effect family's other pools are raised with the templates, threefold, each checked by its name (+8)
+// and the game's count before it is changed: the emitter and filter instances, the mesh and renderable
+// filter instances and each kind of particle filter, and the renderer's particle instances and groups.
+constexpr DWORD kMemoryPoolsSetUp = 0xD2E740;
+constexpr size_t kMemoryPoolsSetUpPrologue = 6;  // push ebp / mov ebp,esp / sub esp,1Ch
+constexpr DWORD kPoolName = 0x08, kPoolCount = 0x1C;  // a pool object's name and count
+struct PoolRoom {
+    DWORD pool;  // the pool object (its start-up constructor's `mov ecx,...`)
+    const char* name;
+    DWORD game, ours;
+};
+const PoolRoom kPoolRooms[] = {
+    {0x26BF43C, "vfx_effect_template", 350, 1024},                         // 0x1C bytes each
+    {0x26BF3D8, "vfx_particle_system_emitter_instance", 1600, 4800},       // 0x194
+    {0x26BF470, "vfx_renderable_filter_instance", 200, 600},               // 0xC0
+    {0x26BF4A4, "vfx_particle_system_filter_instance", 500, 1500},         // 0xCC
+    {0x26BF4D8, "vfx_mesh_instance", 512, 1536},                           // 0x2C
+    {0x26BF50C, "vfx_particle_system_filter_wind", 50, 150},               // 0x7C
+    {0x26BF540, "vfx_particle_system_filter_gravity", 5, 15},              // 0x54
+    {0x26BF574, "vfx_particle_system_filter_magnet", 200, 600},            // 0x5C
+    {0x26BF5A8, "vfx_particle_system_filter_turbulence", 100, 300},        // 0x5C
+    {0x26BF5DC, "vfx_particle_system_filter_vortex", 10, 30},              // 0x54
+    {0x26BF610, "vfx_particle_system_filter_orientor", 100, 300},          // 0x4C
+    {0x2DD7FD0, "rl_renderable_particles_instance", 1600, 4800},           // 0xF4
+    {0x3073684, "rl_renderable_particles_instance_group", 512, 1536},      // 0x140
+};
+using MemoryPoolsSetUpFn = void(__cdecl*)();
+MemoryPoolsSetUpFn g_memoryPoolsSetUp;
+
+void __cdecl MemoryPoolsSetUp() {
+    for (const PoolRoom& room : kPoolRooms) {
+        const char* name = *reinterpret_cast<const char* const*>(room.pool + kPoolName);
+        DWORD& count = *reinterpret_cast<DWORD*>(room.pool + kPoolCount);
+        if (!name || strcmp(name, room.name) != 0)
+            rfa::Log("Effect pools: the pool at 0x%08lX isn't %s; left as it is", room.pool, room.name);
+        else if (count != room.game)
+            rfa::Log("Effect pools: %s holds %lu, not the game's %lu; left as it is", room.name, count, room.game);
+        else {
+            count = room.ours;
+            rfa::Log("Effect pools: %s holds %lu (the game's %lu)", room.name, room.ours, room.game);
+        }
+    }
+    g_memoryPoolsSetUp();
+}
+
+void MoreEffectTemplateRoom() {
+    g_memoryPoolsSetUp = reinterpret_cast<MemoryPoolsSetUpFn>(
+        rfa::HookFunction(kMemoryPoolsSetUp, kMemoryPoolsSetUpPrologue, reinterpret_cast<void*>(&MemoryPoolsSetUp)));
+    if (!g_memoryPoolsSetUp) rfa::Log("Effect pools: could not wrap the memory pools' set-up; the game keeps its own sizes (more effects can crash it)");
+}
+
 // ---- Room for more visual effects
 
 // The game keeps every visual effect vfx.xtbl describes (and a DLC level's, while it's loaded) in a
@@ -6791,8 +6894,8 @@ void MoreParticleRoom() {
 // and the start-up constructor (0xF1C8B0) builds its entries with 0x4EF6A0 (+0x94 = -1). The mod
 // moves it to a table of 2048, builds the new entries with that constructor itself (in case the
 // game's start-up constructor already ran), and the world builder fills to the same
-// (GuerrillaEffectTables.VisualLimit). The effects (effects.xtbl) are in a pool of their own, built
-// into a bigger object, with room for Guerrilla's as it is (1224).
+// (GuerrillaEffectTables.VisualLimit). The effects (effects.xtbl) are in a table of their own, found
+// by name through a lookup of their own: see "Room for more effects".
 constexpr DWORD kVisuals = 0x121FDE8;
 constexpr DWORD kVisualSize = 0xB4;
 constexpr DWORD kGameMaxVisuals = 950;
@@ -6811,6 +6914,206 @@ void MoveVisuals() {
     }
     for (DWORD i = 0; i < kMaxVisuals; ++i) BuildVisual(g_visuals + i * kVisualSize, nullptr);
     rfa::MoveTable("Visual effects", kVisuals, kVisualSize, kGameMaxVisuals, kVisualReferences, kVisualLimits, g_visuals, kMaxVisuals);
+}
+
+// ---- Room for more effects
+
+// The game keeps every effect effects.xtbl describes (and a DLC level's, while it's loaded) in a
+// table of 1225 (0x68 bytes each from 0x1200C40, how many at 0x1200BEC; the entry reader 0x4EE950
+// stops at cmp [1200BECh],4C9h). Armageddon's own are 1112 and the world's objects add about 100, so
+// Guerrilla's vehicles' fire, smoke, exhaust and explosions (and later its lights and weapons) don't
+// fit. Seven places in the game's code hold the table's address (the reader, the DLC level's unload,
+// the look-ups by name and number, an effect host reading an entry's +0x44, the start-up constructor
+// 0xF1C890, which builds the entries with 0x4EF790), and two its size: the mod moves it to a table of
+// 4096, as the visual effects.
+//
+// The game finds an effect by its name through a lookup of its own at 0x124BBE0 (the effect entry's
+// name → the entry), and a loaded effect file through another of the same kind at 0x11E9EF8 (the
+// file's name, copied → its template): a hash table with 1225 places built into each object (a 16-bit
+// free list head at +4, 1225 buckets at +6, the chains at +0x998, the names at +0x132C, the values at
+// +0x2650, the file map's copied names at +0x3974), whose methods reach those by displacement. Only
+// those two objects use the class (its two constructors are called only by the start-up code for
+// them, 0xF1C6B0 and 0xF1C8F0), and nothing else reaches its arrays. So the mod replaces the class's
+// methods with its own, which keep each object's names in a lookup of 4096 here: the same kind of
+// hash (h × 33 ^ the lower-case letter), names compared as the game compares them (the same pointer,
+// or the same letters in any case), a name already there refused (the first one stays), a removal
+// taking the first match, a look-up that misses leaving the answer as it was. The game's start-up
+// constructors still run, and their clearing (0x4EDB50) is ours. The methods are __thiscall with the
+// callee popping its arguments: __fastcall here, with EDX unused.
+constexpr DWORD kEffects = 0x1200C40;
+constexpr DWORD kEffectSize = 0x68;
+constexpr DWORD kGameMaxEffects = 1225;
+constexpr DWORD kEffectCount = 0x1200BEC;
+constexpr DWORD kEffectReferences[] = {0x4EEA67, 0x4EF304, 0x4EF33F, 0x4EF3B8, 0x4EF3D7, 0x8EA4FF, 0xF1C8A0};
+constexpr DWORD kEffectLimits[] = {0x4EEA51, 0xF1C899};  // the entry reader's check, the constructor's push 4C9h
+constexpr DWORD kMaxEffects = 4096;
+alignas(16) BYTE g_effects[kMaxEffects * kEffectSize];  // the new table, filled by the game
+auto const BuildEffect = reinterpret_cast<void*(__fastcall*)(void* effect, void* unused)>(0x4EF790);
+
+constexpr DWORD kEffectNames = 0x124BBE0;  // effects.xtbl names → effect entries (the names are the entries')
+constexpr DWORD kEffectFiles = 0x11E9EF8;  // loaded effect files → their templates (the names copied)
+
+// The class's methods (each one's arguments after `this`; what it gives back).
+constexpr DWORD kLookupContains = 0x4ED1D0;      // (name) → bool
+constexpr DWORD kLookupRemove = 0x4ED220;        // (name) → its place (unused)
+constexpr DWORD kLookupFind = 0x4ED320;          // (name, value*) → bool
+constexpr DWORD kLookupInsertCopy = 0x4ED380;    // (name, const value*) → bool: the name copied (the file map)
+constexpr DWORD kLookupInsert = 0x4EF4B0;        // (name, const value*) → bool: the name kept as given
+constexpr DWORD kLookupClear = 0x4EDB50;         // ()
+// The ones only the table's own (replaced) methods, or its never-called virtual slots, reach: given
+// stand-ins that say so, rather than left working on the game's arrays, which these no longer fill.
+constexpr DWORD kLookupInsertKey = 0x4ED8D0;     // (name) → bool, a virtual slot
+constexpr DWORD kLookupSave = 0x4ED900;          // (stream) → bool, a virtual slot
+constexpr DWORD kLookupSaveInner = 0x4ED9C0;     // (stream) → bool
+
+constexpr int kLookupPlaces = 4096, kLookupBuckets = 4099, kNameLength = 64;
+constexpr WORD kNone = 0xFFFF;
+struct NameLookup {
+    bool ready;
+    WORD free;                         // the first free place, kNone when full
+    WORD buckets[kLookupBuckets];      // each bucket's first place
+    WORD next[kLookupPlaces];          // the next place in its bucket (or the next free one)
+    const char* names[kLookupPlaces];
+    void* values[kLookupPlaces];
+    char copied[kLookupPlaces][kNameLength];  // the file map's names
+};
+NameLookup g_effectNames, g_effectFiles;
+
+void ClearLookup(NameLookup& t) {
+    t.free = 0;
+    for (WORD& b : t.buckets) b = kNone;
+    for (int i = 0; i < kLookupPlaces; ++i) t.next[i] = static_cast<WORD>(i + 1 < kLookupPlaces ? i + 1 : kNone);
+    t.ready = true;
+}
+
+NameLookup* LookupOf(const void* object) {
+    NameLookup* t = reinterpret_cast<DWORD>(object) == kEffectNames ? &g_effectNames
+                  : reinterpret_cast<DWORD>(object) == kEffectFiles ? &g_effectFiles : nullptr;
+    if (!t) {
+        RFA_LOG_FIRST(8, "Effects: a name lookup the mod doesn't know (0x%08lX) used the effects' methods; it finds nothing",
+                      reinterpret_cast<DWORD>(object));
+        return nullptr;
+    }
+    if (!t->ready) ClearLookup(*t);
+    return t;
+}
+
+int Bucket(const char* name) {
+    unsigned h = 0;
+    for (const char* c = name; *c; ++c) h = h * 33 ^ static_cast<unsigned char>(tolower(static_cast<unsigned char>(*c)));
+    return static_cast<int>(h % kLookupBuckets);
+}
+
+bool SameName(const char* a, const char* b) { return a == b || _stricmp(a, b) == 0; }
+
+// The place holding `name`, or kNone.
+WORD PlaceOf(const NameLookup& t, const char* name) {
+    for (WORD at = t.buckets[Bucket(name)]; at != kNone; at = t.next[at])
+        if (SameName(t.names[at], name)) return at;
+    return kNone;
+}
+
+// A free place with `name` and `value` in it, or kNone if the name is there already or none is free.
+WORD Add(NameLookup& t, const char* name, void* value) {
+    if (!name || PlaceOf(t, name) != kNone) return kNone;
+    const WORD at = t.free;
+    if (at == kNone) {
+        RFA_LOG_FIRST(4, "Effects: a name lookup is full (%d); %s was left out", kLookupPlaces, name);
+        return kNone;
+    }
+    t.free = t.next[at];
+    const int b = Bucket(name);
+    t.next[at] = t.buckets[b];
+    t.buckets[b] = at;
+    t.names[at] = name;
+    t.values[at] = value;
+    return at;
+}
+
+bool __fastcall LookupContains(void* object, void*, const char* name) {
+    const NameLookup* t = LookupOf(object);
+    return t && name && PlaceOf(*t, name) != kNone;
+}
+
+WORD __fastcall LookupRemove(void* object, void*, const char* name) {
+    NameLookup* t = LookupOf(object);
+    if (!t || !name) return kNone;
+    const int b = Bucket(name);
+    for (WORD* link = &t->buckets[b]; *link != kNone; link = &t->next[*link]) {
+        const WORD at = *link;
+        if (!SameName(t->names[at], name)) continue;
+        *link = t->next[at];
+        t->next[at] = t->free;
+        t->free = at;
+        return at;
+    }
+    return kNone;
+}
+
+bool __fastcall LookupFind(void* object, void*, const char* name, void** value) {
+    const NameLookup* t = LookupOf(object);
+    if (!t || !name) return false;
+    const WORD at = PlaceOf(*t, name);
+    if (at == kNone) return false;
+    *value = t->values[at];
+    return true;
+}
+
+bool __fastcall LookupInsert(void* object, void*, const char* name, void* const* value) {
+    NameLookup* t = LookupOf(object);
+    return t && value && Add(*t, name, *value) != kNone;
+}
+
+bool __fastcall LookupInsertCopy(void* object, void*, const char* name, void* const* value) {
+    NameLookup* t = LookupOf(object);
+    if (!t || !value) return false;
+    const WORD at = Add(*t, name, *value);
+    if (at == kNone) return false;
+    strncpy_s(t->copied[at], name, _TRUNCATE);  // as the game's, at most 63 letters
+    t->names[at] = t->copied[at];
+    return true;
+}
+
+void __fastcall LookupClear(void* object, void*) {
+    if (NameLookup* t = LookupOf(object)) ClearLookup(*t);
+}
+
+bool __fastcall LookupUnused(void* object, void*, void*) {
+    RFA_LOG_FIRST(4, "Effects: a name lookup method the game wasn't seen to use was called (0x%08lX); it does nothing",
+                  reinterpret_cast<DWORD>(object));
+    return false;
+}
+
+void MoreEffectRoom() {
+    if (*reinterpret_cast<const int*>(kEffectCount) != 0) {
+        rfa::Log("Effects: the game has already read some; it keeps its %lu", kGameMaxEffects);
+        return;
+    }
+    // The lookups first: without room for the names, more entries would be read but never found.
+    const struct { DWORD address; const void* ours; } methods[] = {
+        {kLookupContains, reinterpret_cast<const void*>(&LookupContains)}, {kLookupRemove, reinterpret_cast<const void*>(&LookupRemove)},
+        {kLookupFind, reinterpret_cast<const void*>(&LookupFind)}, {kLookupInsertCopy, reinterpret_cast<const void*>(&LookupInsertCopy)},
+        {kLookupInsert, reinterpret_cast<const void*>(&LookupInsert)}, {kLookupClear, reinterpret_cast<const void*>(&LookupClear)},
+        {kLookupInsertKey, reinterpret_cast<const void*>(&LookupUnused)}, {kLookupSave, reinterpret_cast<const void*>(&LookupUnused)},
+        {kLookupSaveInner, reinterpret_cast<const void*>(&LookupUnused)},
+    };
+    // Each method starts as the game's do (push ebp / mov ebp,esp): checked before any is changed.
+    for (const auto& m : methods) {
+        const BYTE* code = reinterpret_cast<const BYTE*>(m.address);
+        if (code[0] != 0x55 || code[1] != 0x8B || code[2] != 0xEC) {
+            rfa::Log("Effects: the game's name lookup at 0x%08lX isn't as expected; the game keeps its %lu effects", m.address, kGameMaxEffects);
+            return;
+        }
+    }
+    for (const auto& m : methods) {
+        if (!rfa::ReplaceFunction(m.address, m.ours)) {
+            rfa::Log("Effects: could not replace the game's name lookup at 0x%08lX (some already are: effects may not be found)", m.address);
+            return;
+        }
+    }
+    rfa::Log("Effects: the two name lookups (effects, effect files) hold %d names each (the game's 1225)", kLookupPlaces);
+    for (DWORD i = 0; i < kMaxEffects; ++i) BuildEffect(g_effects + i * kEffectSize, nullptr);
+    rfa::MoveTable("Effects", kEffects, kEffectSize, kGameMaxEffects, kEffectReferences, kEffectLimits, g_effects, kMaxEffects);
 }
 
 // Guerrilla's material shaders. The world builder rewrites them for Armageddon's renderer as effect
@@ -7329,7 +7632,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     rfa::MoveTable("Explosions", kExplosions, kExplosionSize, kGameMaxExplosions, kExplosionReferences, kExplosionLimits, g_explosions,
                    kMaxExplosions);
     MoveVisuals();
+    MoreEffectRoom();
     MoreParticleRoom();
+    MoreEffectTemplateRoom();
     g_loadShaders = reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
     if (!g_loadShaders) rfa::Log("Could not add Guerrilla's material shaders to the game's; materials using them draw red");
     // Guerrilla's undergrowth: its random scatter with the pieces on the ground (see RandomlyPlace).

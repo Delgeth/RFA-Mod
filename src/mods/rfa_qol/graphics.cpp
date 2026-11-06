@@ -1,9 +1,11 @@
 // A Graphics window in the in-game menus (rfa_menu.h). A part of rfa_qol.dll. Press F7 (or open the
 // console), then Graphics in the bar along the bottom of the screen: sliders and switches for the
 // picture of the world ported from Guerrilla, the [GuerrillaWorld] settings in rfa_mods.ini marked
-// (live). Letting go of a slider, or ticking a box, saves that one line of rfa_mods.ini, and
-// guerrilla_world reads the file again within a second, so the change shows while you look at it.
-// The window reads the settings again whenever the file is saved, so it shows edits made by hand too.
+// (live), and Mason's Nano Forge light ([GuerrillaPeople] MasonNanoLight, which shows the next time the
+// game makes him). Letting go of a slider, or ticking a box, saves that one line of rfa_mods.ini, and
+// guerrilla_world (guerrilla_people) reads the file again within a second, so the change shows while
+// you look at it. The window reads the settings again whenever the file is saved, so it shows edits
+// made by hand too.
 #define RFA_MOD_NAME "graphics"
 #include "rfa_mod.h"
 #include "rfa_menu.h"
@@ -31,6 +33,7 @@ struct Switch {
     bool fallback;
     const char* about;
     bool value;
+    const wchar_t* section = kSection;  // another mod's ([GuerrillaPeople]): not reset by "Guerrilla's look"
 };
 
 Slider g_sliders[] = {
@@ -54,14 +57,17 @@ Switch g_switches[] = {
     {L"Particles", "Particles as Guerrilla's", true, "With its tone mapping: fire and smoke in a layer of their own, keeping their colours", false},
     {L"ParticleFog", "Fogged particles", true, "Smoke, fire and explosions fade into the haze far off, as Guerrilla's", false},
     {L"Dust", "Dust on the wind", true, "Guerrilla's dust blowing round you, thicker the stronger the wind", false},
+    {L"MasonNanoLight", "Mason's Nano Forge light", true,
+     "The always-on cyan glow at his left forearm, as Armageddon's player has it. Off = as Guerrilla's Mason. "
+     "Shows the next time he is made: load the level again", false, L"GuerrillaPeople"},
 };
 
 bool g_open = false;
 FILETIME g_iniWritten = {};   // when rfa_mods.ini was last saved, as last read
 ULONGLONG g_lastCheck = 0;    // when that was last looked at
 
-float ReadValue(const wchar_t* key, float fallback) {
-    const std::wstring text = rfa::IniString(kSection, key);
+float ReadValue(const wchar_t* key, float fallback, const wchar_t* section = kSection) {
+    const std::wstring text = rfa::IniString(section, key);
     return text.empty() ? fallback : static_cast<float>(_wtof(text.c_str()));
 }
 
@@ -71,7 +77,7 @@ void ReadAll() {
         if (slider.value < slider.min) slider.value = slider.min;
         if (slider.value > slider.max) slider.value = slider.max;
     }
-    for (Switch& option : g_switches) option.value = ReadValue(option.key, option.fallback ? 1.0f : 0.0f) != 0;
+    for (Switch& option : g_switches) option.value = ReadValue(option.key, option.fallback ? 1.0f : 0.0f, option.section) != 0;
 }
 
 // Once a second, while no slider is held: if rfa_mods.ini was saved since (by this window, or by
@@ -87,8 +93,8 @@ void ReadIfSaved() {
     ReadAll();
 }
 
-void Save(const wchar_t* key, const wchar_t* text) {
-    if (!WritePrivateProfileStringW(kSection, key, text, rfa::IniPath().c_str()))
+void Save(const wchar_t* key, const wchar_t* text, const wchar_t* section = kSection) {
+    if (!WritePrivateProfileStringW(section, key, text, rfa::IniPath().c_str()))
         rfa::Log("Could not save %ls=%ls in rfa_mods.ini (error %lu)", key, text, GetLastError());
 }
 
@@ -99,7 +105,7 @@ void Save(const Slider& slider) {
     Save(slider.key, text);
 }
 
-void Save(const Switch& option) { Save(option.key, option.value ? L"1" : L"0"); }
+void Save(const Switch& option) { Save(option.key, option.value ? L"1" : L"0", option.section); }
 
 void DrawWindow() {
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 24, 0), ImGuiCond_FirstUseEver);
@@ -128,13 +134,14 @@ void DrawWindow() {
             Save(slider);
         }
         for (Switch& option : g_switches) {
+            if (option.section != kSection) continue;  // another mod's choice, not the world's look
             option.value = option.fallback;
             Save(option);
         }
     }
-    ImGui::SetItemTooltip("Every setting here back to its default");
+    ImGui::SetItemTooltip("Every setting here back to its default (but Mason's Nano Forge light)");
     ImGui::SameLine();
-    ImGui::TextDisabled("Saved in rfa_mods.ini, [GuerrillaWorld]");
+    ImGui::TextDisabled("Saved in rfa_mods.ini, [GuerrillaWorld] (Mason's light: [GuerrillaPeople])");
     ImGui::End();
 }
 

@@ -16,7 +16,12 @@
 //   animation entries  the game's animation entries, 0x25CD738, size in `cmp [25CD738h],1080h` at 0x95DCFA (4224)
 //   explosions         the explosion table, 0x1893498, size in `cmp [1893498h],84h` at 0x6E9D00 (132)
 //   visual effects     the visual effects, 0x1200BF4, size in `cmp [1200BF4h],3B6h` at 0x4EE40A (950)
+//   effects            the effects, 0x1200BEC, size in `cmp [1200BECh],4C9h` at 0x4EEA51 (1225)
+//   inventory items    the inventory item types, 0x19F8570, size in `cmp [19F8570h],55h` at 0x7A77F0: a one-byte
+//                      value at 0x7A77F6 (85; guerrilla_gear raises it to 127)
 //   vehicle slots      the vehicle pool 0x1972900: taken of the slots it holds (+0x10; 0x7612F0 the free)
+//   animation names    the "Anim strings" pool 0x2684EC8: bytes used (+0x4C) of its size (+0x44; 128 KB,
+//                      guerrilla_people gives it 512 KB): every animation's, set's, state's and action's name
 #define RFA_MOD_NAME "limits"
 #include "rfa_mod.h"
 #include "rfa_menu.h"
@@ -25,6 +30,7 @@
 namespace {
 
 int ValueAt(DWORD address) { return *reinterpret_cast<const volatile int*>(address); }
+int ByteAt(DWORD address) { return *reinterpret_cast<const volatile signed char*>(address); }
 
 struct Limit {
     const char* what;
@@ -33,6 +39,7 @@ struct Limit {
     int fixed;          // the size, when `size` is 0
     int game;           // the game's own size
     const char* about;  // what fills it
+    int width = 4;      // how many bytes the size in the game's code takes: 4, or 1 (a one-byte value in an instruction)
 };
 
 const Limit kLimits[] = {
@@ -42,8 +49,12 @@ const Limit kLimits[] = {
     {"Animation triggers", 0x34C6D68, 0xD89D4F, 0, 5750, "Every animation's triggers (doors, feet, camera), from anim_files.xtbl"},
     {"Library animations", 0x34B2C10, 0xD87682, 0, 4500, "Every animation the animation library knows"},
     {"Animation entries", 0x25CD738, 0x95DCFA, 0, 4224, "The game's entries for anim_files.xtbl"},
+    {"Animation names (bytes)", 0x2684EC8 + 0x4C, 0x2684EC8 + 0x44, 0, 0x20000,
+     "Every animation's, set's, state's and action's name; full, the game stops while it starts"},
     {"Explosions", 0x1893498, 0x6E9D00, 0, 132, "explosions.xtbl and the DLCs'"},
     {"Visual effects", 0x1200BF4, 0x4EE40A, 0, 950, "vfx.xtbl: Armageddon's, Guerrilla's props', and a DLC level's while it's loaded"},
+    {"Effects", 0x1200BEC, 0x4EEA51, 0, 1225, "effects.xtbl: Armageddon's, Guerrilla's props' and vehicles', and a DLC level's while it's loaded"},
+    {"Inventory items", 0x19F8570, 0x7A77F6, 0, 85, "items_inventory.xtbl: one for each weapon you can carry (Armageddon's, Guerrilla's), and a DLC level's while it's loaded", 1},
 };
 
 BYTE* const kVehiclePool = reinterpret_cast<BYTE*>(0x1972900);
@@ -81,7 +92,8 @@ void DrawWindow() {
         ImGui::TableSetupColumn("Used", ImGuiTableColumnFlags_WidthStretch, 2.0f);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         for (const Limit& limit : kLimits)
-            Row(limit.what, ValueAt(limit.count), limit.size ? ValueAt(limit.size) : limit.fixed, limit.game, limit.about);
+            Row(limit.what, ValueAt(limit.count), !limit.size ? limit.fixed : limit.width == 1 ? ByteAt(limit.size) : ValueAt(limit.size),
+                limit.game, limit.about);
         const int slots = ValueAt(reinterpret_cast<DWORD>(kVehiclePool) + kPoolSlots);
         if (slots > 0)
             Row("Vehicle slots", slots - PoolRoom(kVehiclePool, nullptr), slots, slots,

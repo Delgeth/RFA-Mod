@@ -39,9 +39,14 @@ namespace RfaFormats.Guerrilla;
 ///                              the same order
 ///   MOPP table and trees (16)  the same: an offset or −1 for each collision shape, then the trees
 ///                              (Volition's own "MOPP" wrapper, the same in both games)
-/// Every offset is moved to where its target lands. Not carried over: the morph target that dents a
-/// Guerrilla vehicle (46 of its 74 have one; none of Armageddon's 17 does, so the converted vehicle
-/// keeps its shape), and tracked vehicles' splines (their files are refused for now).
+/// Every offset is moved to where its target lands. The morph target that dents a Guerrilla vehicle
+/// (46 of its 74 have one, "0x0BADBEEF" version 2, between the texture names and the collision) is
+/// carried over as it is: Armageddon's vehicle loader still reads it (0x622110 → 0xD40580, which wants
+/// exactly that version) and makes the vehicle's dent container when vehicle_deformation_enabled is on
+/// (0x142A484, off in Armageddon; the guerrilla_vehicles mod turns it on, Guerrilla's default). None of
+/// Armageddon's 17 has one. The deformed morph targets (header +0x88, parts +0xA8) are 0 or −1 in every
+/// Guerrilla file: filled at run time, written −1. Not carried over: tracked vehicles' splines (their
+/// files are refused for now).
 /// </summary>
 public static class GuerrillaVehicles
 {
@@ -219,7 +224,7 @@ public static class GuerrillaVehicles
         o.Put(0x28, newMaterialMap);
         o.Put(0x2C, newMaterialList);
         o.Put(0x34, newNames);
-        o.Put(0x38, 0);                              // no morph target
+        o.Put(0x38, Offset(I(0x38)));                // the morph target (dents), in "the rest" above
         o.Put(0xD4, Moved(I(0x44)));                 // the chassis's tags
         o.Put(0x118, -1);                            // no deformed morph target
         if (I(0x8C) > 0) o.Put(0x120, Moved(I(0x90)));

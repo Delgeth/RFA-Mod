@@ -29,7 +29,9 @@ cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\rfa_qol\*.cpp" %IMGUI_CORE%
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%ROOT%bin\mods\guerrilla_world.dll" /link /IMPLIB:guerrilla_world.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_hud\guerrilla_hud.cpp" /Fe"%ROOT%bin\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\guerrilla_vehicles.cpp" /Fe"%ROOT%bin\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib || goto :fail
-rem guerrilla_hud's scripts, which editor\GuerrillaHud.exe packs with Guerrilla's HUD documents.
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\guerrilla_people.cpp" /Fe"%ROOT%bin\mods\guerrilla_people.dll" /link /IMPLIB:guerrilla_people.lib || goto :fail
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_gear\guerrilla_gear.cpp" /Fe"%ROOT%bin\mods\guerrilla_gear.dll" /link /IMPLIB:guerrilla_gear.lib || goto :fail
+rem guerrilla_hud's scripts, which editor\GuerrillaBuilder.exe packs with Guerrilla's HUD documents.
 xcopy /i /y /q "%ROOT%src\mods\guerrilla_hud\*.lua" "%ROOT%bin\mods\guerrilla_hud" >nul || goto :fail
 
 popd
@@ -53,12 +55,10 @@ rem editor too and build it 32-bit, with 2 GB of memory: too little for big leve
 set Platform=
 where dotnet >nul 2>nul || (echo Skipping the editor: the .NET 10 SDK is not installed & goto :done)
 dotnet build "%ROOT%src\editor\RfaEditor\RfaEditor.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
-rem GuerrillaHud.exe, next to the editor: makes Guerrilla's HUD for guerrilla_hud from your copy of Guerrilla.
-dotnet build "%ROOT%src\editor\GuerrillaHud\GuerrillaHud.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
-rem GuerrillaWorld.exe, next to the editor: builds the world rfg for guerrilla_world from your copy of Guerrilla.
-dotnet build "%ROOT%src\editor\GuerrillaWorld\GuerrillaWorld.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
-rem GuerrillaArsenal.exe, next to the editor: makes Guerrilla's vehicles usable from your copy of Guerrilla.
-dotnet build "%ROOT%src\editor\GuerrillaArsenal\GuerrillaArsenal.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
+rem GuerrillaBuilder.exe, next to the editor: makes Guerrilla's world, HUD, vehicles, weapons and people
+rem usable from your copy of Guerrilla. It took the place of four programs, whose files go from bin\editor.
+for %%t in (GuerrillaWorld GuerrillaHud GuerrillaArsenal GuerrillaPeople) do for %%e in (exe dll deps.json runtimeconfig.json pdb) do if exist "%ROOT%bin\editor\%%t.%%e" del /q "%ROOT%bin\editor\%%t.%%e"
+dotnet build "%ROOT%src\editor\GuerrillaBuilder\GuerrillaBuilder.csproj" -c Release -o "%ROOT%bin\editor" --artifacts-path "%ROOT%build\editor" -v q -nologo || goto :fail
 
 :done
 echo Build OK: %ROOT%bin

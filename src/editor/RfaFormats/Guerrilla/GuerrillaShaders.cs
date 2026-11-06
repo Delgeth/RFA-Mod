@@ -14,7 +14,8 @@ namespace RfaFormats.Guerrilla;
 /// (its Oasis roofs), the number the UV sets past the first their meshes have, then
 /// "c" for alpha-tested materials (cut-outs) and "b" for blended ones; each as _s (still meshes) and
 /// _bs (instanced ones), and the glass also as _c (skinned: the game draws a pane's flying shards with
-/// its material's _c effect, and won't shatter glass whose shader has none). They go with
+/// its material's _c effect, and won't shatter glass whose shader has none), and gw_brdf0,
+/// gw_standard0 and gw_standard0c as _c for the people and the character-mesh items (see <see cref="WriteSkinned"/>). They go with
 /// the world's other new files (overrides\build\pc\cache\), and the guerrilla_world mod has the game
 /// load them after its own (the game only loads the effect files inside its archives).
 ///
@@ -104,25 +105,56 @@ public static class GuerrillaShaders
     /// </summary>
     public static List<string> Write(string armageddonCache, string output)
     {
-        string source = Source();
         var misc = Packfile.Open(Path.Combine(armageddonCache, "misc.vpp_pc"));
+        var written = WriteModels(misc, output, [("s", false, false), ("bs", true, false), ("c", false, true)]);
+        written.AddRange(WriteTerrain(misc, output));
+        return written;
+    }
+
+    /// <summary>
+    /// Writes only the skinned (_c) effects into <paramref name="output"/>, the ones the people's materials
+    /// (character meshes, GuerrillaPeople) and the glass's flying shards name; the same files
+    /// <see cref="Write"/> writes among the others. Returns the files' names.
+    /// </summary>
+    public static List<string> WriteSkinned(string armageddonCache, string output) =>
+        WriteModels(Packfile.Open(Path.Combine(armageddonCache, "misc.vpp_pc")), output, [("c", false, true)]);
+
+    /// <summary>
+    /// The families written skinned: the glass (its shards), the BRDF ones (the people's clothes, skin and
+    /// eyes) and the standard ones (rfg-nodecal: clothes, props, the character-mesh guns and gear;
+    /// Guerrilla's skinned and still versions have the same pixel shader), with no UV set past the first
+    /// (character meshes have one, mostly): opaque, and the standard ones alpha-tested too (Mason's
+    /// eyelashes; their depth and G-buffer passes skinned as well, on Armageddon's ir_at_default_c's
+    /// layout). Blended skinned materials aren't written yet.
+    /// </summary>
+    static bool Skinned(Family family) => family is Family.Glass or Family.EosGlass or Family.Brdf or Family.Standard;
+    /// <summary>Whether <see cref="WriteSkinned"/> writes the rewrite a skinned material of this family, layers and variant is drawn with.</summary>
+    internal static bool CanSkin(Family family, int layers, Variant variant) =>
+        Skinned(family) && SkinnedLayersOf(family).Contains(layers) && SkinnedVariantsOf(family).Contains(variant);
+    static int[] SkinnedLayersOf(Family family) => family is Family.Brdf or Family.Standard ? [0] : LayersOf(family);
+    static Variant[] SkinnedVariantsOf(Family family) => family switch
+    {
+        Family.Brdf => [Variant.Plain],
+        Family.Standard => [Variant.Plain, Variant.CutOut],
+        _ => VariantsOf(family),
+    };
+
+    static List<string> WriteModels(Packfile misc, string output, (string Suffix, bool Instanced, bool Skinned)[] kinds)
+    {
+        string source = Source();
         var written = new List<string>();
-        foreach (var (suffix, instanced, skinned) in new[] { ("s", false, false), ("bs", true, false), ("c", false, true) })
+        foreach (var (suffix, instanced, skinned) in kinds)
         {
             string baseName = $"ir_default_{suffix}.fxo_pc_dx11";
             var entry = misc.Find(baseName) ?? throw new InvalidDataException($"Armageddon's misc.vpp_pc has no {baseName}");
             var baseEffect = EffectFile.Read(misc.Read(entry));
             Check(baseEffect, baseName);
-            EffectFile? cutOutBase = null;
-            if (!skinned)
-            {
-                string cutOutName = $"ir_at_default_{suffix}.fxo_pc_dx11";
-                cutOutBase = EffectFile.Read(misc.Read(misc.Find(cutOutName) ?? throw new InvalidDataException($"Armageddon's misc.vpp_pc has no {cutOutName}")));
-                CheckCutOut(cutOutBase, cutOutName);
-            }
-            foreach (var family in Enum.GetValues<Family>().Where(f => !skinned || f is Family.Glass or Family.EosGlass))
-                foreach (int layers in LayersOf(family))
-                    foreach (var variant in VariantsOf(family))
+            string cutOutName = $"ir_at_default_{suffix}.fxo_pc_dx11";
+            var cutOutBase = EffectFile.Read(misc.Read(misc.Find(cutOutName) ?? throw new InvalidDataException($"Armageddon's misc.vpp_pc has no {cutOutName}")));
+            CheckCutOut(cutOutBase, cutOutName);
+            foreach (var family in Enum.GetValues<Family>().Where(f => !skinned || Skinned(f)))
+                foreach (int layers in skinned ? SkinnedLayersOf(family) : LayersOf(family))
+                    foreach (var variant in skinned ? SkinnedVariantsOf(family) : VariantsOf(family))
                     {
                         string name = $"{Name(family, layers, variant)}_{suffix}.fxo_pc_dx11";
                         byte[] Compile(string entryPoint, string target, bool stippled = false) =>
@@ -135,7 +167,7 @@ public static class GuerrillaShaders
                             });
                         byte[] vertex = Compile("SurfaceVertex", "vs_4_0"), pixel = Compile("SurfacePixel", "ps_4_0");
                         var effect = variant == Variant.CutOut
-                            ? CutOut(cutOutBase!, baseEffect, family, layers, [Compile("DepthVertex", "vs_4_0"), Compile("GeometryVertex", "vs_4_0"), Compile("GeometryVertex", "vs_4_0", true), vertex],
+                            ? CutOut(cutOutBase, baseEffect, family, layers, [Compile("DepthVertex", "vs_4_0"), Compile("GeometryVertex", "vs_4_0"), Compile("GeometryVertex", "vs_4_0", true), vertex],
                                      [Compile("DepthPixel", "ps_4_0"), Compile("GeometryPixel", "ps_4_0"), Compile("GeometryPixel", "ps_4_0", true), pixel])
                             : family == Family.Glass || variant == Variant.Blended ? MaterialPassOnly(baseEffect, family, layers, vertex, pixel)
                             : Effect(baseEffect, family, layers, vertex, pixel);
@@ -143,7 +175,6 @@ public static class GuerrillaShaders
                         written.Add(name);
                     }
         }
-        written.AddRange(WriteTerrain(misc, output));
         return written;
     }
 

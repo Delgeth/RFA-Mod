@@ -1,8 +1,8 @@
 -- Red Faction: Guerrilla's world map in Armageddon: its whole world, the player on it, and the name of
--- the district the player is in. Opened and closed with [GuerrillaHud] MapKey= (M).
+-- the district the player is in. Opened and closed with [GuerrillaHud] MapKey= (Tab).
 --
 -- Part of the guerrilla_hud mod. The document this drives, rfg_ui_fullscreen, is Guerrilla's own
--- full-screen map document, made from your copy of Guerrilla by GuerrillaHud.exe (its pictures
+-- full-screen map document, made from your copy of Guerrilla by GuerrillaBuilder.exe (its pictures
 -- renamed rfg_...), which also packs this script with it; run that again after changing this file.
 -- The mod loads it with the minimap in Guerrilla's world and puts it on screen while the map is open.
 --

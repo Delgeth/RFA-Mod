@@ -2,7 +2,7 @@
 -- Guerrilla's frame with its player arrow, and the district's name above it.
 --
 -- Part of the guerrilla_hud mod. The document this drives, rfg_ui_hud, is Guerrilla's own HUD
--- document, made from your copy of Guerrilla by GuerrillaHud.exe (its pictures renamed rfg_...),
+-- document, made from your copy of Guerrilla by GuerrillaBuilder.exe (its pictures renamed rfg_...),
 -- which also packs this script with it; run that again after changing this file. The mod loads it in
 -- the worlds named by [GuerrillaHud] Worlds= (with [GuerrillaHud] Map=1) and unloads it everywhere
 -- else.
@@ -18,7 +18,7 @@
 --   - in them, a group turned against the camera, holding Guerrilla's world map picture (a zone
 --     every 85 1/3 pixels, under everything, for the zones whose own pictures aren't loaded) and
 --     up to nine zones' own pictures;
---   - the frame on top: the document's own map element, which GuerrillaHud.exe made a picture.
+--   - the frame on top: the document's own map element, which GuerrillaBuilder.exe made a picture.
 -- How far the minimap shows is Guerrilla's: 40 metres from the player to the frame's edge, and half
 -- the vehicle's speed more while driving. Where the player is, which way the camera looks and which
 -- zone pictures are loaded, the mod tells this script through rfg_map_view() and rfg_map_tiles().

@@ -30,8 +30,8 @@
 // under the dirt layer); LAYERS 0, 1 or 2: the UV sets past the first the meshes have
 // (standard: Decal_Map_1 at UV1, Decal_Map_2 at UV2; the others: their layer, Environment_Map, at UV1,
 // Decal_Map_1 at UV2); INSTANCED 1 for instanced meshes (each object's matrix in the vertex stream);
-// SKINNED 1 for skinned ones (up to four bones a vertex: the glass's flying shards, which the game
-// draws with a material's "_c" effect);
+// SKINNED 1 for skinned ones (up to four bones a vertex: the people and their props, and the glass's
+// flying shards, which the game draws with a material's "_c" effect);
 // CUTOUT 1 for alpha-tested materials (Guerrilla's flags 2): holes where the material's alpha is under
 // the engine's threshold, cut the same in every pass, so these effects have their own depth (shadow)
 // and G-buffer passes too (DepthVertex/DepthPixel, GeometryVertex/GeometryPixel, STIPPLED 1 for objects
@@ -77,11 +77,12 @@ cbuffer Material : register(b0)  // the material's constants (vc0), laid out by 
     float4 Shine;               // c9 Specular_Alpha, Metal_Base_Shine, Environment_Map_Opacity, Decal_Map_1_Overlay
     float4 Glow;                // c10 Self_Illumination; 1: lit by the lamps' night level instead; illum_cycle (or < 0: no pulse); 1: specular from the colour map's alpha
     float4 Scroll;              // c11 Diffuse_Map_OffsetU, V; Decal_Map_1_OffsetU, V (each × the time in seconds)
+                                //     (the skin and eye, BRDF kinds 14, 15: Skin_Specular_Gloss, Skin_Translucent_Power, Skin_Translucent_Ramp_Off, Specular_Alpha2)
     float4 Extra;               // c12 Decal_Map_2_OffsetU, V; 1: alpha 1 (not the colour map's); 0
-    float4 BrdfDiffuse[3];      // c13-15 BRDF_Diff_1, 2, 3
+    float4 BrdfDiffuse[3];      // c13-15 BRDF_Diff_1, 2, 3 (the skin and eye: Skin_Color_Hemoglobin, _Melanin, _Unscattered)
     float4 BrdfSpecular[3];     // c16-18 BRDF_Spec_1, 2, 3
     float4 BrdfKind;            // c19 which BRDF (see SurfacePixel); Specular_falloff; 0; Opacity
-    float4 MetalSpecular;       // c20 Metal_Specular_Color (rgb), Metal_Specular_Alpha (w)
+    float4 MetalSpecular;       // c20 Metal_Specular_Color (rgb), Metal_Specular_Alpha (w) (the skin: BRDF_Glancing_1)
     float4 MetalSpecularPower;  // c21 Metal_Specular_Power: x
 };
 
@@ -176,6 +177,19 @@ void SkinRows(Vertex v, out float4 rows[3], out float inverseSum)
     [unroll] for (int r = 0; r < 3; r++)
         rows[r] = w.x * BoneRows[b.x + r] + w.y * BoneRows[b.y + r] + w.z * BoneRows[b.z + r] + w.w * BoneRows[b.w + r];
 }
+
+// A skinned vertex's position, normal and tangent moved by its bones (in its object's space); the
+// directions made unit length again, as Armageddon's skinned shaders do (the bones are mixed by the raw
+// weights, 0-255 each; the glass's ambient reads the normal's length).
+void Skin(Vertex v, inout float4 local, inout float3 n, inout float3 t)
+{
+    float4 bone[3];
+    float inverseSum;
+    SkinRows(v, bone, inverseSum);
+    local = float4(float3(dot(bone[0], local), dot(bone[1], local), dot(bone[2], local)) * inverseSum, 1);
+    n = normalize(float3(dot(bone[0].xyz, n), dot(bone[1].xyz, n), dot(bone[2].xyz, n)));
+    t = normalize(float3(dot(bone[0].xyz, t), dot(bone[1].xyz, t), dot(bone[2].xyz, t)));
+}
 #endif
 
 struct Surface
@@ -198,14 +212,7 @@ Surface SurfaceVertex(Vertex v)
     float4 local = float4(v.position * PositionScale.xyz, 1);
     float3 n = v.normal * 2 - 1, t = v.tangent.xyz * 2 - 1;
 #if SKINNED
-    float4 bone[3];
-    float inverseSum;
-    SkinRows(v, bone, inverseSum);
-    local = float4(float3(dot(bone[0], local), dot(bone[1], local), dot(bone[2], local)) * inverseSum, 1);
-    // The directions made unit length again, as Armageddon's skinned shaders do (the bones are mixed by
-    // the raw weights, 0-255 each; the glass's ambient reads the normal's length).
-    n = normalize(float3(dot(bone[0].xyz, n), dot(bone[1].xyz, n), dot(bone[2].xyz, n)));
-    t = normalize(float3(dot(bone[0].xyz, t), dot(bone[1].xyz, t), dot(bone[2].xyz, t)));
+    Skin(v, local, n, t);
 #endif
     float4 world = float4(dot(rows[0], local), dot(rows[1], local), dot(rows[2], local), 1);
     Surface s;
@@ -271,10 +278,12 @@ float2 LookUp(float2 at) { return clamp(at, 0.002, 0.998); }
 // sun's diffuse and specular by each shader's own curves (kind: 1 rfg-brdf(-e)-concrete, 2 -dull-met,
 // 3 (-e)-dull-paint-met, 4 -paint-metal, 5 -rust-paint-met, 6 -edf-base, 7 (-e)-shiny-comp-metal,
 // 8 -edf-base-panels, 9 -e-/-ed-edf-base-panels, 10 rfg-brdf and 11 rfg-brdf-env with their look-up
-// maps). The specular is the specular map's red, green and blue weighing three lobes; under the layer
-// and decal it is taken away (shineLeft).
+// maps, 12 rfg-brdf-cloth and 13 rfg-brdf-cloth_rimlight: the people's clothes, 14 rfg-skin and 15
+// rfg-eye: their faces). The specular is the specular map's red, green and blue weighing three lobes
+// (but the cloth's and the eye's); under the layer and decal it is taken away (shineLeft). distance:
+// from the eye to the surface (the eye's glint fades with it).
 float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap, float3 n, float3 toEye, float nl, float nhRaw,
-                 float ao, float shineLeft, float shadow)
+                 float ao, float shineLeft, float shadow, float distance)
 {
     const float hl = nl * 0.5 + 0.5, nlc = max(nl, 0), nvc = max(dot(n, toEye), 0), nhc = max(nhRaw, 0);
     const float fo = 1 - (1 - nlc) * BrdfKind.y;          // Specular_falloff
@@ -331,6 +340,84 @@ float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap,
         float3 S = BrdfSpecularMap.Sample(BrdfSpecularSampler, LookUp(float2(nlc, 1 - nhc))).rgb * fo * ao * specularMap;
         sunSpecular = Screen3(S.r * s1, S.g * s2, S.b * s3) * Shine.x;
     }
+    else if (kind == 12 || kind == 13)
+    {
+        // rfg-brdf-cloth (12) and rfg-brdf-cloth_rimlight (13), the people's clothes, as Re-Mars-tered's
+        // (its rfg-brdf-cloth*_c.fxo_kg: the 2009 shaders' curves, without their occlusion): three lobes
+        // by N·L (a: 5/3 N·L; b: peaking at N·L 3/5) and by the grazing view (c), squared and mixed by
+        // "screen"; the plain Lambert in their place by the specular map's red × Specular_Color's; the
+        // Blinn shine by the specular map × Specular_Color; the sky's light by how much the surface faces
+        // up (the back ambient below, the ambient above), only where the sun doesn't light it already.
+        // The rimlight one adds a rim against the light, stronger at night, and lifts the sky's light by
+        // up to half at night (Time.w, the lamps' night level, as Guerrilla's Time.w).
+        const float peak = 1 - abs(1.6667 * nlc - 1);
+        const float a = saturate(1.6667 * nlc), b = saturate(peak);
+        const float c = saturate(pow(max(pow(1 - nvc, 0.7) * max(peak, 0), 0.000001), 0.7));
+        const float3 shineMap = specularMap * SpecularColour.rgb;
+        const float3 cloth = colour * Screen3(d1 * a * a, d2 * b * b, d3 * c * c);
+        const float3 diffuse = lerp(cloth, colour * nlc, shineMap.r);
+        const float3 specular = shineMap * pow(nhc, SpecularPower.x + 0.00001) * Shine.x * fo;
+        float3 sky = lerp(AmbientBelow.rgb, AmbientAbove.rgb, saturate(n.y * 0.5 + 0.5)) * (1 - min(nlc, shadow));
+        if (kind == 13)
+        {
+            const float rim = saturate((0.4 - dot(n, toEye)) * 2.5) * max(0.25 - 0.75 * nlc, 0) * clamp(Time.w, 0.25, 1) * 9;
+            sky = sky * clamp(1.5 * Time.w, 1, 1.5) + rim;
+        }
+        return sky * colour + (diffuse + specular) * SunColour.rgb * shadow;
+    }
+    else if (kind == 14)
+    {
+        // rfg-skin, the faces, as Re-Mars-tered's (its rfg-skin_c.fxo_kg): the light under the skin, the
+        // unscattered colour turned toward the melanin's by Skin_Translucent_Power, with the unscattered
+        // colour again by how much the surface faces the eye and the sun ("screen"); the sun's light the
+        // hemoglobin's colour screened with that by N·L², by a wrapped Lambert (the half-Lambert widened
+        // by Skin_Translucent_Ramp_Off × the specular map's blue) squared, over the colour map; a glancing
+        // colour (BRDF_Glancing_1) by how far the light and the view are from grazing, within
+        // Skin_Specular_Gloss, × the specular map's green; three lobes by N·H, each the specular map's
+        // red, green or blue (BRDF_Spec_1-3, × Specular_Alpha); the sky's light by how much the surface
+        // faces up, only where the sun doesn't light it already, on the light under the skin.
+        const float gloss = Scroll.x, translucent = Scroll.y, rampOff = Scroll.z;
+        const float3 hemoglobin = BrdfDiffuse[0].rgb, melanin = BrdfDiffuse[1].rgb, unscattered = BrdfDiffuse[2].rgb;
+        const float facing = (2 * nvc + nlc) / 3;
+        const float3 under = Screen(lerp(unscattered, melanin, translucent), unscattered * facing * facing);
+        const float wrap = saturate((hl + rampOff * specularMap.b) / (1 + rampOff * specularMap.b));
+        const float glancing = max(1 - sqrt((1 - hl) * (1 - hl) + nvc * nvc) / max(gloss, 0.0001), 0) * specularMap.g;
+        const float3 K = wrap * wrap * Screen(hemoglobin, under * nlc * nlc);
+        const float3 diffuse = saturate(K * colour * Screen(colour, K) + glancing * glancing * MetalSpecular.rgb);
+        const float a = saturate(3 * (nhc - 0.5) - 10 * abs(nlc - nhc));
+        const float3 lobes = float3(saturate(2 * a * (nhc - 0.5)), min(nlc * saturate((100 * nhc - 92) * 0.143), 1), nlc * saturate(4 * nhc - 3));
+        const float3 S = lobes * lobes * nlc * specularMap;
+        const float3 specular = (s1 * S.r + s2 * S.g + s3 * S.b) * Shine.x;
+        const float3 sky = lerp(AmbientBelow.rgb, AmbientAbove.rgb, saturate(n.y * 0.5 + 0.5)) * (1 - min(nlc, shadow));
+        return sky * under * colour + (diffuse + specular) * SunColour.rgb * shadow;
+    }
+    else if (kind == 15)
+    {
+        // rfg-eye, as Re-Mars-tered's (its rfg-eye_c.fxo_kg): no normal map (n is the vertex normal), lit
+        // by the sun's direction laid flat (its height dropped, as its vertex shader does); the skin's
+        // colours by its own curves (the light under: the unscattered colour by the half-Lambert and the
+        // view, as rfg-brdf-dull-paint-met's third lobe; the hemoglobin's by N·L to 2.2; the wrapped
+        // Lambert by Skin_Translucent_Ramp_Off alone); the sky's light by the half-Lambert; and a glint
+        // where N·H (to the sun's direction, or away from it) is within 0.003 of 1, × Specular_Alpha2,
+        // fading out from 1 m to 6 m, not shadowed. (Its Blinn term is always 0 in Guerrilla's compiled
+        // shader: pow(0, Specular_Power).)
+        const float translucent = Scroll.y, rampOff = Scroll.z, glintAlpha = Scroll.w;
+        const float3 level = float3(SunToward.x, 0, SunToward.z);
+        const float3 L = dot(level, level) > 0 ? normalize(level) : SunToward.xyz;
+        const float eyeNl = dot(n, L), eyeHl = eyeNl * 0.5 + 0.5;
+        const float3 unscattered = BrdfDiffuse[2].rgb;
+        const float3 under = Screen(lerp(unscattered, BrdfDiffuse[1].rgb, translucent), unscattered * Gamma(saturate(1 + 0.666667 * (eyeHl + nvc - 2))));
+        const float lit = Gamma(saturate(eyeNl));
+        const float wrap = saturate((eyeHl + rampOff) / (rampOff + 1));
+        const float3 K = wrap * wrap * Screen(BrdfDiffuse[0].rgb, under * lit);
+        const float3 diffuse = K * colour * (Screen(colour, K) + (1 - colour) * K);
+        const float toward = saturate(max(dot(n, normalize(toEye - L)), dot(n, normalize(toEye + L))));
+        const float glint = saturate(400 * (toward - 0.997));
+        const float fade = saturate((distance - 1) * 0.2);
+        const float sparkle = glint * glint * glintAlpha * (1 - smoothstep(0, 1, fade)) * 0.075;
+        const float3 sky = lerp(AmbientBelow.rgb, AmbientAbove.rgb, eyeHl) * (1 - min(lit, shadow));
+        return sky * under * colour + diffuse * SunColour.rgb * shadow + sparkle * SunColour.rgb;
+    }
     float3 ambient = Ambient(ambientWeight, ao);
     if (kind == 10) ambient = SelfLit(ambient, (1 - colourAlpha) * Glow.x);  // self-lit where the colour map is see-through
     return ambient * colour + (sunDiffuse + sunSpecular * shineLeft) * SunColour.rgb * shadow;
@@ -356,7 +443,7 @@ float SurfaceAlpha(float4 uv01, float4 uv2, float seconds)
 #elif FAMILY == 3
     const int kind = (int)(BrdfKind.x + 0.5);
     const float a = DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
-    return kind >= 7 && kind <= 9 ? 1 : kind == 10 ? a + BrdfKind.w * (1 - a) : a;
+    return kind >= 7 && kind <= 9 || kind >= 14 ? 1 : kind == 10 ? a + BrdfKind.w * (1 - a) : a;
 #elif FAMILY == 2 || FAMILY == 5
     return DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
 #elif FAMILY == 8
@@ -466,8 +553,9 @@ float4 SurfacePixel(Surface s) : SV_Target
     float alpha = c0.a;
   #if FAMILY == 3
     const int kind = (int)(BrdfKind.x + 0.5);
-    if (kind >= 7 && kind <= 9) alpha = 1;
+    if (kind >= 7 && kind <= 9 || kind >= 14) alpha = 1;
     if (kind == 10) alpha = c0.a + BrdfKind.w * (1 - c0.a);
+    if (kind == 15) n = normalize(s.normal);  // rfg-eye: no normal map
   #elif FAMILY == 4
     alpha = 1;
   #endif
@@ -528,7 +616,7 @@ float4 SurfacePixel(Surface s) : SV_Target
   #endif
     rgb += lamps * colour;
 #elif FAMILY == 3
-    rgb = BrdfLight(kind, colour, c0.a, specularSample.rgb, n, toEye, nl, dot(n, halfway), occlusion, (1 - e) * (1 - d), shadow);
+    rgb = BrdfLight(kind, colour, c0.a, specularSample.rgb, n, toEye, nl, dot(n, halfway), occlusion, (1 - e) * (1 - d), shadow, length(s.fromEye));
     rgb += lamps * colour;
 #elif FAMILY == 5
     // Glass: the ambient by the half-Lambert of the normal as the vertices give it (not made unit length,
@@ -616,14 +704,21 @@ float4 SurfacePixel(Surface s) : SV_Target
 // SurfacePixel cuts, the G-buffer written as Armageddon's G-buffer shaders write it (ir_at_default's,
 // line by line): the normal in the camera's space, the shine, the object's id.
 
-float4 WorldPosition(Vertex v, out float4 rows[3])
+// The vertex in the world, and its normal and tangent in its object's space (moved by its bones, when
+// skinned: the people's alpha-tested materials, Mason's eyelashes).
+float4 WorldPosition(Vertex v, out float4 rows[3], out float3 n, out float3 t)
 {
 #if INSTANCED
     rows[0] = v.row0; rows[1] = v.row1; rows[2] = v.row2;
 #else
     rows[0] = ObjectRows[0]; rows[1] = ObjectRows[1]; rows[2] = ObjectRows[2];
 #endif
-    const float4 local = float4(v.position * PositionScale.xyz, 1);
+    float4 local = float4(v.position * PositionScale.xyz, 1);
+    n = v.normal * 2 - 1;
+    t = v.tangent.xyz * 2 - 1;
+#if SKINNED
+    Skin(v, local, n, t);
+#endif
     return float4(dot(rows[0], local), dot(rows[1], local), dot(rows[2], local), 1);
 }
 
@@ -651,8 +746,9 @@ struct Depth
 Depth DepthVertex(Vertex v)
 {
     float4 rows[3];
+    float3 n, t;
     Depth d;
-    d.clip = ClipPosition(WorldPosition(v, rows));
+    d.clip = ClipPosition(WorldPosition(v, rows, n, t));
     UvSets(v, d.uv01, d.uv2);
     return d;
 }
@@ -678,12 +774,12 @@ struct Geometry
 Geometry GeometryVertex(Vertex v)
 {
     float4 rows[3];
+    float3 n, tangent;
     Geometry g;
-    g.clip = ClipPosition(WorldPosition(v, rows));
+    g.clip = ClipPosition(WorldPosition(v, rows, n, tangent));
     g.screen = g.clip;
     UvSets(v, g.uv01, g.uv2);
-    const float3 n = v.normal * 2 - 1;
-    const float4 t = v.tangent * 2 - 1;
+    const float4 t = float4(tangent, v.tangent.w * 2 - 1);
     const float3 nWorld = normalize(float3(dot(rows[0].xyz, n), dot(rows[1].xyz, n), dot(rows[2].xyz, n)));
     const float3 tWorld = normalize(float3(dot(rows[0].xyz, t.xyz), dot(rows[1].xyz, t.xyz), dot(rows[2].xyz, t.xyz)));
     g.normal = float3(dot(nWorld, WorldToView[0].xyz), dot(nWorld, WorldToView[1].xyz), dot(nWorld, WorldToView[2].xyz));

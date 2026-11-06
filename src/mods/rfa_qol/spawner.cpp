@@ -1,7 +1,7 @@
 // A spawner in the in-game menus (rfa_menu.h). A part of rfa_qol.dll. Open the console (the ` key),
 // then Spawn in the bar along the bottom of the screen, for four windows:
 //   Vehicles  every vehicle the game has, Armageddon's and the Guerrilla ones
-//             editor\GuerrillaArsenal.exe made; Spawn (or a double-click) drops one in front of you,
+//             editor\GuerrillaBuilder.exe made; Spawn (or a double-click) drops one in front of you,
 //             as the console's drop_car <name> does, loading it first if the area hasn't;
 //   Items     every item the game can drop (drop_item <name>);
 //   Weapons   every weapon, given to you (give_player_item <its inventory item>);

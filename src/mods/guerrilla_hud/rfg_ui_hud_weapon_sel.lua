@@ -1,7 +1,7 @@
 -- Red Faction: Guerrilla's weapon select in Armageddon: Guerrilla's own document and script, fed
 -- from Armageddon's weapon slots.
 --
--- Part of the guerrilla_hud mod. GuerrillaHud.exe makes the document rfg_ui_hud_weapon_sel from
+-- Part of the guerrilla_hud mod. GuerrillaBuilder.exe makes the document rfg_ui_hud_weapon_sel from
 -- your copy of Guerrilla (its pictures renamed rfg_...), and its script from three parts: our
 -- rfg_guerrilla_shims.lua, then Guerrilla's own script for it (its init and cleanup renamed
 -- rfg_ui_hud_weapon_sel_guerrilla_init and _cleanup), then this file. Run it again after changing

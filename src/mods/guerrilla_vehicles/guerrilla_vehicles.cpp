@@ -1,5 +1,5 @@
 // What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself.
-// The vehicles are made from the player's own copy of Guerrilla by GuerrillaArsenal.exe (never
+// The vehicles are made from the player's own copy of Guerrilla by GuerrillaBuilder.exe (never
 // shipped): see RfaFormats\Guerrilla\GuerrillaArsenal.cs.
 //
 // Driving: Armageddon still has Guerrilla's driving code for the player. Its gameplay controls
@@ -83,10 +83,47 @@
 // mods\guerrilla_vehicles\rigs.txt), in no archive's list, so the mod wraps the start-up loading and
 // has the game load each of them by name after its own (0x973550, cdecl, the file's name: it opens the
 // file by name, where the loader finds a new file).
+//
+// Dents: Guerrilla's cars crumple where they are hit, by a morph target in the vehicle's file (46 of its
+// 74 have one; GuerrillaArsenal carries it over). Armageddon kept the whole of it, Guerrilla's code as
+// it was: the vehicle loader reads the morph target (0x622110 → 0xD40580) and makes the vehicle's dent
+// container (0xC2BC10), and the impact code (0x60F590) dents it (0x619810), but only while
+// vehicle_deformation_enabled is on (a bool at 0x142A484, also the console's toggle of that name),
+// which Guerrilla starts on and Armageddon off (none of its vehicles has a morph target, so for them
+// nothing changes). The mod turns it on while the game starts ([GuerrillaVehicles] Dents=1, before
+// any vehicle is loaded: the loader reads it then), after checking that the three instructions that
+// read it (the toggle, the loader, the impact code) still name it.
+//
+// Doors: getting in, a person's step "Open Door" opens the vehicle's door (vi_door_open_action,
+// 0x654AA0, Guerrilla's 0xBA1520), which records it among the vehicle's open doors (six records of 16
+// bytes from the pointer at the interaction instance's +4: when, the door part, its state, the
+// waypoint it was opened from), and every frame the interaction closes a door recorded open 2.5 s
+// after it opened once nobody stands at that waypoint, 4 s at most (0x657500, Guerrilla's
+// vehicle_interaction_process). Armageddon kept all of it as Guerrilla had it. A door recorded open is
+// never opened again (the open action only refreshes the record), so if the door part has shut while
+// its record still says open, a person climbs through the shut door: seen on Guerrilla's taxi. The
+// mod wraps the open action: before it runs, a door of the transition that is shut (latched to the
+// body, its opening at most 0.03) but still recorded open has its record cleared (0x64C140, and any
+// person's note of it), so the game opens it and records it afresh, as Guerrilla would.
+//
+// A door's opening is measured from its turn against the vehicle (0x6134A0, Guerrilla's
+// vehicle_component::get_unlatched_door_t_value): the turn's axis and angle (matrix::
+// extract_axis_and_angle), over the hinge's most. For a shut door the turn is next to none, and its
+// axis comes out next to nothing; Guerrilla's extract_axis_and_angle (RM 0x5A10C0) then calls it no
+// turn (angle 0), Armageddon's (0xC9C8A0) a half turn (angle pi). So, depending on which way the
+// vehicle faces, a shut door just unlatched to open measured pi over its 90 degrees, 2: fully open;
+// the game ended the opening at once, the door never moved, and the person climbed through it (the
+// second time into Guerrilla's taxi). The mod replaces the door's measurement with Guerrilla's, its
+// axis and angle worked out as Guerrilla's are (the game's matrix and angle helpers otherwise); the
+// shared math function stays Armageddon's for everything else. With
+// [GuerrillaVehicles] DoorLog=1 (off unless set; not in the ini template) it also logs every door
+// opening and closing, each latch and unlatch, and each change of a door part's state.
 #define RFA_MOD_NAME "guerrilla_vehicles"
 #include "rfa_mod.h"
 #include "rfa_game.h"
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <cwctype>
 #include <fstream>
 #include <iterator>
@@ -348,6 +385,268 @@ BYTE* __fastcall BuildVehicleList(BYTE* list, void*) {
     return list;
 }
 
+// ---- Doors (see the top)
+
+constexpr DWORD kDoorOpenAction = 0x654AA0;   // cdecl bool (interaction, person, transition, seconds, door or -1 for all)
+constexpr size_t kDoorOpenActionPrologue = 6;  // push ebp / mov ebp,esp / sub esp,28h
+constexpr DWORD kDoorCloseAction = 0x657AD0;  // cdecl (interaction, record, seconds)
+constexpr size_t kDoorCloseActionPrologue = 6;  // push ebp / mov ebp,esp / sub esp,10h
+constexpr DWORD kUpdateDoor = 0x612FA0;       // thiscall (part; seconds, vehicle), each frame for an unlatched door
+constexpr size_t kUpdateDoorPrologue = 6;       // push ebp / mov ebp,esp / sub esp,60h
+using DoorOpenActionFn = bool(__cdecl*)(BYTE* interaction, int person, const BYTE* transition, float seconds, int door);
+using DoorCloseActionFn = void(__cdecl*)(BYTE* interaction, int record, float seconds);
+using UpdateDoorFn = void(__fastcall*)(BYTE* part, void* unused, float seconds, BYTE* vehicle);
+DoorOpenActionFn g_doorOpenAction;
+DoorCloseActionFn g_doorCloseAction;
+UpdateDoorFn g_updateDoor;
+auto const ClearDoorRecord = reinterpret_cast<void(__fastcall*)(BYTE* record, void* unused)>(0x64C140);  // vi_door::initialize
+
+constexpr int kDoorRecords = 6, kDoorRecordSize = 16;                // when, part, state, waypoint
+constexpr int kPeople = 8, kPersonSize = 0x130, kPersonDoorRecords = 0x3B;  // each person's note of its doors' records (3 bytes)
+constexpr int kTransitionDoorPart = 8, kTransitionDoorCount = 0x1C;  // a door's part (a byte, +8 + 8 each); how many
+constexpr DWORD kParts = 0x1C4, kPartsReady = 0x3BDC, kPartSize = 0xB8;  // a vehicle's parts: +8 + 0xB8 each, how many at +4
+constexpr DWORD kDoorOpening = 0x30, kDoorState = 0x3C, kPartFlags = 0x54, kUnlatched = 0x10000;
+constexpr int kRecordOpen = 3;
+const char* const kDoorStates[] = {"still", "begin opening", "opening", "opened", "begin closing", "closing", "closed"};
+const char* const kRecordStates[] = {"closed", "closed climbing", "closing", "open", "opening", "open for gunner"};
+
+bool g_doorLog = false;
+int g_doorLogLines = 0;
+constexpr int kDoorLogLines = 400;
+#define DOOR_LOG(...)                                                \
+    do {                                                             \
+        if (g_doorLog && g_doorLogLines < kDoorLogLines) {           \
+            ++g_doorLogLines;                                        \
+            rfa::Log(__VA_ARGS__);                                   \
+        }                                                            \
+    } while (0)
+
+BYTE* DoorRecord(BYTE* interaction, int i) { return *reinterpret_cast<BYTE**>(interaction + 4) + i * kDoorRecordSize; }
+
+BYTE* Part(BYTE* vehicle, int i) {
+    if (!vehicle || i < 0 || vehicle[kParts + kPartsReady] != 1) return nullptr;
+    if (i >= *reinterpret_cast<const int*>(vehicle + kParts + 4)) return nullptr;
+    return vehicle + kParts + 8 + i * kPartSize;
+}
+
+const char* Named(const char* const* names, int count, int value) { return value >= 0 && value < count ? names[value] : "?"; }
+
+std::string DoorRecords(BYTE* interaction) {
+    std::string list;
+    for (int i = 0; i < kDoorRecords; ++i) {
+        const BYTE* r = DoorRecord(interaction, i);
+        const int part = *reinterpret_cast<const int*>(r + 4);
+        if (part < 0) continue;
+        char one[64];
+        snprintf(one, sizeof(one), " [%d: part %d %s]", i, part, Named(kRecordStates, 6, *reinterpret_cast<const int*>(r + 8)));
+        list += one;
+    }
+    return list.empty() ? " none" : list;
+}
+
+std::string DoorPart(BYTE* vehicle, int i) {
+    const BYTE* p = Part(vehicle, i);
+    if (!p) return "no part";
+    char text[96];
+    snprintf(text, sizeof(text), "part %d %s, open %.2f, %s", i, Named(kDoorStates, 7, *reinterpret_cast<const int*>(p + kDoorState)),
+             *reinterpret_cast<const float*>(p + kDoorOpening), (*reinterpret_cast<const DWORD*>(p + kPartFlags) & kUnlatched) ? "unlatched" : "latched");
+    return text;
+}
+
+bool __cdecl DoorOpenAction(BYTE* interaction, int person, const BYTE* transition, float seconds, int door) {
+    BYTE* vehicle = *reinterpret_cast<BYTE**>(interaction);
+    const int first = door < 0 ? 0 : door;
+    const int end = door < 0 ? *reinterpret_cast<const int*>(transition + kTransitionDoorCount) : door + 1;
+    for (int d = first; d < end && d < 3; ++d) {
+        const int part = static_cast<signed char>(transition[kTransitionDoorPart + d * 8]);
+        const BYTE* p = Part(vehicle, part);
+        if (!p) continue;
+        DOOR_LOG("Doors: open, person %d, %s; records%s", person, DoorPart(vehicle, part).c_str(), DoorRecords(interaction).c_str());
+        const bool shut = !(*reinterpret_cast<const DWORD*>(p + kPartFlags) & kUnlatched) && *reinterpret_cast<const float*>(p + kDoorOpening) <= 0.03f;
+        if (!shut) continue;
+        for (int i = 0; i < kDoorRecords; ++i) {
+            BYTE* r = DoorRecord(interaction, i);
+            if (*reinterpret_cast<const int*>(r + 4) != part || *reinterpret_cast<const int*>(r + 8) != kRecordOpen) continue;
+            ClearDoorRecord(r, nullptr);
+            BYTE* people = *reinterpret_cast<BYTE**>(interaction + 0xAC);
+            for (int h = 0; h < kPeople && people; ++h)
+                for (int k = 0; k < 3; ++k)
+                    if (static_cast<signed char>(people[h * kPersonSize + kPersonDoorRecords + k]) == i)
+                        people[h * kPersonSize + kPersonDoorRecords + k] = 0xFF;
+            RFA_LOG_FIRST(20, "Doors: part %d is shut but was still recorded open; record cleared so it opens", part);
+        }
+    }
+    const bool result = g_doorOpenAction(interaction, person, transition, seconds, door);
+    DOOR_LOG("Doors: open action %s (%.2f s); records%s", result ? "true" : "false", seconds, DoorRecords(interaction).c_str());
+    return result;
+}
+
+void __cdecl DoorCloseAction(BYTE* interaction, int record, float seconds) {
+    BYTE* vehicle = *reinterpret_cast<BYTE**>(interaction);
+    const int part = record >= 0 && record < kDoorRecords ? *reinterpret_cast<const int*>(DoorRecord(interaction, record) + 4) : -1;
+    DOOR_LOG("Doors: close record %d (%.2f s), %s; records%s", record, seconds, DoorPart(vehicle, part).c_str(), DoorRecords(interaction).c_str());
+    g_doorCloseAction(interaction, record, seconds);
+    DOOR_LOG("Doors: closed record %d: %s", record, DoorPart(vehicle, part).c_str());
+}
+
+// For the log: a door's opening as the game measures it (0x6134A0, thiscall (part; vehicle): its cached
+// world rotation, +0x58, against its parent's or the vehicle's, turned into the angle about the hinge
+// over the hinge's most; with no hinge constraint, +4, it gives the stored t, +0x34; clamped to -1..2,
+// 2 when the angle can't be had), latch and unlatch (0x615E00, 0x615CE0, cdecl (part, vehicle): free
+// or make the door's body, +0, and hinge constraint, +4).
+auto const DoorOpening = reinterpret_cast<float(__fastcall*)(BYTE* part, void* unused, BYTE* vehicle)>(0x6134A0);
+constexpr DWORD kLatchDoor = 0x615E00, kUnlatchDoor = 0x615CE0;
+constexpr size_t kLatchDoorPrologue = 6, kUnlatchDoorPrologue = 7;  // push ebp / mov ebp,esp / sub esp,8; push ebp / mov ebp,esp / push ecx / mov ecx,[ebp+8]
+using LatchDoorFn = void(__cdecl*)(BYTE* part, BYTE* vehicle);
+LatchDoorFn g_latchDoor, g_unlatchDoor;
+
+std::string DoorBody(const BYTE* part) {
+    const float* r = reinterpret_cast<const float*>(part + 0x58);
+    char text[200];
+    snprintf(text, sizeof(text), "body %08lX, hinge %08lX, t %.2f, rotation (%.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f)",
+             *reinterpret_cast<const DWORD*>(part), *reinterpret_cast<const DWORD*>(part + 4), *reinterpret_cast<const float*>(part + 0x34),
+             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]);
+    return text;
+}
+
+void __cdecl LatchDoor(BYTE* part, BYTE* vehicle) {
+    DOOR_LOG("Doors: latch part at +0x%X: %s", static_cast<unsigned>(part - vehicle), DoorBody(part).c_str());
+    g_latchDoor(part, vehicle);
+    DOOR_LOG("Doors: latched: %s", DoorBody(part).c_str());
+}
+
+void __cdecl UnlatchDoor(BYTE* part, BYTE* vehicle) {
+    DOOR_LOG("Doors: unlatch part at +0x%X: %s, measured %.2f", static_cast<unsigned>(part - vehicle), DoorBody(part).c_str(), DoorOpening(part, nullptr, vehicle));
+    g_unlatchDoor(part, vehicle);
+    DOOR_LOG("Doors: unlatched: %s, measured %.2f", DoorBody(part).c_str(), DoorOpening(part, nullptr, vehicle));
+}
+
+void __fastcall UpdateDoor(BYTE* part, void* unused, float seconds, BYTE* vehicle) {
+    const int before = *reinterpret_cast<const int*>(part + kDoorState);
+    if (before == 1) {
+        const float* v = reinterpret_cast<const float*>(vehicle + 0x10);
+        DOOR_LOG("Doors: part at +0x%X begins opening: measured %.2f, %s, %s; vehicle rotation (%.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f)",
+                 static_cast<unsigned>(part - vehicle), DoorOpening(part, nullptr, vehicle),
+                 (*reinterpret_cast<const DWORD*>(part + kPartFlags) & kUnlatched) ? "unlatched" : "latched", DoorBody(part).c_str(),
+                 v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+    }
+    g_updateDoor(part, unused, seconds, vehicle);
+    const int after = *reinterpret_cast<const int*>(part + kDoorState);
+    if (after != before)
+        DOOR_LOG("Doors: part at +0x%X %s -> %s, open %.2f, %s", static_cast<unsigned>(part - vehicle), Named(kDoorStates, 7, before),
+                 Named(kDoorStates, 7, after), *reinterpret_cast<const float*>(part + kDoorOpening),
+                 (*reinterpret_cast<const DWORD*>(part + kPartFlags) & kUnlatched) ? "unlatched" : "latched");
+}
+
+void MeasureDoorsAsGuerrilla();  // below, with the door's measurement
+
+void HookDoors() {
+    MeasureDoorsAsGuerrilla();
+    g_doorOpenAction = reinterpret_cast<DoorOpenActionFn>(rfa::HookFunction(kDoorOpenAction, kDoorOpenActionPrologue, reinterpret_cast<void*>(&DoorOpenAction)));
+    if (!g_doorOpenAction) {
+        rfa::Log("Doors: could not wrap the door open action; a door left recorded open won't open again");
+        return;
+    }
+    g_doorLog = rfa::IniInt(L"GuerrillaVehicles", L"DoorLog", 0) != 0;
+    if (!g_doorLog) return;
+    g_doorCloseAction = reinterpret_cast<DoorCloseActionFn>(rfa::HookFunction(kDoorCloseAction, kDoorCloseActionPrologue, reinterpret_cast<void*>(&DoorCloseAction)));
+    g_updateDoor = reinterpret_cast<UpdateDoorFn>(rfa::HookFunction(kUpdateDoor, kUpdateDoorPrologue, reinterpret_cast<void*>(&UpdateDoor)));
+    g_latchDoor = reinterpret_cast<LatchDoorFn>(rfa::HookFunction(kLatchDoor, kLatchDoorPrologue, reinterpret_cast<void*>(&LatchDoor)));
+    g_unlatchDoor = reinterpret_cast<LatchDoorFn>(rfa::HookFunction(kUnlatchDoor, kUnlatchDoorPrologue, reinterpret_cast<void*>(&UnlatchDoor)));
+    rfa::Log("Doors: logging door openings, closings and door parts' states (DoorLog=1; the first %d lines)", kDoorLogLines);
+}
+
+// ---- The door's opening, measured as Guerrilla measures it (see the top)
+
+constexpr DWORD kMeasureDoor = 0x6134A0;  // thiscall float (part; vehicle), from the door update 0x612FA0 and 0x613440
+const BYTE kMeasureDoorStart[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x9C, 0x00, 0x00, 0x00};  // push ebp / mov ebp,esp / sub esp,9Ch
+
+struct Rotation { float m[9]; };  // rows of three
+auto const Rotate = reinterpret_cast<void(__fastcall*)(Rotation* self, void* unused, const Rotation* by)>(0xC9E090);  // matrix::rotate
+auto const CapAngle = reinterpret_cast<float(__cdecl*)(float angle, float lowest)>(0xCA5010);  // fl_angle_cap_radians
+auto const AxisAndAngle = reinterpret_cast<void(__fastcall*)(const Rotation* self, void* unused, float* axis, float* angle)>(0xC9C8A0);
+
+// Guerrilla's matrix::extract_axis_and_angle (RM 0x5A10C0), in the precision it works in.
+void GuerrillaAxisAndAngle(const Rotation& r, float axis[3], float& angle) {
+    const float* m = r.m;
+    const float trace = static_cast<float>(static_cast<double>(m[0]) + m[4] + m[8]);
+    const float cosine = static_cast<float>((static_cast<double>(trace) - 1.0) * 0.5);
+    auto none = [&] {
+        angle = 0;
+        axis[0] = 1;
+        axis[1] = axis[2] = 0;
+    };
+    if (cosine > 0.99999994039535522) return none();
+    if (cosine <= -0.99999994039535522) {
+        AxisAndAngle(&r, nullptr, axis, &angle);  // a half turn (no door turns so far): the game's own
+        return;
+    }
+    angle = static_cast<float>(acos(static_cast<double>(cosine)));
+    axis[0] = static_cast<float>(static_cast<double>(m[5]) - m[7]);
+    axis[1] = static_cast<float>(static_cast<double>(m[6]) - m[2]);
+    axis[2] = static_cast<float>(static_cast<double>(m[1]) - m[3]);
+    const float length2 = static_cast<float>(static_cast<double>(axis[0]) * axis[0] + static_cast<double>(axis[1]) * axis[1] +
+                                             static_cast<double>(axis[2]) * axis[2]);
+    if (length2 < 1.0e-8f) return none();  // Armageddon's: a half turn
+    const float inverse = static_cast<float>(1.0 / static_cast<float>(sqrt(static_cast<double>(length2))));
+    for (int k = 0; k < 3; ++k) axis[k] = static_cast<float>(static_cast<double>(axis[k]) * inverse);
+}
+
+// Guerrilla's vehicle_component::get_unlatched_door_t_value (RM 0xB7AA70): with no hinge, the stored
+// t; else the door's world turn (+0x58) against its parent part's or the vehicle's (+0x10) and its own
+// at rest (its data +0x1C), the angle about the hinge's axis (negative when the turn's axis lies along
+// it), capped from -pi/2, over the hinge's most; -1 when it can't be had, at most 2.
+float __fastcall MeasureDoor(BYTE* part, void* unused, BYTE* vehicle) {
+    if (!*reinterpret_cast<void* const*>(part + 4)) return *reinterpret_cast<const float*>(part + 0x34);
+    const BYTE* data = *reinterpret_cast<BYTE* const*>(part + 0x50);
+    const BYTE* hinge = *reinterpret_cast<BYTE* const*>(data + 0xA0);
+    const float* hingeAxis = reinterpret_cast<const float*>(hinge);
+    const int parent = *reinterpret_cast<const int*>(data + 0x10);
+    const BYTE* parentPart = parent == -1 ? nullptr : Part(vehicle, parent);
+    const Rotation parentTurn = *reinterpret_cast<const Rotation*>(parentPart ? parentPart + 0x58 : vehicle + 0x10);
+    const Rotation rest = *reinterpret_cast<const Rotation*>(data + 0x1C);
+    Rotation turn = *reinterpret_cast<const Rotation*>(part + 0x58);
+    Rotate(&turn, nullptr, &parentTurn);
+    Rotate(&turn, nullptr, &rest);
+    float axis[3], angle;
+    GuerrillaAxisAndAngle(turn, axis, angle);
+    const float along = static_cast<float>(static_cast<double>(axis[0]) * hingeAxis[0] + static_cast<double>(axis[1]) * hingeAxis[1] +
+                                           static_cast<double>(axis[2]) * hingeAxis[2]);
+    if (along > 0.7f) angle = -angle;
+    angle = CapAngle(angle, -1.5707963705062866f);
+    float t = static_cast<float>(static_cast<double>(angle) / *reinterpret_cast<const float*>(hinge + 0x18));
+    if (!(static_cast<double>(t) + 1.0 >= 0.0)) t = -1.0f;
+    if (static_cast<double>(t) - 2.0 >= 0.0) t = 2.0f;
+    return t;
+}
+
+void MeasureDoorsAsGuerrilla() {
+    if (memcmp(reinterpret_cast<const void*>(kMeasureDoor), kMeasureDoorStart, sizeof(kMeasureDoorStart)) != 0) {
+        rfa::Log("Doors: the game's door measurement (0x%08lX) isn't as expected; shut doors may read open", kMeasureDoor);
+        return;
+    }
+    if (rfa::ReplaceFunction(kMeasureDoor, reinterpret_cast<const void*>(&MeasureDoor)))
+        rfa::Log("Doors: measured as Guerrilla measures them (a shut door's next-to-no turn is none, not a half turn)");
+}
+
+// ---- Dents (see the top)
+
+constexpr DWORD kDeformationEnabled = 0x142A484;  // vehicle_deformation_enabled, a bool
+// The address's 4 bytes in each instruction that reads it: the console toggle (0x5FB9E0), the
+// vehicle loader's (0x622110) and the impact code's (0x60F590).
+constexpr DWORD kDeformationReads[] = {0x5FB9E6, 0x6221CC, 0x61052D};
+
+void TurnOnDents() {
+    for (DWORD at : kDeformationReads) {
+        if (rfa::CodeValue(at) != kDeformationEnabled) {
+            rfa::Log("Dents: the game's code at 0x%08lX isn't as expected (0x%08lX); vehicles keep their shape", at, rfa::CodeValue(at));
+            return;
+        }
+    }
+    *reinterpret_cast<bool*>(kDeformationEnabled) = true;
+    rfa::Log("Dents: vehicle_deformation_enabled on (Guerrilla's vehicles dent where they're hit)");
+}
+
 // ---- Guerrilla's vehicles' own skeletons (see the top)
 
 // A check of the doors' animations (getting into cars stops at the door: the game finds no "door
@@ -385,7 +684,7 @@ void __cdecl LoadSkeletons() {
     LogDoorAnimations();
 }
 
-// The skeletons GuerrillaArsenal.exe listed, one file name a line.
+// The skeletons GuerrillaBuilder.exe listed, one file name a line.
 void ReadSkeletonList() {
     std::ifstream list(rfa::RootDir() + L"\\mods\\guerrilla_vehicles\\rigs.txt");
     for (std::string line; std::getline(list, line);) {
@@ -409,6 +708,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoveAnimationLibrary();
     g_buildVehicleList = reinterpret_cast<BuildVehicleListFn>(rfa::HookFunction(kBuildVehicleList, kBuildVehicleListPrologue, reinterpret_cast<void*>(&BuildVehicleList)));
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
+    if (rfa::IniInt(L"GuerrillaVehicles", L"Dents", 1) != 0) TurnOnDents();
+    else rfa::Log("Dents: off ([GuerrillaVehicles] Dents=0)");
+    HookDoors();
     ReadSkeletonList();
     if (!g_skeletons.empty()) {
         g_loadSkeletons = reinterpret_cast<LoadSkeletonsFn>(rfa::HookFunction(kLoadSkeletons, kLoadSkeletonsPrologue, reinterpret_cast<void*>(&LoadSkeletons)));

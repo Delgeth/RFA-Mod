@@ -42,7 +42,7 @@ The window is laid out like other game editors (Nanoforge among them):
   colour for its kind (tables, textures, models, zones, scripts, sounds, ...).
 - New archives your mods add in `overrides\` are listed too, marked "new, in overrides", such as
   the Guerrilla world's `rfg_l0.vpp_pc`, `rfg_l1.vpp_pc` and `zonescript_rfg.vpp_pc` once
-  `GuerrillaWorld.exe` has built them. You can open their zones in the level editor, but you can't
+  `GuerrillaBuilder.exe` has built them. You can open their zones in the level editor, but you can't
   save changes into them: build them again instead.
 - Search by file name across all of them. The files inside containers become searchable a few
   seconds after the editor starts.

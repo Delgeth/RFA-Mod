@@ -10,9 +10,14 @@ namespace RfaFormats.Guerrilla;
 /// sets the same way while they start: the list of sets (anim_set_filenames.xtbl), every animation's
 /// triggers and flags (anim_files.xtbl), then each listed set's table by its file name. For each set
 /// asked for:
-///   - its animations, from the vehicle's own container or Guerrilla's anims.vpp_pc, moved from Mason's
-///     skeleton onto Darius's (<see cref="GuerrillaAnimations"/>), to be packed in the vehicle's
-///     container as Armageddon packs its own vehicles' player animations;
+///   - its animations, from the vehicle's own container or Guerrilla's anims.vpp_pc, to be packed in the
+///     vehicle's container as Armageddon packs its own vehicles' player animations: as Guerrilla has them,
+///     in Armageddon's packing, for the people who drive in Guerrilla's world (Mason, Guerrilla's NPCs:
+///     their own skeletons; retargetToDarius false), or moved from Mason's skeleton onto Darius's
+///     (<see cref="PlayerRetarget"/>, given Armageddon's anims.vpp_pc to learn the two skeletons from; else
+///     <see cref="GuerrillaAnimations"/>). Moved onto Darius, one Armageddon has itself on Darius (its
+///     developers moved it: the same name and frame count, in its preloaded animations) is played by its
+///     own name instead, with Armageddon's own entry;
 ///   - each animation's anim_files.xtbl entry, Guerrilla's own, added to Armageddon's table: its
 ///     triggers (when a door opens and is open, when the camera and the person's place hand over, the
 ///     footsteps) and its flags. Its sounds and voice lines (Guerrilla's are XACT cues) are left out
@@ -24,6 +29,11 @@ namespace RfaFormats.Guerrilla;
 ///     anim_actions.xtbl, so the set reads whole.
 /// The changed lists are handed to the game by the guerrilla_world mod (mods\guerrilla_world\). A name
 /// Armageddon already uses (a set, an animation) gets the prefix rfg_; the others keep Guerrilla's.
+/// The four lists are shared with the other tools that add sets (GuerrillaPeople's people): given
+/// the mod's folder, this starts from the lists already there and replaces only its own entries, which
+/// it records in mods\guerrilla_vehicles\anim_entries.txt (each tool its own such file, "set x.xtbl" and
+/// "file x.animx" a line); without a record yet, its own are taken to be those neither Armageddon's nor
+/// in another tool's record.
 /// </summary>
 public sealed class GuerrillaAnimationSets
 {
@@ -55,6 +65,10 @@ public sealed class GuerrillaAnimationSets
     static readonly string[] LeftOutOfFiles = ["Sounds", "Voice_Lines", "OldProps"];
 
     readonly Packfile guerrillaTables, gameTables, guerrillaAnims;
+    readonly Packfile? gameAnims;            // Armageddon's anims.vpp_pc (its preloaded animations), if given
+    readonly PlayerRetarget? retarget;       // Mason's skeleton to Darius's, learnt from it
+    readonly Dictionary<string, bool> armageddonsOwn = new(StringComparer.OrdinalIgnoreCase);  // Guerrilla's x.animx → whether Armageddon has it itself
+    readonly bool toDarius;                  // people's animations moved onto Darius (else kept for Guerrilla's own skeletons)
     readonly Dictionary<int, Rig> peopleRigs = [];  // Guerrilla's people's skeletons, by bone count
     readonly Rig darius;
     readonly XtblFile setList, fileList, stateList, actionList;
@@ -65,7 +79,41 @@ public sealed class GuerrillaAnimationSets
     readonly Dictionary<string, byte[]> animations = new(StringComparer.OrdinalIgnoreCase);  // our .anim_pc file → its bytes
     readonly List<(string File, byte[] Data)> setTables = [];
     readonly List<string> noRoom = [];  // Guerrilla's sets left out for want of room
-    bool statesChanged, actionsChanged;
+    readonly List<string> ownFiles = [];  // the animations' entries this run adds (x.animx)
+    readonly HashSet<string> earlierSets = new(StringComparer.OrdinalIgnoreCase);  // the set tables an earlier run of this tool wrote
+    bool statesChanged, actionsChanged, othersInLists;
+
+    /// <summary>This tool's record of its own entries in the shared lists, beside its skeleton list (mods\guerrilla_vehicles\).</summary>
+    public const string OwnEntries = "anim_entries.txt";
+    static string OwnEntriesFile(string modFolder) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(modFolder))!, "guerrilla_vehicles", OwnEntries);
+
+    /// <summary>A record of a tool's own entries: its sets' tables and its animations' entries; null if there is none.</summary>
+    static (HashSet<string> Sets, HashSet<string> Files)? ReadRecord(string path)
+    {
+        if (!File.Exists(path)) return null;
+        var sets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var parts in File.ReadAllLines(path).Select(l => l.Trim().Split(' ', 2)).Where(p => p.Length == 2))
+            (parts[0] == "set" ? sets : parts[0] == "file" ? files : null)?.Add(parts[1].Trim());
+        return (sets, files);
+    }
+
+    /// <summary>The other tools' records (mods\*\anim_entries.txt but this tool's own).</summary>
+    static (HashSet<string> Sets, HashSet<string> Files) OthersRecords(string modFolder)
+    {
+        var sets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string mods = Path.GetDirectoryName(Path.GetFullPath(modFolder))!, own = Path.GetFullPath(OwnEntriesFile(modFolder));
+        if (!Directory.Exists(mods)) return (sets, files);
+        foreach (string folder in Directory.GetDirectories(mods))
+        {
+            string path = Path.Combine(folder, OwnEntries);
+            if (Path.GetFullPath(path).Equals(own, StringComparison.OrdinalIgnoreCase) || ReadRecord(path) is not { } record) continue;
+            sets.UnionWith(record.Sets);
+            files.UnionWith(record.Files);
+        }
+        return (sets, files);
+    }
 
     /// <summary>How many sets Armageddon fills itself, and how many of ours fit.</summary>
     public int GameSets { get; }
@@ -74,9 +122,15 @@ public sealed class GuerrillaAnimationSets
     /// <summary>Guerrilla's sets left out because the game holds no more (see <see cref="MaxAnimSets"/>).</summary>
     public IReadOnlyList<string> LeftOutForRoom => noRoom;
 
-    public GuerrillaAnimationSets(Packfile guerrillaTables, Packfile gameTables, Packfile guerrillaAnims)
+    /// <summary>
+    /// The sets' port, with Armageddon's lists, or, given <paramref name="modFolder"/> (mods\guerrilla_world\),
+    /// the lists already written there with this tool's earlier entries taken out (see the summary).
+    /// </summary>
+    public GuerrillaAnimationSets(Packfile guerrillaTables, Packfile gameTables, Packfile guerrillaAnims, string? modFolder = null, Packfile? gameAnims = null,
+                                  bool retargetToDarius = true)
     {
-        (this.guerrillaTables, this.gameTables, this.guerrillaAnims) = (guerrillaTables, gameTables, guerrillaAnims);
+        (this.guerrillaTables, this.gameTables, this.guerrillaAnims, this.gameAnims) = (guerrillaTables, gameTables, guerrillaAnims, gameAnims);
+        toDarius = retargetToDarius;
         var people = Rig.Read(Read(guerrillaTables, PeopleRig));
         var mason = Rig.Read(Read(guerrillaTables, MasonRig));
         peopleRigs[mason.Bones.Count] = mason;
@@ -91,6 +145,9 @@ public sealed class GuerrillaAnimationSets
                 peopleRigs[rig.Bones.Count] = rig;
         }
         darius = Rig.Read(Read(gameTables, DariusRig));
+        if (gameAnims != null && retargetToDarius)
+            try { retarget = PlayerRetarget.Fit(guerrillaTables, guerrillaAnims, gameTables, gameAnims); }
+            catch (InvalidDataException) { retarget = null; }
         setList = XtblFile.FromBytes(Read(gameTables, SetList));
         fileList = XtblFile.FromBytes(Read(gameTables, FileList));
         stateList = XtblFile.FromBytes(Read(gameTables, StateList));
@@ -109,6 +166,42 @@ public sealed class GuerrillaAnimationSets
         if (gameTables.Find(RigObjects) is { } rigObjects)
             ownSets += XtblFile.FromBytes(gameTables.Read(rigObjects)).Entries.Count(e => e.Name.Equals("Anim_Rig_Object", StringComparison.OrdinalIgnoreCase));
         GameSets = ownSets;
+
+        // The lists already written (Armageddon's with ours and other tools'), without this tool's own.
+        if (modFolder != null)
+        {
+            var earlier = ReadRecord(OwnEntriesFile(modFolder));
+            var others = OthersRecords(modFolder);
+            bool Ours(string name, HashSet<string> armageddons, HashSet<string> recorded, HashSet<string> othersOwn) =>
+                earlier != null ? recorded.Contains(name) : !armageddons.Contains(name) && !othersOwn.Contains(name);
+            XtblFile? Existing(string name) => File.Exists(Path.Combine(modFolder, name)) ? XtblFile.FromBytes(File.ReadAllBytes(Path.Combine(modFolder, name))) : null;
+            if (Existing(SetList) is { } sets)
+            {
+                setList = sets;
+                foreach (var e in setList.Entries.ToList())
+                {
+                    string name = e.ValueOf("Name")?.Trim() ?? "";
+                    if (Ours(name, gameSets, earlier?.Sets ?? [], others.Sets)) { earlierSets.Add(name); e.Remove(); }
+                    else if (!gameSets.Contains(name)) { GameSets++; othersInLists = true; }
+                }
+            }
+            if (Existing(FileList) is { } files)
+            {
+                fileList = files;
+                fileEntries = fileList.Table?.Element("Files")?.Element("Anim_files") ?? throw new InvalidDataException($"the {FileList} in {modFolder} has no Files/Anim_files");
+                foreach (var e in fileEntries.Elements.ToList())
+                {
+                    string name = AnimationName(e) ?? "";
+                    if (Ours(name, gameAnimations, earlier?.Files ?? [], others.Files)) e.Remove();
+                    else if (!gameAnimations.Contains(name)) othersInLists = true;
+                }
+            }
+            // The state and action names: every one kept (another tool's sets may name them too).
+            if (Existing(StateList) is { } states) { stateList = states; statesChanged = true; }
+            if (Existing(ActionList) is { } actions) { actionList = actions; actionsChanged = true; }
+            ourStates = new(stateList.Entries.Select(XtblFile.EntryName), StringComparer.OrdinalIgnoreCase);
+            ourActions = new(actionList.Entries.Select(XtblFile.EntryName), StringComparer.OrdinalIgnoreCase);
+        }
 
         var rfgFiles = XtblFile.FromBytes(Read(guerrillaTables, FileList)).Table?.Element("Files")?.Element("Anim_files");
         foreach (var e in rfgFiles?.Elements ?? [])
@@ -153,6 +246,7 @@ public sealed class GuerrillaAnimationSets
         var missing = new List<string>();
         foreach (string file in files)
         {
+            if (toDarius && ArmageddonsOwn(file, container)) { ours[file] = file; continue; }
             string name = gameAnimations.Contains(file) ? "rfg_" + file : file;
             string pc = Path.ChangeExtension(name, ".anim_pc"), rfgPc = Path.ChangeExtension(file, ".anim_pc");
             ours[file] = name;
@@ -165,7 +259,8 @@ public sealed class GuerrillaAnimationSets
                             (rfgEntry.Element("Flags")?.Elements.Any(f => f.Value.Trim().Equals("Additive", StringComparison.OrdinalIgnoreCase)) ?? false);
             try
             {
-                made[pc] = !peopleRigs.TryGetValue(bytes[0xB], out var skeleton) ? GuerrillaAnimations.Recode(bytes)
+                made[pc] = !peopleRigs.TryGetValue(bytes[0xB], out var skeleton) || !toDarius ? GuerrillaAnimations.Recode(bytes)
+                         : retarget != null ? retarget.ToDarius(bytes, skeleton, additive)
                          : additive ? GuerrillaAnimations.RetargetAdditive(bytes, skeleton, darius)
                          : GuerrillaAnimations.Retarget(bytes, skeleton, darius);
             }
@@ -216,7 +311,33 @@ public sealed class GuerrillaAnimationSets
             log.Add($"animation set {set}" + (ourSet != set ? $" (as {ourSet})" : "") + $": {files.Count} animations" +
                     (added.Count > 0 ? $"; names Armageddon's tables lacked, added: {string.Join(", ", added)}" : ""));
         }
-        return (ourSet, ours.Values.Select(n => Path.ChangeExtension(n, ".anim_pc")).Select(pc => (pc, animations[pc])).ToList());
+        return (ourSet, ours.Where(o => !armageddonsOwn.GetValueOrDefault(o.Key)).Select(o => Path.ChangeExtension(o.Value, ".anim_pc"))
+                            .Select(pc => (pc, animations[pc])).ToList());
+    }
+
+    /// <summary>
+    /// Whether Armageddon has Guerrilla's animation itself, on Darius: its developers moved many of
+    /// Guerrilla's player animations over under Guerrilla's names; one of the same name and frame count in
+    /// Armageddon's preloaded animations (anims.vpp_pc) for Darius's skeleton is theirs, and is played by
+    /// its name (no copy of ours, no entry of ours: Armageddon's own).
+    /// </summary>
+    bool ArmageddonsOwn(string file, Packfile? container)
+    {
+        if (armageddonsOwn.TryGetValue(file, out var known)) return known;
+        bool same = false;
+        string pc = Path.ChangeExtension(file, ".anim_pc");
+        if (gameAnims?.Find(pc) is { } theirs && gameAnimations.Contains(file))
+        {
+            Packfile? source = container?.Find(pc) != null ? container : guerrillaAnims.Find(pc) != null ? guerrillaAnims : null;
+            try
+            {
+                var armageddons = Animation.Read(gameAnims.Read(theirs));
+                same = source != null && armageddons.SkeletonBones == darius.Bones.Count &&
+                       armageddons.Frames == Animation.ReadGuerrilla(source.Read(source.Find(pc)!)).Frames;
+            }
+            catch (Exception e) when (e is InvalidDataException or ArgumentException or IndexOutOfRangeException) { }
+        }
+        return armageddonsOwn[file] = same;
     }
 
     /// <summary>Guerrilla's anim_files.xtbl entry for an animation, under our name, added to Armageddon's (or a plain one if Guerrilla's table hasn't it).</summary>
@@ -236,24 +357,25 @@ public sealed class GuerrillaAnimationSets
             if (leftOut || (!part.HasElements && part.Value.Trim().Length == 0)) part.Remove();
         }
         fileEntries.AddElement(entry);
+        ownFiles.Add(ourFile);
     }
 
     /// <summary>
-    /// Writes the sets' tables (new files, in <paramref name="cache"/>: overrides\build\pc\cache\) and the
+    /// Writes the sets' tables (new files, in <paramref name="cache"/>: overrides\build\pc\cache\), the
     /// lists they change (in <paramref name="modFolder"/>, for guerrilla_world to hand the game; a list
-    /// with nothing of ours added is deleted there, so the game keeps its own).
+    /// with nothing but Armageddon's in it is deleted there, so the game keeps its own) and this tool's
+    /// record of its own entries in them.
     /// </summary>
     public void Write(string cache, string modFolder)
     {
+        AnimTriggerPools.Check(fileList);  // refuses (throws) before anything is written
         Directory.CreateDirectory(cache);
         Directory.CreateDirectory(modFolder);
-        // The set tables an earlier run wrote that this one doesn't (the old list names them).
-        string oldList = Path.Combine(modFolder, SetList);
-        if (File.Exists(oldList))
-            foreach (string name in XtblFile.FromBytes(File.ReadAllBytes(oldList)).Entries.Select(e => e.ValueOf("Name")?.Trim()).OfType<string>())
-                if (!gameSets.Contains(name) && !setTables.Any(t => t.File.Equals(name, StringComparison.OrdinalIgnoreCase)) &&
-                    name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && File.Exists(Path.Combine(cache, name)))
-                    File.Delete(Path.Combine(cache, name));
+        // The set tables an earlier run of this tool wrote that this one doesn't (another tool's are kept).
+        foreach (string name in earlierSets)
+            if (!setTables.Any(t => t.File.Equals(name, StringComparison.OrdinalIgnoreCase)) &&
+                name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && File.Exists(Path.Combine(cache, name)))
+                File.Delete(Path.Combine(cache, name));
         foreach (var (file, data) in setTables) File.WriteAllBytes(Path.Combine(cache, file), data);
         void Put(string name, XtblFile table, bool changed)
         {
@@ -261,33 +383,66 @@ public sealed class GuerrillaAnimationSets
             if (changed) File.WriteAllBytes(path, table.ToBytes());
             else if (File.Exists(path)) File.Delete(path);
         }
-        Put(SetList, setList, setTables.Count > 0);
-        Put(FileList, fileList, animations.Count > 0);
+        Put(SetList, setList, setTables.Count > 0 || othersInLists);
+        Put(FileList, fileList, animations.Count > 0 || othersInLists);
         Put(StateList, stateList, statesChanged);
         Put(ActionList, actionList, actionsChanged);
+        string record = OwnEntriesFile(modFolder);
+        Directory.CreateDirectory(Path.GetDirectoryName(record)!);
+        File.WriteAllLines(record, setTables.Select(t => $"set {t.File}").Concat(ownFiles.Select(f => $"file {f}")));
     }
 
-    /// <summary>Takes away what <see cref="Write"/> wrote: the sets' tables (the ones our list has that the game's hasn't) and the lists.</summary>
+    /// <summary>
+    /// Takes away what <see cref="Write"/> wrote: this tool's sets' tables and its entries in the lists (by
+    /// its record; without one, the entries neither Armageddon's nor in another tool's record), each list
+    /// kept while another tool's entries are in it, and the record.
+    /// </summary>
     public static IEnumerable<string> Remove(string game, string overrides, string modFolder)
     {
-        string ourList = Path.Combine(modFolder, SetList);
-        if (File.Exists(ourList))
+        var gameTables = Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc"));
+        var record = ReadRecord(OwnEntriesFile(modFolder));
+        var others = OthersRecords(modFolder);
+        var theirSets = new HashSet<string>(XtblFile.FromBytes(Read(gameTables, SetList)).Entries.Select(e => e.ValueOf("Name")?.Trim()).OfType<string>(),
+                                            StringComparer.OrdinalIgnoreCase);
+        var theirFiles = new HashSet<string>((XtblFile.FromBytes(Read(gameTables, FileList)).Table?.Element("Files")?.Element("Anim_files")?.Elements ?? [])
+                                             .Select(AnimationName).OfType<string>(), StringComparer.OrdinalIgnoreCase);
+        bool Ours(string name, HashSet<string> armageddons, HashSet<string> recorded, HashSet<string> othersOwn) =>
+            record != null ? recorded.Contains(name) : !armageddons.Contains(name) && !othersOwn.Contains(name);
+        bool anyOthers = others.Sets.Count > 0 || others.Files.Count > 0;
+
+        string setPath = Path.Combine(modFolder, SetList);
+        if (File.Exists(setPath))
         {
-            var gameTables = Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc"));
-            var theirs = new HashSet<string>(XtblFile.FromBytes(Read(gameTables, SetList)).Entries.Select(e => e.ValueOf("Name")?.Trim()).OfType<string>(),
-                                             StringComparer.OrdinalIgnoreCase);
-            foreach (string name in XtblFile.FromBytes(File.ReadAllBytes(ourList)).Entries.Select(e => e.ValueOf("Name")?.Trim()).OfType<string>())
+            var sets = XtblFile.FromBytes(File.ReadAllBytes(setPath));
+            foreach (var e in sets.Entries.ToList())
             {
-                if (theirs.Contains(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) continue;
+                string name = e.ValueOf("Name")?.Trim() ?? "";
+                if (!Ours(name, theirSets, record?.Sets ?? [], others.Sets)) continue;
+                e.Remove();
                 string file = Path.Combine(overrides, "build", "pc", "cache", name);
-                if (File.Exists(file)) { File.Delete(file); yield return $"Deleted {file}"; }
+                if (name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && File.Exists(file)) { File.Delete(file); yield return $"Deleted {file}"; }
             }
+            if (sets.Entries.Any(e => !theirSets.Contains(e.ValueOf("Name")?.Trim() ?? ""))) { File.WriteAllBytes(setPath, sets.ToBytes()); yield return $"{setPath}: our sets taken out, other tools' kept"; }
+            else { File.Delete(setPath); yield return $"Deleted {setPath}"; }
         }
-        foreach (string name in new[] { SetList, FileList, StateList, ActionList })
+        string filePath = Path.Combine(modFolder, FileList);
+        if (File.Exists(filePath))
+        {
+            var files = XtblFile.FromBytes(File.ReadAllBytes(filePath));
+            var entries = files.Table?.Element("Files")?.Element("Anim_files");
+            foreach (var e in entries?.Elements.ToList() ?? [])
+                if (Ours(AnimationName(e) ?? "", theirFiles, record?.Files ?? [], others.Files)) e.Remove();
+            if (entries?.Elements.Any(e => !theirFiles.Contains(AnimationName(e) ?? "")) == true) { File.WriteAllBytes(filePath, files.ToBytes()); yield return $"{filePath}: our animations taken out, other tools' kept"; }
+            else { File.Delete(filePath); yield return $"Deleted {filePath}"; }
+        }
+        // The state and action names: kept while another tool's sets may name them.
+        foreach (string name in new[] { StateList, ActionList })
         {
             string path = Path.Combine(modFolder, name);
-            if (File.Exists(path)) { File.Delete(path); yield return $"Deleted {path}"; }
+            if (File.Exists(path) && !anyOthers) { File.Delete(path); yield return $"Deleted {path}"; }
         }
+        string own = OwnEntriesFile(modFolder);
+        if (File.Exists(own)) { File.Delete(own); yield return $"Deleted {own}"; }
     }
 
     /// <summary>Every element of a name inside another, at any depth, in document order.</summary>

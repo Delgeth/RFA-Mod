@@ -50,7 +50,7 @@ foreach ($dll in Get-ChildItem -LiteralPath (Join-Path $bin 'mods') -Filter '*.d
     if (-not (Test-Path -LiteralPath (Join-Path $root "src\mods\$($dll.BaseName)\$($dll.BaseName).cpp"))) { continue }
     $parts += @{ From = "bin\mods\$($dll.Name)"; To = "mods\$($dll.Name)" }
 }
-# A mod's own scripts (guerrilla_hud's, which GuerrillaHud.exe packs with Guerrilla's documents),
+# A mod's own scripts (guerrilla_hud's, which GuerrillaBuilder.exe packs with Guerrilla's documents),
 # from src\mods: never bin\mods\<mod>\, which also holds files made from the player's own games.
 foreach ($script in Get-ChildItem -LiteralPath (Join-Path $root 'src\mods') -Recurse -Filter '*.lua' -File) {
     $mod = $script.Directory.Name
@@ -61,8 +61,10 @@ foreach ($file in Get-ChildItem -LiteralPath $overrides -Recurse -File) {
     $parts += @{ From = "src\overrides\$($file.FullName.Substring($overrides.Length + 1))"; To = "overrides\$($file.FullName.Substring($overrides.Length + 1))" }
 }
 if (-not $NoEditor) {
-    # The program and its settings files; not the .pdb debugging files.
-    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $bin 'editor') -File | Where-Object { $_.Extension -in '.exe', '.dll', '.json' }) {
+    # The programs and their settings files; not the .pdb debugging files, nor the four programs
+    # GuerrillaBuilder.exe took the place of, should an old build have left them.
+    $replaced = 'GuerrillaWorld', 'GuerrillaHud', 'GuerrillaArsenal', 'GuerrillaPeople'
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $bin 'editor') -File | Where-Object { $_.Extension -in '.exe', '.dll', '.json' -and ($_.Name -split '\.')[0] -notin $replaced }) {
         $parts += @{ From = "bin\editor\$($file.Name)"; To = "editor\$($file.Name)" }
     }
     # The libraries the editor ships with ask that their licence travels with them.

@@ -427,7 +427,7 @@ public static partial class GuerrillaHud
 
     /// <summary>The script of a document of zone pictures: nothing to do, its init and cleanup only.</summary>
     static string TilesScript(string document) =>
-        $"-- {document}: Guerrilla's zone pictures for its minimap, made by GuerrillaHud.exe from your copy of Guerrilla.\r\n" +
+        $"-- {document}: Guerrilla's zone pictures for its minimap, made by GuerrillaBuilder.exe from your copy of Guerrilla.\r\n" +
         "-- The document only brings them (the guerrilla_hud mod loads it while you're near); the minimap shows them.\r\n" +
         $"function {document}_init()\r\nend\r\n\r\nfunction {document}_cleanup()\r\nend\r\n";
 
@@ -457,7 +457,7 @@ public static partial class GuerrillaHud
         table = territory.Value;
         var lines = new List<string>
         {
-            "; Guerrilla's districts by zone (column and row), as its HUD names them: made by GuerrillaHud.exe from",
+            "; Guerrilla's districts by zone (column and row), as its HUD names them: made by GuerrillaBuilder.exe from",
             "; your copy of Guerrilla (territories.xtbl and its strings). The minimap shows the name of the zone you're in.",
         };
         int count = 0;
@@ -484,7 +484,7 @@ public static partial class GuerrillaHud
     /// tag's hash (u32, <see cref="VintDocument.Hash"/> of the tag in lower case), its length in
     /// bytes (u16) and the text (UTF-16, NUL-terminated), the next string starting on a 4-byte boundary.
     /// </summary>
-    static Dictionary<uint, string> ReadStrings(byte[] data)
+    internal static Dictionary<uint, string> ReadStrings(byte[] data)
     {
         var strings = new Dictionary<uint, string>();
         int count = (int)BitConverter.ToUInt32(data, 6);

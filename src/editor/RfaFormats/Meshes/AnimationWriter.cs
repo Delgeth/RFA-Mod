@@ -100,14 +100,14 @@ public static class AnimationWriter
     {
         // As stored: the game's rotations turn the other way from System.Numerics' (see Animation),
         // so x, y and z are negated; and each key on the side of the one before.
-        var keys = new List<(int[] Axes, bool NegativeW)>();
+        var keys = new List<(int[] Axes, bool NegativeW, float W)>();
         Quaternion previous = Quaternion.Identity;
         for (int i = 0; i < rotations.Count; i++)
         {
             Quaternion q = Quaternion.Normalize(rotations[i]);
             if (i > 0 && Quaternion.Dot(q, previous) < 0) q = Quaternion.Negate(q);
             previous = q;
-            keys.Add(([Quantize(-q.X), Quantize(-q.Y), Quantize(-q.Z)], q.W < 0));
+            keys.Add(([Quantize(-q.X), Quantize(-q.Y), Quantize(-q.Z)], q.W < 0, MathF.Abs(q.W)));
         }
         var runs = new List<byte>();
         var bytes = new List<byte>();
@@ -129,16 +129,34 @@ public static class AnimationWriter
 
     static int Quantize(float value) => Math.Clamp((int)MathF.Round(value * RotationScale), -RotationScale, RotationScale);
 
-    static bool RunFits(List<(int[] Axes, bool NegativeW)> keys, int first, int count) =>
+    /// <summary>
+    /// The largest step a run whose smallest |w| is <paramref name="w"/> may take: half a step's error on
+    /// each of x, y, z (a step over 16,383) puts about √3 × step / 2 / 16,383 / w into w, which this keeps
+    /// near 0.00175 (a fifth of a degree): 33 × w.
+    /// </summary>
+    static float MostStepFor(float w) => 33 * w;
+
+    static bool RunFits(List<(int[] Axes, bool NegativeW, float W)> keys, int first, int count) =>
         Enumerable.Range(0, 3).All(axis => StepFor(keys, first, count, axis, out _) >= 0);
 
-    /// <summary>The smallest step (its index in <see cref="Steps"/>) the axis's moves fit in for this run, or −1; and the run's start (7 bits).</summary>
-    static int StepFor(List<(int[] Axes, bool NegativeW)> keys, int first, int count, int axis, out int start)
+    /// <summary>
+    /// The smallest step (its index in <see cref="Steps"/>) the axis's moves fit in for this run, or −1; and
+    /// the run's start (7 bits). A step is only taken if it keeps every key of the run within about a fifth
+    /// of a degree: w is worked out from x, y and z, so where w is small (a turn near half a revolution)
+    /// their error grows in w by 1/w, and a run holding such a key takes finer steps (shorter runs, or a
+    /// run of its own, with the finest step that fits its one key).
+    /// </summary>
+    static int StepFor(List<(int[] Axes, bool NegativeW, float W)> keys, int first, int count, int axis, out int start)
     {
         start = Math.Clamp((int)MathF.Round(keys[first].Axes[axis] / 256f), -64, 63);
+        float smallestW = 1;
+        for (int k = 0; k < count; k++) smallestW = MathF.Min(smallestW, keys[first + k].W);
         for (int s = 0; s < Steps.Length; s++)
         {
             int step = Steps[s], previous = 0;
+            // (A run of one key takes the finest step that fits it: near a whole axis, ±1, its start can't
+            // come close enough for a step of 1.)
+            if (count > 1 && s > 0 && step > MostStepFor(smallestW)) break;
             bool fits = true;
             for (int k = 0; k < count && fits; k++)
             {
@@ -152,7 +170,7 @@ public static class AnimationWriter
         return -1;
     }
 
-    static (byte[] Header, byte[] Steps) Run(List<(int[] Axes, bool NegativeW)> keys, int first, int count)
+    static (byte[] Header, byte[] Steps) Run(List<(int[] Axes, bool NegativeW, float W)> keys, int first, int count)
     {
         var header = new byte[4];
         var moves = new byte[count * 3];

@@ -61,8 +61,10 @@ public static class GuerrillaWorld
     /// whenever a change here means a world built before it won't work with the mods any more (the
     /// launcher, RFAModLauncher.exe, expects the same number, kGuerrillaWorldFormat, and asks before
     /// starting the game with a world of another, or with one built before worlds were stamped).
+    /// 2 (v0.5.7-beta): the zones name the world's own spawn resource, rfg_Default; a world without
+    /// it gives the game Armageddon's Default people, whose effects run its pools out at start.
     /// </summary>
-    public const int Format = 1;
+    public const int Format = 2;
 
     /// <summary>The stamp's file name, in the mod's folder (mods\guerrilla_world\).</summary>
     public const string StampFile = "world.txt";
@@ -524,7 +526,9 @@ public static class GuerrillaWorld
         // object names its level object there. The visual effects' files, converted (see GuerrillaEffects),
         // and their textures go with the zones whose objects show them. The effects Guerrilla's dust
         // plays round the camera (weather.xtbl's Dust_effects; the guerrilla_world mod plays them) go
-        // with every zone.
+        // with every zone, and so do Guerrilla's vehicles' effects and explosions (their fire, smoke,
+        // exhaust and sparks: GuerrillaArsenal names these in the vehicles it makes), and Guerrilla's
+        // campaign weapons' (muzzle flashes, smoke, tracers: GuerrillaWeapons names these).
         var rfgFiles = new GuerrillaTextures(rfgCache, GuerrillaTextures.EffectArchives);
         var placedProps = propsIn.Values.SelectMany(p => p).Select(o => o.Text("Props")).OfType<string>().Where(n => n.Length > 0)
             .GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
@@ -532,8 +536,10 @@ public static class GuerrillaWorld
             ? XElement.Parse(Encoding.Latin1.GetString(rfgTables.Read(weather))).Descendants("Dust_effects").Elements("Element").Select(e => e.Value.Trim())
                       .Where(n => n.Length > 0).ToList()
             : [];
-        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"), dustEffects,
-                                                       DlcExplosions(game));
+        var vehicleEffects = GuerrillaArsenal.VehicleEffects(rfgTables, misc);
+        var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"),
+                                                       [.. dustEffects, .. vehicleEffects.Effects, .. GuerrillaWeapons.Effects(rfgTables)],
+                                                       DlcExplosions(game), [.. vehicleEffects.Explosions, .. GuerrillaWeapons.Explosions(rfgTables)]);
         File.WriteAllBytes(Path.Combine(modFolder, "vfx.xtbl"), effectTables.Visuals);
         File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
         File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
@@ -567,7 +573,8 @@ public static class GuerrillaWorld
         }
         log($"Explosions: {effectTables.ExplosionsAdded} of Guerrilla's added to Armageddon's table (mods\\guerrilla_world\\explosions.xtbl; the game keeps " +
             $"{GuerrillaEffectTables.ExplosionLimit}, Armageddon's and its DLCs' first)" +
-            (effectTables.ExplosionsWaiting.Count > 0 ? $"; no room for {string.Join(", ", effectTables.ExplosionsWaiting)} (Armageddon's of the name play instead, where it has one)" : ""));
+            (effectTables.ExplosionsWaiting.Count > 0 ? $"; no room for {string.Join(", ", effectTables.ExplosionsWaiting)} (Armageddon's of the name play instead, where it has one)" : "") +
+            (GuerrillaEffectTables.FlagsLeftOut.Count > 0 ? $"; flags Armageddon's table has no name for, left out: {string.Join(", ", GuerrillaEffectTables.FlagsLeftOut)}" : ""));
         log($"Effects: {effectTables.PropsOf.Count} of Guerrilla's level objects, {effectTables.EffectsAdded} effects and {effectTables.VisualsAdded} visual effects added to Armageddon's tables " +
             $"(mods\\guerrilla_world\\level_objects.xtbl, effects.xtbl, vfx.xtbl); {effectFiles.Count} effect files converted with {effectTextures.Count} textures, " +
             $"{effectFiles.Values.Sum(l => l.Sum(f => (long)f.Data.Length)) / 1024:N0} KB" +
@@ -810,6 +817,23 @@ public static class GuerrillaWorld
             }
         }
 
+        // Guerrilla's people (see GuerrillaPopulation): the patrols whose squad GuerrillaPeople puts in the
+        // squad tables, with their squad spawn nodes and route navpoints, kept within Armageddon's 24 patrols for
+        // every 3 × 3 block of zones. The squads are worked out from Guerrilla's own tables for the people it
+        // makes (its default ones, and any its last run made), so the world needn't wait for it: a squad it
+        // doesn't write after all (its weapons not ported) the game drops, with a warning.
+        var peopleSquads = GuerrillaSquads.Expected(rfgTables, misc, GuerrillaSquads.PlannedCharacters(modFolder));
+        // The zones' spawn resource: the Guerrilla world's own (GuerrillaSquads), written here holding only the
+        // player if GuerrillaPeople hasn't run yet (without it the zones would take Armageddon's "Default",
+        // which streams its aliens and soldiers in).
+        string spawnResource = GuerrillaSquads.SpawnResource;
+        bool resourceWritten = GuerrillaSquads.EnsureSpawnResource(misc, modFolder);
+        log($"People: the zones' spawn resource is {spawnResource}" + (resourceWritten ? " (written with the player only; building the people adds theirs)" : ""));
+        var patrolsIn = GuerrillaPopulation.Cap(guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.Patrols(z.Value, peopleSquads)), out int patrolsLeftOut);
+        log(peopleSquads.Count == 0 ? "People: none of Guerrilla's squads can be had with the people built so far, so no patrols placed"
+            : $"People: {patrolsIn.Values.Sum(p => p.Count)} of Guerrilla's patrols placed, with their squads ({string.Join(", ", peopleSquads.Order())})" +
+              (patrolsLeftOut > 0 ? $"; {patrolsLeftOut} left out to keep {GuerrillaPopulation.MostPatrols} patrols at most within each 3 x 3 block of zones" : ""));
+
         foreach (var (col, row) in zones)
         {
             string zone = $"{World}_{col:00}_{row:00}";
@@ -849,6 +873,7 @@ public static class GuerrillaWorld
             var marker = zoneFile.AddNew(Class("obj_zone"), prefix | 0x000020, schema.Class("obj_zone")!.NewObject(zoneMiddle, DefaultChoice),
                                          zoneMiddle - new Vector3(0.5f), zoneMiddle + new Vector3(0.5f));
             marker.Property("terrain_file_name")!.SetText(zone);
+            marker.Property("spawn_resource_data")!.SetText(spawnResource);
             ZoneEnvironment(zoneFile, schema, prefix | 0x030008, zoneMiddle);
             Vector3 startAt = new(zoneMiddle.X, GuerrillaGround.HeightAt(h, ZoneWidth / 2, ZoneWidth / 2, Layout) + 1, zoneMiddle.Z);
             Matrix4x4? startTurn = null;
@@ -876,6 +901,13 @@ public static class GuerrillaWorld
                                                                PropsOf, GameplayProps, LodProps,
                                                                chunk => BitConverter.ToUInt32(chunkFiles[chunk].Header, 0x24), taken);
                 foreach (var mover in movers) zoneFile.Insert(zoneFile.Objects.Count, mover);
+            }
+            // Guerrilla's patrols with their squads and route navpoints.
+            if (patrolsIn.TryGetValue((col, row), out var patrolsHere) && patrolsHere.Count > 0)
+            {
+                var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
+                foreach (var person in GuerrillaPopulation.Convert(guerrillaObjects[(col, row)], patrolsHere, schema, taken))
+                    zoneFile.Insert(zoneFile.Objects.Count, person);
             }
             byte[] zoneBytes = GuerrillaMovers.WithLinks(zoneFile.ToBytes(), links);
             // The persistent zone: the player start again (as the game's own levels keep one there), and

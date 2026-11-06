@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using RfaFormats.Tables;
 
 namespace RfaFormats.Guerrilla;
 
@@ -32,15 +33,16 @@ namespace RfaFormats.Guerrilla;
 ///
 /// Room: the game keeps the visuals in an array of 950 (0x1200BF4 its count, 0x121FDE8 the entries,
 /// 0xB4 bytes each; one past it is left out), which Armageddon's 904 nearly fill; the guerrilla_world
-/// mod gives it one of <see cref="VisualLimit"/>. Its effects are in a pool of <see cref="EffectLimit"/>. The visuals added are those the most
+/// mod gives it one of <see cref="VisualLimit"/>. Its effects are in a table of 1225, found by name
+/// through a lookup of 1225 (Armageddon's own are 1112), which the mod makes <see cref="EffectLimit"/>. The visuals added are those the most
 /// placed objects show, as many as fit; the rest, and the effects showing them, wait. Level objects
 /// are made as many as the table has. The game reads all three at start-up from its table cache, where
 /// the guerrilla_world mod hands it these.
 /// </summary>
 public static class GuerrillaEffectTables
 {
-    /// <summary>How many visual effects (vfx.xtbl entries) the game keeps; how many effects (effects.xtbl entries).</summary>
-    public const int VisualLimit = 2048, EffectLimit = 1224;
+    /// <summary>How many visual effects (vfx.xtbl entries) the game keeps; how many effects (effects.xtbl entries), with the guerrilla_world mod.</summary>
+    public const int VisualLimit = 2048, EffectLimit = 4096;
 
     /// <summary>
     /// How many explosions (explosions.xtbl entries) the game keeps: its own reader (0x6E9C70) stops at
@@ -48,6 +50,14 @@ public static class GuerrillaEffectTables
     /// (dlcNN_explosions.xtbl); the guerrilla_world mod gives it a table of 256.
     /// </summary>
     public const int ExplosionLimit = 256;
+
+    /// <summary>
+    /// The flags of Guerrilla's added explosions that Armageddon's explosion table has no name for
+    /// ("explosion: flag"), left out by the last <see cref="Build"/>: its reader stops the game on a flag it
+    /// doesn't know ("\"nano dissolve\" is not a valid flag name!", xml_table_tools.cpp 1381). Guerrilla's
+    /// nano rifle's explosion dissolves people with "nano dissolve"; that waits for the nano rifle's port.
+    /// </summary>
+    public static readonly List<string> FlagsLeftOut = [];
 
     /// <summary>The name an added entry (or a converted effect's file) has: Guerrilla's with "rfg_" before it.</summary>
     public static string Added(string guerrillaName) => "rfg_" + guerrillaName;
@@ -78,10 +88,12 @@ public static class GuerrillaEffectTables
     /// many objects name it), from Armageddon's and Guerrilla's misc.vpp_pc; <paramref name="hasFile"/>
     /// says whether Guerrilla's effect file (its name without extension) can be had. The effects in
     /// <paramref name="worldEffects"/> (effects.xtbl names: those the world plays everywhere, such as
-    /// its dust) are added too, their visuals before any object's.
+    /// its dust and its vehicles' fire, smoke, exhaust and sparks) are added too, their visuals before
+    /// any object's; so are the explosions in <paramref name="worldExplosions"/> (its vehicles' and weapons'), before
+    /// any object's, with their effects as the world's own.
     /// </summary>
     public static Tables Build(Packfile armageddonMisc, Packfile guerrillaMisc, IReadOnlyDictionary<string, int> used, Func<string, bool> hasFile,
-                               IReadOnlyCollection<string> worldEffects, int dlcExplosions)
+                               IReadOnlyCollection<string> worldEffects, int dlcExplosions, IReadOnlyCollection<string>? worldExplosions = null)
     {
         string Text(Packfile archive, string table) =>
             Encoding.Latin1.GetString(archive.Read(archive.Find(table) ?? throw new InvalidDataException($"no {table} in {archive.Name}")));
@@ -110,6 +122,8 @@ public static class GuerrillaEffectTables
         var explosionUse = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var (p, list) in explosionsOf)
             foreach (string x in list) explosionUse[x] = explosionUse.GetValueOrDefault(x) + used[p];
+        foreach (string x in worldExplosions ?? []) if (theirExplosions.ContainsKey(x)) explosionUse[x] = int.MaxValue;  // played everywhere: first
+        var asked = (worldExplosions ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var takenExplosions = explosions;
         int explosionRoom = Math.Max(0, ExplosionLimit - Count(ourExplosionText, "Explosion") - dlcExplosions);
         var rankedExplosions = explosionUse.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase).Select(x => x.Key)
@@ -119,8 +133,12 @@ public static class GuerrillaEffectTables
         // have, which the game requires: see ExplosionEntry): Armageddon's explosion of its name, else
         // that of the one Guerrilla's own table gives the same damage (the same radii, structural
         // damage and impulse; the nearest human damage, then by name): chem_tank_a_demo is chem_tank_a
-        // without salvage, sewage_tank_a hits as gas_pump and generator_a do. One with neither is left
-        // out, and its objects die without it, as before.
+        // without salvage, sewage_tank_a hits as gas_pump and generator_a do. An object's explosion with neither
+        // is left out, and its objects die without it, as before. One the world's vehicles and weapons
+        // set off themselves (worldExplosions) is never left out: with neither, the nearest of
+        // Armageddon's own by those numbers (Armageddon's, under its names) lends it the fields, its
+        // kind of damage to buildings; the numbers stay Guerrilla's. The NPCs' gauss rifle shot
+        // (gauss_rifle_npc) takes Armageddon's gauss_rifle so (whose radii are Guerrilla's NPC one's).
         string? DamageFrom(string explosion)
         {
             if (ourExplosions.TryGetValue(explosion, out string? same)) return same;
@@ -129,10 +147,23 @@ public static class GuerrillaEffectTables
                 double.TryParse(Field(entry, field), NumberStyles.Float, CultureInfo.InvariantCulture, out double v) ? v : null;
             string[] damage = ["Radius", "CrumbleRadius", "KnockdownRadius", "FlinchRadius", "Structural_Damage", "Impulse"];
             double human = Number(theirs, "Human_Damage_Max") ?? 0;
-            return theirExplosions.Where(t => !t.Key.Equals(explosion, StringComparison.OrdinalIgnoreCase) && ourExplosions.ContainsKey(t.Key) &&
-                                              damage.All(f => Number(t.Value, f) == Number(theirs, f)))
-                                  .OrderBy(t => Math.Abs((Number(t.Value, "Human_Damage_Max") ?? 0) - human)).ThenBy(t => t.Key, StringComparer.Ordinal)
-                                  .Select(t => ourExplosions[t.Key]).FirstOrDefault();
+            string? alike = theirExplosions.Where(t => !t.Key.Equals(explosion, StringComparison.OrdinalIgnoreCase) && ourExplosions.ContainsKey(t.Key) &&
+                                                       damage.All(f => Number(t.Value, f) == Number(theirs, f)))
+                                           .OrderBy(t => Math.Abs((Number(t.Value, "Human_Damage_Max") ?? 0) - human)).ThenBy(t => t.Key, StringComparer.Ordinal)
+                                           .Select(t => ourExplosions[t.Key]).FirstOrDefault();
+            if (alike != null || !asked.Contains(explosion)) return alike;
+            string[] armageddons = ["Radius", "CrumbleRadius", "KnockdownRadius", "FlinchRadius", "StructuralDamage", "Mover_Impulse"];
+            double Apart(string ourEntry)
+            {
+                double apart = 0;
+                for (int i = 0; i < damage.Length; i++)
+                {
+                    double g = Number(theirs, damage[i]) ?? 0, a = Number(ourEntry, armageddons[i]) ?? 0, larger = Math.Max(Math.Abs(g), Math.Abs(a));
+                    if (larger > 0) apart += Math.Abs(g - a) / larger;
+                }
+                return apart;
+            }
+            return ourExplosions.OrderBy(t => Apart(t.Value)).ThenBy(t => t.Key, StringComparer.Ordinal).Select(t => t.Value).FirstOrDefault();
         }
         var addedExplosions = rankedExplosions.Take(explosionRoom).ToHashSet(StringComparer.OrdinalIgnoreCase);
         IEnumerable<string> ExplosionEffects(string explosion) => Leaves(theirExplosions[explosion], "Element");
@@ -149,7 +180,8 @@ public static class GuerrillaEffectTables
         foreach (var (p, list) in effectsOf)
             foreach (string v in list.Select(e => VisualOf(e)!).Distinct(StringComparer.OrdinalIgnoreCase))
                 placed[v] = placed.GetValueOrDefault(v) + used[p];
-        var everywhere = worldEffects.Where(e => VisualOf(e) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var everywhere = worldEffects.Concat((worldExplosions ?? []).Where(addedExplosions.Contains).SelectMany(ExplosionEffects))
+                                     .Where(e => VisualOf(e) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         foreach (string e in everywhere) placed[VisualOf(e)!] = int.MaxValue;
         // (The entries of its <Table>: the two in <TableTemplates> are the editor's.)
         int visualRoom = Math.Max(0, VisualLimit - Count(ourVisuals, "Effect"));
@@ -213,11 +245,15 @@ public static class GuerrillaEffectTables
         // The explosions: Guerrilla's settings in Armageddon's fields (see ExplosionEntry), new unique
         // numbers after Armageddon's own.
         var explosionShape = new Shape(ourExplosionText, "Explosion", theirExplosionText);
+        // The explosion flags Armageddon's table names (its description; its reader knows no others).
+        var knownFlags = XtblFile.FromBytes(Encoding.Latin1.GetBytes(ourExplosionText)).Description?.Children
+                             .FirstOrDefault(f => f.Name.Equals("Flags", StringComparison.OrdinalIgnoreCase))?.Flags.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        lock (FlagsLeftOut) FlagsLeftOut.Clear();
         var explosionText = new StringBuilder();
         int uniqueId = ourExplosions.Values.Select(x => int.TryParse(Field(x, "Unique_ID"), out int id) ? id : 0).DefaultIfEmpty(0).Max();
         foreach (string x in rankedExplosions.Where(addedExplosions.Contains))
         {
-            string body = Fit(ExplosionEntry(theirExplosions[x], Added(x), DamageFrom(x), effectSet, ++uniqueId), "Explosion", explosionShape);
+            string body = Fit(ExplosionEntry(theirExplosions[x], Added(x), DamageFrom(x), effectSet, ++uniqueId, knownFlags), "Explosion", explosionShape);
             // The game stops while it starts on an explosion without a field all of Armageddon's have
             // ("Could not find required attribute Explosion:Structural_Damage_Type"), so check here.
             var fields = XElement.Parse($"<Explosion>{body}</Explosion>").Elements().Select(e => e.Name.LocalName).ToHashSet();
@@ -242,9 +278,16 @@ public static class GuerrillaEffectTables
     /// radii, Electrical_Explosion) from <paramref name="ours"/>: Armageddon's entry of the same name,
     /// or of the explosion Guerrilla's table gives the same damage (see DamageFrom in Build).
     /// </summary>
-    static string ExplosionEntry(string theirs, string name, string? ours, ISet<string> addedEffects, int uniqueId)
+    static string ExplosionEntry(string theirs, string name, string? ours, ISet<string> addedEffects, int uniqueId, ISet<string>? knownFlags)
     {
         var entry = XElement.Parse($"<Explosion>{Rename(theirs, name)}</Explosion>");
+        // Its flags Armageddon's table names, the others left out (see FlagsLeftOut).
+        if (knownFlags != null && entry.Element("Flags") is { } flags)
+            foreach (var flag in flags.Elements().Where(f => !knownFlags.Contains(f.Value.Trim())).ToList())
+            {
+                lock (FlagsLeftOut) FlagsLeftOut.Add($"{name}: {flag.Value.Trim()}");
+                flag.Remove();
+            }
         foreach (var (guerrilla, armageddon) in ExplosionFieldNames)
             foreach (var e in entry.Elements(guerrilla).ToList())
                 e.Name = armageddon;

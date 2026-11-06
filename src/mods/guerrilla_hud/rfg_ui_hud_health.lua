@@ -2,7 +2,7 @@
 -- from the screen's corners as health drops, driven by Armageddon's own health data (health_hud).
 --
 -- Part of the guerrilla_hud mod. The document this drives, rfg_ui_hud_health, is Guerrilla's own,
--- made from your copy of Guerrilla by GuerrillaHud.exe (its pictures renamed rfg_...), which also
+-- made from your copy of Guerrilla by GuerrillaBuilder.exe (its pictures renamed rfg_...), which also
 -- packs this script with it; run that again after changing this file. The mod loads the document
 -- in the worlds named by [GuerrillaHud] Worlds= and unloads it everywhere else.
 --

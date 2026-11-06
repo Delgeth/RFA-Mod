@@ -1,5 +1,5 @@
 -- What Red Faction: Guerrilla's own interface scripts use that Armageddon's interface Lua doesn't
--- have. Part of the guerrilla_hud mod: GuerrillaHud.exe puts this in front of each of Guerrilla's
+-- have. Part of the guerrilla_hud mod: GuerrillaBuilder.exe puts this in front of each of Guerrilla's
 -- scripts it brings over from your copy of Guerrilla (which is only read; nothing of it is shipped),
 -- and our own script for that document after it.
 --
@@ -14,7 +14,7 @@ TWEEN_STATE_IDLE = TWEEN_STATE_WAITING
 string = { find = rfg_string_find }
 
 -- Guerrilla's scripts give and read tints as 0-1, Armageddon's interface as 0-255 (in its documents
--- both are 0-1). GuerrillaHud.exe makes their vint_set_property and vint_get_property calls these.
+-- both are 0-1). GuerrillaBuilder.exe makes their vint_set_property and vint_get_property calls these.
 function rfg_vint_set_property(handle, property, ...)
 	if property == "tint" then
 		local r, g, b = ...

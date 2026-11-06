@@ -26,14 +26,27 @@ single-player.
   in that world, in place of Armageddon's health ring, red screen edges and compass bar; its
   reticles and ammo count, in place of Armageddon's reticle and ammo ring (Armageddon's Nano Forge
   meter stays); its weapon select, in place of Armageddon's weapon selector; and its minimap (the
-  map around you turning with the camera, the district's name) and its world map, which M opens
+  map around you turning with the camera, the district's name) and its world map, which Tab opens
   and closes.
+- **Guerrilla's people, the first ones** (`guerrilla_people`, beta): in the Guerrilla world you play
+  Mason, in his own coat, with Guerrilla's animations and Armageddon's extra moves (dodging, the
+  Nano Forge); and the EDF are there: troopers, lieutenants, elites and heavy elites, who patrol
+  Guerrilla's routes, fight you with Guerrilla's guns, drop them when they die and fall as
+  ragdolls. You build them from your own copy of Guerrilla too.
 - **Guerrilla's vehicles** (`guerrilla_vehicles`, beta): Guerrilla's cars, trucks, buses, ATVs,
   rovers, EDF staff cars, scouts and APCs, Marauder raiders and more, which you can spawn and drive
   (W, S, Space and A/D, Guerrilla's keys). You get in and out the way Mason does in Guerrilla
   (opening the door, climbing in, quick and diving exits, moving between seats with the middle
-  mouse button, getting out with E), his animations moved onto Darius. You build them from your
-  own copy of Guerrilla too.
+  mouse button, getting out with E), with his own animations: in the Guerrilla world you play
+  Mason. They handle, dent, burn and
+  blow up as in Guerrilla, with its own fire, smoke, exhaust and explosions. You build them from
+  your own copy of Guerrilla too.
+- **Guerrilla's guns, the first ones** (`guerrilla_gear`, beta): the EDF's assault rifle, enforcer,
+  gauss rifle and rail driver and the Peacekeeper, with Guerrilla's own models, magazines, damage,
+  spread, ammo, muzzle flashes, tracers and explosions (the rail driver's scope sees through walls,
+  as in Guerrilla), and Guerrilla's own player animations for them: you stand, walk, run, aim, fire
+  and reload with them as Mason did, and Armageddon's own guns keep Darius's. You give yourself one from the Spawn menu. You build them from your own copy of
+  Guerrilla too.
 - **In-game menus** (`rfa_loader`, drawn with [Dear ImGui](https://github.com/ocornut/imgui)):
   press F7 (or open the console) and a bar along the bottom of the screen holds RFA-Mod's menus
   (another key: `MenuKey=` under `[Loader]`). Its first
@@ -135,31 +148,41 @@ work as before.
 
 1. Install **Red Faction: Guerrilla Steam Edition** (Re-MARS-tered's files aren't read yet). You
    need about 1 GB free where RFA-Mod is.
-2. In `rfa_mods.ini`, under `[Launcher]`, set `GuerrillaDir=` to Guerrilla's folder (for example
-   `D:\Games\Red Faction Guerrilla`). Or give the folder to each tool as its argument.
-3. Run `editor\GuerrillaWorld.exe` (two or three minutes). It writes the world `rfg` into
-   `overrides\`, with Guerrilla's ground, rocks, buildings and props (which break, and which the
-   Nano Forge rebuilds), and its sky into `mods\guerrilla_world\`. `--props none` leaves out the
-   buildings and props; `--zones 11-12,10-11` builds only that block of zones (columns, then rows).
-4. Run `editor\GuerrillaHud.exe` for Guerrilla's HUD (a few seconds).
-5. Run `editor\GuerrillaArsenal.exe` for Guerrilla's vehicles (a few seconds). It builds every
-   one it can (`--vehicles Col_Taxi_1,Min_ATV_1` for only some).
-6. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
+2. Run `editor\GuerrillaBuilder.exe`. It finds Guerrilla in the Steam library Armageddon is in;
+   if it doesn't, click **Browse...** beside Red Faction: Guerrilla and choose Guerrilla's folder
+   (for example `D:\Games\Red Faction Guerrilla`). It keeps the folder in `rfa_mods.ini`
+   (`GuerrillaDir=` under `[Launcher]`).
+3. Leave everything ticked and click **Build** (a minute or more). From your copy of Guerrilla it makes:
+   - the world `rfg`, with Guerrilla's ground, rocks, buildings and props (which break, and which
+     the Nano Forge rebuilds) and its sky;
+   - Guerrilla's HUD;
+   - its vehicles, and the guns ported so far;
+   - its EDF soldiers, who patrol the world.
+
+   All of it goes into `overrides\` and `mods\` in your RFA-Mod folder.
+4. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
    `level rfg_12_11`, or any zone's name, `rfg_<column>_<row>` (such as `rfg_04_10`, a town).
-7. To drive: with the console open, click **Spawn**, then **Vehicles**, in the bar at the bottom
+5. To drive: with the console open, click **Spawn**, then **Vehicles**, in the bar at the bottom
    of the screen; pick one (type `taxi`, `ATV`, `Bluecrab`, `Staffcar`, `Raider`, ... in the box to
    find it) and click Spawn. Close the console, walk up to its driver side and get in with E. W accelerates, S brakes
    and reverses, Space is the handbrake, A and D steer, E gets you out, the middle mouse button moves
    you to another seat.
 
 Things to know:
-- Run the tools again after updating RFA-Mod, and `GuerrillaHud.exe` again after changing its
-  script.
-- `editor\GuerrillaHud.exe --remove` takes the HUD away. Only remove it that way: one of its files
-  also holds Armageddon's own HUD pictures.
+- After updating RFA-Mod, run `editor\GuerrillaBuilder.exe` again: it ticks what needs building
+  again, so click **Build**. Build the HUD again after changing its scripts.
+- **Remove...** takes the ticked parts away again, with what's built on them: the world takes
+  everything with it, the weapons take the soldiers (who carry them). Only take the HUD away there:
+  one of its files also holds Armageddon's own HUD pictures.
+- To build only some of a part, use the builder from a command prompt, for example
+  `editor\GuerrillaBuilder.exe build world --zones 11-12,10-11` (that block of zones: columns,
+  then rows), `build world --props none` (no buildings or props), `build vehicles --vehicles
+  Col_Taxi_1,Min_ATV_1` or `build weapons --weapons m16,rail_driver`. `editor\GuerrillaBuilder.exe
+  help` lists everything. It's a window program, so start it with `start /wait` in a command
+  prompt, or add `| Out-Host` in PowerShell, for the prompt to wait for it.
 - Guerrilla's minimap sits at the bottom left: north turns with the camera, the arrow in the middle
-  is you, and it zooms out as you drive faster. Press M (`MapKey=` under `[GuerrillaHud]`) for the
-  world map, with you on it, and M again to close it; the game keeps running while it's open. The
+  is you, and it zooms out as you drive faster. Press Tab (`MapKey=` under `[GuerrillaHud]`) for
+  the world map, with you on it, and Tab again to close it; the game keeps running while it's open. The
   minimap shows each zone's own detailed picture once it has loaded, a moment after you come near.
 - Guerrilla's reticle sits in the middle, turning red over an enemy and green over a friend, with
   the rounds in your magazine beside it and the rest in the box (the infinity sign where ammo is
@@ -169,7 +192,8 @@ Things to know:
   on plates in a cross (key 1 is the left one, then clockwise), each with its ammo, the chosen one
   lit with its name. The pictures are Armageddon's weapons' own. `WeaponSelect=0` brings
   Armageddon's selector back.
-- The vehicles have no sounds, lights or turrets yet, and their glass shows too bright. Darius is a little taller than Mason, so his hands may not land exactly on the
+- The vehicles have no sounds, lights or turrets yet, and their glass shows too bright. In
+  Armageddon's own levels Darius gets in with Mason's animations, so his hands may not land on the
   wheel and door. Tanks and the bulldozer aren't built yet, and walkers can't be got into yet.
   `guerrilla_vehicles` must be on: besides the keys, it makes room in the game for the vehicles
   (Armageddon holds only 40, and uses 24 itself) and their animation sets. The console's own
@@ -177,15 +201,33 @@ Things to know:
   first. The game makes no vehicle while you're in one. Remove ones you're done with in Spawned.
 - The driving, getting-out and seat keys are under `[GuerrillaVehicles]` in `rfa_mods.ini`. A key
   you have set for one of them yourself is kept. E also gets you out of Armageddon's own vehicles
-  where the game lets you (as a controller's button already does).
-- `editor\GuerrillaArsenal.exe --remove` takes the vehicles away again.
+  where the game lets you (as a controller's button already does). `Dents=0` there keeps the
+  vehicles from denting.
+- To try Guerrilla's guns: with the console open, click **Spawn**, then **Weapons**, type `rfg_` or
+  the gun's name (`rfg_m16` the assault rifle, `rfg_enforcer`, `autoblaster` the Peacekeeper,
+  `gauss_rifle`, `rfg_rail_driver`) and click Give. They have no sounds yet, no melee hit, and
+  Armageddon's bullet impacts. With one of them in your hands you move as Mason did (Guerrilla's
+  player animations); take up one of Armageddon's guns and you move as Darius again.
+- The EDF carry these guns, and you can take one a soldier drops, as in Guerrilla: walk over it to
+  take its ammo (if you have that gun) or to take it into a free slot, or use the action button to
+  swap it for the gun in your hands. A dropped gun carries what Guerrilla gives: part of a magazine and
+  a little ammo, more on Easy, less on Hard and Insane.
+- In the Guerrilla world you play Mason with Armageddon's movement, except that walking and running
+  turn him to face where you go, all the way round, as sprinting does; aim or shoot and he faces
+  where the camera looks again. Darius walks the same way in Armageddon's own levels (with
+  `guerrilla_gear` on).
+- To meet the EDF: they patrol the Guerrilla world's roads and bases (try `level rfg_10_08`), or
+  type `drop_human EDF_Trooper` in the console for one in front of you (also `EDF_Elite`,
+  `EDF_Elite_Heavy`, `EDF_Lieutenant`, ...). Mason's Nano Forge glove gives off a cyan light, as
+  Darius's does; **F7 → Graphics → Mason's Nano Forge light** turns it off (load the level again
+  to see it).
+- `guerrilla_gear` must be on: it makes room in the game for more weapons (Armageddon holds only 85
+  inventory items, and uses up to 79 itself) and for the guns' animations. If you turn it off, take
+  the weapons away in the builder first.
 - Nothing made from Guerrilla is ever shipped; it stays on your PC.
 - `guerrilla_world` widens the game's physics for every world, the campaign included. Set
   `ZoneSize=0` under `[GuerrillaWorld]` if you don't use the Guerrilla world.
-- To take the world away, remove the HUD first (`--remove`), then delete `rfg_*`,
-  `zonescript_rfg.vpp_pc`, `rfg.gtodx`, `table.vpp_pc\territories.xtbl`,
-  `effects.vpp_pc\vfx_containers.asm_pc` and `misc.vpp_pc\bitmaps_pc` from
-  `overrides\build\pc\cache\`.
+- To take the world away, tick **World** in the builder and click **Remove...**.
 
 ## The editor
 

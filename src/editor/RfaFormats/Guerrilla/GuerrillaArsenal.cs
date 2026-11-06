@@ -5,7 +5,7 @@ namespace RfaFormats.Guerrilla;
 
 /// <summary>
 /// Red Faction: Guerrilla's vehicles made usable in Armageddon, from the player's own copy of Guerrilla
-/// (only read): GuerrillaArsenal.exe, for the guerrilla_world mod. For each vehicle asked for:
+/// (only read): GuerrillaBuilder.exe's vehicles, for the guerrilla_world mod. For each vehicle asked for:
 ///   - its model converted (<see cref="GuerrillaVehicles"/>) and packed with its textures (each one of
 ///     Guerrilla's, from the vehicle's own texture file, as a single-texture file under its alias, its
 ///     compressed mip levels down to 4 × 4) into a container of its own, named as Guerrilla's
@@ -16,11 +16,14 @@ namespace RfaFormats.Guerrilla;
 ///   - its vehicles.xtbl entry, Guerrilla's own, added to Armageddon's table, which the guerrilla_world
 ///     mod hands the game while it starts (mods\guerrilla_world\vehicles.xtbl). The two tables describe a
 ///     vehicle with nearly the same fields; a field Armageddon's table hasn't is left out (Guerrilla's
-///     vehicle family, AI speed limits, ...), and so is a value Armageddon has no choice for; a field
-///     Armageddon requires that Guerrilla's hasn't (its electric hit points, memory slot, the cameras'
-///     vertical limits, ...) gets the default Armageddon's description gives it. For now
-///     also left out: the sounds (Guerrilla's are XACT cues, Armageddon plays Wwise events), the lights
-///     and other effects (Guerrilla names effects Armageddon's tables don't load), and the turrets;
+///     vehicle family, its sounds' wave bank, ...) unless Armageddon's reader still reads it (the
+///     handling fields in <see cref="ReadAnyway"/>), and so is a value Armageddon has no choice for; a
+///     field Armageddon requires that Guerrilla's hasn't (its electric hit points, memory slot, the
+///     cameras' vertical limits, ...) gets the default Armageddon's description gives it. Its effects
+///     (engine fire and smoke, the wreck's fire, exhaust, sparks, its explosion) are Guerrilla's own, as
+///     the world builder adds them ("rfg_" names: see <see cref="VehicleEffects"/>). For now also left
+///     out: the sounds (Guerrilla's are XACT cues, Armageddon plays Wwise events), the lights (Armageddon
+///     lights a vehicle through its own Lights map), and the turrets;
 ///   - its vehicle_interactions.xtbl entry (where the player and passengers get in, sit, move between
 ///     seats and get out, and how: opening the door, climbing in, quick and diving exits, crawling out of
 ///     an upturned car), Guerrilla's own, added to Armageddon's table
@@ -28,8 +31,9 @@ namespace RfaFormats.Guerrilla;
 ///     same steps, actions and animation states ("vehicle enter primary 1" ends in "driving forward",
 ///     which is what puts the player behind the wheel); Guerrilla's Door is Armageddon's Door_1. The
 ///     doors' sound cues are left out until Guerrilla's audio is ported;
-///   - the animation set the interaction plays (Vehicle_Taxi, ...), Guerrilla's own, with Mason's
-///     animations moved onto Darius's skeleton and packed in the vehicle's container
+///   - the animation set the interaction plays (Vehicle_Taxi, ...), Guerrilla's own, with its
+///     animations as Guerrilla has them (re-encoded for Armageddon; Mason is the player in Guerrilla's
+///     world, and its people use the same skeletons) and packed in the vehicle's container
 ///     (<see cref="GuerrillaAnimationSets"/>). Without the animations a transition that names a door
 ///     stops the player at it ("Vehicle interaction anim missing open 'DOOR_L' anim or trigger"): the
 ///     door opens on the "door start" and "door end" triggers of the person's animation.
@@ -62,7 +66,83 @@ public static class GuerrillaArsenal
     };
 
     /// <summary>The fields of Guerrilla's entry left out for now (see the summary), whatever Armageddon's table has.</summary>
-    static readonly string[] NotYet = ["Foley", "Effects", "Turrets"];
+    static readonly string[] NotYet = ["Foley", "Turrets"];
+
+    /// <summary>
+    /// The fields Armageddon's table description leaves out that its vehicle reader still reads, as
+    /// Guerrilla's does (0x628340 and its parts are Guerrilla's vehicle_parse_vehicle with fields added:
+    /// each of these names is pushed there, and read into the vehicle's settings): kept although the
+    /// description lacks them. Without them the game takes vehicle_defaults.xtbl's: Guerrilla's cars
+    /// turn with the default yaw torque (1, the taxi's 1.4), the APCs wait half a second before reversing,
+    /// the mining rovers push with 4.75 times their force assist, AI drivers lose their own torque, spin
+    /// damping and top speed. Armageddon's own entries carry undescribed fields too, so its table reader
+    /// takes them. Paths as <see cref="Prune"/> builds them (a list's items under the list's name).
+    /// </summary>
+    static readonly HashSet<string> ReadAnyway = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Yaw_Torque_Scalar", "Collision_Mass_Scalar", "Vehicle_Damage_Scale", "Alert_Level_Multiplier", "Autobrake_Speed",
+        "AIEnforcedMaxSpeed", "Engine/AITorque", "Engine/Force_assist", "Axles/Wheel_Spring_Pow",
+        "Transmission/Forward_To_Reverse_Delay", "Transmission/Reverse_To_Forward_Delay", "Angular_Damping/Normal_Spin_Damping_AI",
+        "Effects/Bomb_Explosion",
+    };
+
+    /// <summary>
+    /// The fields of a vehicle's Effects that name an explosion (explosions.xtbl); the others Armageddon's
+    /// reader reads (<see cref="EffectFields"/>) name an effect (effects.xtbl).
+    /// </summary>
+    static readonly HashSet<string> ExplosionFields = new(StringComparer.OrdinalIgnoreCase) { "Explosion", "Bomb_Explosion", "Electrical_Explosion" };
+
+    /// <summary>
+    /// The Effects fields Armageddon's vehicle reader reads (0x62D2C0): those its description has
+    /// (engine fire and smoke, the wreck's smoke, a broken-off part's fire, the explosion, exhaust, sparks
+    /// on a hit and a scrape, a part coming off, Armageddon's electric damage and hit markers), and
+    /// Bomb_Explosion (<see cref="ReadAnyway"/>). Guerrilla's light fields (Head_Light_Primary ...) aren't
+    /// among them: Armageddon lights its vehicles through its Lights map.
+    /// </summary>
+    static IReadOnlyList<string> EffectFields(FieldDescription vehicleDescription) =>
+    [
+        .. (vehicleDescription.Children.FirstOrDefault(f => f.Name.Equals("Effects", StringComparison.OrdinalIgnoreCase))?.Children ?? [])
+               .Where(f => f.Type == FieldType.Reference).Select(f => f.Name),
+        .. ReadAnyway.Where(p => p.StartsWith("Effects/", StringComparison.OrdinalIgnoreCase)).Select(p => p["Effects/".Length..]),
+    ];
+
+    /// <summary>
+    /// A Guerrilla vehicle entry's effects as Guerrilla plays them: each field of <paramref name="fields"/>
+    /// its Effects names, else what Guerrilla's vehicle_defaults.xtbl names (its reader takes the
+    /// defaults' for a field an entry leaves out, 0xB6BE50; Armageddon's defaults name the same effects,
+    /// but Armageddon's effects of those names are its own: its own fire, sparks, a purple car explosion,
+    /// and exhaust it loads only with its own levels).
+    /// </summary>
+    static Dictionary<string, string> EffectsOf(XtblElement entry, XtblElement? defaults, IReadOnlyList<string> fields)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string field in fields)
+        {
+            string? value = entry.Element("Effects")?.ValueOf(field)?.Trim();
+            if (string.IsNullOrEmpty(value)) value = defaults?.Element("Effects")?.ValueOf(field)?.Trim();
+            if (!string.IsNullOrEmpty(value)) result[field] = value;  // "null": none (an effect of no such name)
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// The effects and explosions (Guerrilla's names) Guerrilla's vehicles play, every one of its entries
+    /// (see <see cref="EffectsOf"/>): the world builder adds them to the effect tables as effects played
+    /// everywhere in the world (<see cref="GuerrillaEffectTables"/>), and this tool names the added ones
+    /// ("rfg_" + Guerrilla's name) in the vehicles' entries.
+    /// </summary>
+    public static (IReadOnlyList<string> Effects, IReadOnlyList<string> Explosions) VehicleEffects(Packfile guerrillaTables, Packfile gameTables)
+    {
+        XtblFile ReadTable(Packfile pack, string name) => XtblFile.FromBytes(pack.Read(pack.Find(name) ?? throw new InvalidDataException($"no {name} in {pack.Name}")));
+        var fields = EffectFields(ReadTable(gameTables, "vehicles.xtbl").Description ?? throw new InvalidDataException("Armageddon's vehicles.xtbl has no description"));
+        var defaults = ReadTable(guerrillaTables, "vehicle_defaults.xtbl").Entries.FirstOrDefault();
+        var effects = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var explosions = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in ReadTable(guerrillaTables, "vehicles.xtbl").Entries)
+            foreach (var (field, value) in EffectsOf(entry, defaults, fields))
+                if (!value.Equals("null", StringComparison.OrdinalIgnoreCase)) (ExplosionFields.Contains(field) ? explosions : effects).Add(value);
+        return ([.. effects], [.. explosions]);
+    }
 
     /// <summary>The files this writes (relative to the overrides folder, then to the mod's folder), for --remove.</summary>
     public const string AssetList = @"build\pc\cache\vehicles.vpp_pc\vehicle_containers.asm_pc", Table = "vehicles.xtbl",
@@ -92,11 +172,26 @@ public static class GuerrillaArsenal
         var ourVehicles = ReadTable(gameTables, "vehicles.xtbl");
         var description = ourVehicles.Description ?? throw new InvalidDataException("Armageddon's vehicles.xtbl has no description");
         var groups = new HashSet<string>(ReadTable(gameTables, "vehicle_groups.xtbl").ReferenceTargets("Vehicle_Group.Name"), StringComparer.OrdinalIgnoreCase);
+        var effectFields = EffectFields(description);
+        var rfgDefaults = ReadTable(guerrillaTables, "vehicle_defaults.xtbl").Entries.FirstOrDefault();
+        // The effects and explosions the world builder added for the vehicles (GuerrillaWorld writes
+        // them into the same mod folder; see VehicleEffects).
+        HashSet<string> NamesIn(string table) => File.Exists(Path.Combine(modFolder, table))
+            ? new(XtblFile.FromBytes(File.ReadAllBytes(Path.Combine(modFolder, table))).Entries.Select(XtblFile.EntryName), StringComparer.OrdinalIgnoreCase)
+            : new(StringComparer.OrdinalIgnoreCase);
+        var worldEffects = NamesIn("effects.xtbl");
+        var worldExplosions = NamesIn("explosions.xtbl");
+        var notInWorld = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         var rfgInteractions = ReadTable(guerrillaTables, InteractionTable);
         var ourInteractions = ReadTable(gameTables, InteractionTable);
         var interactionDescription = ourInteractions.Description ?? throw new InvalidDataException("Armageddon's vehicle_interactions.xtbl has no description");
         var takenInteractions = new HashSet<string>(ourInteractions.Entries.Select(XtblFile.EntryName), StringComparer.OrdinalIgnoreCase);
-        var sets = new GuerrillaAnimationSets(guerrillaTables, gameTables, Packfile.Open(Path.Combine(guerrillaCache, "anims.vpp_pc")));
+        // The animation lists are shared (GuerrillaPeople adds the people's sets): from the ones already written.
+        // The people who get in are Guerrilla's own in its world (Mason the player, its NPCs, all on its
+        // people's skeletons), so the vehicles' animations stay Guerrilla's: re-encoded, not moved onto
+        // Darius. A Guerrilla vehicle in Armageddon's own levels plays them on Darius (a Darius version later).
+        var sets = new GuerrillaAnimationSets(guerrillaTables, gameTables, Packfile.Open(Path.Combine(guerrillaCache, "anims.vpp_pc")), modFolder,
+                                              retargetToDarius: false);
         var guerrillaArchive = Packfile.Open(Path.Combine(guerrillaCache, "vehicles_r.vpp_pc"));
         var gameArchive = Packfile.Open(Path.Combine(gameCache, "vehicles.vpp_pc"));
         var assetList = AsmFile.Read(gameArchive.Read(gameArchive.Find("vehicle_containers.asm_pc") ?? throw new InvalidDataException("no vehicle_containers.asm_pc in vehicles.vpp_pc")));
@@ -190,7 +285,20 @@ public static class GuerrillaArsenal
             var dropped = new List<string>();
             foreach (string field in NotYet)
                 if (copy.Element(field) is { } part) { part.Remove(); dropped.Add(field); }
-            Prune(copy, description.Children, "", dropped);
+            // Its effects, Guerrilla's (see EffectsOf), under the names the world builder added them by. An
+            // effect the world's tables haven't shows nothing (the game's look-up gives none, 0x4EF370); an
+            // explosion they haven't stays Guerrilla's name, Armageddon's explosion of that name, until the
+            // world is built again (a vehicle's explosion is never left without one).
+            var effects = copy.Element("Effects") ?? copy.AddElement("Effects");
+            foreach (var (field, value) in EffectsOf(entry, rfgDefaults, effectFields))
+            {
+                if (value.Equals("null", StringComparison.OrdinalIgnoreCase)) { Set(effects, field, value); continue; }
+                string ported = GuerrillaEffectTables.Added(value);
+                bool isExplosion = ExplosionFields.Contains(field), there = (isExplosion ? worldExplosions : worldEffects).Contains(ported);
+                if (!there) notInWorld.Add(ported);
+                Set(effects, field, there || !isExplosion ? ported : value);
+            }
+            Prune(copy, description.Children, "", dropped, ReadAnyway);
             var rounded = new List<string>();
             FitValues(copy, description.Children, "", rounded);
             // The skeleton by the name it is loaded under (in lower case: the game's own names are).
@@ -250,8 +358,12 @@ public static class GuerrillaArsenal
         string rigList = RigListFile(modFolder);
         Directory.CreateDirectory(Path.GetDirectoryName(rigList)!);
         File.WriteAllLines(rigList, rigs.Keys.Order(StringComparer.OrdinalIgnoreCase));
+        if (notInWorld.Count > 0)
+            yield return $"Effects: the world's tables (mods\\guerrilla_world\\effects.xtbl, explosions.xtbl) haven't these of Guerrilla's vehicle effects yet: " +
+                         $"{string.Join(", ", notInWorld)}. Build the world again, then the vehicles (editor\\GuerrillaBuilder.exe): until then the vehicles show none of " +
+                         "those effects, and explode as Armageddon's explosions of those names.";
         if (rigs.Count > 0) yield return $"Skeletons: {rigs.Count} of Guerrilla's vehicles' own, for the guerrilla_vehicles mod to load: {string.Join(", ", rigs.Keys)}";
-        yield return $"Animation sets: Armageddon's own fill {sets.GameSets} of the {GuerrillaAnimationSets.MaxAnimSets} the game holds; " +
+        yield return $"Animation sets: Armageddon's own and the other Guerrilla tools' fill {sets.GameSets} of the {GuerrillaAnimationSets.MaxAnimSets} the game holds; " +
                      $"{sets.Room} were left for Guerrilla's" +
                      (sets.LeftOutForRoom.Count > 0 ? $", so these vehicles' sets were left out (they can't be got into): {string.Join(", ", sets.LeftOutForRoom)}" : "");
         yield return built.Count == 0 ? "No vehicles built." : $"Vehicles: {string.Join(", ", built)}";
@@ -323,24 +435,31 @@ public static class GuerrillaArsenal
     }
 
     /// <summary>
-    /// Leaves out of an entry (or a group in it) every field Armageddon's description hasn't, and every
-    /// Selection value it has no choice for; <paramref name="dropped"/> names them.
+    /// Leaves out of an entry (or a group in it) every field Armageddon's description hasn't (but those
+    /// in <paramref name="keep"/>, by path), and every Selection value it has no choice for;
+    /// <paramref name="dropped"/> names them.
     /// </summary>
-    static void Prune(XtblElement element, IReadOnlyList<FieldDescription> fields, string path, List<string> dropped)
+    static void Prune(XtblElement element, IReadOnlyList<FieldDescription> fields, string path, List<string> dropped, ISet<string>? keep = null)
     {
         foreach (var child in element.Elements.ToList())
         {
             if (child.Name.Equals("_Editor", StringComparison.OrdinalIgnoreCase)) continue;
             var field = fields.FirstOrDefault(f => f.Name.Equals(child.Name, StringComparison.OrdinalIgnoreCase));
-            if (field == null) { child.Remove(); dropped.Add(path + child.Name); continue; }
+            if (field == null)
+            {
+                if (keep?.Contains(path + child.Name) == true) continue;
+                child.Remove();
+                dropped.Add(path + child.Name);
+                continue;
+            }
             switch (field.Type)
             {
                 case FieldType.Element:
-                    Prune(child, field.Children, path + child.Name + "/", dropped);
+                    Prune(child, field.Children, path + child.Name + "/", dropped, keep);
                     break;
                 case FieldType.List or FieldType.Grid when field.Item is { Type: FieldType.Element } item:
                     foreach (var one in child.Elements.Where(e => e.Name.Equals(field.ItemElementName, StringComparison.OrdinalIgnoreCase)).ToList())
-                        Prune(one, item.Children, path + child.Name + "/", dropped);
+                        Prune(one, item.Children, path + child.Name + "/", dropped, keep);
                     break;
                 case FieldType.Selection when field.Choices.Count > 0 && !child.HasElements &&
                                               !field.Choices.Contains(child.Value.Trim(), StringComparer.OrdinalIgnoreCase):

@@ -7,7 +7,7 @@
 // other world. Each document's script (in mods\guerrilla_hud\) fades out the parts of Armageddon's
 // HUD it replaces while it is loaded, and back in when it is unloaded.
 //
-// The documents are Guerrilla's own, made loadable by GuerrillaHud.exe from the player's own copy
+// The documents are Guerrilla's own, made loadable by GuerrillaBuilder.exe from the player's own copy
 // of Guerrilla (never shipped): see RfaFormats\Interface\GuerrillaHud.cs. Without them the mod only
 // says so in the log.
 //
@@ -445,7 +445,7 @@ constexpr int kFirstZone = 2;
 constexpr int kZonesAcross = 12;
 constexpr double kZonePixels = kMapPixels / kZonesAcross;
 
-// A zone's picture's document, as GuerrillaHud.exe names it: rfg_ui_map_<column>_<row>.
+// A zone's picture's document, as GuerrillaBuilder.exe names it: rfg_ui_map_<column>_<row>.
 std::string ZoneDocument(int column, int row) {
     char name[32];
     sprintf_s(name, "rfg_ui_map_%02d_%02d", column, row);
@@ -511,12 +511,12 @@ int KeyCode(const std::wstring& name) {
     return 0;
 }
 
-// districts.txt (made by GuerrillaHud.exe): "CCRR=name" a zone a line, ; comments.
+// districts.txt (made by GuerrillaBuilder.exe): "CCRR=name" a zone a line, ; comments.
 void ReadDistricts() {
     const std::wstring path = rfa::RootDir() + L"\\mods\\guerrilla_hud\\districts.txt";
     FILE* file = nullptr;
     if (_wfopen_s(&file, path.c_str(), L"r") != 0 || !file) {
-        rfa::Log("No mods\\guerrilla_hud\\districts.txt (GuerrillaHud.exe makes it): the minimap shows no district names");
+        rfa::Log("No mods\\guerrilla_hud\\districts.txt (editor\\GuerrillaBuilder.exe build hud makes it): the minimap shows no district names");
         return;
     }
     char line[256];
@@ -606,11 +606,16 @@ void UpdateMapView() {
         }
 }
 
+bool HeldDown(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+
 // The world map's key, pressed in the game's window, the console and menus closed: opens or closes it.
+// Not with Alt or the Windows key held: Alt+Tab and Win+Tab are Windows' own, and the game still has
+// the focus when Tab goes down.
 void FollowTheMapKey() {
     if (!g_mapKey) return;
-    const bool down = (GetAsyncKeyState(g_mapKey) & 0x8000) != 0;
-    if (down && !g_mapKeyDown) {
+    const bool down = HeldDown(g_mapKey);
+    const bool windowsShortcut = HeldDown(VK_MENU) || HeldDown(VK_LWIN) || HeldDown(VK_RWIN);
+    if (down && !g_mapKeyDown && !windowsShortcut) {
         DWORD process = 0;
         GetWindowThreadProcessId(GetForegroundWindow(), &process);
         if (process == GetCurrentProcessId() && !MenusShown()) {
@@ -682,8 +687,8 @@ void FollowTheWorld() {
             rfa::Log("The game closed %s; loading it again", doc.name.c_str());
         }
         if (!InProject(doc.name.c_str())) {
-            rfa::Log("%s isn't in the game's interface project: make Guerrilla's HUD with editor\\GuerrillaHud.exe "
-                     "(from your copy of Guerrilla) first", doc.name.c_str());
+            rfa::Log("%s isn't in the game's interface project: build Guerrilla's HUD from your copy "
+                     "of Guerrilla first (editor\\GuerrillaBuilder.exe build hud)", doc.name.c_str());
             doc.missing = true;
             continue;
         }
@@ -954,7 +959,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
     }
-    RaiseDocumentLimits();  // GuerrillaHud.exe adds its documents to the interface project whatever the settings
+    RaiseDocumentLimits();  // The builder adds the HUD's documents to the interface project whatever the settings
     g_worlds = SplitList(rfa::IniString(L"GuerrillaHud", L"Worlds", L"rfg"));
     for (const std::string& name : SplitList(rfa::IniString(L"GuerrillaHud", L"Documents", L"rfg_ui_hud_health")))
         g_documents.push_back({name});
@@ -976,7 +981,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
                 tiles.zone = ZoneKey(column, row);
                 g_documents.push_back(tiles);
             }
-        const std::wstring key = rfa::IniString(L"GuerrillaHud", L"MapKey", L"M");
+        const std::wstring key = rfa::IniString(L"GuerrillaHud", L"MapKey", L"Tab");
         g_mapKey = key.empty() ? 0 : KeyCode(key);
         if (!key.empty() && !g_mapKey) rfa::Log("[GuerrillaHud] MapKey=%ls isn't a key this mod knows (a letter, a digit, Tab, F1-F12)", key.c_str());
         ReadDistricts();

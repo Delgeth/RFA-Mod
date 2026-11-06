@@ -238,6 +238,9 @@ public static class GuerrillaMaterials
 
     const string DiffuseTiling = "Diffuse_Map_Tiling", NormalTiling = "Normal_map_Tiling";
 
+    /// <summary>rfg-skin's and rfg-eye's numbers among the BRDF shaders' curves (GuerrillaSurfaces.hlsl's BrdfLight).</summary>
+    const int SkinKind = 14, EyeKind = 15;
+
     /// <summary>Guerrilla's shaders drawn by its rewrites: the standard, metal, BRDF and blend-std-metal families (opaque materials of the world's chunks and rocks), and its glass.</summary>
     static readonly Dictionary<uint, PortedShader> Ported = new()
     {
@@ -271,6 +274,12 @@ public static class GuerrillaMaterials
         [H("rfg-brdf-ed-edf-base-panels")] = Brdf(2, 9),
         [H("rfg-brdf")] = Brdf(0, 10),
         [H("rfg-brdf-env")] = Brdf(1, 11),
+        // The people's clothes (character meshes: drawn by the skinned _c effects).
+        [H("rfg-brdf-cloth")] = Brdf(0, 12),
+        [H("rfg-brdf-cloth_rimlight")] = Brdf(0, 13),
+        // Their faces (the heads): every map at UV0, untiled (their materials have no tiling).
+        [H("rfg-skin")] = Brdf(0, SkinKind),
+        [H("rfg-eye")] = Brdf(0, EyeKind),
         // Blended (its every material has flags 1); the colour map untiled, the specular map tiled.
         [H("rfg-glass")] = new(GuerrillaShaders.Family.Glass, 0, null, false, null, false),
         // Every map at UV0 × the colour map's tiling, unguarded (13 of its 32 materials tile by 0: one texel).
@@ -301,6 +310,19 @@ public static class GuerrillaMaterials
         (_, 1) => GuerrillaShaders.Variant.Blended,
         _ => null,
     };
+
+    /// <summary>
+    /// For a character's material (Guerrilla's at <paramref name="at"/>): why the skinned rewrites of Guerrilla's
+    /// shaders (<see cref="GuerrillaShaders.WriteSkinned"/>) can't draw it yet, or null if they can.
+    /// </summary>
+    internal static string? NotSkinned(byte[] file, int at)
+    {
+        uint flags = BitConverter.ToUInt32(file, at + 0x0C), shader = BitConverter.ToUInt32(file, at + 0x04);
+        string kind = (flags & 3) switch { 1 => "blended", 2 => "cut out", _ => "opaque" };
+        if (!Ported.TryGetValue(shader, out var port)) return $"shader 0x{shader:X8} ({kind}): none of its rewrites";
+        if (VariantFor(port, flags) is not { } variant) return $"a {port.Family} shader ({kind}): no variant of its rewrite fits";
+        return GuerrillaShaders.CanSkin(port.Family, port.Layers, variant) ? null : $"a {port.Family} shader with {port.Layers} layers, {variant}: not written skinned yet";
+    }
 
     /// <summary>How many materials were given one of Guerrilla's own shaders, in all.</summary>
     public static int GuerrillaShaderMaterials;
@@ -337,6 +359,8 @@ public static class GuerrillaMaterials
         var specular = port.Family is GuerrillaShaders.Family.Standard or GuerrillaShaders.Family.Glass ? Tiling("Specular_Map_Tiling", false) : diffuse;
         bool metal = port.Family == GuerrillaShaders.Family.Metal, composite = port.Family == GuerrillaShaders.Family.Composite,
              paint = port.Family == GuerrillaShaders.Family.VehiclePaint, clearcoat = port.Family == GuerrillaShaders.Family.Clearcoat;
+        bool skin = port.Family == GuerrillaShaders.Family.Brdf && port.BrdfKind is SkinKind or EyeKind;
+        Vector4 Or0(string name) => constants.TryGetValue(H(name), out var v) ? v : Vector4.Zero;
         // Metal's decal (at UV2) is its Decal_Map_1; the standard shaders' decals are Decal_Map_1 (UV1) and Decal_Map_2 (UV2).
         float decal1 = Has("Decal_Map_1") ? X("Decal_Map_1_Opacity", 1) : 0, decal2 = Has("Decal_Map_2") ? X("Decal_Map_2_Opacity", 1) : 0;
         float layer = Has("Environment_Map") ? X("Environment_Map_Opacity", 1) : 0;
@@ -353,6 +377,8 @@ public static class GuerrillaMaterials
             "gw_Decals" => new(X("Decal_Map_1_TilingU", 1), X("Decal_map_1_TilingV", 1), decal1, decal2),
             "gw_Shine" => new(port.Specular ? X("Specular_Alpha", 1) : 0, X("Metal_Base_Shine", 1), layer, X("Decal_Map_1_Overlay", 1)),
             "gw_Glow" => new(metal ? 0 : X("Self_Illumination", 0), port.LitAtNight ? 1 : 0, port.Animated ? X("illum_cycle", -1) : -1, port.SpecularFromAlpha ? 1 : 0),
+            // The skin's and eye's own values where the BRDF shaders' scroll would be (they have none).
+            "gw_Scroll" when skin => new(X("Skin_Specular_Gloss", 0), X("Skin_Translucent_Power", 0), X("Skin_Translucent_Ramp_Off", 0), X("Specular_Alpha2", 0)),
             "gw_Scroll" => port.Animated ? new(X("Diffuse_Map_OffsetU", 0), X("Diffuse_Map_OffsetV", 0), X("Decal_Map_1_OffsetU", 0), X("Decal_Map_1_OffsetV", 0)) : Vector4.Zero,
             "gw_Extra" => new(port.Animated ? X("Decal_Map_2_OffsetU", 0) : 0, port.Animated ? X("Decal_Map_2_OffsetV", 0) : 0, port.SpecularFromAlpha ? 1 : 0, 0),
             // The composite's mask: which channels pick the panel's (sub) and the core's (top), and the core's shift.
@@ -362,6 +388,11 @@ public static class GuerrillaMaterials
             // The clear coat's colour and dirt threshold, its powers and strengths (shine, rim).
             "BRDF_Spec_1" when clearcoat => Colour("Clearcoat_Color") with { W = X("Clearcoat_Dirt_Threshold", 0) },
             "BRDF_Spec_2" when clearcoat => new(X("Clearcoat_Specular_Power", 1), X("Clearcoat_Specular_Alpha", 0), X("Clearcoat_Falloff_Power", 1), X("Clearcoat_Falloff_Alpha", 0)),
+            // The skin's and eye's colours: under the skin (hemoglobin, melanin, unscattered), and the skin's glancing one.
+            "BRDF_Diff_1" when skin => Or0("Skin_Color_Hemoglobin"),
+            "BRDF_Diff_2" when skin => Or0("Skin_Color_Melanin"),
+            "BRDF_Diff_3" when skin => Or0("Skin_Color_Unscattered"),
+            "gw_MetalSpecular" when skin => Or0("BRDF_Glancing_1"),
             "BRDF_Diff_1" or "BRDF_Diff_2" or "BRDF_Diff_3" or "BRDF_Spec_1" or "BRDF_Spec_2" or "BRDF_Spec_3" =>
                 constants.TryGetValue(H(constant), out var lobe) ? lobe : Vector4.Zero,
             "gw_Brdf" => new(port.BrdfKind, X("Specular_falloff", 0), 0, X("Opacity", 1)),

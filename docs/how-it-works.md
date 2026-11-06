@@ -15,6 +15,7 @@ isn't the publicbeta build, and leave the game alone.
 - [Project layout](#project-layout)
 - [The loader](#the-loader)
 - [The mods](#the-mods)
+- [The Guerrilla builder](#the-guerrilla-builder)
 - [The editor](#the-editor)
 - [Writing a mod](#writing-a-mod)
 - [Building, packaging and releasing](#building-packaging-and-releasing)
@@ -78,16 +79,15 @@ applied again, so change a command's value there rather than deleting it.
 ```
 src\launcher\             RFAModLauncher.exe: updates your settings files, starts the game, injects the loader
 src\loader\               rfa_loader.dll: loads mods, crash reports, overrides, Lua bridge
-src\mods\<name>\          one folder per mod DLL (guerrilla_hud, guerrilla_vehicles, guerrilla_world,
-                          rfa_qol), and a mod's own scripts; rfa_qol\ has a source file for each of
+src\mods\<name>\          one folder per mod DLL (guerrilla_gear, guerrilla_hud, guerrilla_people,
+                          guerrilla_vehicles, guerrilla_world, rfa_qol), and a mod's own scripts; rfa_qol\ has a source file for each of
                           its parts (borderless, console, fov, video_settings)
 src\common\               rfa_mod.h (logging, ini, hooking helpers), rfa_game.h (build check, Lua API)
 src\overrides\            replacements for files inside the game's archives, same layout as the game
 src\editor\RfaFormats\    C# library that reads and writes the game's file formats (no UI)
 src\editor\RfaEditor\     the editor (C#, WPF desktop app); built into bin\editor\
-src\editor\GuerrillaHud\  GuerrillaHud.exe: makes Guerrilla's HUD for guerrilla_hud; built into bin\editor\
-src\editor\GuerrillaWorld\ GuerrillaWorld.exe: builds the world rfg for guerrilla_world; built into bin\editor\
-src\editor\GuerrillaArsenal\ GuerrillaArsenal.exe: makes Guerrilla's vehicles usable; built into bin\editor\
+src\editor\GuerrillaBuilder\ GuerrillaBuilder.exe: makes Guerrilla's world, HUD, vehicles, weapons and people
+                          usable, from your copy of Guerrilla; built into bin\editor\
 config\rfa_mods.ini       the settings template (to bin\ when missing, always to bin\defaults\)
 config\console.ini        console settings template (to bin\ when missing, always to bin\defaults\)
 docs\editor-guide.md      how to use the editor
@@ -605,10 +605,10 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   effects' three tables (`vfx.xtbl`, `effects.xtbl`, `level_objects.xtbl`, below), the vehicles'
   two (`vehicles.xtbl`, `vehicle_interactions.xtbl`) and the animation lists their animation sets
   need (`anim_set_filenames.xtbl`, `anim_files.xtbl`, `anim_states.xtbl`, `anim_actions.xtbl`), all
-  written by `GuerrillaArsenal.exe` (see [guerrilla_vehicles](#guerrilla_vehicles)).
+  written by the builder's vehicles (see [guerrilla_vehicles](#guerrilla_vehicles)).
 
-The world itself is built by `editor\GuerrillaWorld.exe` (code in `src\editor\GuerrillaWorld\` and
-`src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
+The world itself is built by `editor\GuerrillaBuilder.exe` (see
+[The Guerrilla builder](#the-guerrilla-builder); the code is in `src\editor\RfaFormats\Guerrilla\`), from the player's own copy of Guerrilla. It writes the world
 `rfg` into `overrides\build\pc\cache\` and the sky's files into `mods\guerrilla_world\`. What it
 converts:
 - **The ground** of each of Guerrilla's 102 zones, sampled whole, with its own textures and cliff
@@ -701,11 +701,24 @@ converts:
   in our world it went off unseen. The game keeps at most 132 explosions, Armageddon's and its
   DLCs' first, which left room for two, so the mod gives it a table of 256 (`0x1888D88`, 0x144 bytes
   each: eight addresses and one size changed after checking them), and the world builder adds 12 of
-  Guerrilla's explosions.
+  Guerrilla's explosions. Guerrilla's vehicles' effects (engine fire and smoke, a wreck's fire, a
+  broken-off part's smoke, exhaust, sparks on a hit or a scrape) and their explosions are added too,
+  as effects played everywhere in the world (packed with the world's own, as its dust is), for
+  `GuerrillaArsenal` to name in the vehicles: Armageddon's effects and explosions of the same
+  names are its own (its fire and sparks, a purple car explosion, exhaust it loads only with its own
+  levels, a vehicle explosion with a fifth of the damage and ten times the share for the player's
+  own car).
   Visual effects had the same problem: the game keeps 950 (`0x121FDE8`, 0xB4 bytes each) and
   Armageddon's take 904, so only the 46 most placed of Guerrilla's 99 fitted. The mod moves that
   table to 2,048 (13 addresses and 2 sizes, its new entries built with the game's own constructor),
-  and the world builder adds them all. Each visual effect's file is converted
+  and the world builder adds them all. The effects (`effects.xtbl`) too: the game keeps 1,225
+  (`0x1200C40`, 0x68 bytes each) and Armageddon's take 1,112, so with the objects' and the vehicles'
+  they didn't fit. The game finds an effect by name, and a loaded effect file, through two lookups of
+  1,225 names built into their objects (`0x124BBE0`, `0x11E9EF8`), whose methods reach their arrays by
+  fixed offsets. Only those two objects use that class, so the mod replaces its six methods
+  (contains, find, insert, insert with a copied name, remove, clear) with its own, which keep 4,096
+  names for each, the same way the game does (names in any case, the first of a name kept), and moves
+  the effects to a table of 4,096 (7 addresses and 2 sizes). Each visual effect's file is converted
   (`GuerrillaEffects`: Guerrilla's effect format, versions 21 to 26, written as Armageddon's
   version 36: its emitters, lights, meshes and coronas reworked, each emitter's material given the
   values Armageddon keeps after it (taken from Guerrilla's emitter: self-illumination, ambient and
@@ -781,7 +794,7 @@ documents (elements driven by a Lua script).
   only while the HUD itself runs (the interface's draw pass, `0x564FF0`, is wrapped too), so
   nothing of it stays on loading screens or in the menus.
 
-`editor\GuerrillaHud.exe` (code in `src\editor\GuerrillaHud\` and
+`editor\GuerrillaBuilder.exe` (its HUD; code in
 `src\editor\RfaFormats\Interface\`) makes the documents from the player's own copy of Guerrilla:
 - It renames Guerrilla's pictures (`rfg_...`, since both games use some of the same names for
   different pictures), gathers the textures each document needs into one texture file, packs each
@@ -795,13 +808,13 @@ documents (elements driven by a Lua script).
   overridden, but a table under a new name is looked up by name.
 - A picture that is a whole texture (the blood) gets a sheet of its own there too, holding just
   that picture, since the game finds pictures reliably only through sheets.
-- `--remove` takes all of it away again. Since that sheet table now holds the pictures of
+- Taking the HUD away in the builder takes all of it away again. Since that sheet table now holds the pictures of
   Armageddon's own HUD too, it must never be deleted alone.
 
 **Guerrilla's map** (`Map=1`): its minimap (`rfg_ui_hud`) and its world map (`rfg_ui_fullscreen`,
 opened and closed with `MapKey=`).
 - Guerrilla drew its maps in its documents' `map` elements with game code of its own, which
-  Armageddon kept only for its compass. So `GuerrillaHud.exe` makes those elements plain pictures
+  Armageddon kept only for its compass. So the builder makes those elements plain pictures
   (the minimap's is its frame: the border, its shading and the player's arrow), and our scripts
   build the map from Guerrilla's own pictures with the interface's elements, created at load
   (`vint_object_create`).
@@ -811,7 +824,7 @@ opened and closed with `MapKey=`).
   pictures near the player (`terr01_<col>_<row>_map`, 512 × 512, a metre a pixel). It reaches
   Guerrilla's 40 m from the player to the frame's edge, plus half the vehicle's speed while
   driving. The district's name above it comes from Guerrilla's districts (`territories.xtbl`) and
-  their names in its strings (`territories_us.le_strings`), written by `GuerrillaHud.exe` to
+  their names in its strings (`territories_us.le_strings`), written by the builder to
   `mods\guerrilla_hud\districts.txt`.
 - The zones' own pictures (13 MB in all) come as Guerrilla keeps them, each in a container of its
   own: a document per zone that holds nothing but that texture (`rfg_ui_map_<col>_<row>`, 128 KB);
@@ -846,7 +859,7 @@ Guerrilla's own script for it.
   engine's own `0xC58910`, which holds up to 128 items) and set its fields (`rfg_dataitem_set`,
   through `0xC576E0`, which tells the subscribers), and our part of the script makes `WeaponFire`
   and fills it from Armageddon's own items for its HUD (`reticule_hud`, `primary_weapon_hud`).
-- `GuerrillaHud.exe` builds the document's script from the player's copy of Guerrilla: our shims
+- The builder builds the document's script from the player's copy of Guerrilla: our shims
   first (`rfg_guerrilla_shims.lua`: what Guerrilla's scripts call that Armageddon's interface Lua
   hasn't got, such as `string.find`), then Guerrilla's script with its `_init` and `_cleanup`
   renamed and the pictures it names renamed `rfg_...`, then ours, which calls them.
@@ -877,8 +890,8 @@ bottom left, over the minimap).
 
 What Red Faction: Guerrilla's vehicles need from Armageddon's engine that it doesn't do itself
 (`[GuerrillaVehicles]` in the ini). So far: the keys for driving, getting out and changing seats,
-room for the vehicles themselves, their animation sets and their animations' triggers, and their own
-skeletons.
+room for the vehicles themselves, their animation sets and their animations' triggers, their own
+skeletons, and their dents.
 
 - **Driving keys**: Armageddon still has Guerrilla's driving code for the player. Its gameplay
   controls (`0x4DBBD0`) read the accelerator and brake as button values (actions 62 `veh_accelerate`
@@ -945,16 +958,36 @@ skeletons.
   (`0x973460`: each through `0x973550`, by name), and when it reads the vehicle table it takes each
   vehicle's from those (`0x62F1C0`) without checking: one that isn't loaded crashes it. Guerrilla's
   six (`walker_civilian`, `walker_min`, `walker_flamer`, `edf_flyer`, `flatbed`, `fueltanker`, none
-  of them Armageddon's) are new files `GuerrillaArsenal.exe` writes into `overrides\build\pc\cache\`,
+  of them Armageddon's) are new files the builder writes into `overrides\build\pc\cache\`,
   in no archive's list, with their names in `mods\guerrilla_vehicles\rigs.txt`; the mod wraps the
   start-up loading and has the game load each of those by name after its own. The tool leaves out a
   vehicle whose skeleton is in neither game.
+- **Dents**: Guerrilla's cars crumple where they're hit, by a morph target in the vehicle's file (46
+  of its 74 models have one). Armageddon kept all of Guerrilla's code for it: the vehicle loader
+  reads the morph target (`0x622110`, which wants exactly Guerrilla's version, 2) and makes the
+  vehicle's dent container, and the impact code dents it, but only while
+  `vehicle_deformation_enabled` is on (a bool at `0x142A484`, also a console toggle), which Guerrilla
+  starts on and Armageddon off (none of its own vehicles has a morph target). The mod turns it on
+  while the game starts, before any vehicle is loaded, after checking the three instructions that
+  read it (`Dents=0` leaves it off).
+- **Doors**: getting in, the "Open Door" step opens the door and records it among the vehicle's
+  open doors, which the game closes 2.5 seconds later once nobody stands where it was opened from (4
+  at most), Guerrilla's code as it was. A door recorded open is never opened again, so a door that has
+  shut while its record still says open was climbed through (seen on Guerrilla's taxi). The mod wraps
+  the door-open step (`0x654AA0`): a door that is shut but still recorded open has its record cleared
+  first, so the game opens it again. And a door's opening is measured as Guerrilla measures it: the
+  game works it out from the door's turn against the vehicle (`0x6134A0`), whose axis and angle a
+  shared math function gives; for a shut door the turn is next to none, which Guerrilla's version of
+  that function calls no turn and Armageddon's a half turn, so at some headings a shut door read
+  fully open, the game never moved it, and you climbed through it. The mod replaces the measurement
+  with Guerrilla's (the shared function stays Armageddon's for everything else). `DoorLog=1` (off
+  unless set) logs every door opening, closing and change of state.
 
-`editor\GuerrillaArsenal.exe` (code in `src\editor\GuerrillaArsenal\` and
+`editor\GuerrillaBuilder.exe` (its vehicles; code in
 `src\editor\RfaFormats\Guerrilla\GuerrillaArsenal.cs`, `GuerrillaVehicles.cs`,
 `GuerrillaAnimationSets.cs`, `GuerrillaAnimations.cs`) makes the vehicles
 from the player's own copy of Guerrilla (every one that converts, or `--vehicles <names>`;
-`--remove` takes everything away). Tracked vehicles wait for their tread splines, and walkers for
+taking the vehicles away in the builder takes everything away). Tracked vehicles wait for their tread splines, and walkers for
 their skeletons and blended movement (they are built but can't be got into: a vehicle whose
 interaction can't be ported gets none, not Armageddon's `Dummy`, with which the player gets in and
 can't drive or get out):
@@ -966,18 +999,26 @@ can't drive or get out):
   are converted as for the world's destructible objects, and every offset is moved to where its
   target lands. Checked on the civilian walker, which both games ship: every part, light, tag list
   and section of ours matches Armageddon's own conversion. Guerrilla's dents (morph targets, which
-  none of Armageddon's vehicles has) and tracked vehicles' tread splines aren't carried over yet.
+  none of Armageddon's vehicles has) are carried over as they are (their vertices are in the g-file,
+  which stays as it is). Tracked vehicles' tread splines aren't carried over yet.
 - **Its container**, named as Guerrilla's (`col_taxi_1.ccar_pc.str2_pc`, a new file in
   `overrides\build\pc\cache\`) with the model and its textures, and an entry for it in an override
   of `vehicles.vpp_pc\vehicle_containers.asm_pc` (the player's own list with ours added).
 - **Its table entries**: Guerrilla's own `vehicles.xtbl` and `vehicle_interactions.xtbl` entries,
   added to Armageddon's tables, which guerrilla_world hands the game at start-up. A field
-  Armageddon's table hasn't is left out; a field it requires that Guerrilla's entry hasn't gets the
+  Armageddon's table hasn't is left out, unless Armageddon's vehicle reader still reads it:
+  Armageddon's reader is Guerrilla's with fields added, but its table's description lost some
+  handling values, and without them a car takes the defaults (Guerrilla's taxi turns with a yaw
+  torque of 1.4, the default 1; the APCs reverse at once, the default waits half a second; AI
+  drivers' own torque, spin damping and top speed). A field it requires that Guerrilla's entry hasn't gets the
   default Armageddon's table gives it (the game's table reader stops on a missing one). A field the
   two games measure differently is converted: the vehicle's price (Guerrilla's in millions,
   Armageddon's in whole units) and a flyer's turn and tilt rates (revolutions a second, degrees a
-  second); a decimal left in a field Armageddon reads as a whole number stops its reader too. Left out for
-  now: the sounds (Guerrilla's are XACT cues), lights and effects, turrets.
+  second); a decimal left in a field Armageddon reads as a whole number stops its reader too. Its
+  effects and explosion are Guerrilla's own (its entry's, else Guerrilla's vehicle defaults', as
+  Guerrilla's reader takes them), under the `rfg_` names the world builder adds them by: build the
+  world first. Left out for now: the sounds (Guerrilla's are XACT cues), lights (Armageddon lights
+  a vehicle through a map of its own), turrets.
 - **Getting in and out**: the interaction is Guerrilla's whole: its waypoints, seats and every
   transition between them with its steps (open the door, climb in; quick, diving and side exits;
   driver to passenger; crawling out of an upturned car). Both games name the same steps, actions
@@ -985,23 +1026,17 @@ can't drive or get out):
   player behind the wheel); Guerrilla's `Door` is Armageddon's `Door_1`. The doors' sound cues are
   left out until Guerrilla's audio is ported.
 - **Its animation set** (such as Guerrilla's `Vehicle_Taxi`: which animation plays for each step), with
-  every animation it names, from the vehicle's container or Guerrilla's `anims.vpp_pc`, moved onto
-  Darius's skeleton and packed in our container (as Armageddon packs its walkers' player
-  animations: asset list type 16). Both games' animations are the same format (version 10), but
-  Guerrilla packs its rotation keys differently (each run's header 5 bytes, each key 4: an explicit
-  w; Armageddon's 4 and 3, w worked out from the rest), so it has a reader of its own
-  (`Animation.ReadGuerrilla`), and `AnimationWriter` writes Armageddon's. The skeletons aren't bone
-  for bone (Guerrilla's people all share its player's 52 bones, in the same order, and some add
-  their own after them: Mason's camera, EDF shoulder pads, coats, so an animation's bone count tells
-  its skeleton; Darius's 137: different spine and clavicle parents, Mason's arms chains of twist
-  segments, Darius's twists beside the limbs), so each frame is posed on Mason and carried over bone by bone: Darius's bone
-  gets the world turn of Mason's same bone, first turned to point the way Mason's points at rest
-  (Darius's forearms are bent forward at rest, Mason's hang straight); the twists and muscle bones
-  follow Mason's twist segments or sit halfway across their joint; the hips, spine and hand props
-  are placed where Mason's are, scaled by the hip heights. An animation that moves only part of the
-  body keys only that part of Darius, with its weight curves; an additive one (a flinch, played on
-  top of another) is carried over turn for turn. An animation for any other skeleton is a vehicle's
-  own (a turret's, the flyer's) and is only re-packed, its scale keys and weight curves as they are. The game reads its animation lists and
+  every animation it names, from the vehicle's container or Guerrilla's `anims.vpp_pc`, as Guerrilla
+  has it, packed in our container (as Armageddon packs its walkers' player animations: asset list
+  type 16). In Guerrilla's world the player is Mason and the people are Guerrilla's own, on its
+  people's skeletons (all share its player's 52 bones, in the same order; some add their own after
+  them: Mason's camera, EDF shoulder pads, coats), so the animations stay theirs. Both games'
+  animations are the same format (version 10), but Guerrilla packs its rotation keys differently
+  (each run's header 5 bytes, each key 4: an explicit w; Armageddon's 4 and 3, w worked out from the
+  rest), so it has a reader of its own (`Animation.ReadGuerrilla`), and `AnimationWriter` writes
+  Armageddon's; scale keys and weight curves as they are. (Until Mason became the player they were
+  moved onto Darius's skeleton; a Guerrilla vehicle in Armageddon's own levels now plays Mason's
+  animations on Darius.) The game reads its animation lists and
   sets while it starts, and guerrilla_world hands it Armageddon's with Guerrilla's added: the set's
   listing (`anim_set_filenames.xtbl`; the set's own table is a new file in
   `overrides\build\pc\cache\`, which the game then reads by name), each animation's triggers and
@@ -1013,6 +1048,365 @@ can't drive or get out):
   animations of its own (`anim_rig_objects.xtbl`). The tool counts them from the player's files and
   ports only as many of Guerrilla's sets as fit, in the order of Guerrilla's vehicle table; a
   vehicle whose set is left out gets no interaction.
+  The four lists are shared with the people (below): each part starts from the lists
+  already in `mods\guerrilla_world\` and replaces only its own entries, which it records in its own
+  folder (`mods\guerrilla_vehicles\anim_entries.txt`, `mods\guerrilla_people\anim_entries.txt`: a
+  line a set table or animation), so either can be run again without taking the other's away.
+
+### guerrilla_people
+
+What Red Faction: Guerrilla's people need from Armageddon's engine that it doesn't do itself
+(`[GuerrillaPeople]` in the ini). Armageddon's character code is Guerrilla's with fields added: its
+character table reader still reads Guerrilla's fields, and it takes each character's bones from that
+character's own skeleton. So Guerrilla's people keep their own meshes, skeletons and animations; the
+mod gives them what the engine lacks around them:
+
+- **Their skeletons**: the game loads every skeleton its archives list while it starts, and takes
+  each character's from those when it reads the character table (`0x8860D0`). Guerrilla's people's
+  (`greene.rig_pc`, ...) are new files, in no archive's list, named in
+  `mods\guerrilla_people\rigs.txt`; the mod has the game load each of them by name (`0x973550`) just
+  before it reads the table.
+- **The world's spawn resource**: where a level's spawn resource is in force (the pools' state
+  `0x19734CC` isn't 0: Wrecking Crew levels, and the Guerrilla world), the game makes only the people
+  the resource holds and loads no other: its human create (`0x762D50`, which the console's
+  `drop_human` uses) gives up on a character that isn't loaded or on its way. The Guerrilla world's
+  zones name its own resource, `rfg_Default`, which lists one person for each container the builder
+  made (the game drops a whole resource that lists two characters of one container; the others come
+  with their container), so the game loads them itself, and the mod writes in the log which of `mods\guerrilla_people\people.txt` are
+  loaded, on their way or not, 5 and 30 seconds after the world starts. A name the resource table
+  hasn't, or none (from a zone, the mission, a cutscene or a script), gives the table's fallback,
+  Armageddon's "Default" (its aliens, soldiers and Marauders, whose effects run the effect pools out
+  in the Guerrilla world); so in the worlds `Worlds=` names the mod gives the game `rfg_Default`
+  wherever it would load that one (it hooks where a level's resource is set, `0x7628B0`, and where
+  one is applied at once, `0x7625A0`), and logs who asked for it.
+- **Their animations**: Guerrilla kept its people's animations in its animations archive, which its
+  game loads whole while it starts and keeps for good (each overlaid on its place in the animation
+  library with "keep" set, which an unload passes over). They are many characters' at once (every
+  set builds on Male), and an animation packed in a character's own container belongs to whichever
+  container loaded first and goes when that one goes. So, as Guerrilla, they are loaded once and kept:
+  The builder writes them into `mods\guerrilla_people\animations\`, and once Armageddon has
+  loaded its own archive (`0x95E180`) the mod reads each one and overlays it the same way (its place
+  by name, `0xD8C2C0`, or a new one, `0xD875F0`; then `0xD8C0F0` with "keep" set). The animation
+  library holds 8,192 with guerrilla_vehicles (Armageddon's own 4,500 were nearly all taken).
+- **Room for the skeletons**: every skeleton the game loads (its own, and Guerrilla's vehicles' and
+  people's) goes into one memory pool, "rigs" (`0x26AFB48`), which the game's start-up makes 576 KB;
+  Armageddon's and Guerrilla's filled it, and one more skeleton stops the game while it starts ("Failed
+  aligned alloc ... in rigs pool"). When the game sets that pool up (its memory pools' init,
+  `0x4280C0`) the mod gives it 2 MB of its own instead; the pool is empty then, and no code is changed.
+  Always, as the vehicles' skeletons need the room too; the log says how full it is.
+- **Room for the animations' names**: the game keeps every animation's name (each entry of
+  `anim_files.xtbl`, and the sets', states' and actions' names) in one string pool, "Anim strings"
+  (`0x2684EC8`), which a start-up initializer (`0xF4A7E0`) gives 128 KB; Armageddon's, Guerrilla's
+  vehicles' and people's names together don't fit, and the game stops while it starts ("Length of
+  string pool exceeded"). The pool is one of the game's memory pools (its memory at +0x40, its size
+  at +0x44, how much is used at +0x4C), so the mod lets the initializer run and then gives it 512 KB of
+  its own, with what is in it already; no code is changed. This happens whatever `Enabled=` says, since
+  the animation lists hold the people's animations either way. The people's animations also need the
+  room two other mods give the game's tables: guerrilla_vehicles (the animation library and its entries)
+  and guerrilla_gear (the map of every set's states and actions); the mod writes a warning in the log at
+  start-up if either isn't loaded.
+- **Guerrilla's sides**: both games number the teams the same (0 Guerrilla's Red Faction, the
+  player's; 1 its EDF, Armageddon's Legion; 2 civilians; 3 Marauders; Armageddon adds 4, its
+  cultists) and keep how each team takes each other in a 5 × 5 table (`0x21DC8D0`), which a level's
+  start resets to Armageddon's (`0x8A0350`). Armageddon's make the Marauders the player's friends;
+  Guerrilla's make the EDF and the Marauders hostile to the player's side, civilians friendly to it
+  and unfriendly to the EDF, and the Marauders hostile to everyone. In the worlds `Worlds=` names the
+  mod writes Guerrilla's after each reset, and again whenever they differ (through the game's own
+  setter, `0x8A03A0`); the cultists keep Armageddon's.
+- **Guerrilla's player**: the game picks the player's character once per level load (`0x8B77B0`):
+  multiplayer's choice, else a DLC uniform chosen in Armageddon's menu, else the start zone's spawn
+  resource's `Player_Override` (in the Guerrilla world Mason, whom the builder makes), else Darius. In
+  the worlds `Worlds=` names the mod sets the chosen uniform aside while the game picks (and puts it
+  back), so the player there is always Mason; Armageddon's own levels keep the uniform.
+
+`editor\GuerrillaBuilder.exe` (its people; code in
+`src\editor\RfaFormats\Guerrilla\GuerrillaPeople.cs`, `GuerrillaCharacterMeshes.cs`) makes the people
+from the player's own copy of Guerrilla (`--characters <names>`, Guerrilla's `character.xtbl` names;
+by default the EDF soldiers whose bodies are whole: the trooper, tough trooper, mercenary, the three
+lieutenants, the elite and the two heavy elites; taking the people away in the builder takes everything away). For each:
+- **The model** (`.ccmesh_pc`, Guerrilla's version 3) is written as Armageddon's version 7: the
+  header gains a submesh count for each detail level and a visibility id for each submesh, the hit
+  spheres and cylinders a word each (and their radius and height go from inches to metres), the mesh
+  block goes to version 9 with one bone palette that keeps the skeleton's own numbers (Guerrilla's
+  people have at most 64 bones, a palette's room), and the materials go onto Guerrilla's own
+  shaders' skinned rewrites (`gw_*_c`: the clothes' BRDF shaders, the faces' skin and eyes, and the
+  standard shaders, opaque or alpha-tested (eyelashes), as Re-Mars-tered draws them; the tool names
+  any material none of them can draw yet). The vertex and index buffers stay as they are (both games use vertex format 3 for
+  characters). Checked against Armageddon's own three-detail-level characters, whose layout is the
+  one Guerrilla's convert to.
+- **Its container**, named as the character (`EDF_Trooper.str2_pc` in `overrides\build\pc\cache\`)
+  with the model and its textures (each as a single-texture file under the world's name for it), and
+  an entry for it in an override of `humans.vpp_pc\character_containers.asm_pc` (Armageddon's own list
+  with ours added; type 19, as Armageddon's people). Characters whose containers are the same in
+  Guerrilla, file for file (the trooper, mercenary and lieutenants are all `greene`), share the first
+  one's (`Shared_Container`, as Armageddon's own do; and Guerrilla's own sharing, its riot-shield
+  elite's).
+- **Its animation set**, Guerrilla's own (its Male set as `rfg_Male`, with the sets it builds on),
+  every animation it names as `rfgp_<name>` (Armageddon has animations of many of the same names, for
+  its own skeleton, and the vehicles' `rfg_` ones are moved onto Armageddon's player), re-packed in
+  Armageddon's key packing with the tracks of the 52 bones every Guerrilla person's skeleton shares in
+  the same order (the bones after them are each skeleton's own: the EDF's shoulder pads, coats), each
+  a file in `mods\guerrilla_people\animations\` that the mod loads (above). A state naming one of Guerrilla's blend trees (a walk blended by the ground's slope, which Armageddon
+  has no reader for) plays the tree's level animation for now; the faces' animations wait for the
+  heads.
+- **Its table entry**: Guerrilla's own `character.xtbl` fields, added to Armageddon's table
+  (`mods\guerrilla_world\character.xtbl`, which guerrilla_world hands the game at start-up), its
+  `Anim_Set` as Armageddon's `Animation_Sets`, a field Armageddon's table hasn't left out, a field it
+  requires filled from its description's default or, where Guerrilla has nothing for it, named by
+  the tool (the model type and audio switch by the character's side), and its inventory Guerrilla's own
+  items where the builder has ported them (the trooper's assault rifle; its grenades not yet).
+  Left out for now, each with its own port to come: the voices, the props and heads not made yet
+  (below), and the height.
+- **Its ragdoll**, Guerrilla's: Guerrilla builds its people's ragdoll in code (the bones it finds by name in
+  the character's own skeleton, each part's size and weight, each joint's limits and axes, the bodies'
+  damping, friction and bounce), and Armageddon's ragdoll is the same code with those numbers moved into a
+  table a character names (`ragdoll_type`). So the tool writes Guerrilla's numbers as such a table
+  (`mods\guerrilla_world\ragdoll_rfg_human.xtbl`, `RfaFormats\Guerrilla\GuerrillaRagdoll.cs`), which
+  guerrilla_world hands the game at start-up, and every Guerrilla person names it: the bones it names are
+  the same in all their skeletons. Without a ragdoll Armageddon hides a dead body at once.
+- **Guerrilla's player, Mason** (`rfg_PC`), made the player of the Guerrilla world: his own model and
+  skeleton, the skeleton with the tags Armageddon's player code looks for that Guerrilla's hasn't
+  (`muzzle_flash0` and `l-nanoforge` on his left forearm, where the Nano Forge fires from and its
+  effects sit; `l-spotlight`, the player's light, on his chest; placed as on Darius, carried over by
+  the turn between the two forearms), in a player container (type 20, as Armageddon's player suits);
+  Guerrilla's own fields (his hit points, speed, footsteps) and Armageddon's player's where Guerrilla
+  has none (the player controller, container and blend tree, always face target and IK hands to
+  weapon, the hit indicators, the Nano Forge's light); his animation set the weapons' build's
+  `rfg_mason` (Guerrilla's player animations on his skeleton, and Armageddon's player moves carried
+  onto it); his own spine bend and arm limbs (Armageddon's `spinebend.xtbl` and `ik_limbs.xtbl` name
+  Darius's bones: entries with his added, which guerrilla_world hands the game); and the Guerrilla
+  world's spawn resource's `Player_Override`. Armageddon's player's always-on Nano Forge light (a cyan
+  lamp at his left forearm, from Darius's `Persistent_Effects`) comes with those fields;
+  `[GuerrillaPeople] MasonNanoLight=0` (or the F7 menu's Graphics window) takes it off Mason, as
+  Guerrilla's Mason has none: guerrilla_people takes it out of his character's effects as the game
+  keeps them, and it shows the next time the game makes him.
+- **Props** (Mason's coat and armour, later the Marauders' masks and bags): each of Guerrilla's props is
+  an item (`items_3d.xtbl`) whose model is a character mesh with its own skeleton and the flag
+  `inherit_bone_transforms`: the game copies the wearer's bones onto the prop's skeleton by name, so
+  the coat follows Mason's body (its tails and scarf ride stiffly until Guerrilla's cloth is ported).
+  Armageddon kept that code and uses it for its own coats. For each prop a character names whose mesh
+  is in its own container, the tool converts the mesh and packs it, with its textures, into the
+  character's container, copies the prop's skeleton (loaded with the people's), and adds the item,
+  Guerrilla's entry fitted to Armageddon's table, to the items table the weapons build wrote (its
+  own entries recorded in `mods\guerrilla_people\prop_items.txt`, taken out again on a rebuild or
+  `--remove`). The character's entry keeps only the props made: a listed item whose mesh isn't
+  packed would stop the game.
+- **Heads** (Mason's face): Guerrilla draws a person's head as a base head (an item's character mesh:
+  Mason's is `base_hires_head`) dressed with the face's own materials (`mason_head.mat_pc` in his
+  container) on the face's own five-bone skeleton (`mason_head.rig_pc`: spine to eyes), the face's shape
+  a morph of the base head where it has one. Armageddon kept that code but drops the morph and needs the
+  base heads as preloaded items, so the tool makes each head that has no morph a prop instead: the base
+  head's mesh (from Guerrilla's `items.vpp_pc`) converted with the face's materials in place of its own,
+  packed with its textures into the character's container as `rfg_<face>` (`rfg_mason_head`), the face's
+  skeleton loaded with the people's, and an item of that name (the base head's entry, with
+  `inherit_bone_transforms`) worn as a `head_prop` prop at 100%, so his face follows his neck, head and
+  eyes. His hair is part of his body's model. The faces Guerrilla shapes with a morph (Braun's, May's)
+  wait for their morph to be baked into a mesh of their own.
+- **The skin and eyes** are drawn by Guerrilla's own shaders, rewritten from Re-Mars-tered's (`rfg-skin`:
+  the light under the skin from its unscattered, melanin and hemoglobin colours, a wrapped light by the
+  specular map's blue, a glancing colour, three highlights; `rfg-eye`: the sun's direction laid flat,
+  the skin's colours by its own curves, and a small glint that fades out from 1 to 6 m).
+- **The squads**: Guerrilla's `squads.xtbl` gives a squad's team and size, and each member's character
+  and weapon come from its team's progression when it spawns (`squad_progression.xtbl`: the EDF's,
+  at the level the campaign is at); Armageddon's names each member (a leader and a member list, each a
+  character and a loadout). So each of Guerrilla's squads is written into Armageddon's table with its
+  members picked from its team's progression at the campaign's first level, as Guerrilla's weights
+  spread them, among the characters made and the loadouts whose weapon is ported (Guerrilla's
+  `squad_loadout.xtbl` entries, added to Armageddon's under their own names: `rfg_` where Armageddon has
+  one; their grenades not yet). Both tables (`mods\guerrilla_world\squads.xtbl`, `squad_loadout.xtbl`)
+  are handed to the game by guerrilla_world.
+
+The world build places Guerrilla's patrols whose squads those tables will hold
+(`RfaFormats\Guerrilla\GuerrillaPopulation.cs`). It works the squads out itself from Guerrilla's own
+tables for the people the builder makes (its default ones, and any its last run made), so the
+world can be built before the people; a squad that isn't written after all (its weapon not ported) the
+game leaves out, with a warning. The zones name the Guerrilla world's own spawn resource, which the
+world builder writes holding only the player if the people aren't built yet. For each patrol:
+each `object_patrol`, the squad spawn node hung under it
+(its orders Patrol, as Armageddon's own patrols' squads) and every navpoint its route reaches, handles
+and links kept. Armageddon's own squad spawn and patrol code does the rest: the squad comes down when
+its zone streams in and walks the route. Armageddon holds 24 patrols at once (Guerrilla 72), so the
+builder keeps every 3 × 3 block of zones within that for now.
+
+### guerrilla_gear
+
+What Red Faction: Guerrilla's player gear needs from Armageddon's engine that it doesn't do itself.
+So far:
+
+- **Room for more inventory items.** Every weapon a player can carry has an inventory item of its
+  own (`items_inventory.xtbl`; the game gives a weapon by its inventory item). The game keeps them in
+  one table of 85 (`0x19F8578`, 0x30 bytes an item, filled while it starts by `0x7A7710`, which
+  stops the game past 85: "Too many inventory item types"). Armageddon's own are 75, and its Path to
+  War add-on's 4 more while one of its levels is loaded, so Guerrilla's weapons don't fit. The table
+  is reached by its address in five instructions (the loader, the lookups by name and by name hash,
+  the start-up constructor) and its size is in two (the loader's check, `cmp dword ptr
+  [19F8570h],55h` at `0x7A77F0`, and the constructor's `push 55h` at `0xF2C338`): one-byte, signed
+  values, so 127 is the most the table can grow to without changing the instructions' form. The mod
+  moves it to a table of 127 of its own, every value checked against the game's first and none
+  changed if one differs; the game's start-up constructor builds the new table's entries.
+- **Guerrilla's player animations for its guns.** A character has one animation set; the game asks
+  it for a state (standing, walking, aiming) or an action (firing, reloading) in the animation group
+  of the gun held, and a set that hasn't one asks the set it builds on, then the group's parent group.
+  Darius's set (`vs_player`) is also the one Armageddon's people build on, and Guerrilla's group names
+  are Armageddon's (Enforcer and Railgun hold Armageddon's own guns too), so Guerrilla's animations are
+  a set of their own, `rfg_player`, built on `vs_player` with the variant `confident` (Armageddon's
+  variants are how a drunk or wounded civilian plays another set; nothing of Armageddon's uses this
+  one). When the player takes up a gun the game sets his animation group
+  (`character_instance::set_animation_group`, `0x969110`, from `human::equip`, `0x84DD70`); the mod
+  first switches his set with the game's own variant setter (`0x98C310`): to `rfg_player` for one of
+  the guns `mods\guerrilla_gear\player_weapons.txt` names, back to Darius's for any other. What
+  `rfg_player` hasn't (dodging, free running, the Nano Forge) stays Darius's.
+- **Room for every set's states and actions.** Each is one place in a map the game makes while it
+  reads the sets (`0x97D6B0`), 6,344 places (a value in the game's data at `0x1107C58`), and its reader
+  doesn't check: more spoil the memory after it. Armageddon's own sets and Guerrilla's vehicles' and
+  people's come close, `rfg_player` adds about 650, so the mod raises the value to 16,384 just before
+  the sets are read (`0x979C20`), if the Permanent Mempool it comes from (12 MB) has room, and logs how
+  many are in use.
+- **Guerrilla's dropped guns.** Guerrilla's NPCs carry the player's own guns, and one an NPC drops can
+  be picked up as any other; what it carries is Guerrilla's own rule (`weapon::adjust_dropped_ammo`):
+  the rounds it and its owner held × its `Dropped_ammo_scale` (0.4 for the EDF's) × the difficulty's
+  "player ammo pickup" (Easy 2.0, Medium 1.0, Hard 0.9, Insane 0.8), a magazine of 0.5 to 1.5 × the
+  scale of a full one (at least 1 round), the rest in reserve. Armageddon keeps the pickup rules (a gun
+  you have gives ammo, else a free slot, else the action button swaps it for the one in hand) but not
+  the numbers: its drop step (`0x731A10`) keeps a full magazine, its pickup gives the firing mode's
+  `Rounds_On_Pickup`, and its ammo-pickup difficulty is 1.0 throughout. For Guerrilla's guns the mod
+  runs Guerrilla's step in place of Armageddon's and, after the game's pickup (`0x7CAE20`, the items'
+  `give_item` touch) or its adding a swapped-in gun (`0x85B3E0`), sets the player's magazine and
+  reserve to those rounds through the game's own ammo store. Guerrilla's difficulty values come from
+  your Guerrilla (`mods\guerrilla_gear\ammo_pickup.txt`, written with the weapons).
+- **The animations**, `mods\guerrilla_gear\animations\` (`rfgpl_<Guerrilla's name>.anim_pc`): loaded
+  once right after the sets and kept, each overlaid on its place in the animation library by name, as
+  `guerrilla_people` loads its people's.
+- **The player turns to where he walks.** Armageddon keeps its player facing the camera: its heading
+  step (`0x84C6D0`, once a frame for each human on foot) turns the player toward the camera unless he
+  sprints, and its movement step (`0x89D0C0`) turns a character toward where it goes only if its
+  character entry lacks "always face target" (an Armageddon flag its player has). The mod wraps the
+  heading step: for the player playing Darius's set (`vs_player`, in every level) or Mason's
+  (`rfg_mason`), on foot, moving, not sprinting, not aiming (`0x8BB2F0`) and not attacking (the attack
+  buttons, and 1.5 seconds after), it lifts that flag from his entry and lets no camera turn through,
+  as the sprint does; the flag goes back as soon as he stops. Aiming, attacking or standing still, he
+  faces the camera as before.
+- **Room for the animations' triggers.** While the game reads its animation sets it copies each
+  `anim_files.xtbl` entry's lists into five fixed pools, a record each, and never checks their room:
+  effects 64, voice lines 320, sounds 960, props 256 and hand IKs 1,300. Armageddon's own nearly fill
+  them, and Guerrilla's people, vehicles and player animations ran four of them over, spoiling the game's
+  memory after them (the campaign stopped after a cutscene). Each pool's address is in two instructions,
+  both in its reader, so the mod moves the five to bigger tables of its own (1,024, 4,096, 16,384,
+  4,096 and 16,384), all or nothing, each place checked against the game's value first, and logs how
+  full each is once the sets are read. `editor\GuerrillaBuilder.exe` refuses to write an
+  `anim_files.xtbl` that would hold more than that (`AnimTriggerPools.cs`).
+- **The camera's look-at bone.** A character entry keeps its skeleton's "camera" and "camera-lookat"
+  bones (`+0x1E0`, `+0x1E4`, found by name when the character table is read, -1 for none). Darius's
+  dodges, rolls and other moves turn the camera toward his camera-lookat bone, which they move. Mason's
+  skeleton gets the same bone from the builder (below); should a player's skeleton still have none, the
+  mod gives its entry the camera bone instead, so the camera (`0x4CFAD8`) never asks for bone -1.
+
+`editor\GuerrillaBuilder.exe` (its weapons, `--weapons <names>`; code in `src\editor\RfaFormats\Guerrilla\GuerrillaWeapons.cs`,
+`GuerrillaStaticMeshes.cs`, `GuerrillaTableFit.cs`) makes Guerrilla's weapons from the player's own copy of
+Guerrilla (Guerrilla's `weapons.xtbl` names: `m16`, `enforcer`, `autoblaster`, `gauss_rifle`,
+`rail_driver` by default; taking the weapons away in the builder takes them, and the people who carry them, away). For each:
+- **Its item** (the model in the hand and on the ground, `items_3d.xtbl`), Guerrilla's own entry: the
+  static mesh (`.csmesh_pc` version 4) written as Armageddon's version 6 (the header gains one word;
+  the mesh block goes to version 9; the materials onto Guerrilla's shaders' rewrites, as the world's),
+  in a container named as the item with its low-detail textures (from Guerrilla's
+  `items_containers.cpeg_pc`), and its 512 × 512 textures with its high-detail material file
+  (`.mat_pc` version 1 → 2) in `<item>_high`, which Armageddon loads for an item flagged
+  `high_res_map` by that name. Its props (the magazine) likewise. Both containers are listed in an
+  override of `items.vpp_pc\items_containers.asm_pc` (Armageddon's own list with ours added).
+- **Its inventory item**, Guerrilla's, named as Guerrilla shows it (its strings file), and **an ammo
+  type of its own** (`ammo.xtbl`): Guerrilla's ammo is each weapon's, Armageddon's shared by weapons
+  of one type. Guerrilla's `Max_Rounds` counts the loaded magazine, Armageddon's `Max_Reserve` doesn't.
+- **Its weapon entry**: Guerrilla's one flat entry written as Armageddon's one firing mode (Armageddon's
+  own assault rifle is Guerrilla's, moved so, with the same numbers): the shot (a bullet, or a
+  penetrating one with Guerrilla's flag), its trigger, magazine, spreads, ranges, damage at near and
+  far range (a building takes the shot's damage, as in Guerrilla), refire and reload delays, recoil,
+  muzzle flash, smoke and tracer (Guerrilla's own effects, which the world builder adds: build the
+  world first), explosion, camera shake, and the flags both games have. A weapon firing several shots
+  a round (the autoblaster) throws each into a cone round the aimed one in Guerrilla; Armageddon has no
+  such cone, so the cone is added to each spread for now. The rail driver's scope sees through walls
+  as in Guerrilla (Armageddon's `xray zoom`). Every entry carries an `_Editor` category: Armageddon's
+  weapon reader requires one (it skips multiplayer override copies by it).
+- **What it names that both games have under one name but differently** (the NPCs' firing pattern
+  and aim drift, camera shakes): Guerrilla's under an `rfg_` name; one both have alike is used as it is.
+- Names: Guerrilla's, or with `rfg_` before them where Armageddon has one of that name (`rfg_m16`,
+  `rfg_enforcer`, `rfg_rail_driver`); a fixed Unique_ID of ours from 141 (saved games keep weapons by it).
+- **The player's animations for them** (`GuerrillaPlayerAnimations.cs`): the set `rfg_player` with a
+  group for each group the guns use (AK, Enforcer, Railgun so far). Each is Guerrilla's group as its
+  game plays it, its own entries then those of the groups it builds on in Guerrilla's
+  `anim_groups.xtbl` (the enforcer's are mostly the assault rifle's), cut to the names Armageddon's
+  player asks for (its blend tree's and Darius's set's): the name's own entry, or where Guerrilla has
+  none one that plays the same (Armageddon's `fire` is Guerrilla's `stand fire`, its upgraded reloads
+  the plain ones, its turning on the spot the standing pose). Guerrilla blends its walking and running
+  by speed in a table Armageddon can't read; Armageddon's player tree blends walking, running and
+  sprinting itself, so each name takes that blend's animation for its speed. Where Armageddon has the
+  animation itself on Darius (its developers moved many of Guerrilla's player animations over, under
+  Guerrilla's names), its own is used by name; each other is moved from Mason's skeleton onto Darius's
+  (`PlayerRetarget.cs`, learnt from those same pairs: Darius's root only moves with the hips and never
+  turns, his pelvis turns as Mason's root), with Guerrilla's `anim_files.xtbl` entry (when a reload hands
+  over the ammo, the hand's IK, the magazine moved between gun and hand), less what Armageddon's tables
+  haven't (`Use_Shortest_Rotation`) and the sounds. The set's file goes in `overrides\build\pc\cache\`
+  and into the shared `anim_set_filenames.xtbl` and `anim_files.xtbl` in `mods\guerrilla_world\`
+  (the vehicles' and people's tools keep each other's entries; this one's are recorded in
+  `mods\guerrilla_gear\anim_entries.txt`).
+- **A set for a player on Mason's own skeleton**, `rfg_mason`, built with it: every group of Guerrilla's
+  player (18), each made the same way, its animations as Guerrilla has them (no skeleton to move them
+  onto: `rfgm_<Guerrilla's name>`, in the same folder), and no set under it (Darius's animations can't
+  play on Mason's bones). A character with Mason's skeleton names it in its `Animation_Sets`
+  (`rfg_mason.xtbl`). Armageddon's own moves come with it (dodging, free running, the Nano Forge, its
+  own guns): every group and name of Darius's set Mason's hasn't, with Darius's animation moved onto
+  Mason's skeleton (`rfgmd_<its name>`, `PlayerRetarget.cs`), or Guerrilla's own where Darius's is one
+  of Guerrilla's. How each of Mason's bones follows Darius's is learnt each build from the player
+  animations Armageddon's developers moved from Guerrilla onto Darius themselves (Armageddon's
+  `anims.vpp_pc` has them under Guerrilla's names): a source bone and one constant turn for each, fitted
+  on those pairs (Mason's root is his hips; Darius's root never turns). Moved back, those pairs land
+  within half a degree of Guerrilla's originals at the spine, head, feet and hands. Armageddon's
+  mission-only moves (its cutscene and mission props) aren't in its preloaded animations and are left out.
+  Mason's skeleton gets Darius's camera-lookat bone after his own (`PlayerRetarget.WithCameraLookat`,
+  applied by the people's build and checked by this one), and Armageddon's moves keep Darius's track for
+  it, so the camera follows a dodge or roll as it does Darius's. Jumping is Armageddon's too: its
+  controller lifts the player and its jump clips keep him on the ground, while Guerrilla's carry their
+  own small hop in the character's movement, which held Mason to it; every jump, fall and landing name
+  of Mason's groups takes Darius's clip (moved onto him), through the game's group parents.
+  Neither game has its player walk with nothing in his hands (Mason always carries his sledgehammer,
+  Darius his), so every name Mason's hammer group has and his Default group (what the game plays with no
+  weapon) lacks goes into Default: empty-handed he moves as with the hammer.
+The seven tables (`weapons`, `items_3d`, `items_inventory`, `ammo`, `weapon_firing_patterns`,
+`aim_drift`, `camera_shake`) are Armageddon's with Guerrilla's entries added, in `mods\guerrilla_world\`,
+which guerrilla_world hands the game at start-up. Not yet: the sounds (Guerrilla's are XACT cues), the
+melee moves, the bullets' impact effects, the HUD icons, Guerrilla's facial animations for the
+player, and the weapons modelled as characters (pistol, shotgun, sniper rifle).
+
+## The Guerrilla builder
+
+`editor\GuerrillaBuilder.exe` (code in `src\editor\GuerrillaBuilder\`) makes everything of
+Guerrilla's that the guerrilla_* mods use, from the player's own copy of Guerrilla, into the mod
+folder (`overrides\` and `mods\`); nothing it makes is ever shipped. The converting is
+`RfaFormats`' (`Guerrilla\GuerrillaWorld.cs`, `Interface\GuerrillaHud.cs`,
+`Guerrilla\GuerrillaArsenal.cs`, `GuerrillaWeapons.cs`, `GuerrillaPeople.cs`); the builder finds
+the folders and runs them in order:
+- `Setup.cs`: the mod folder (the one above `editor\`, with `rfa_mods.ini`), Armageddon (`GameDir`,
+  or the mod folder when the mod is in the game folder) and Guerrilla (`GuerrillaDir`, or else the
+  Steam Edition in the Steam library Armageddon is in, or another that library's
+  `libraryfolders.vdf` names: only files are read).
+- `Parts.cs`: the five parts in their order (world, HUD, vehicles, weapons, people); what each needs
+  built first (the vehicles and weapons name the world's effect and explosion tables, the people
+  carry the weapons), which a build adds when they aren't built; and what goes with a part taken
+  away (everything with the world, the people with the weapons), last built first. It records each
+  part in `mods\guerrilla_world\builder.ini` once it's finished (when, by which release from
+  `version.txt`, with which options): a part that is there but not recorded (left half-made, or
+  built by an older RFA-Mod), built by another release, or a world of another format (`world.txt`)
+  shows as needing building again. The four programs it took the place of (GuerrillaWorld,
+  GuerrillaHud, GuerrillaArsenal and GuerrillaPeople) are deleted from `editor\` when it starts.
+- `MainWindow.xaml`: the window, in the editor's look (the editor's `Theme.xaml` and
+  `DarkTitleBar.cs`, linked in): the two folders, a row a part with how it stands (ticked when it
+  isn't built or needs building again), Build and Remove. The work runs on another thread; its
+  lines also go to `logs\guerrilla_builder.log`, with the details of an error.
+- `CommandLine.cs`: given a command it runs without a window: `build [<parts>] [<options>]`,
+  `remove [<parts>]`, `status` and `help`. The options are the parts' own (`--zones`, `--props`,
+  `--props-in`, `--vehicles`, `--weapons`, `--characters`) and `--guerrilla <folder>`; one given
+  without naming parts builds only its part. Being a window program, it writes to the console it
+  was started from, or to the pipe or file its output goes to; a command prompt waits for it only
+  with `start /wait`, PowerShell only when its output is piped.
 
 ## The editor
 
@@ -1133,7 +1527,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() { /* install hooks *
 process) into `bin\`, copies `src\overrides\` into `bin\overrides\`, and copies
 `config\rfa_mods.ini` and `config\console.ini` to `bin\` only if there are none there yet, and to
 `bin\defaults\` every time (the templates the launcher adds new settings from to yours). It
-builds the editor and the three Guerrilla tools 64-bit into `bin\editor\`. The build turns off the
+builds the editor and the Guerrilla builder 64-bit into `bin\editor\`. The build turns off the
 .NET SDK's usage reporting and its first-run web certificate.
 
 `tools\package.ps1` makes the copy to give others, in `dist\RFA-Mod\` and as

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- GuerrillaBuilder.exe: makes Red Faction: Guerrilla's world, HUD, vehicles, weapons and people
+       usable in Armageddon, from your own copy of Guerrilla. A window when started on its own, a
+       command-line tool when given a command. Built into bin\editor\ by build.cmd. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>GuerrillaBuilder</RootNamespace>
+    <AssemblyName>GuerrillaBuilder</AssemblyName>
+    <!-- 64-bit: building the whole world takes more than a 32-bit program's 2 GB -->
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- Program.cs has its own Main: a command runs without starting the window at all -->
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RfaFormats\RfaFormats.csproj" />
+  </ItemGroup>
+
+  <!-- The editor's dark look, so both programs look alike -->
+  <ItemGroup>
+    <Page Include="..\RfaEditor\Theme.xaml" Link="Theme.xaml" />
+    <Compile Include="..\RfaEditor\DarkTitleBar.cs" Link="DarkTitleBar.cs" />
+  </ItemGroup>
+
+</Project>
