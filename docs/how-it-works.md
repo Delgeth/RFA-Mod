@@ -475,8 +475,10 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   day's fog curves but never draws with them. Guerrilla's is height fog, thicker low down and far
   away. The world builder writes Guerrilla's fog curves into each district's set (colour, density,
   fall-off with height, ground, offset) and moves the zones' boxes' own fog out of reach. The mod
-  then draws Guerrilla's fog over what the world has drawn, before the sky: each pixel's distance
-  and height from the G-buffer's depth (noted during the light pass), and the fog worked out there
+  then draws Guerrilla's fog over what the world has drawn, as the particles begin (Armageddon's sky
+  step draws into a multisampled layer of its own, laid over the scene only where nothing was drawn,
+  so fog drawn there would show on the sky alone): each pixel's distance and height from the
+  G-buffer's depth (noted as the sun's lamp is drawn in the light pass), and the fog worked out there
   as Guerrilla's shaders do per vertex, `1 − 2^−(term × distance × density − offset)` with
   `term = (1 − e^−k·dy)/(k·dy)`. As in Guerrilla's world, the fog's ground follows the camera (131 m
   below it), so the density at the camera stays the same. `Fog=` scales it, live. Guerrilla fogs its
@@ -490,13 +492,14 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   fixed exposure held between its time of day's limits, a curve that glares on bright light, and
   its colour grading. In our worlds the mod holds Armageddon's exposure at 1 (wrapping the call
   that sets its constants, `0xC45130`) and, after Armageddon's last pass (`0xC46C10` / `0xC471C0`),
-  draws Guerrilla's own from the scene it read: the eye's brightness `L` measured on a grid of the
-  scene (4.5 × its luminance) and eased toward at the district's `iris_rate`; the exposure
+  draws Guerrilla's own from the scene it read. Guerrilla's scene holds the picture ÷ 8 (its lights,
+  sky and fog colours as the time of day gives them) and every pass that reads it takes it × 8; ours
+  holds the same values, so the mod's passes take it × 8 too. The eye's brightness `L` is measured on
+  a grid of the scene (36 × its luminance) and eased toward at the district's `iris_rate`; the exposure
   `E = range / max(1 + offset × (base + amount × (L − base)), 0.1)` from the time of day's
   `tonemap_lum_range`, `tonemap_lum_offset`, `eye_adaption_base` and `eye_adaption_amount`, which
-  the world builder writes; then `1 − (1 − particles) × e^(−E × (colour × (1 − cover) + bloom + sun
-  shafts))` (the particles below; without them `1 − e^(−E × (colour + bloom + sun shafts))`) and the
-  sRGB curve. `Exposure=` scales `E` (1 is Guerrilla's). The sky's brightness setting is a fifth under
+  the world builder writes; then `1 − (1 − particles) × e^(−E × (8 × colour × (1 − cover) + bloom +
+  8 × sun shafts))` (the particles below; the bloom is made from the scene × 8) and the sRGB curve. `Exposure=` scales `E` (1 is Guerrilla's). The sky's brightness setting is a fifth under
   it, since Guerrilla's sky goes through the same exposure.
 - **The particles** (`Particles=`, with the tone mapping): Guerrilla draws its particles into a
   buffer of their own (their colour, and in its alpha how much they cover) and lays it over the picture
@@ -511,6 +514,15 @@ What a world ported from Red Faction: Guerrilla needs that Armageddon doesn't do
   copies that into a layer of its own and puts the scene back, so the distortion, the bloom and the
   eye see no particles; the tone mapping lays the layer over the picture. `Particles=0` leaves them
   to Armageddon.
+- **The particles' fog** (`ParticleFog=`): Guerrilla fogs every particle with the same height fog
+  (its particle vertex shaders), mixes it toward the colour a surface lost in the fog shows on the
+  screen (`1 − e^(−8 × E × the fog colour)`, worked out once a frame), and fades it out by the same
+  amount, so a particle deep in the haze is gone. Armageddon's particle shaders fog only by
+  distance, toward the boxes' fog colour, and never fade. In our worlds the mod wraps the particle
+  renderer's draw of each effect (`0xC25030`): it works out Guerrilla's fog at the effect's
+  particles (the mean over up to 32 of them), draws the effect with Armageddon's fog set to give
+  every vertex that amount toward Guerrilla's colour, and its opacity times one less it; coronas
+  (`0xC33820`) the same. The heat haze is left alone.
 - **The dust** (`Dust=`): Guerrilla blows dust round the camera with a system of its own, run every
   frame, which Armageddon has dropped (its start-up function is empty) while keeping what it rests on:
   the weather's wind (`0x6FB620`: speed in mph and direction; started halfway between the zone's
