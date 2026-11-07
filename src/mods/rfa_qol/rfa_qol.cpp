@@ -10,8 +10,10 @@
 //                   fixed tables are
 //   graphics        Graphics in the in-game menus: the ported world's     [GuerrillaWorld]
 //                   picture settings, saved as you change them
+//   streaming       a fix for a race in the game's zone stream-out         (no settings)
+//                   (two worker threads; a crash when zones stream out)
 // Each works as it did when it was a DLL of its own: its settings section in rfa_mods.ini, its own
-// switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=, limits=, graphics=; 0 = off, on when missing) and
+// switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=, limits=, graphics=, streaming=; 0 = off, on when missing) and
 // its own name in the log. They start in the order they loaded as separate DLLs.
 //
 // Those old DLLs (borderless.dll, console.dll, fov.dll, video_settings.dll) may still be in mods\
@@ -62,6 +64,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_spawnerRunning = StartPart(L"spawner", spawner::Init);
     g_limitsRunning = StartPart(L"limits", limits::Init);
     g_graphicsRunning = StartPart(L"graphics", graphics::Init);
+    StartPart(L"streaming", streaming::Init);
 }
 
 // The game's menus changed a setting: only fov listens.

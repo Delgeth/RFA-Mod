@@ -111,7 +111,9 @@
 // one refused for want of its model reserves it in the resource in force (0x761DC0, cdecl: category 8,
 // owner 3, the vehicle's entry, as the game's own reservations and the Spawn menu's; it makes room only by
 // letting go of a reservation nothing uses, 16 models at most) and says "not yet", so the spot asks again
-// until it has streamed in.
+// until it has streamed in. It reserves only while the resource is in force (state 4): while the game is
+// changing to a new one (1-3, as after a reload) a model reserved can't stream yet, and the change waits
+// for everything it doesn't want to be let go (see "What the spawn pools hold"); the spawn is "not yet".
 //
 // Guerrilla's lights (GuerrillaVehicleLights: each light linked to a vehicle_lights row of its type, its
 // glow Guerrilla's): Armageddon turns a vehicle's lights on and off by its own rules (0x61BA60 each frame,
@@ -820,11 +822,13 @@ auto const RecordReserved = reinterpret_cast<bool(__fastcall*)(void* record, voi
 auto const RecordInUse = reinterpret_cast<bool(__fastcall*)(void* record, void* unused)>(0x75FEB0);
 auto const ReserveInResource = reinterpret_cast<bool(__cdecl*)(int category, int owner, void* entry)>(0x761DC0);
 constexpr int kMissionCategory = 8, kReservationOwner = 3;  // as the game's own and the Spawn menu's (rfa_qol)
+constexpr int kResourceInForce = 4;                          // the spawn resource's state once a change is done
 auto& g_spawnResourceState = *reinterpret_cast<const volatile int*>(0x19734CC);  // 0: no spawn resource in force
 
 int __cdecl SpawnVehicle(void** parameters) {
     const int result = g_spawnVehicle(parameters);
     if (result != 2 || !parameters || !parameters[0] || !g_spawnResourceState) return result;
+    if (g_spawnResourceState != kResourceInForce) return 1;  // the area's resource is still changing: not yet
     void* entry = parameters[0];
     void* record = VehicleRecord(entry);
     if (!record || RecordReserved(record, nullptr) || RecordInUse(record, nullptr)) return result;  // refused for another reason
@@ -847,6 +851,111 @@ void ReserveWantedVehicles() {
     rfa::Log(g_spawnVehicle ? "Spawning: a vehicle refused for want of its model reserves it and waits (parked vehicles, traffic)"
                             : "Spawning: could not hook the game's vehicle spawn");
 }
+
+// ---- What the spawn pools hold (for the log)
+//
+// The game streams people and vehicle models through two pools of records (the people's 0x19728E8, the
+// vehicles' 0x1972900; a pool is a vector: its records, then their count at +8; it lists what it has streamed
+// at +0xC, that count at +0x14). A record (0x1C bytes): +0 its handle (>= 0 once streamed), +8 its container,
+// +0xC the categories wanting it (bit n: category n; 8 the level's and the mod's reservations), +0x18 its flags
+// (1 kept for good, as the player's; 2 on its way; 8 holding its container). A
+// container: +8 its references (a short), +0x22 its flags, +0x2C its name; 0x909210 says how far it has
+// loaded (0 not at all). The spawn resource's state is at 0x19734CC (0 none; 1 letting go of what the new
+// resource doesn't want; 2, 3 loading it; 4 in force; 5, 6 letting go), its resource at 0x19734D0. State 1
+// ends once no record but the kept ones has its container loaded (0x760450), letting go only of the
+// containers its records hold (0x760830, 0x75FFB0). Each level's start resets both pools and the state
+// (0x761C20, from gameplay_level_init_pre).
+//
+// After a reload in rfg (2026-11-07) the state stayed at 1 (rfg_dust), so no one came and no vehicle model
+// streamed: nothing ran the change in our worlds (guerrilla_people runs it now). So the log shows it, the mod
+// writes a line whenever the state changes, and when a change has taken 5 s, whether state 1's own check
+// passes (0x761FC0, both pools through 0x760450) and every record whose container is loaded.
+constexpr DWORD kPeoplePool = 0x19728E8, kStreamedCount = 0x14, kRecordCount = 0x08;
+constexpr DWORD kRecordHandle = 0x00, kRecordContainer = 0x08, kRecordCategories = 0x0C, kRecordFlags = 0x18;
+constexpr DWORD kRecordKept = 1, kRecordOnItsWay = 2;
+constexpr DWORD kContainerReferences = 0x08, kContainerName = 0x2C;
+constexpr int kMaxListedRecords = 24;
+auto const ContainerState = reinterpret_cast<int(__cdecl*)(const void* container)>(0x909210);  // 0: not loaded
+auto const AllLetGo = reinterpret_cast<bool(__cdecl*)()>(0x761FC0);  // state 1's check: nothing unwanted still loaded
+auto const InWreckingCrewMatch = reinterpret_cast<bool(__cdecl*)()>(0x511930);
+auto& g_spawnResource = *reinterpret_cast<void* const volatile*>(0x19734D0);
+
+// A container's name, copied with care: a wrong guess at its layout mustn't stop the game.
+void ContainerName(const BYTE* container, char* out, size_t size) {
+    out[0] = 0;
+    __try {
+        const char* name = *reinterpret_cast<const char* const*>(container + kContainerName);
+        if (name) strncpy_s(out, size, name, _TRUNCATE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        strcpy_s(out, size, "?");
+    }
+}
+
+template <typename T>
+T Field(const BYTE* object, DWORD offset) { return *reinterpret_cast<const T*>(object + offset); }
+
+void LogLoadedRecords(const char* kind, DWORD pool) {
+    const BYTE* records = *reinterpret_cast<BYTE* const*>(pool);
+    const int count = Field<int>(reinterpret_cast<const BYTE*>(pool), kRecordCount);
+    int loaded = 0;
+    for (int i = 0; records && i < count && i < 1024; ++i) {
+        const BYTE* record = records + i * kRecordSize;
+        const BYTE* container = Field<const BYTE*>(record, kRecordContainer);
+        if (!container) continue;
+        const int state = ContainerState(container);
+        if (state == 0) continue;
+        if (++loaded > kMaxListedRecords) continue;
+        char name[64];
+        ContainerName(container, name, sizeof(name));
+        const DWORD flags = Field<DWORD>(record, kRecordFlags);
+        rfa::Log("  %s %d: %s, loaded (%d), %d reference(s)%s%s, handle %d, categories 0x%lX", kind, i, name, state,
+                 Field<short>(container, kContainerReferences), (flags & kRecordKept) ? ", kept" : "",
+                 (flags & kRecordOnItsWay) ? ", on its way" : "", Field<int>(record, kRecordHandle), Field<DWORD>(record, kRecordCategories));
+    }
+    rfa::Log("  %s: %d of %d records have their container loaded%s", kind, loaded, count, loaded > kMaxListedRecords ? " (the first 24 above)" : "");
+}
+
+void LogSpawnPools(const char* when, bool records) {
+    const char* resource = g_spawnResource ? *static_cast<const char* const*>(g_spawnResource) : nullptr;
+    const int state = g_spawnResourceState;
+    rfa::Log("Spawn resource (%s): state %d (%s)%s%s; streamed: people %d, vehicle models %d", when, state, resource ? resource : "none",
+             state == 1 ? (AllLetGo() ? ", state 1's check passes" : ", state 1's check fails") : "",
+             InWreckingCrewMatch() ? "" : ", not a Wrecking Crew match", Field<int>(reinterpret_cast<const BYTE*>(kPeoplePool), kStreamedCount),
+             Field<int>(reinterpret_cast<const BYTE*>(kVehicleResourcePool), kStreamedCount));
+    if (!records) return;
+    LogLoadedRecords("person", kPeoplePool);
+    LogLoadedRecords("vehicle", kVehicleResourcePool);
+}
+
+int g_poolReports = 0;  // at most 60 of them in a run
+constexpr int kMaxPoolReports = 60;
+
+}  // namespace
+
+// Each frame (from traffic's frame): a line whenever the spawn resource's state changes, and every record
+// whose container is loaded whenever a change has taken 5 s (state 1-3, 5 or 6).
+void ReportSpawnPools() {
+    static int lastState = -1;
+    static DWORD changedAt = 0;
+    const int state = g_spawnResourceState;
+    const DWORD now = GetTickCount();
+    if (state != lastState) {
+        lastState = state;
+        changedAt = now;
+        if (g_poolReports < kMaxPoolReports) {
+            ++g_poolReports;
+            LogSpawnPools("its state changed", false);
+        }
+        return;
+    }
+    if (state == 0 || state == 4 || now - changedAt < 5000) return;
+    changedAt = now;
+    if (g_poolReports >= kMaxPoolReports) return;
+    ++g_poolReports;
+    LogSpawnPools("still changing after 5 s", true);
+}
+
+namespace {
 
 // ---- Room for Guerrilla's walkers' blend trees (see the top)
 

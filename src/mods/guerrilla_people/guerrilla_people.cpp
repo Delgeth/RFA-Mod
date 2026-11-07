@@ -776,7 +776,10 @@ void SetGuerrillaDispositions() {
     rfa::Log("Sides: Guerrilla's (the EDF and the Marauders hostile to the player's side, civilians friendly to it and unfriendly to the EDF, the Marauders hostile to all)");
 }
 
+int g_levelStarts = 0;  // each level's start (a reload too): the people's reports are written again after it
+
 void __cdecl ResetDispositions() {
+    ++g_levelStarts;
     g_resetDispositions();
     if (InOurWorld()) SetGuerrillaDispositions();
 }
@@ -896,12 +899,48 @@ DWORD g_lastCheck = 0, g_enteredAt = 0;
 bool g_wasOurs = false;
 int g_reports = 0;  // the people's reports written since entering the world (at 5 s and 30 s)
 
+// ---- The spawn resource's changes in our worlds (each frame)
+//
+// The game changes spawn resource through a state machine (0x762730, cdecl, returns the state; the state at
+// 0x19734CC): 1 lets go of what the new resource doesn't want, then asks the stream allocators to switch to
+// their spawn mode (0x908DF0(1)) and goes to 2, which applies the resource (0x762600); 3 waits until it has
+// loaded; 4 it is in force. In Armageddon's own levels the spawn resources' frame (0x7619D0, from the gameplay
+// update at 0x4FE883) runs it every frame while a state is set (0x75FC10), but not in a Wrecking Crew match
+// (0x511930: [0x10F83FC] isn't -1), which our worlds run as. Then only the mission system's update runs it
+// (0x503DE0 at 0x503EC4, reached from the loading state through 0x6C9110, and only while a mission is set,
+// [0x10F80C8], whose flags allow it). A first load got through; a reload after dying (die, ` + R) didn't: the
+// state stayed at 1 for good, the zone's resource (rfg_dust) was never applied, so no one came, and with the
+// allocators never switched every vehicle model failed "SLOT ALLOC FAIL" (the user's 03:05 and 03:15 runs,
+// 2026-11-07). So in our worlds the mod runs the machine each frame while a state is set, as the game's frame
+// does in its own levels.
+auto const RunSpawnResourceChange = reinterpret_cast<int(__cdecl*)()>(0x762730);
+auto const InWreckingCrewMatch = reinterpret_cast<bool(__cdecl*)()>(0x511930);
+
+void RunSpawnResourceChanges() {
+    if (!InWreckingCrewMatch() || !ResourceInForce(kPools, nullptr) || !InOurWorld()) return;
+    static int loggedStart = -1;
+    const int before = *static_cast<const int*>(kPools);
+    if (loggedStart != g_levelStarts) {
+        loggedStart = g_levelStarts;
+        RFA_LOG_FIRST(40, "Spawn resource: the mod runs its change each frame in world \"%s\" (a Wrecking Crew match; state %d)", WorldName(), before);
+    }
+    const int after = RunSpawnResourceChange();
+    if (after != before) RFA_LOG_FIRST(60, "Spawn resource: its change went from state %d to %d (run by the mod; 4 = in force)", before, after);
+}
+
 void __cdecl GameplayFrame() {
     g_gameplayFrame();
+    RunSpawnResourceChanges();
     const DWORD now = GetTickCount();
     if (now - g_lastCheck < 1000) return;
     g_lastCheck = now;
     const bool ours = InOurWorld();
+    static int seenStarts = 0;
+    if (ours && g_levelStarts != seenStarts) {  // the level loaded again in our world (a reload, a checkpoint)
+        g_enteredAt = now;
+        g_reports = 0;
+    }
+    seenStarts = g_levelStarts;
     if (ours != g_wasOurs) {
         g_wasOurs = ours;
         g_enteredAt = now;

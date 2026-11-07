@@ -119,6 +119,7 @@ auto const CastHuman = reinterpret_cast<void*(__fastcall*)(void* world, void* un
 auto const VehicleLoaded = reinterpret_cast<bool(__cdecl*)(BYTE* vehicle)>(0x762290);
 auto const ReserveInResource = reinterpret_cast<bool(__cdecl*)(int category, int owner, BYTE* vehicle)>(0x761DC0);
 constexpr int kVehicleCategory = 8, kOwner = 3;
+constexpr int kResourceInForce = 4;  // the pools' state once a change of spawn resource is done
 auto& g_poolState = *reinterpret_cast<const volatile int*>(0x19734CC);  // 0: no spawn resource in force
 auto const Player = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
 constexpr DWORD kPlayerVehicle = 0x1160;  // the vehicle the player is in, by handle; -1 on foot
@@ -311,6 +312,13 @@ void SpawnVehicle(int i) {
     g_loading = nullptr;
     if (VehicleLoaded(vehicle) || !g_poolState) {
         Drop(name);
+        return;
+    }
+    // While the area's resource is still changing (state 1-3, as after a reload) a model reserved can't stream
+    // yet, and the change waits for what it doesn't want to be let go: reserve only once it's in force (4).
+    if (g_poolState != kResourceInForce) {
+        rfa::Log("%s: not yet; this area's spawn resource is still changing (state %d)", name.c_str(), static_cast<int>(g_poolState));
+        SetStatus("This area is still loading its people and vehicles; try again in a moment");
         return;
     }
     if (!ReserveInResource(kVehicleCategory, kOwner, vehicle)) {

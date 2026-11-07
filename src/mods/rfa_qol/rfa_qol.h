@@ -38,3 +38,8 @@ void Init();
 // Its part of the in-game menus (RFAMod_Menu).
 void Menu(const RFAMenu* menu);
 }  // namespace graphics
+
+// A fix for a race in the game's zone stream-out (streaming.cpp). No settings.
+namespace streaming {
+void Init();
+}

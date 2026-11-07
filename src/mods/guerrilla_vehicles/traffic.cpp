@@ -49,6 +49,7 @@
 #include <vector>
 
 void StartTraffic();
+void ReportSpawnPools();  // guerrilla_vehicles.cpp: what the spawn pools hold, for the log
 
 namespace {
 
@@ -443,6 +444,7 @@ FrameFn g_spawnNodeFrame;
 
 void __cdecl SpawnNodeFrame() {
     g_spawnNodeFrame();
+    ReportSpawnPools();
     TrafficFrame();
     gv::ConvoysFrame();
     gv::EdfFrame();
