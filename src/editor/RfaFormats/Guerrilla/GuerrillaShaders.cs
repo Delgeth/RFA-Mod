@@ -123,8 +123,8 @@ public static class GuerrillaShaders
     /// The families written skinned: the glass (its shards), the BRDF ones (the people's clothes, skin and
     /// eyes) and the standard ones (rfg-nodecal: clothes, props, the character-mesh guns and gear;
     /// Guerrilla's skinned and still versions have the same pixel shader), with no UV set past the first
-    /// (character meshes have one, mostly): opaque, and the standard ones alpha-tested too (Mason's
-    /// eyelashes; their depth and G-buffer passes skinned as well, on Armageddon's ir_at_default_c's
+    /// (character meshes have one, mostly): opaque, and alpha-tested too (Mason's eyelashes, the people's skin
+    /// cut out on some; their depth and G-buffer passes skinned as well, on Armageddon's ir_at_default_c's
     /// layout). Blended skinned materials aren't written yet.
     /// </summary>
     static bool Skinned(Family family) => family is Family.Glass or Family.EosGlass or Family.Brdf or Family.Standard;
@@ -134,8 +134,7 @@ public static class GuerrillaShaders
     static int[] SkinnedLayersOf(Family family) => family is Family.Brdf or Family.Standard ? [0] : LayersOf(family);
     static Variant[] SkinnedVariantsOf(Family family) => family switch
     {
-        Family.Brdf => [Variant.Plain],
-        Family.Standard => [Variant.Plain, Variant.CutOut],
+        Family.Brdf or Family.Standard => [Variant.Plain, Variant.CutOut],
         _ => VariantsOf(family),
     };
 

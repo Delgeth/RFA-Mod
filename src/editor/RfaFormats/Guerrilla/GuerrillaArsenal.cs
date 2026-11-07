@@ -66,7 +66,7 @@ public static class GuerrillaArsenal
     };
 
     /// <summary>The fields of Guerrilla's entry left out for now (see the summary), whatever Armageddon's table has.</summary>
-    static readonly string[] NotYet = ["Foley", "Turrets"];
+    static readonly string[] NotYet = ["Foley"];  // Guerrilla's Foley: replaced by the sounds' own (GuerrillaVehicleSounds)
 
     /// <summary>
     /// The fields Armageddon's table description leaves out that its vehicle reader still reads, as
@@ -84,6 +84,13 @@ public static class GuerrillaArsenal
         "AIEnforcedMaxSpeed", "Engine/AITorque", "Engine/Force_assist", "Axles/Wheel_Spring_Pow",
         "Transmission/Forward_To_Reverse_Delay", "Transmission/Reverse_To_Forward_Delay", "Angular_Damping/Normal_Spin_Damping_AI",
         "Effects/Bomb_Explosion",
+        // A choice Armageddon's description lost but its reader still takes (as path=value): Guerrilla's
+        // artillery tanks' type (the exe's name table at 0x10FCB78 still parses it, type 4: a tank).
+        "Special_Vehicle_Type=Artillery Tank",
+        // A mount nobody mans (Guerrilla's no-turret APCs' roof plate, TurretPlug): its seat "none", which
+        // Armageddon's seat look-up (0x603FC0) reads as no seat (-1) as Guerrilla's does; without it the
+        // field the reader requires is missing and it stops.
+        "Turrets/Seat=none",
     };
 
     /// <summary>
@@ -141,12 +148,14 @@ public static class GuerrillaArsenal
         foreach (var entry in ReadTable(guerrillaTables, "vehicles.xtbl").Entries)
             foreach (var (field, value) in EffectsOf(entry, defaults, fields))
                 if (!value.Equals("null", StringComparison.OrdinalIgnoreCase)) (ExplosionFields.Contains(field) ? explosions : effects).Add(value);
+        foreach (string light in GuerrillaVehicleLights.Effects(guerrillaTables)) effects.Add(light);  // the lights' (see GuerrillaVehicleLights)
+        foreach (string step in GuerrillaVehicleFootsteps.Effects(guerrillaTables)) effects.Add(step);  // the walkers' footsteps'
         return ([.. effects], [.. explosions]);
     }
 
     /// <summary>The files this writes (relative to the overrides folder, then to the mod's folder), for --remove.</summary>
     public const string AssetList = @"build\pc\cache\vehicles.vpp_pc\vehicle_containers.asm_pc", Table = "vehicles.xtbl",
-                        InteractionTable = "vehicle_interactions.xtbl";
+                        InteractionTable = "vehicle_interactions.xtbl", SpawnGroupTable = "spawn_group_vehicle.xtbl";
 
     /// <summary>
     /// The vehicles' own skeletons Armageddon hasn't, one file name a line, in the guerrilla_vehicles mod's
@@ -204,7 +213,38 @@ public static class GuerrillaArsenal
         var takenNames = new HashSet<string>(ourVehicles.Entries.Select(e => e.ValueOf("Display_Name") ?? ""), StringComparer.OrdinalIgnoreCase);
         var containers = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);  // file name → container
         var built = new List<string>();
+        var builtNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var modelLights = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);  // a model's light types (GuerrillaVehicles.LightTypes)
         var rigs = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);  // Guerrilla's vehicle skeletons Armageddon hasn't: file → bytes
+
+        // Their sounds, Guerrilla's own, in banks of Armageddon's kind (see GuerrillaVehicleSounds): the
+        // engines, the Foley cues, and (below) the doors'. A failure leaves the vehicles without them.
+        var soundFoley = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var soundLog = new List<string>();
+        GuerrillaSoundBanks? soundBanks = null;
+        try
+        {
+            soundBanks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, GuerrillaVehicleSounds.Part, GuerrillaVehicleSounds.BankPrefix);
+            soundFoley = GuerrillaVehicleSounds.Build(soundBanks, guerrillaTables,
+                                                      wanted.Where(entries.ContainsKey).Select(v => entries[v]).Distinct(), soundLog);
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException)
+        {
+            soundLog.Add($"not built ({error.Message}); the vehicles have no sounds");
+            soundBanks = null;
+        }
+        foreach (string line in soundLog) yield return "Sounds: " + line;
+        string? DoorSound(string cue) => soundBanks?.OneShot(cue);
+        var turrets = new GuerrillaTurrets(guerrillaTables, gameTables, modFolder, soundBanks);
+        // The interactions' animations' sounds (getting in and out, doors), Guerrilla's cues as our events.
+        if (soundBanks != null) sets.SoundOf = (cue, looping) => looping ? soundBanks.Loop(cue) : soundBanks.OneShot(cue);
+        // The walkers' blend trees (see GuerrillaWalkerTrees): their sets' tree-named states, and the trees.
+        var walkerTrees = new GuerrillaWalkerTrees(guerrillaTables);
+        var footstepNames = new List<string>();  // Guerrilla's footsteps entries the vehicles name
+        var walkerRigs = new List<string>();      // the walkers' rigs (Guerrilla's file names), for their legs' limb rows
+        var gunnerVehicles = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);  // vehicles with a gunner's seat (a turret on a passenger seat)
+        var flyerModels = new List<string>();    // the flyers' lines of flyers.txt (Guerrilla's flight model's values)
+        sets.Trees = walkerTrees.Rewrite;
 
         foreach (string name in wanted)
         {
@@ -251,7 +291,11 @@ public static class GuerrillaArsenal
                 byte[] Read(string file) => pack.Read(pack.Find(file) ?? throw new InvalidDataException($"{source.Name} has no {file}"));
                 byte[] cFile = Read(mesh + ".ccar_pc"), gFile = Read(mesh + ".gcar_pc");
                 if (GuerrillaVehicles.NotYet(cFile) is { } why) { yield return $"{name}: {why}; left out"; continue; }
-                var (header, textures) = GuerrillaVehicles.Convert(cFile, t => t == GuerrillaMaterials.GlassReflection ? t : GuerrillaVehicles.Alias(t));
+                // A tank (Guerrilla's Tank or Artillery Tank type) has its drive wheels hidden, as Guerrilla's code does.
+                bool tank = entry.ValueOf("Special_Vehicle_Type")?.Trim() is { } kind &&
+                            (kind.Equals("Tank", StringComparison.OrdinalIgnoreCase) || kind.Equals("Artillery Tank", StringComparison.OrdinalIgnoreCase));
+                var (header, textures) = GuerrillaVehicles.Convert(cFile, t => t == GuerrillaMaterials.GlassReflection ? t : GuerrillaVehicles.Alias(t), tank);
+                modelLights[mesh] = GuerrillaVehicles.LightTypes(cFile);
                 var files = new List<(string Name, byte[] Data)> { (mesh + ".ccar_pc", header), (mesh + ".gcar_pc", gFile) };
                 var pegs = pack.Entries.Where(e => e.Name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase))
                                .Select(e => PegFile.Read(pack.Read(e), Read(PegFile.DataFileName(e.Name)!))).ToList();
@@ -285,6 +329,22 @@ public static class GuerrillaArsenal
             var dropped = new List<string>();
             foreach (string field in NotYet)
                 if (copy.Element(field) is { } part) { part.Remove(); dropped.Add(field); }
+            // Its turrets, Guerrilla's (see GuerrillaTurrets): a mount whose turret can't be had yet is left out.
+            if (copy.Element("Turrets") is { } mounts)
+            {
+                foreach (var mount in mounts.Elements.ToList())
+                {
+                    string? turret = mount.ValueOf("AttachedTurret")?.Trim();
+                    if (string.IsNullOrEmpty(turret)) continue;
+                    if (turrets.Ported(turret, out string? why) is { } portedTurret)
+                    {
+                        mount.Element("AttachedTurret")!.Value = portedTurret;
+                        if (mount.ValueOf("Seat")?.Trim() is { } seat && seat.StartsWith("passenger", StringComparison.OrdinalIgnoreCase)) gunnerVehicles.Add(name);
+                    }
+                    else { mount.Remove(); dropped.Add($"turret {turret} ({why})"); }
+                }
+                if (!mounts.Elements.Any()) mounts.Remove();
+            }
             // Its effects, Guerrilla's (see EffectsOf), under the names the world builder added them by. An
             // effect the world's tables haven't shows nothing (the game's look-up gives none, 0x4EF370); an
             // explosion they haven't stays Guerrilla's name, Armageddon's explosion of that name, until the
@@ -298,9 +358,43 @@ public static class GuerrillaArsenal
                 if (!there) notInWorld.Add(ported);
                 Set(effects, field, there || !isExplosion ? ported : value);
             }
+            // Its own animation set (walkers', flyers', turret trucks' Rig/Anim_set: the interaction's set, by the name
+            // it was ported under, not Armageddon's set of Guerrilla's name), and a walker's blend tree.
+            // Its footsteps (walkers'): Guerrilla's entry, under our name for it (see GuerrillaVehicleFootsteps).
+            if (copy.Element("Rig")?.Element("Footsteps") is { } footsteps && footsteps.Value.Trim().Length > 0)
+            {
+                footstepNames.Add(footsteps.Value.Trim());
+                footsteps.Value = GuerrillaVehicleFootsteps.OurName(footsteps.Value.Trim(), gameTables);
+            }
+            if (ourSet != null && copy.Element("Rig")?.Element("Anim_set") is { } rigSet && rigSet.Value.Trim().Equals(rfgSet, StringComparison.OrdinalIgnoreCase))
+            {
+                rigSet.Value = ourSet;
+                if (copy.ValueOf("VehicleClass")?.Trim().Equals("Walker", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    walkerTrees.Apply(copy, name, rfgSet!);
+                    if (copy.Element("Rig")?.Element("Rig")?.ValueOf("Filename")?.Trim() is { Length: > 0 } walkerRig) walkerRigs.Add(walkerRig);
+                }
+            }
+            // Its lights: each light type its model has, linked to our row for it (see GuerrillaVehicleLights).
+            copy.Element("Lights")?.Remove();
+            if (modelLights.TryGetValue(mesh, out var lightTypes) && lightTypes.Count > 0)
+            {
+                var map = copy.AddElement("Lights").AddElement("LightsMap");
+                foreach (string type in lightTypes)
+                {
+                    var link = map.AddElement("LightMap");
+                    link.AddElement("LightName", type);
+                    link.AddElement("VehLightType", GuerrillaVehicleLights.RowFor(type));
+                }
+            }
             Prune(copy, description.Children, "", dropped, ReadAnyway);
             var rounded = new List<string>();
             FitValues(copy, description.Children, "", rounded);
+            if (copy.ValueOf("VehicleClass")?.Trim().Equals("Flyer", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                FlyerLimits(copy, rfgDefaults);
+                flyerModels.Add(FlyerModel(name, entry, rfgDefaults));
+            }
             // The skeleton by the name it is loaded under (in lower case: the game's own names are).
             if (rig != null && copy.Element("Rig")?.Element("Rig")?.Element("Filename") is { } rigName)
                 rigName.Value = Path.ChangeExtension(rig, ".rigx");
@@ -308,12 +402,12 @@ public static class GuerrillaArsenal
             // Its interaction: Guerrilla's, converted, unless Armageddon has one of that name.
             if (rfgInteraction != null && ourSet != null && !takenInteractions.Contains(interactionName!))
             {
-                var interaction = ConvertInteraction(rfgInteraction, interactionDescription, ourSet, out var left);
+                var interaction = ConvertInteraction(rfgInteraction, interactionDescription, ourSet, DoorSound, out var left);
                 ourInteractions.Table!.AddElement(interaction);
                 takenInteractions.Add(interactionName!);
                 yield return $"{name}: interaction {interactionName} ({interaction.Element("Waypoints")?.Elements.Count() ?? 0} waypoints, " +
                              $"{interaction.Element("Waypoint_transitions")?.Elements.Count() ?? 0} transitions, animation set {ourSet})" +
-                             (left.Count > 0 ? $"; left out until Guerrilla's audio is ported: {string.Join(", ", left.Distinct())}" : "");
+                             (left.Count > 0 ? $"; its doors' sounds that couldn't be had, left out: {string.Join(", ", left.Distinct())}" : "");
             }
             if (rfgInteraction != null && takenInteractions.Contains(interactionName!)) Set(copy, "Vehicle_Interaction", interactionName!);
             else
@@ -331,6 +425,12 @@ public static class GuerrillaArsenal
             if (copy.ValueOf("Group") is { } group && !groups.Contains(group)) { copy.Element("Group")!.Remove(); dropped.Add($"Group {group}"); }
             string display = copy.ValueOf("Display_Name") ?? name;
             if (takenNames.Contains(display)) Set(copy, "Display_Name", display = "rfg " + display);
+            // Its sounds, where built: Armageddon's Foley fields naming the banks' events.
+            if (soundFoley.TryGetValue(name, out var events))
+            {
+                var foleyGroup = copy.AddElement("Foley");
+                foreach (var (field, eventName) in events) foleyGroup.AddElement(field, eventName);
+            }
             var added = new List<string>();
             var unfilled = new List<string>();
             FillRequired(copy, description.Children, "", added, unfilled);
@@ -338,6 +438,7 @@ public static class GuerrillaArsenal
             taken.Add(name);
             takenNames.Add(display);
             built.Add($"{name} (\"{display}\")");
+            builtNames.Add(name);
             if (dropped.Count > 0) yield return $"{name}: left out of its table entry: {string.Join(", ", dropped)}";
             if (rounded.Count > 0) yield return $"{name}: decimals where Armageddon reads whole numbers, rounded: {string.Join(", ", rounded)}";
             if (added.Count > 0) yield return $"{name}: Armageddon's defaults added for the fields it requires: {string.Join(", ", added.Distinct())}";
@@ -352,7 +453,66 @@ public static class GuerrillaArsenal
         File.WriteAllBytes(listFile, assetList.ToBytes());
         Directory.CreateDirectory(modFolder);
         File.WriteAllBytes(Path.Combine(modFolder, Table), ourVehicles.ToBytes());
+        int interactionNames = InteractionNameBytes(ourInteractions);
+        if (interactionNames > MostInteractionNames)
+            throw new InvalidDataException($"{InteractionTable}'s names need {interactionNames} bytes of the game's {MostInteractionNames} (guerrilla_vehicles' " +
+                                           "\"Vehicle interaction info strings\"): a vehicle whose interaction's name doesn't fit stops the game");
         File.WriteAllBytes(Path.Combine(modFolder, InteractionTable), ourInteractions.ToBytes());
+        yield return $"Vehicle interactions: {ourInteractions.Entries.Count()} in {InteractionTable}, their names {interactionNames} of {MostInteractionNames} bytes";
+        // Guerrilla's vehicle spawn groups (the groups its parked vehicles' spots and traffic pick from; the
+        // world builder places the spots, see GuerrillaVehiclePlaces), each as GroupPrefix + its name with the
+        // vehicles built here, after Armageddon's own; a group none of whose vehicles were built is left out.
+        var ourGroups = ReadTable(gameTables, SpawnGroupTable);
+        var emptyGroups = new List<string>();
+        var unbuilt = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        int groupsWritten = 0;
+        var writtenGroups = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);  // Guerrilla's name → the vehicles built in it
+        foreach (var rfgGroup in ReadTable(guerrillaTables, SpawnGroupTable).Entries)
+        {
+            var group = rfgGroup.Copy();
+            Set(group, "Name", GuerrillaVehiclePlaces.GroupPrefix + XtblFile.EntryName(rfgGroup));
+            foreach (var vehicle in group.Element("vehicle_list")?.Elements.ToList() ?? [])
+                if (!builtNames.Contains(vehicle.Value.Trim())) { unbuilt.Add(vehicle.Value.Trim()); vehicle.Remove(); }
+            if (group.Element("vehicle_list")?.Elements.Any() != true) { emptyGroups.Add(XtblFile.EntryName(rfgGroup)); continue; }
+            ourGroups.Table!.AddElement(group);
+            groupsWritten++;
+            writtenGroups[XtblFile.EntryName(rfgGroup)] = group.Element("vehicle_list")!.Elements.Select(v => v.Value.Trim()).ToList();
+        }
+        File.WriteAllBytes(Path.Combine(modFolder, SpawnGroupTable), ourGroups.ToBytes());
+        turrets.Write(modFolder);
+        yield return GuerrillaVehicleLights.Write(guerrillaTables, gameTables, modFolder, worldEffects);
+        yield return walkerTrees.Write(gameTables, modFolder);
+        yield return GuerrillaWalkerLimbs.Write(guerrillaTables, gameTables, modFolder, walkerRigs);
+        yield return GuerrillaVehicleFootsteps.Write(guerrillaTables, gameTables, modFolder, Path.GetDirectoryName(RigListFile(modFolder))!, footstepNames, worldEffects);
+        // Guerrilla's traffic by zone, for the guerrilla_vehicles mod's traffic (see GuerrillaTraffic).
+        string trafficLine;
+        try { trafficLine = GuerrillaTraffic.Write(guerrillaCache, guerrillaTables, writtenGroups, gunnerVehicles, Path.GetDirectoryName(RigListFile(modFolder))!); }
+        catch (Exception error) when (error is IOException or InvalidDataException) { trafficLine = $"Traffic: not written ({error.Message})"; }
+        yield return trafficLine;
+        // Guerrilla's flight model's values for each flyer, for the guerrilla_vehicles mod's flyers (Armageddon's reader keeps some only as
+        // whole degrees, and the player's limits above overwrite two): name, then FlyerMaxUpThrust, TurnAngvel, TurnAngaccl (revolutions),
+        // ThrustOffsetX, ThrustOffsetZ (radians, as Guerrilla's loader makes them), TiltAngvel, TiltAngaccl, SpinBankScalar,
+        // ThrustTiltScalar, BankTiltScalar, DefaultLookatYScalar.
+        File.WriteAllLines(Path.Combine(Path.GetDirectoryName(RigListFile(modFolder))!, FlyerFile),
+                           new[] { @"# Guerrilla's flight model's values for its flyers (written by editor\GuerrillaBuilder.exe with the vehicles)" }.Concat(flyerModels));
+        yield return $@"Flyers: {flyerModels.Count} with Guerrilla's flight model's values in mods\guerrilla_vehicles\{FlyerFile}";
+        // Guerrilla's convoys (their definitions, end points and routes), for the guerrilla_vehicles mod's convoys (see GuerrillaConvoys).
+        string convoyLine;
+        try { convoyLine = GuerrillaConvoys.Write(guerrillaCache, guerrillaTables, writtenGroups, Path.GetDirectoryName(RigListFile(modFolder))!); }
+        catch (Exception error) when (error is IOException or InvalidDataException) { convoyLine = $"Convoys: not written ({error.Message})"; }
+        yield return convoyLine;
+        yield return $"Turrets: {turrets.Added} of Guerrilla's in {GuerrillaTurrets.Table}" +
+                     (turrets.LeftOut.Any() ? $"; left out (their vehicles' mounts too): {string.Join(", ", turrets.LeftOut)}" : "");
+        if (soundBanks != null)
+        {
+            List<string> written;
+            try { written = soundBanks.Write(game, overrides, modFolder); }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException) { written = [$"not written ({error.Message})"]; }
+            foreach (string line in written.Concat(soundBanks.Log.Distinct())) yield return "Sounds: " + line;
+        }
+        yield return $"Spawn groups: {groupsWritten} of Guerrilla's in {SpawnGroupTable} (as {GuerrillaVehiclePlaces.GroupPrefix}<name>)" +
+                     (unbuilt.Count > 0 ? $"; their vehicles not built, left out of them: {string.Join(", ", unbuilt)}" : "") +
+                     (emptyGroups.Count > 0 ? $"; groups left out (none of their vehicles built): {string.Join(", ", emptyGroups)}" : "");
         sets.Write(cache, modFolder);
         foreach (var (file, bytes) in rigs) File.WriteAllBytes(Path.Combine(cache, file), bytes);
         string rigList = RigListFile(modFolder);
@@ -373,12 +533,17 @@ public static class GuerrillaArsenal
     /// Guerrilla's interaction entry for Armageddon (see the summary): its waypoints, transitions and
     /// steps as they are, each transition's door (Guerrilla's Door) as Armageddon's first (Door_1), the
     /// animation set as ported (<paramref name="animSet"/>), then pruned and filled as the vehicle entries
-    /// are. The doors' sound cues (Guerrilla's XACT cues) are left out; <paramref name="leftOut"/> names them.
+    /// are. The doors' sounds (Guerrilla's XACT cues) are named by the events <paramref name="soundOf"/> gives (in
+    /// our banks); one it gives none for is left out, and <paramref name="leftOut"/> names it.
     /// </summary>
-    static XtblElement ConvertInteraction(XtblElement rfg, FieldDescription description, string animSet, out List<string> leftOut)
+    static XtblElement ConvertInteraction(XtblElement rfg, FieldDescription description, string animSet, Func<string, string?> soundOf, out List<string> leftOut)
     {
         var copy = rfg.Copy();
         leftOut = [];
+        // Guerrilla's "Moving Exit" (once, the mini hauler's quick door exit; its every other one is "Exit Moving"): Armageddon's
+        // waypoints know "Exit Moving" by name and nothing by the other.
+        foreach (var flag in (copy.Element("Waypoints")?.Elements ?? []).SelectMany(w => w.Element("Node_Type")?.Elements ?? []))
+            if (flag.Value.Trim().Equals("Moving Exit", StringComparison.OrdinalIgnoreCase)) flag.Value = "Exit Moving";
         foreach (var transition in copy.Element("Waypoint_transitions")?.Elements ?? [])
         {
             if (transition.Element("Door") is { } door)
@@ -386,11 +551,15 @@ public static class GuerrillaArsenal
                 transition.InsertAfter(door, new XtblElement("Door_1") { Value = door.Value });
                 door.Remove();
             }
-            foreach (string cue in new[] { "Door_open", "Door_close" })
-                if (transition.Element(cue) is { } sound)
+            foreach (string field in new[] { "Door_open", "Door_close" })
+                if (transition.Element(field) is { } sound && sound.Value.Trim().Length > 0)
                 {
-                    leftOut.Add(sound.Value.Trim());
-                    sound.Remove();
+                    if (soundOf(sound.Value.Trim()) is { } eventName) sound.Value = eventName;
+                    else
+                    {
+                        leftOut.Add(sound.Value.Trim());
+                        sound.Remove();
+                    }
                 }
         }
         Set(copy, "Anim_Set", animSet);
@@ -404,6 +573,8 @@ public static class GuerrillaArsenal
     public static IEnumerable<string> Remove(string game, string overrides, string modFolder)
     {
         foreach (string line in GuerrillaAnimationSets.Remove(game, overrides, modFolder)) yield return line;
+        foreach (string line in GuerrillaSoundBanks.Remove(game, overrides, modFolder, GuerrillaVehicleSounds.Part)) yield return line;
+        foreach (string line in GuerrillaWalkerLimbs.Remove(Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc")), modFolder)) yield return line;
         string rigList = RigListFile(modFolder);
         if (File.Exists(rigList))
         {
@@ -415,6 +586,14 @@ public static class GuerrillaArsenal
             File.Delete(rigList);
             yield return $"Deleted {rigList}";
         }
+        foreach (string list in new[] { GuerrillaTraffic.File, GuerrillaConvoys.File, FlyerFile })
+        {
+            string file = Path.Combine(Path.GetDirectoryName(rigList)!, list);
+            if (File.Exists(file)) { File.Delete(file); yield return $"Deleted {file}"; }
+        }
+        // (footsteps.xtbl: only the vehicles write it so far, so it goes whole, with this part's list of its rows.)
+        foreach (string file in new[] { Path.Combine(Path.GetDirectoryName(rigList)!, GuerrillaVehicleFootsteps.OwnRows), Path.Combine(modFolder, GuerrillaVehicleFootsteps.Table) })
+            if (File.Exists(file)) { File.Delete(file); yield return $"Deleted {file}"; }
         string listFile = Path.Combine(overrides, AssetList);
         if (File.Exists(listFile))
         {
@@ -427,7 +606,8 @@ public static class GuerrillaArsenal
             File.Delete(listFile);
             yield return $"Deleted {listFile}";
         }
-        foreach (string name in new[] { Table, InteractionTable })
+        foreach (string name in new[] { Table, InteractionTable, SpawnGroupTable, GuerrillaTurrets.Table, GuerrillaVehicleLights.Table,
+                                        GuerrillaWalkerTrees.FileList, GuerrillaWalkerTrees.TreeFile })
         {
             string table = Path.Combine(modFolder, name);
             if (File.Exists(table)) { File.Delete(table); yield return $"Deleted {table}"; }
@@ -439,6 +619,108 @@ public static class GuerrillaArsenal
     /// in <paramref name="keep"/>, by path), and every Selection value it has no choice for;
     /// <paramref name="dropped"/> names them.
     /// </summary>
+    /// <summary>
+    /// A flyer's flight limits in Armageddon's terms, from Guerrilla's. Guerrilla's player never flew (its
+    /// flyer_steer is empty): its flyers flew for its AI, by a thrust model (flyer::flight_compute_physics:
+    /// the acceleration left once the thrust holds the weight, g·√((1 + u·UpThrust)² − 1) for urgency u,
+    /// in every direction; braking at the same; tilting and turning at its rates). Armageddon's player
+    /// controller (0x61DA50) flies by speeds and accelerations instead, which Guerrilla's entries lack (0:
+    /// its velocities would come out NaN). So: each axis's acceleration and deceleration Guerrilla's at full
+    /// thrust (u = 1, m/s²), its top speed Guerrilla's fastest air-traffic speed, 50 m/s (Armageddon's in
+    /// mph), the minimum scalars 1 (the limits as they are at any speed); the turn and tilt rates and
+    /// accelerations Guerrilla's (in degrees, the ×360 above), each axis's deceleration and mouse
+    /// acceleration as its acceleration; but Armageddon applies the angular acceleration per frame, not per
+    /// second, so those are Guerrilla's per second over 60 frames; the bank angle the tilt Guerrilla's
+    /// sideways acceleration gives (atan(BankTiltScalar · a / g)), banking at its tilt rate.
+    /// </summary>
+    const string FlyerFile = "flyers.txt";
+
+    /// <summary>The room for vehicle_interactions.xtbl's names: guerrilla_vehicles' "Vehicle interaction info strings" (the game's 8 KB).</summary>
+    const int MostInteractionNames = 0x8000;
+
+    /// <summary>
+    /// The bytes vehicle_interactions.xtbl's names take in the game's string pool, as its reader (0x65F360) stores them:
+    /// each interaction's Name, each waypoint's Name and Parent_Component, each transition's Door_N; each name once
+    /// (the pool's find-or-add, 0xC97DB0, compares without case), in its length + 1 rounded up to even, + 2 when that
+    /// is even already.
+    /// </summary>
+    static int InteractionNameBytes(XtblFile interactions)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in interactions.Entries)
+        {
+            if (entry.ValueOf("Name") is { } name) names.Add(name.Trim());
+            foreach (var waypoint in entry.Element("Waypoints")?.Elements ?? [])
+                foreach (string field in new[] { "Name", "Parent_Component" })
+                    if (waypoint.ValueOf(field) is { } text) names.Add(text.Trim());
+            foreach (var transition in entry.Element("Waypoint_transitions")?.Elements ?? [])
+                foreach (var door in transition.Elements.Where(e => System.Text.RegularExpressions.Regex.IsMatch(e.Name, @"^Door_\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)))
+                    names.Add(door.Value.Trim());
+        }
+        return names.Sum(n => { int stored = System.Text.Encoding.Latin1.GetByteCount(n) + 1; return stored + (stored % 2 == 1 ? 1 : 2); });
+    }
+
+    /// <summary>A flyer's line of flyers.txt: Guerrilla's own FlyerParams (its entry's, else the defaults'), as its loader keeps them.</summary>
+    static string FlyerModel(string name, XtblElement guerrillaEntry, XtblElement? rfgDefaults)
+    {
+        var flyer = guerrillaEntry.Element("FlyerParams");
+        var defaults = rfgDefaults?.Element("FlyerParams");
+        string Value(string field, double toRadians = 1)
+        {
+            string? text = flyer?.ValueOf(field) ?? defaults?.ValueOf(field);
+            double v = double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsed) ? parsed : 0;
+            return (v * toRadians).ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        return string.Join(" ", name, Value("FlyerMaxUpThrust"), Value("FlyerMaxTurnAngvel"), Value("FlyerMaxTurnAngaccl"),
+                           Value("FlyerMaxThrustOffsetX", Math.PI / 180), Value("FlyerMaxThrustOffsetZ", Math.PI / 180), Value("FlyerMaxTiltAngvel"),
+                           Value("FlyerMaxTiltAngaccl"), Value("FlyerSpinBankScalar"), Value("FlyerThrustTiltScalar"), Value("FlyerBankTiltScalar"),
+                           Value("FlyerDefaultLookatYScalar"));
+    }
+
+    static void FlyerLimits(XtblElement vehicle, XtblElement? rfgDefaults)
+    {
+        var flyer = vehicle.Element("FlyerParams") ?? vehicle.AddElement("FlyerParams");
+        var defaults = rfgDefaults?.Element("FlyerParams");
+        double Get(string field, double fallback) =>
+            double.TryParse(flyer.ValueOf(field) ?? defaults?.ValueOf(field), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v) ? v : fallback;
+        void Put(string field, double value, bool whole = false) =>
+            (flyer.Element(field) ?? flyer.AddElement(field)).Value = whole ? ((int)Math.Round(value)).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                                                                            : value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        // A turn or tilt rate in degrees: the entry's (converted ×360 already), else Guerrilla's default's (revolutions).
+        double Degrees(string field, double revolutions) =>
+            double.TryParse(flyer.ValueOf(field), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v) ? v
+            : 360 * (double.TryParse(defaults?.ValueOf(field), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double d) ? d : revolutions);
+        const double G = 9.8, TopSpeed = 50, Mph = 0.44704, FramesPerSecond = 60;
+        double upThrust = Get("FlyerMaxUpThrust", 0.8);
+        double acceleration = G * Math.Sqrt(Math.Pow(1 + upThrust, 2) - 1);
+        foreach (string axis in new[] { "Forward", "Lateral", "Vertical" })
+        {
+            Put($"FlyerMax{axis}Vel", TopSpeed / Mph);
+            Put($"FlyerMax{axis}Accel", acceleration);
+            Put($"FlyerMax{axis}Decel", acceleration);
+        }
+        Put("FlyerMinLinearAccelScalar", 1);
+        foreach (string axis in new[] { "Turn", "Tilt" })
+        {
+            // (degrees a second, after the ×360 of Guerrilla's revolutions; Guerrilla's defaults likewise)
+            double rate = Degrees($"FlyerMax{axis}Angvel", 0.25), perFrame = Math.Max(1, Degrees($"FlyerMax{axis}Angaccl", 0.25) / FramesPerSecond);
+            Put($"FlyerMax{axis}Angaccl", perFrame, whole: true);
+            Put($"FlyerMax{axis}Angdecl", perFrame, whole: true);
+            Put($"FlyerMax{axis}AngacclMouse", perFrame, whole: true);
+            if (axis == "Tilt") Put("FlyerMaxBankAccel", Math.Min(rate, 90), whole: true);  // Armageddon's most (its description's); the AAX's 108 is over it
+        }
+        Put("FlyerMinAngularAccelScalar", 1);
+        Put("FlyerMaxBankAngle", Math.Atan(Get("FlyerBankTiltScalar", 0.5) * acceleration / G) * 180 / Math.PI, whole: true);
+    }
+
+    /// <summary>An entry of another of Guerrilla's tables made fit for Armageddon's as the vehicles' are: pruned, its values fitted, its required fields filled.</summary>
+    internal static void FitEntry(XtblElement entry, FieldDescription description)
+    {
+        Prune(entry, description.Children, "", []);
+        FitValues(entry, description.Children, "", []);
+        FillRequired(entry, description.Children, "", [], []);
+    }
+
     static void Prune(XtblElement element, IReadOnlyList<FieldDescription> fields, string path, List<string> dropped, ISet<string>? keep = null)
     {
         foreach (var child in element.Elements.ToList())
@@ -462,7 +744,8 @@ public static class GuerrillaArsenal
                         Prune(one, item.Children, path + child.Name + "/", dropped, keep);
                     break;
                 case FieldType.Selection when field.Choices.Count > 0 && !child.HasElements &&
-                                              !field.Choices.Contains(child.Value.Trim(), StringComparer.OrdinalIgnoreCase):
+                                              !field.Choices.Contains(child.Value.Trim(), StringComparer.OrdinalIgnoreCase) &&
+                                              keep?.Contains($"{path}{child.Name}={child.Value.Trim()}") != true:
                     dropped.Add($"{path}{child.Name} {child.Value.Trim()}");
                     child.Remove();
                     break;

@@ -24,9 +24,25 @@ public static class GuerrillaZones
     {
         if (zone.Length < 24 || BitConverter.ToUInt32(zone, 0) != Signature || BitConverter.ToUInt32(zone, 4) != Version)
             throw new InvalidDataException("not a Guerrilla zone file (ZONE version 36)");
-        int count = BitConverter.ToInt32(zone, 8), handles = BitConverter.ToInt32(zone, 12);
+        int handles = BitConverter.ToInt32(zone, 12);
         uint flags = BitConverter.ToUInt32(zone, 20);
-        int at = 24 + handles * 4 + ((flags & 1) == 0 ? RelationTableSize : 0);
+        return Read(zone, 24 + handles * 4 + ((flags & 1) == 0 ? RelationTableSize : 0));
+    }
+
+    /// <summary>
+    /// The objects of one of Guerrilla's layer files (.layer_pc, in an activity's or mission's container: the
+    /// same header, but no handle list or relation table, the objects straight after it).
+    /// </summary>
+    public static List<GuerrillaZoneObject> LayerObjects(byte[] layer)
+    {
+        if (layer.Length < 24 || BitConverter.ToUInt32(layer, 0) != Signature || BitConverter.ToUInt32(layer, 4) != Version)
+            throw new InvalidDataException("not a Guerrilla layer file (ZONE version 36)");
+        return Read(layer, 24);
+    }
+
+    static List<GuerrillaZoneObject> Read(byte[] zone, int at)
+    {
+        int count = BitConverter.ToInt32(zone, 8);
         var objects = new List<GuerrillaZoneObject>();
         for (int i = 0; i < count; i++)
         {

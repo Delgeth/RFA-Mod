@@ -77,7 +77,7 @@ cbuffer Material : register(b0)  // the material's constants (vc0), laid out by 
     float4 Shine;               // c9 Specular_Alpha, Metal_Base_Shine, Environment_Map_Opacity, Decal_Map_1_Overlay
     float4 Glow;                // c10 Self_Illumination; 1: lit by the lamps' night level instead; illum_cycle (or < 0: no pulse); 1: specular from the colour map's alpha
     float4 Scroll;              // c11 Diffuse_Map_OffsetU, V; Decal_Map_1_OffsetU, V (each × the time in seconds)
-                                //     (the skin and eye, BRDF kinds 14, 15: Skin_Specular_Gloss, Skin_Translucent_Power, Skin_Translucent_Ramp_Off, Specular_Alpha2)
+                                //     (the skin, eye and skinshader, BRDF kinds 14-16: Skin_Specular_Gloss, Skin_Translucent_Power, Skin_Translucent_Ramp_Off, Specular_Alpha2)
     float4 Extra;               // c12 Decal_Map_2_OffsetU, V; 1: alpha 1 (not the colour map's); 0
     float4 BrdfDiffuse[3];      // c13-15 BRDF_Diff_1, 2, 3 (the skin and eye: Skin_Color_Hemoglobin, _Melanin, _Unscattered)
     float4 BrdfSpecular[3];     // c16-18 BRDF_Spec_1, 2, 3
@@ -279,7 +279,7 @@ float2 LookUp(float2 at) { return clamp(at, 0.002, 0.998); }
 // 3 (-e)-dull-paint-met, 4 -paint-metal, 5 -rust-paint-met, 6 -edf-base, 7 (-e)-shiny-comp-metal,
 // 8 -edf-base-panels, 9 -e-/-ed-edf-base-panels, 10 rfg-brdf and 11 rfg-brdf-env with their look-up
 // maps, 12 rfg-brdf-cloth and 13 rfg-brdf-cloth_rimlight: the people's clothes, 14 rfg-skin and 15
-// rfg-eye: their faces). The specular is the specular map's red, green and blue weighing three lobes
+// rfg-eye: their faces, 16 rfg-skinshader: their bodies' bare skin). The specular is the specular map's red, green and blue weighing three lobes
 // (but the cloth's and the eye's); under the layer and decal it is taken away (shineLeft). distance:
 // from the eye to the surface (the eye's glint fades with it).
 float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap, float3 n, float3 toEye, float nl, float nhRaw,
@@ -418,6 +418,25 @@ float3 BrdfLight(int kind, float3 colour, float colourAlpha, float3 specularMap,
         const float3 sky = lerp(AmbientBelow.rgb, AmbientAbove.rgb, eyeHl) * (1 - min(lit, shadow));
         return sky * under * colour + diffuse * SunColour.rgb * shadow + sparkle * SunColour.rgb;
     }
+    else if (kind == 16)
+    {
+        // rfg-skinshader, the people's bare skin on their bodies (arms, hands), as Re-Mars-tered's (its
+        // rfg-skinshader_c.fxo_kg): the light under the skin from the melanin's colour (× Skin_Translucent_Power)
+        // to the unscattered colour by N·L, from the hemoglobin's colour toward it by a wrapped Lambert (N·L widened
+        // by Skin_Translucent_Ramp_Off × the colour map's alpha) through a smoothstep, which scales it again; mixed
+        // over the colour as a soft light (C × (C (1 − 2K) + 2K)); the Blinn shine by the specular map ×
+        // Specular_Color × Specular_Alpha × N·L; the sky's light by the half-Lambert, less where the surface faces
+        // up into the sun. (Re-Mars-tered's shadow map has a second channel that weighs that last part, which our
+        // light hasn't: the sun's shadow stands in for it.)
+        const float translucent = Scroll.y, rampOff = Scroll.z * colourAlpha;
+        const float3 through = lerp(BrdfDiffuse[1].rgb * translucent, BrdfDiffuse[2].rgb, nlc);
+        const float s = smoothstep(0, 1, saturate((nlc + rampOff) / (1 + rampOff)));
+        const float3 K = s * lerp(BrdfDiffuse[0].rgb, through, s);
+        const float3 diffuse = K * colour * (colour * (1 - 2 * K) + 2 * K);
+        const float3 specular = specularMap * SpecularColour.rgb * pow(nhc, SpecularPower.x + 0.00001) * Shine.x * nlc;
+        const float3 sky = lerp(AmbientBelow.rgb, AmbientAbove.rgb, hl) * (1 - saturate(n.y * 0.5 + 0.5) * shadow);
+        return sky * colour + (diffuse + specular) * SunColour.rgb * shadow;
+    }
     float3 ambient = Ambient(ambientWeight, ao);
     if (kind == 10) ambient = SelfLit(ambient, (1 - colourAlpha) * Glow.x);  // self-lit where the colour map is see-through
     return ambient * colour + (sunDiffuse + sunSpecular * shineLeft) * SunColour.rgb * shadow;
@@ -443,7 +462,7 @@ float SurfaceAlpha(float4 uv01, float4 uv2, float seconds)
 #elif FAMILY == 3
     const int kind = (int)(BrdfKind.x + 0.5);
     const float a = DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
-    return kind >= 7 && kind <= 9 || kind >= 14 ? 1 : kind == 10 ? a + BrdfKind.w * (1 - a) : a;
+    return kind >= 7 && kind <= 9 || kind == 14 || kind == 15 ? 1 : kind == 10 ? a + BrdfKind.w * (1 - a) : a;
 #elif FAMILY == 2 || FAMILY == 5
     return DiffuseMap.Sample(DiffuseSampler, uv01.xy * Tiling.xy).a;
 #elif FAMILY == 8
@@ -553,7 +572,7 @@ float4 SurfacePixel(Surface s) : SV_Target
     float alpha = c0.a;
   #if FAMILY == 3
     const int kind = (int)(BrdfKind.x + 0.5);
-    if (kind >= 7 && kind <= 9 || kind >= 14) alpha = 1;
+    if (kind >= 7 && kind <= 9 || kind == 14 || kind == 15) alpha = 1;
     if (kind == 10) alpha = c0.a + BrdfKind.w * (1 - c0.a);
     if (kind == 15) n = normalize(s.normal);  // rfg-eye: no normal map
   #elif FAMILY == 4

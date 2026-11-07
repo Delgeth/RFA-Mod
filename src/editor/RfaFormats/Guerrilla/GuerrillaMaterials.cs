@@ -238,8 +238,8 @@ public static class GuerrillaMaterials
 
     const string DiffuseTiling = "Diffuse_Map_Tiling", NormalTiling = "Normal_map_Tiling";
 
-    /// <summary>rfg-skin's and rfg-eye's numbers among the BRDF shaders' curves (GuerrillaSurfaces.hlsl's BrdfLight).</summary>
-    const int SkinKind = 14, EyeKind = 15;
+    /// <summary>rfg-skin's, rfg-eye's and rfg-skinshader's numbers among the BRDF shaders' curves (GuerrillaSurfaces.hlsl's BrdfLight).</summary>
+    const int SkinKind = 14, EyeKind = 15, SkinShaderKind = 16;
 
     /// <summary>Guerrilla's shaders drawn by its rewrites: the standard, metal, BRDF and blend-std-metal families (opaque materials of the world's chunks and rocks), and its glass.</summary>
     static readonly Dictionary<uint, PortedShader> Ported = new()
@@ -280,6 +280,8 @@ public static class GuerrillaMaterials
         // Their faces (the heads): every map at UV0, untiled (their materials have no tiling).
         [H("rfg-skin")] = Brdf(0, SkinKind),
         [H("rfg-eye")] = Brdf(0, EyeKind),
+        // Their bodies' bare skin (arms, hands): every map at UV0, untiled; alpha its colour map's (cut out on some).
+        [H("rfg-skinshader")] = Brdf(0, SkinShaderKind),
         // Blended (its every material has flags 1); the colour map untiled, the specular map tiled.
         [H("rfg-glass")] = new(GuerrillaShaders.Family.Glass, 0, null, false, null, false),
         // Every map at UV0 × the colour map's tiling, unguarded (13 of its 32 materials tile by 0: one texel).
@@ -359,7 +361,7 @@ public static class GuerrillaMaterials
         var specular = port.Family is GuerrillaShaders.Family.Standard or GuerrillaShaders.Family.Glass ? Tiling("Specular_Map_Tiling", false) : diffuse;
         bool metal = port.Family == GuerrillaShaders.Family.Metal, composite = port.Family == GuerrillaShaders.Family.Composite,
              paint = port.Family == GuerrillaShaders.Family.VehiclePaint, clearcoat = port.Family == GuerrillaShaders.Family.Clearcoat;
-        bool skin = port.Family == GuerrillaShaders.Family.Brdf && port.BrdfKind is SkinKind or EyeKind;
+        bool skin = port.Family == GuerrillaShaders.Family.Brdf && port.BrdfKind is SkinKind or EyeKind or SkinShaderKind;
         Vector4 Or0(string name) => constants.TryGetValue(H(name), out var v) ? v : Vector4.Zero;
         // Metal's decal (at UV2) is its Decal_Map_1; the standard shaders' decals are Decal_Map_1 (UV1) and Decal_Map_2 (UV2).
         float decal1 = Has("Decal_Map_1") ? X("Decal_Map_1_Opacity", 1) : 0, decal2 = Has("Decal_Map_2") ? X("Decal_Map_2_Opacity", 1) : 0;

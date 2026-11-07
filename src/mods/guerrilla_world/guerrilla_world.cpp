@@ -317,6 +317,20 @@ BuiltTable g_builtTables[] = {
     {"level_objects.xtbl", "Level objects", {}},
     {"vehicles.xtbl", "Vehicles", {}},
     {"vehicle_interactions.xtbl", "Vehicle interactions", {}},
+    // Guerrilla's vehicle spawn groups ("rfg_<its name>", the vehicles built), which the world's parked
+    // vehicles' spots name; Armageddon's own rows kept.
+    {"spawn_group_vehicle.xtbl", "Vehicle spawn groups", {}},
+    // Guerrilla's vehicles' turrets (the turrets their mounts name; Armageddon's with Guerrilla's added).
+    {"turrets.xtbl", "Turrets", {}},
+    // Guerrilla's vehicles' light types (each a row: its kind, Guerrilla's glow effects, its breaking), which
+    // the vehicles' Lights maps name; Armageddon's own rows kept. Read once while the game starts.
+    {"vehicle_lights.xtbl", "Vehicle lights", {}},
+    // Guerrilla's walkers' blend trees (one file of Armageddon's kind, GuerrillaBuilder.exe's), and Armageddon's
+    // list of tree files with it; read while the game starts (guerrilla_vehicles makes room for the trees).
+    // Guerrilla's walkers' footsteps (their own effects; Armageddon's rows kept).
+    {"footsteps.xtbl", "Footsteps", {}},
+    {"blendTree_filenames.xtbl", "Blend tree files", {}},
+    {"rfg_walkers.blend_treex", "Guerrilla's walkers' blend trees", {}},
     {"anim_set_filenames.xtbl", "Animation sets", {}},
     {"anim_files.xtbl", "Animation files", {}},
     {"anim_states.xtbl", "Animation states", {}},
@@ -334,6 +348,8 @@ BuiltTable g_builtTables[] = {
     {"weapon_firing_patterns.xtbl", "NPC firing patterns", {}},
     {"aim_drift.xtbl", "NPC aim drift", {}},
     {"camera_shake.xtbl", "Camera shakes", {}},  // Guerrilla's weapons' where they differ from Armageddon's of the name
+    {"projectiles.xtbl", "Projectiles", {}},     // Guerrilla's thrown and launched weapons'; Armageddon holds 100, its own 91
+    {"melee.xtbl", "Melee moves", {}},           // Guerrilla's (the hammer's swings, ...), each rfg_; Armageddon holds 32, its own 22
     // Guerrilla's people (GuerrillaBuilder.exe's people; Armageddon's characters with Guerrilla's added). Their
     // animation sets go into the four animation lists above, which it shares with the vehicles.
     {"character.xtbl", "Characters", {}},
@@ -350,6 +366,10 @@ BuiltTable g_builtTables[] = {
     // Guerrilla's player's spine bend and arms (Armageddon's tables name Darius's bones; Mason's entries added).
     {"spinebend.xtbl", "Spine bends", {}},
     {"ik_limbs.xtbl", "Limbs", {}},
+    // Guerrilla's sounds' banks (GuerrillaBuilder.exe; banks of Armageddon's kind, "rfg_<Guerrilla's
+    // bank>", new files in overrides\): Armageddon's patch rows with ours. The game registers each bank
+    // listed (its media opened by name, the bank loaded at boot), and posts their events by name.
+    {"audio_banks_patch.xtbl", "Sound banks", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";

@@ -16,12 +16,14 @@ namespace RfaFormats.Guerrilla;
 ///   +0x24 the tags: a count, 52 bytes a tag    +0x24 a word (1 in all of Armageddon's)
 ///         (name hash, rotation, position)      +0x28 the tags, the same
 ///   +0x28 0                                    +0x2C 0
-///   +0x2C embedded Havok, or −1                +0x30 Armageddon's collision, or −1
+///   +0x2C its own collision, or −1             +0x30 its own collision, or −1
 ///   mesh block (16)                            version 4 → 9 (<see cref="MeshBlockConversion"/>)
 ///   material map (16)                          the same (run-time words: one, the count, one a material)
 ///   material offsets (16), materials           each rebuilt for one of Armageddon's shaders
 ///                                              (<see cref="GuerrillaMaterials"/>)
 ///   texture names (16)                         the names the materials use (renamed if asked)
+///   collision (16, last): "MCKH" version 2,    "MCKH" version 5, Havok 2010 (as 18 of Armageddon's
+///   Havok 5.5 (a riot shield, turret parts)    items: turret bases, egg pods; <see cref="ChunkCollision"/>)
 /// Checked against both games' guns (Guerrilla's assault_rifle, Armageddon's ppr_lod and nano_rifle):
 /// the tags carry the same names in both (weapon_handle, secondary_handle, muzzle_flash), which is
 /// where the game puts the gun in the hand and the flash at the muzzle.
@@ -40,8 +42,29 @@ public static class GuerrillaStaticMeshes
     {
         if (file.Length < 0x40 || BitConverter.ToUInt32(file, 0) != Magic || BitConverter.ToInt32(file, 4) != GuerrillaVersion)
             return "not a Guerrilla static mesh (version 4)";
-        if (BitConverter.ToInt32(file, 0x2C) != -1) return "it has its own collision (Guerrilla's embedded Havok; not converted yet)";
+        int collision = BitConverter.ToInt32(file, 0x2C);
+        if (collision != -1)
+            try
+            {
+                if (Collision(file, collision).Count == 0) return "its own collision has no shapes";
+            }
+            catch (Exception e) when (e is InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException)
+            {
+                return $"its own collision (Guerrilla's embedded Havok) can't be converted yet: {e.Message}";
+            }
         return null;
+    }
+
+    /// <summary>
+    /// A mesh's own collision: an "MCKH" section (as a destructible object's: "MCKH", a version, its
+    /// length, the number of shapes, then a Havok packfile; Guerrilla's version 2 with Havok 5.5,
+    /// Armageddon's 5 with Havok 2010), read by <see cref="ChunkCollision"/>.
+    /// </summary>
+    static List<ChunkShape> Collision(byte[] file, int at)
+    {
+        if (at < 0 || at + 16 > file.Length || System.Text.Encoding.ASCII.GetString(file, at, 4) != "MCKH")
+            throw new InvalidDataException("no collision section (MCKH) where the header says");
+        return ChunkCollision.ReadPackfile(file, at + 16);
     }
 
     /// <summary>
@@ -49,7 +72,20 @@ public static class GuerrillaStaticMeshes
     /// names them, without ".tga"; built-ins among them). With <paramref name="rename"/>, the file names
     /// each texture by what it gives for Guerrilla's name instead.
     /// </summary>
-    public static (byte[] CFile, IReadOnlyList<string> Textures) Convert(byte[] g, Func<string, string>? rename = null)
+    public static (byte[] CFile, IReadOnlyList<string> Textures) Convert(byte[] g, Func<string, string>? rename = null) => Convert(g, rename, false);
+
+    /// <summary>
+    /// The name hash of the tag Armageddon puts a weapon in the hand by: "weapon_handle" (a tag's name is
+    /// hashed as CRC-32 without its final inversion; secondary_handle 0xD9F61534, muzzle_flash 0x77900BC7).
+    /// </summary>
+    public const uint WeaponHandle = 0xA301497C;
+
+    /// <summary>
+    /// As <see cref="Convert(byte[], Func{string, string}?)"/>; with <paramref name="weaponHandle"/>, a model
+    /// with no weapon_handle tag gets one where its first tag is (Armageddon won't put a weapon in a hand
+    /// without one, 0x84FEB6; Guerrilla's grenade has only its one tag of its own).
+    /// </summary>
+    public static (byte[] CFile, IReadOnlyList<string> Textures) Convert(byte[] g, Func<string, string>? rename, bool weaponHandle)
     {
         if (NotYet(g) is { } why) throw new NotSupportedException(why);
         int I(int at) => BitConverter.ToInt32(g, at);
@@ -77,7 +113,28 @@ public static class GuerrillaStaticMeshes
         int newWord2 = o.Count;
         o.Add(BitConverter.GetBytes(1));
         int newTags = o.Count;
-        o.Add(g.AsSpan(tags, 4 + tagCount * TagSize));
+        bool hasHandle = Enumerable.Range(0, tagCount).Any(k => BitConverter.ToUInt32(g, tags + 4 + k * TagSize) == WeaponHandle);
+        if (weaponHandle && !hasHandle)
+        {
+            o.Add(BitConverter.GetBytes(tagCount + 1));
+            o.Add(g.AsSpan(tags + 4, tagCount * TagSize));
+            byte[] handle = new byte[TagSize];
+            if (tagCount > 0) g.AsSpan(tags + 4, TagSize).CopyTo(handle);  // its first tag's turn and place
+            else foreach (int at in new[] { 4, 20, 36 }) BitConverter.TryWriteBytes(handle.AsSpan(at), 1f);  // else none, at its middle
+            BitConverter.TryWriteBytes(handle.AsSpan(0), WeaponHandle);
+            o.Add(handle);
+        }
+        else o.Add(g.AsSpan(tags, 4 + tagCount * TagSize));
+
+        // Its own collision, last (as Armageddon's items that have one keep it): Guerrilla's Havok 5.5
+        // shapes written as Armageddon's section (version 5, Havok 2010).
+        int collision = I(0x2C), newCollision = -1;
+        if (collision != -1)
+        {
+            o.Align(16);
+            newCollision = o.Count;
+            o.Add(ChunkCollision.Section(Collision(g, collision)));
+        }
 
         o.Put(0x08, newMesh);
         o.Put(0x0C, newMaterialMap);
@@ -87,7 +144,7 @@ public static class GuerrillaStaticMeshes
         o.Put(0x24, newWord2);
         o.Put(0x28, newTags);
         o.Put(0x2C, 0);
-        o.Put(0x30, -1);
+        o.Put(0x30, newCollision);
         return (o.ToArray(), textures);
     }
 

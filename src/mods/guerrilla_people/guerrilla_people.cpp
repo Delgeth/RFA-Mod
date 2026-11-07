@@ -46,6 +46,16 @@
 // does this whatever [GuerrillaPeople] Enabled= says: the animation lists hold the people's animations
 // whether or not the rest of the mod is on.
 //
+// Room for Guerrilla's patrols: the game keeps every patrol route the loaded zones place (object_patrol)
+// in an object pool its start-up makes (0xF2E480 → 0x7F9980: the pool set up, 0x71C5D0, a memory pool on
+// the buffer inside the pool object, 0x428240, and the pool's fill, 0x7FC8D0, carving each slot's object,
+// handle and byte out of it), of 24; Guerrilla's holds 72 (object_pool<object_patrol,72,1>), and its zones
+// place up to 29 in one 3 × 3 block. Nothing else is sized by that count: the pool is reached only through
+// its own object (0x20F3B10: how many it holds, a word at +0xA; its free list at +0xC; a byte a slot at
+// +0x18, 0xFF while free). So the mod replaces the constructor with one doing the same on a buffer of its
+// own, for Guerrilla's 72, after checking the constructor's buffer size and count are the game's (nothing
+// changes if not). Always, whatever [GuerrillaPeople] Enabled= says: the world's zones place them.
+//
 // Guerrilla's sides: both games keep the teams by the same numbers (0 Guerrilla's Red Faction, 1 its
 // EDF, Armageddon's Legion, 2 civilians, 3 Marauders; Armageddon adds 4, its cultists) and how each
 // team takes each other in a 5 × 5 table (0x21DC8D0: 0 hostile, 1 unfriendly, 2 neutral, 3 friendly,
@@ -121,6 +131,7 @@ std::vector<std::string> g_skeletons;  // mods\guerrilla_people\rigs.txt
 bool g_skeletonsLoaded = false;
 void LogRigPool();  // (below, with the skeletons' pool)
 void MasonsTableRead();  // (below, with Mason's Nano Forge light)
+void LogCharacterNames();  // (below, with the characters' strings)
 
 void __cdecl ReadCharacters(int which, void* table, int dlc) {
     if (!g_skeletonsLoaded) {
@@ -133,6 +144,7 @@ void __cdecl ReadCharacters(int which, void* table, int dlc) {
         LogRigPool();
     }
     g_readCharacters(which, table, dlc);
+    LogCharacterNames();
     MasonsTableRead();
 }
 
@@ -155,13 +167,36 @@ constexpr DWORD kGameRigPoolBytes = 0x90000;  // its own: 576 KB
 constexpr DWORD kRigPoolBytes = 0x200000;     // ours: 2 MB
 alignas(16) BYTE g_rigPool[kRigPoolBytes];
 
+// The characters' strings: the character table's reader (0x8860D0) keeps every character's names (its
+// name, nickname, display name, outfit image, model, skeleton, morph, light tag and each prop's names, each
+// once) in a string pool, "Human info strings" (0x21DC118), which it sets up on 0x1838 bytes (6,200) it takes
+// the first time (kept at 0x21B74A4) through the same memory pools' init. Armageddon's and Guerrilla's 152
+// characters' come to about 10.6 KB; past its end the pool says "Length of string pool exceeded" and hands
+// out nothing, and the reader's next compare with it stops the game (C0000417). So when it is set up the mod
+// gives it 64 KB of its own (the pool is empty then; the game's 6,200 bytes stay taken, unused; nothing else
+// names them, and nothing frees them).
+BYTE* const kHumanInfoStrings = reinterpret_cast<BYTE*>(0x21DC118);
+constexpr DWORD kGameHumanInfoBytes = 0x1838;   // its own: 6,200 bytes
+constexpr DWORD kHumanInfoBytes = 0x10000;      // ours: 64 KB
+alignas(16) BYTE g_humanInfoStrings[kHumanInfoBytes];
+
 void __fastcall PoolInit(void* pool, void* unused, void* memory, DWORD size, const char* name, int flag, int alignment) {
     if (pool == kRigPool && size == kGameRigPoolBytes) {
         g_poolInit(pool, unused, g_rigPool, kRigPoolBytes, name, flag, alignment);
         rfa::Log("Skeletons: their pool holds %lu KB (its own %lu KB)", kRigPoolBytes / 1024, kGameRigPoolBytes / 1024);
         return;
     }
+    if (pool == kHumanInfoStrings && size == kGameHumanInfoBytes) {
+        g_poolInit(pool, unused, g_humanInfoStrings, kHumanInfoBytes, name, flag, alignment);
+        rfa::Log("Characters' names: their pool holds %lu KB (its own %lu bytes)", kHumanInfoBytes / 1024, kGameHumanInfoBytes);
+        return;
+    }
     g_poolInit(pool, unused, memory, size, name, flag, alignment);
+}
+
+void LogCharacterNames() {
+    rfa::Log("Characters' names: %lu of their pool's %lu bytes used", *reinterpret_cast<const DWORD*>(kHumanInfoStrings + 0x4C),
+             *reinterpret_cast<const DWORD*>(kHumanInfoStrings + 0x44));
 }
 
 void LogRigPool() {
@@ -180,6 +215,45 @@ constexpr DWORD kPoolMemory = 0x40, kPoolSize = 0x44, kPoolUsed = 0x4C;
 constexpr DWORD kGameAnimStringBytes = 0x20000;  // its own: 128 KB
 constexpr DWORD kAnimStringBytes = 0x80000;      // ours: 512 KB
 alignas(16) char g_animStrings[kAnimStringBytes];
+
+// ---- Room for Guerrilla's patrols (see the top)
+
+using PoolSetUpFn = void(__fastcall*)(void* pool, void* unused);
+using MempoolMakeFn = void*(__fastcall*)(void* mempool, void* unused, void* buffer, DWORD size, const char* name, int one, int zero);
+using MempoolEndFn = void(__fastcall*)(void* mempool, void* unused);
+using PoolFillFn = void(__fastcall*)(void* pool, void* unused, void* mempool, int count);
+auto const PoolSetUp = reinterpret_cast<PoolSetUpFn>(0x71C5D0);
+auto const MempoolMake = reinterpret_cast<MempoolMakeFn>(0x428240);
+auto const MempoolEnd = reinterpret_cast<MempoolEndFn>(0x427F40);
+auto const FillPatrolPool = reinterpret_cast<PoolFillFn>(0x7FC8D0);
+constexpr DWORD kPoolName = 0xF7101C;  // "object pool", the name the game's constructors give
+
+// The constructor, and the values in it that say it is as expected: it pushes the buffer's size (4
+// bytes: 24 × (the patrol's 0xA8 + 5) + 5) and the count (a one-byte push).
+constexpr DWORD kPatrolPoolMake = 0x7F9980, kPatrolBufferSize = 0x7F999B, kPatrolCount = 0x7F99AF;
+constexpr DWORD kPatrolSize = 0xA8, kGamePatrolBuffer = 0x103D;
+constexpr int kGamePatrols = 24, kPatrols = 72;  // Guerrilla's 72
+
+// A slot's bytes: its object, its handle (4) and its byte; then room for the memory pool's alignment.
+constexpr DWORD PoolBytes(int count, DWORD size) { return count * (size + 5) + 64; }
+alignas(16) BYTE g_patrolBuffer[PoolBytes(kPatrols, kPatrolSize)];
+
+// What the game's constructor does, on the mod's buffer and with Guerrilla's count.
+void* __fastcall MakePatrolPool(void* pool, void*) {
+    PoolSetUp(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's is 0x58 bytes on its stack
+    MempoolMake(mempool, nullptr, g_patrolBuffer, sizeof(g_patrolBuffer), reinterpret_cast<const char*>(kPoolName), 1, 0);
+    FillPatrolPool(pool, nullptr, mempool, kPatrols);
+    MempoolEnd(mempool, nullptr);
+    return pool;
+}
+
+void MakeRoomForPatrols() {
+    if (rfa::CodeValue(kPatrolBufferSize) == kGamePatrolBuffer && *reinterpret_cast<const BYTE*>(kPatrolCount) == kGamePatrols &&
+        rfa::ReplaceFunction(kPatrolPoolMake, reinterpret_cast<void*>(&MakePatrolPool)))
+        rfa::Log("Patrols: the game holds %d at once (its own %d), as Guerrilla", kPatrols, kGamePatrols);
+    else rfa::Log("Patrols: the pool's constructor isn't as expected; the game keeps its %d (the world places more than fit in some places)", kGamePatrols);
+}
 
 // The mods the people's animations need room from (they move the game's tables at start-up): the
 // animation library and entries (guerrilla_vehicles: 8,192 for 4,500 and 4,224) and the map of every
@@ -614,6 +688,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_poolInit) rfa::Log("Skeletons: could not hook the memory pools' set-up; their pool keeps its 576 KB (too few for Guerrilla's people and vehicles)");
     g_animStringsInit = reinterpret_cast<AnimStringsInitFn>(rfa::HookFunction(kAnimStringsInit, kAnimStringsInitPrologue, reinterpret_cast<void*>(&AnimStringsInit)));
     if (!g_animStringsInit) rfa::Log("Animation names: could not hook the pool's start-up; it keeps its 128 KB (too few for Guerrilla's people and vehicles)");
+    MakeRoomForPatrols();
     if (rfa::IniInt(L"GuerrillaPeople", L"Enabled", 1) == 0) {
         rfa::Log("Off ([GuerrillaPeople] Enabled=0)");
         return;

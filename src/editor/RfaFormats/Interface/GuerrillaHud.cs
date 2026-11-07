@@ -42,8 +42,8 @@ public static partial class GuerrillaHud
     public static readonly IReadOnlyList<HudDocument> Documents =
     [
         new("rfg_ui_hud_health", ["ui_hud_blood_gradient", "ui_hud_radiation"]),
-        new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true),
-        new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true),
+        new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Reticles),
+        new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Icons),
         new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player"]),
         new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap]),
     ];
@@ -103,6 +103,9 @@ public static partial class GuerrillaHud
 
         string guerrillaSheetsText = ReadText(guerrillaMisc, "bitmap_sheets.xtbl");
         Dictionary<string, string> sheetOf = SheetPictures(guerrillaSheetsText);  // picture -> sheet
+        // Guerrilla's weapons' own pictures (Guerrilla.GuerrillaWeapons.HudPictures): their icons come with the
+        // weapon select, their reticles with the reticles.
+        var weaponPictures = Guerrilla.GuerrillaWeapons.HudPictures(guerrillaMisc);
 
         // Guerrilla's world: its map picture, and each zone's own (see ZoneDocument).
         Packfile guerrillaWorld = Packfile.Open(Path.Combine(guerrillaCache, "terr01_l0.vpp_pc"));
@@ -182,7 +185,13 @@ public static partial class GuerrillaHud
                     document.Point(property.AsReference, Prefix + SamePicture.GetValueOrDefault(picture, picture));
                     renamed.Add(picture);
                 }
-            foreach (string picture in hud.ScriptPictures)
+            IEnumerable<string> scriptPictures = hud.WeaponPictures switch
+            {
+                HudWeaponPictures.Icons => hud.ScriptPictures.Concat(weaponPictures.Select(w => w.Icon)),
+                HudWeaponPictures.Reticles => hud.ScriptPictures.Concat(weaponPictures.SelectMany(w => new[] { w.Reticle, w.FineAimReticle }).OfType<string>()),
+                _ => hud.ScriptPictures,
+            };
+            foreach (string picture in scriptPictures.Distinct(StringComparer.OrdinalIgnoreCase))
                 if (TextureFor(picture) is { } texture && !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
                 else if (TextureFor(picture) == null) report.Add($"{name}: its script's picture {picture} isn't in Guerrilla's textures");
             // Guerrilla's own script, when it runs here too: the pictures it names come along.
@@ -231,6 +240,7 @@ public static partial class GuerrillaHud
             byte[] scriptBytes = guerrillaScript != null
                 ? Encoding.Latin1.GetBytes(GuerrillaScriptFor(name, guerrillaScript,
                                                               File.ReadAllText(Path.Combine(scriptsFolder, ShimsScript), Encoding.Latin1),
+                                                              (hud.WeaponPictures == HudWeaponPictures.Reticles ? WeaponReticlesScript(weaponPictures) : "") +
                                                               File.ReadAllText(script, Encoding.Latin1), sheetOf.Keys))
                 : File.ReadAllBytes(script);
             byte[] main = Packfile.CreateContainer(documentTemplate, [(name + ".vint_doc", documentBytes), (name + ".lua", scriptBytes)]);
@@ -423,6 +433,25 @@ public static partial class GuerrillaHud
                script.TrimEnd() + newline + newline +
                $"-- ---- Ours for {document} (guerrilla_hud)" + newline +
                ours;
+    }
+
+    /// <summary>
+    /// For the reticles' script: Guerrilla's weapons' reticles by the picture each weapon names as its icon (the
+    /// weapons build names Guerrilla's, "rfg_" + it, and the game gives the HUD the held weapon's), a table
+    /// Rfg_weapon_reticles of { reticle, reticle while aiming finely (or nil) }. The first weapon of a picture wins.
+    /// </summary>
+    static string WeaponReticlesScript(IReadOnlyList<(string Weapon, string Icon, string? Reticle, string? FineAimReticle)> weapons)
+    {
+        const string newline = "\r\n";
+        var text = new StringBuilder();
+        text.Append("-- Guerrilla's weapons' reticles, by the picture each weapon shows: from your copy's weapons.xtbl (GuerrillaBuilder.exe)." + newline);
+        text.Append("Rfg_weapon_reticles = {" + newline);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (weapon, icon, reticle, fine) in weapons)
+            if (reticle != null && seen.Add(icon))
+                text.Append($"\t[\"{Prefix}{icon}\"] = {{ \"{Prefix}{reticle}\", {(fine != null ? $"\"{Prefix}{fine}\"" : "nil")} }},\t-- {weapon}" + newline);
+        text.Append("}" + newline + newline);
+        return text.ToString();
     }
 
     /// <summary>The script of a document of zone pictures: nothing to do, its init and cleanup only.</summary>
@@ -687,4 +716,9 @@ public static partial class GuerrillaHud
 /// Its script is Guerrilla's own, from the player's copy, between our shims and our script for it
 /// (see <see cref="GuerrillaHud.GuerrillaScriptFor"/>); otherwise it is our script alone.
 /// </param>
-public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures, bool GuerrillaScript = false);
+/// <param name="WeaponPictures">Guerrilla's weapons' pictures it shows too: their icons (the weapon select) or their reticles.</param>
+public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures, bool GuerrillaScript = false,
+                                 HudWeaponPictures WeaponPictures = HudWeaponPictures.None);
+
+/// <summary>Which of Guerrilla's weapons' pictures a HUD document brings along (see <see cref="GuerrillaHud.Build"/>).</summary>
+public enum HudWeaponPictures { None, Icons, Reticles }

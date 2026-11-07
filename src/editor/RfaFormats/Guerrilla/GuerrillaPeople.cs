@@ -55,17 +55,40 @@ namespace RfaFormats.Guerrilla;
 /// </summary>
 public static class GuerrillaPeople
 {
+    /// <summary>Guerrilla's civilians (spawn_group_human.xtbl's Default Civilian, the same as its Default Guerilla), in its order.</summary>
+    public static readonly string[] Civilians =
+    [
+        "Bev", "Torvald", "Olga", "Dustin", "John", "Pierce", "Kat", "Celia", "Marie", "Jake", "Blair", "Selma",
+        "Blair_Dust", "Chuck_Dust", "Heidi_Dust", "Isaiah_Dust", "Jackson_Dust", "Jake_Dust", "Jamaya_Dust", "Krystal_Dust", "Rachel_Dust", "Selma_Dust",
+        "Isaiah", "Jackson", "Celia_Parker", "Chuck_Parker", "Dustin_Parker", "Heidi_Parker", "John_Parker", "Kat_Parker", "Kayla_Parker",
+        "Numah_Dust", "Pierce_Parker", "Rachel_Parker", "Chuck", "Jamaya", "Kayla", "Krystal", "Lawrence", "Numah",
+        "Blair_Oasis", "Celia_Oasis", "Dustin_Oasis", "Heidi_Oasis", "Ian_Oasis", "Isaiah_Oasis", "Jackson_Oasis", "Jake_Oasis", "Jean_Oasis",
+        "John_Oasis", "Kat_Oasis", "Mila_Oasis", "Pierce_Oasis", "Selma_Oasis", "Heidi", "Ian", "Jean", "Mila", "Rachel",
+        "Blair_Eos", "Celia_Eos", "Chuck_Eos", "Isaiah_Eos", "Jake_Eos", "Jamaya_Eos", "John_Eos", "Kayla_Eos", "Kat_Eos", "Krystal_Eos",
+        "Numah_Eos", "Pierce_Eos", "Selma_Eos",
+    ];
+
     /// <summary>
-    /// The characters built when none are named: Guerrilla's EDF soldiers whose bodies are whole (no
-    /// head or props of their own: those come with the heads' and props' ports, as Braun's and May's
-    /// heads, the Marauders' masks and the riot shield).
+    /// The characters built when none are named: Guerrilla's EDF (its soldiers, and the faces, helmets and
+    /// masks of Braun and May) and its player. (Next: the Marauders, the civilians and guerrillas.)
     /// </summary>
     public static readonly string[] DefaultCharacters =
     [
         "EDF_Trooper", "EDF_Trooper_Tough", "EDF_Merc", "EDF_Lieutenant", "EDF_Lieutenant_Sniper", "EDF_Lieutenant_Enforcer",
         "EDF_Elite", "EDF_Elite_Heavy", "EDF_Elite_Heavy_Tan",
+        // The rest of the EDF Guerrilla puts in its world (its Default EDF and EDF_Pilot groups, its squad
+        // progression): Braun and May with their faces baked and their helmets and masks; the pilot (May's model);
+        // the riot-shield elite (EDF_Elite's container, Guerrilla's own sharing: after it).
+        "EDF_Grunt_Braun", "EDF_Officer_May", "EDF_Lieutenant_Pilot", "EDF_Elite_Riot_Shield",
+        // The Marauders (its Default Marauder group, its Marauder progression's Eddie) and its SciTech Marauder.
+        "Eddie", "Slade", "Muir", "Camie",
+        // Its civilians, who are its guerrillas' looks too (its Default Civilian group, in its order; each district's
+        // group a part of them), and its Driver group's Kyle.
+        .. Civilians,
+        "Kyle",
         PlayerCharacter,
     ];
+
 
     /// <summary>
     /// Guerrilla's player, Alex Mason (its character.xtbl's rfg_PC), made the player of our worlds: his own
@@ -205,6 +228,15 @@ public static class GuerrillaPeople
         var propsOf = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);  // a container's owner → the props made into it
         var headsOf = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);    // and the heads (their items)
         var guerrillaItems = new Lazy<Packfile>(() => Packfile.Open(Path.Combine(guerrillaCache, "items.vpp_pc")));
+        // The props' and heads' textures: misc's (always_loaded: the eyes, eyelashes), and items.vpp_pc's own
+        // (items_containers: helmets, masks, backpacks), after the character's container's.
+        var propPegs = new Lazy<List<PegFile>>(() =>
+        [
+            .. guerrillaPegs.Value,
+            .. guerrillaItems.Value.Entries.Where(e => e.Name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase))
+                .Select(e => guerrillaItems.Value.Find(PegFile.DataFileName(e.Name)!) is { } data ? PegFile.Read(guerrillaItems.Value.Read(e), guerrillaItems.Value.Read(data)) : null)
+                .OfType<PegFile>(),
+        ]);
         var ownerOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);  // a character made → whose container it has
         var rigs = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         var made = new List<string>();
@@ -292,10 +324,10 @@ public static class GuerrillaPeople
                     }
                     // Its props: Guerrilla's character-mesh props whose files are in its container (Mason's coat, ...).
                     var propLog = new List<string>();
-                    propsOf[name] = PortProps(entry, pack, pegs, guerrillaPegs, guerrillaTables, gameTables, rfgItems, gameItemNames, itemDescription,
-                                              files, rigs, propItems, propLog);
+                    propsOf[name] = PortProps(entry, pack, pegs, propPegs, guerrillaTables, gameTables, guerrillaItems, rfgItems, gameItemNames,
+                                              itemDescription, files, rigs, propItems, propLog);
                     // Its heads, as props too (Mason's face).
-                    headsOf[name] = PortHeads(entry, pack, pegs, guerrillaPegs, guerrillaTables, gameTables, guerrillaItems, rfgItems, gameItemNames,
+                    headsOf[name] = PortHeads(entry, pack, pegs, propPegs, guerrillaTables, gameTables, guerrillaItems, rfgItems, gameItemNames,
                                               itemDescription, files, rigs, propItems, propLog);
                     foreach (string line in propLog) yield return $"{name}: {line}";
                     byte[] container = Packfile.CreateContainer(files);
@@ -353,15 +385,34 @@ public static class GuerrillaPeople
         // Each one's container: its own, or the one it shares (Shared_Container), for the spawn resource.
         var containerNameOf = ourCharacters.Entries.Where(e => ourPeople.Contains(XtblFile.EntryName(e)))
             .ToDictionary(XtblFile.EntryName, e => e.ValueOf("Shared_Container")?.Trim() is { Length: > 0 } shared ? shared : XtblFile.EntryName(e), StringComparer.OrdinalIgnoreCase);
-        foreach (string line in GuerrillaSquads.Build(guerrillaTables, gameTables, worldFolder, ourPeople, containerNameOf, playerMade ? PlayerCharacter : null)) yield return line;
-        // The player's spine bend and arms (Armageddon's tables name Darius's bones).
-        foreach (string table in new[] { SpinebendTable, LimbTable }) if (File.Exists(Path.Combine(worldFolder, table))) File.Delete(Path.Combine(worldFolder, table));
-        if (playerMade)
+        foreach (string line in GuerrillaSquads.Build(guerrillaTables, gameTables, worldFolder, ourPeople, containerNameOf,
+                                                                     c => entries.TryGetValue(c, out var e) ? e.ValueOf("Team")?.Trim() : null, playerMade ? PlayerCharacter : null)) yield return line;
+        // The vehicles' crews (GuerrillaDistricts.CrewLines): who can crew a vehicle where, for the vehicles' code.
         {
+            string? TeamOf(string c) => entries.TryGetValue(c, out var e) ? e.ValueOf("Team")?.Trim() : null;
+            var crewResources = GuerrillaDistricts.Resources(GuerrillaDistricts.Groups(guerrillaTables),
+                                                             GuerrillaDistricts.DistrictGroups(GuerrillaDistricts.AmbientGroups(guerrillaTables).Values),
+                                                             ourPeople, containerNameOf, TeamOf);
+            var crewLines = GuerrillaDistricts.CrewLines(crewResources, TeamOf);
+            Directory.CreateDirectory(peopleFolder);
+            File.WriteAllLines(Path.Combine(peopleFolder, GuerrillaDistricts.CrewList), crewLines);
+            yield return $"Crews: {crewLines.Count - 1} lines in {GuerrillaDistricts.CrewList} (each resource's people by team, for the vehicles' crews)";
+        }
+        // The player's spine bend and arms (Armageddon's tables name Darius's bones), added to what is written there
+        // already (the vehicles build adds its walkers' legs to the limb table), ours from an earlier run replaced.
+        {
+            var spinebend = SharedTableWithoutOurs(worldFolder, gameTables, SpinebendTable);
+            var limbs = SharedTableWithoutOurs(worldFolder, gameTables, LimbTable);
+            if (playerMade)
+            {
+                spinebend = PlayerSpinebend(spinebend);
+                limbs = PlayerLimbs(limbs);
+            }
             Directory.CreateDirectory(worldFolder);
-            File.WriteAllBytes(Path.Combine(worldFolder, SpinebendTable), PlayerSpinebend(ReadTable(gameTables, SpinebendTable)).ToBytes());
-            File.WriteAllBytes(Path.Combine(worldFolder, LimbTable), PlayerLimbs(ReadTable(gameTables, LimbTable)).ToBytes());
-            yield return $"Player: {PlayerCharacter} (Mason), the Guerrilla world's player; his spine bend ({PlayerSpinebendName}) in {SpinebendTable}, his arms in {LimbTable}";
+            foreach (var (table, written) in new[] { (SpinebendTable, spinebend), (LimbTable, limbs) })
+                if (playerMade || File.Exists(Path.Combine(worldFolder, table))) File.WriteAllBytes(Path.Combine(worldFolder, table), written.ToBytes());
+            if (playerMade)
+                yield return $"Player: {PlayerCharacter} (Mason), the Guerrilla world's player; his spine bend ({PlayerSpinebendName}) in {SpinebendTable}, his arms in {LimbTable}";
         }
         // The props' items, added to the items table already written (the weapons' build's, or Armageddon's
         // own), ours from an earlier run taken out first (mods\guerrilla_people\prop_items.txt).
@@ -455,8 +506,18 @@ public static class GuerrillaPeople
             yield return $"{ItemTable}: {removed} of our props' items taken out";
         }
         foreach (string path in new[] { Path.Combine(overrides, AssetList), Path.Combine(worldFolder, CharacterTable), Path.Combine(worldFolder, GuerrillaRagdoll.FileName),
-                                        Path.Combine(worldFolder, SpinebendTable), Path.Combine(worldFolder, LimbTable), Path.Combine(peopleFolder, OwnEntries) })
+                                        Path.Combine(peopleFolder, OwnEntries), Path.Combine(peopleFolder, GuerrillaDistricts.CrewList) })
             if (File.Exists(path)) { File.Delete(path); yield return $"Deleted {path}"; }
+        // The spine bend and limb tables: our rows out; the file goes only if no other build's rows are left in it.
+        foreach (string table in new[] { SpinebendTable, LimbTable })
+        {
+            string path = Path.Combine(worldFolder, table);
+            if (!File.Exists(path)) continue;
+            var left = SharedTableWithoutOurs(worldFolder, gameTables, table);
+            var armageddons = XtblFile.FromBytes(ArmageddonsTable(gameTables, table)).Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (left.Entries.All(e => armageddons.Contains(XtblFile.EntryName(e)))) { File.Delete(path); yield return $"Deleted {path}"; }
+            else { File.WriteAllBytes(path, left.ToBytes()); yield return $"{table}: Mason's rows taken out (another build's are kept)"; }
+        }
         foreach (string line in GuerrillaSquads.Remove(worldFolder)) yield return line;
     }
 
@@ -478,14 +539,31 @@ public static class GuerrillaPeople
         if (copy.Element("Props") is { } propList)
         {
             var unmade = new List<string>();
+            void Keep(XtblElement? list)
+            {
+                foreach (var held in list?.Elements.ToList() ?? [])
+                {
+                    if (props == null || !props.Contains(held.ValueOf("Name")?.Trim() ?? "")) { unmade.Add(held.ValueOf("Name")?.Trim() ?? "?"); held.Remove(); continue; }
+                    Keep(held.Element("Sub_Items"));
+                    if (held.Element("Sub_Items") is { } subs && !subs.Elements.Any()) subs.Remove();
+                }
+            }
+            var retyped = new List<string>();
             foreach (var prop in propList.Elements.ToList())
             {
-                foreach (var held in prop.Element("Items")?.Elements.ToList() ?? [])
-                    if (props == null || !props.Contains(held.ValueOf("Name")?.Trim() ?? "")) { unmade.Add(held.ValueOf("Name")?.Trim() ?? "?"); held.Remove(); }
-                if (prop.Element("Items")?.Elements.Any() != true) prop.Remove();
+                Keep(prop.Element("Items"));
+                if (prop.Element("Items")?.Elements.Any() != true) { prop.Remove(); continue; }
+                // Armageddon passes over a prop of type Back in a Wrecking Crew match, which our worlds are (0x511930):
+                // Guerrilla's are worn, so they take another type (a type only names the prop for lookups).
+                if (prop.Element("Type") is { } type && type.Value.Trim().Equals(SkippedPropType, StringComparison.OrdinalIgnoreCase))
+                {
+                    type.Value = WornPropType;
+                    retyped.Add(prop.ValueOf("Prop_Name")?.Trim() ?? "?");
+                }
             }
             if (!propList.Elements.Any()) propList.Remove();
             if (unmade.Count > 0) log.Add($"props not made yet, left out of its entry: {string.Join(", ", unmade.Distinct())}");
+            if (retyped.Count > 0) log.Add($"props of type {SkippedPropType} (skipped in our worlds) as {WornPropType}: {string.Join(", ", retyped)}");
         }
         if (ownHeads.Count > 0)
         {
@@ -602,60 +680,122 @@ public static class GuerrillaPeople
     // ---- Props
 
     /// <summary>
-    /// A character's props as Armageddon's, for those it can have so far: Guerrilla's items its Props name that are
-    /// character meshes with their own skeleton (items_3d character_mesh: mesh and rig; inherit_bone_transforms:
-    /// Armageddon's prop code, Guerrilla's kept, copies the wearer's bones onto the prop's skeleton by name), with
-    /// their mesh in the character's own container (Mason's coat, the Marauders' masks and bags). Each one's mesh is
-    /// converted (<see cref="GuerrillaCharacterMeshes"/>: its bone numbers are its own skeleton's) and packed with
-    /// its textures into the container being made (<paramref name="files"/>), its skeleton is Guerrilla's file as it
-    /// is (loaded through rigs.txt), and its item, Guerrilla's entry fitted to Armageddon's table, goes into
-    /// <paramref name="items"/>. Returns the items made; the rest (static meshes, items elsewhere) wait.
+    /// A character's props as Armageddon's: Guerrilla's items its Props name (with their Sub_Items, an item worn on
+    /// another, as Braun's mask on his helmet), of either kind Armageddon's prop code wears:
+    ///   - character meshes with their own skeleton (items_3d character_mesh: mesh and rig; inherit_bone_transforms:
+    ///     Armageddon's prop code, Guerrilla's kept, copies the wearer's bones onto the prop's skeleton by name):
+    ///     Mason's coat, the Marauders' masks and bags, Braun's backpack; converted by <see cref="GuerrillaCharacterMeshes"/>
+    ///     (its bone numbers are its own skeleton's), the skeleton Guerrilla's file as it is (loaded through rigs.txt);
+    ///   - static meshes (items_3d Mesh): helmets, masks, hats; converted by <see cref="GuerrillaStaticMeshes"/>
+    ///     (version 4 → 6, their tags as they are: the prop hangs on the wearer's Character_Prop by its own
+    ///     Item_Prop tag).
+    /// Each one's mesh comes from the character's own container, or from the item's own in Guerrilla's items.vpp_pc
+    /// (its streaming category there "General", "Head mesh": loaded on its own), and is packed with its textures into
+    /// the container being made (<paramref name="files"/>), as Armageddon's own people carry theirs: so every item is
+    /// "Character prop mesh only". Its item, Guerrilla's entry fitted to Armageddon's table, goes into
+    /// <paramref name="items"/>. Returns the items made; the rest wait (logged).
     /// </summary>
     static HashSet<string> PortProps(XtblElement character, Packfile pack, List<PegFile> pegs, Lazy<List<PegFile>> allPegs, Packfile guerrillaTables,
-                                     Packfile gameTables, IReadOnlyDictionary<string, XtblElement> rfgItems, IReadOnlySet<string> gameItemNames,
-                                     FieldDescription itemDescription, List<(string Name, byte[] Data)> files, Dictionary<string, byte[]> rigs,
-                                     Dictionary<string, XtblElement> items, List<string> log)
+                                     Packfile gameTables, Lazy<Packfile> guerrillaItems, IReadOnlyDictionary<string, XtblElement> rfgItems,
+                                     IReadOnlySet<string> gameItemNames, FieldDescription itemDescription, List<(string Name, byte[] Data)> files,
+                                     Dictionary<string, byte[]> rigs, Dictionary<string, XtblElement> items, List<string> log)
     {
         var made = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var waiting = new List<string>();
-        foreach (var prop in character.Element("Props")?.Elements ?? [])
-            foreach (var held in prop.Element("Items")?.Elements ?? [])
+        // Every item a prop names, and the items worn on them. A prop never worn (Chance 0: the multiplayer
+        // backpacks) is made only from the character's own container (Mason's armour upgrades).
+        var held = new List<string>();
+        var ownOnly = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Collect(IEnumerable<XtblElement> list, string sub, bool worn)
+        {
+            foreach (var item in list)
             {
-                string name = held.ValueOf("Name")?.Trim() ?? "";
-                if (name.Length == 0 || made.Contains(name)) continue;
-                if (!rfgItems.TryGetValue(name, out var rfg)) { waiting.Add($"{name} (Guerrilla's {ItemTable} hasn't it)"); continue; }
-                if (gameItemNames.Contains(name)) { waiting.Add($"{name} (Armageddon has an item of that name)"); continue; }
-                var characterMesh = rfg.Element("character_mesh");
-                string? meshFile = characterMesh?.Element("character_mesh")?.ValueOf("Filename")?.Trim(), rigFile = characterMesh?.Element("rig")?.ValueOf("Filename")?.Trim();
-                if (string.IsNullOrEmpty(meshFile) || string.IsNullOrEmpty(rigFile)) { waiting.Add($"{name} (not a character mesh)"); continue; }
-                string mesh = Path.GetFileNameWithoutExtension(meshFile), rig = Path.ChangeExtension(Path.GetFileName(rigFile), ".rig_pc").ToLowerInvariant();
-                var cEntry = pack.Find(mesh + ".ccmesh_pc");
-                var gEntry = pack.Find(mesh + ".gcmesh_pc");
-                if (cEntry == null || gEntry == null) { waiting.Add($"{name} (its mesh {mesh} isn't in the character's container)"); continue; }
+                if (item.ValueOf("Name")?.Trim() is { Length: > 0 } name)
+                {
+                    if (!held.Contains(name, StringComparer.OrdinalIgnoreCase)) { held.Add(name); if (!worn) ownOnly.Add(name); }
+                    else if (worn) ownOnly.Remove(name);
+                }
+                Collect(item.Element(sub)?.Elements ?? [], sub, worn);
+            }
+        }
+        foreach (var prop in character.Element("Props")?.Elements ?? [])
+            Collect(prop.Element("Items")?.Elements ?? [], "Sub_Items", (prop.ValueOf("Chance")?.Trim() ?? "100") is not ("0" or "0.0"));
+
+        // A file of the item's: in the character's container, else in the item's own in items.vpp_pc.
+        (Packfile Pack, PackfileEntry C, PackfileEntry G)? Find(string item, string mesh, string cExt, string gExt)
+        {
+            if (pack.Find(mesh + cExt) is { } c && pack.Find(mesh + gExt) is { } g) return (pack, c, g);
+            if (ownOnly.Contains(item)) return null;
+            foreach (string container in new[] { item, mesh })
+                if (guerrillaItems.Value.Find(container + ".str2_pc") is { } source)
+                {
+                    var own = guerrillaItems.Value.OpenContainer(source);
+                    if (own.Find(mesh + cExt) is { } oc && own.Find(mesh + gExt) is { } og) return (own, oc, og);
+                }
+            return null;
+        }
+
+        string NotFound(string item, string mesh) => ownOnly.Contains(item)
+            ? $"{item} (never worn here, Chance 0, and its mesh {mesh} isn't in the character's container)"
+            : $"{item} (its mesh {mesh} is neither in the character's container nor in an item's of its own)";
+
+        foreach (string name in held)
+        {
+            if (!rfgItems.TryGetValue(name, out var rfg)) { waiting.Add($"{name} (Guerrilla's {ItemTable} hasn't it)"); continue; }
+            if (gameItemNames.Contains(name)) { waiting.Add($"{name} (Armageddon has an item of that name)"); continue; }
+            var characterMesh = rfg.Element("character_mesh");
+            string? meshFile = characterMesh?.Element("character_mesh")?.ValueOf("Filename")?.Trim(), rigFile = characterMesh?.Element("rig")?.ValueOf("Filename")?.Trim();
+            string? staticFile = rfg.Element("Mesh")?.ValueOf("Filename")?.Trim();
+            IReadOnlyList<string> textures;
+            string line;
+            if (!string.IsNullOrEmpty(meshFile) && !string.IsNullOrEmpty(rigFile))
+            {
+                string mesh = Path.GetFileNameWithoutExtension(meshFile).ToLowerInvariant(), rig = Path.ChangeExtension(Path.GetFileName(rigFile), ".rig_pc").ToLowerInvariant();
+                if (Find(name, mesh, ".ccmesh_pc", ".gcmesh_pc") is not { } found) { waiting.Add(NotFound(name, mesh)); continue; }
                 if (gameTables.Find(rig) != null) { waiting.Add($"{name} (Armageddon has a skeleton {rig} of its own)"); continue; }
                 if (guerrillaTables.Find(rig) is not { } rigEntry) { waiting.Add($"{name} (Guerrilla has no {rig})"); continue; }
-                byte[] cFile = pack.Read(cEntry);
+                byte[] cFile = found.Pack.Read(found.C);
                 if (GuerrillaCharacterMeshes.NotYet(cFile) is { } why) { waiting.Add($"{name} ({why})"); continue; }
                 var notSkinned = new List<string>();
-                var (header, textures) = GuerrillaCharacterMeshes.Convert(cFile, GuerrillaVehicles.Alias, notSkinned);
-                files.Add((mesh + ".ccmesh_pc", header));
-                files.Add((mesh + ".gcmesh_pc", pack.Read(gEntry)));
-                var missing = new List<string>();
-                foreach (string texture in textures)
+                (byte[] header, textures) = GuerrillaCharacterMeshes.Convert(cFile, GuerrillaVehicles.Alias, notSkinned);
+                if (!files.Any(f => f.Name.Equals(mesh + ".ccmesh_pc", StringComparison.OrdinalIgnoreCase)))
                 {
-                    string alias = GuerrillaVehicles.Alias(texture);
-                    if (files.Any(f => f.Name.Equals(alias + ".cvbm_pc", StringComparison.OrdinalIgnoreCase))) continue;  // the body's already
-                    var texFiles = GuerrillaBuiltIns.Files(texture, alias) ?? Single(pegs, texture, alias) ?? Single(allPegs.Value, texture, alias);
-                    if (texFiles == null) missing.Add(texture);
-                    else files.AddRange(texFiles);
+                    files.Add((mesh + ".ccmesh_pc", header));
+                    files.Add((mesh + ".gcmesh_pc", found.Pack.Read(found.G)));
                 }
                 rigs[rig] = guerrillaTables.Read(rigEntry);
-                items[name] = PropItem(rfg, itemDescription);
-                made.Add(name);
-                log.Add($"prop {name}: its mesh {mesh} ({cFile.Length:N0} → {header.Length:N0} bytes), {textures.Count} textures" +
-                        (missing.Count > 0 ? $" ({missing.Count} not found: {string.Join(", ", missing)})" : "") + $", its own skeleton {rig}" +
-                        (notSkinned.Count > 0 ? $"; materials the skinned shaders can't draw yet: {string.Join("; ", notSkinned)}" : ""));
+                line = $"prop {name}: its mesh {mesh} ({cFile.Length:N0} → {header.Length:N0} bytes{(found.Pack == pack ? "" : ", from its own container in items.vpp_pc")}), " +
+                       $"its own skeleton {rig}" + (notSkinned.Count > 0 ? $"; materials the skinned shaders can't draw yet: {string.Join("; ", notSkinned)}" : "");
             }
+            else if (!string.IsNullOrEmpty(staticFile))
+            {
+                string mesh = Path.GetFileNameWithoutExtension(staticFile).ToLowerInvariant();
+                if (Find(name, mesh, ".csmesh_pc", ".gsmesh_pc") is not { } found) { waiting.Add(NotFound(name, mesh)); continue; }
+                byte[] cFile = found.Pack.Read(found.C);
+                if (GuerrillaStaticMeshes.NotYet(cFile) is { } why) { waiting.Add($"{name} ({why})"); continue; }
+                (byte[] header, textures) = GuerrillaStaticMeshes.Convert(cFile, GuerrillaVehicles.Alias);
+                if (!files.Any(f => f.Name.Equals(mesh + ".csmesh_pc", StringComparison.OrdinalIgnoreCase)))
+                {
+                    files.Add((mesh + ".csmesh_pc", header));
+                    files.Add((mesh + ".gsmesh_pc", found.Pack.Read(found.G)));
+                }
+                line = $"prop {name}: its static mesh {mesh} ({cFile.Length:N0} → {header.Length:N0} bytes{(found.Pack == pack ? "" : ", from its own container in items.vpp_pc")})";
+            }
+            else { waiting.Add($"{name} (neither a character mesh nor a static mesh)"); continue; }
+
+            var missing = new List<string>();
+            foreach (string texture in textures)
+            {
+                string alias = GuerrillaVehicles.Alias(texture);
+                if (files.Any(f => f.Name.Equals(alias + ".cvbm_pc", StringComparison.OrdinalIgnoreCase))) continue;  // packed already
+                var texFiles = GuerrillaBuiltIns.Files(texture, alias) ?? Single(pegs, texture, alias) ?? Single(allPegs.Value, texture, alias);
+                if (texFiles == null) missing.Add(texture);
+                else files.AddRange(texFiles);
+            }
+            items[name] = PropItem(rfg, itemDescription);
+            made.Add(name);
+            log.Add(line + $", {textures.Count} textures" + (missing.Count > 0 ? $" ({missing.Count} not found: {string.Join(", ", missing)})" : ""));
+        }
         if (waiting.Count > 0) log.Add($"props not made yet: {string.Join(", ", waiting.Distinct())}");
         return made;
     }
@@ -666,17 +806,24 @@ public static class GuerrillaPeople
     /// <summary>The prop type a head is worn as (one of Armageddon's prop_system_type.xtbl: Guerrilla's Head isn't in either game's).</summary>
     const string HeadPropType = "head_prop";
 
+    /// <summary>The prop type Armageddon leaves off in a Wrecking Crew match (our worlds), and the one such props take instead.</summary>
+    const string SkippedPropType = "Back", WornPropType = "accessory_misc";
+
     /// <summary>
     /// A character's heads (its Heads: Guerrilla draws each as its base head, an items_3d character mesh, dressed
     /// with the face's own materials, &lt;Name&gt;.mat_pc in the character's container, on the face's skeleton,
     /// &lt;Name&gt;.rig_pc, else the base head's), made as props Armageddon's prop code wears (<see cref="HeadPropType"/>).
+    /// Every head here is on its base head's skeleton: the game holds at most 290 skeletons, and a face's own (32 of
+    /// them) is the base head's bones placed for that face, so its places are moved into the head's vertices instead
+    /// (<see cref="GuerrillaFaces.Rebase"/>).
     /// Armageddon kept Guerrilla's head code, but it needs the base heads as preloaded items and drops a face's
     /// shape (its morph); a prop needs neither. Each one's mesh (the base head's, from Guerrilla's items.vpp_pc)
     /// is converted dressed with the face's materials and packed as rfg_&lt;Name&gt; with its textures into the
-    /// container being made (<paramref name="files"/>), its skeleton is Guerrilla's file as it is (loaded through
-    /// rigs.txt), and its item, rfg_&lt;Name&gt; (<see cref="HeadItem"/>), goes into <paramref name="items"/>. A face
-    /// shaped by a morph (&lt;Name&gt;.morph_pc: Braun's, May's) waits until its morph is baked into a mesh of its
-    /// own. Returns the items made, in the Heads' order.
+    /// container being made (<paramref name="files"/>), its skeleton is the base head's, Guerrilla's file as it is
+    /// (loaded through rigs.txt), and its item, rfg_&lt;Name&gt; (<see cref="HeadItem"/>), goes into <paramref name="items"/>. A face
+    /// shaped by a morph (&lt;Name&gt;.morph_pc: Braun's, May's, the civilians') has it baked into the base head's
+    /// vertices (<see cref="GuerrillaFaces"/>). Guerrilla's low-detail head for 20 m and more (Lod_Head) isn't used:
+    /// the head's own detail levels do. Returns the items made, in the Heads' order.
     /// </summary>
     static List<string> PortHeads(XtblElement character, Packfile pack, List<PegFile> pegs, Lazy<List<PegFile>> allPegs, Packfile guerrillaTables,
                                   Packfile gameTables, Lazy<Packfile> guerrillaItems, IReadOnlyDictionary<string, XtblElement> rfgItems,
@@ -698,21 +845,41 @@ public static class GuerrillaPeople
             string mesh = Path.GetFileNameWithoutExtension(meshFile);
             if (guerrillaItems.Value.Find(baseHead + ".str2_pc") is not { } headSource) { waiting.Add($"{face} (Guerrilla's items.vpp_pc has no {baseHead}.str2_pc)"); continue; }
             var headPack = guerrillaItems.Value.OpenContainer(headSource);
-            if (pack.Find(face + ".morph_pc") != null || headPack.Find(face + ".morph_pc") != null)
-            { waiting.Add($"{face} (its face is {baseHead} shaped by a morph, not baked into a mesh yet)"); continue; }
+            // The face's shape: its morph of the base head, baked in (GuerrillaFaces), if it has one.
+            var morphEntry = pack.Find(face + ".morph_pc");
+            var morphPack = morphEntry != null ? pack : headPack;
+            morphEntry ??= headPack.Find(face + ".morph_pc");
             var cEntry = headPack.Find(mesh + ".ccmesh_pc");
             var gEntry = headPack.Find(mesh + ".gcmesh_pc");
             if (cEntry == null || gEntry == null) { waiting.Add($"{face} ({baseHead}.str2_pc has no {mesh}.ccmesh_pc and .gcmesh_pc)"); continue; }
             if (pack.Find(face + ".mat_pc") is not { } materialEntry) { waiting.Add($"{face} (its materials, {face}.mat_pc, aren't in the character's container)"); continue; }
-            string rig = (guerrillaTables.Find(face + ".rig_pc") != null ? face : baseHead).ToLowerInvariant() + ".rig_pc";
+            // Every face on its base head's skeleton (the game holds 290 at most): a face's own is moved into its vertices.
+            string rig = baseHead.ToLowerInvariant() + ".rig_pc", faceRig = face.ToLowerInvariant() + ".rig_pc";
             if (gameTables.Find(rig) != null) { waiting.Add($"{face} (Armageddon has a skeleton {rig} of its own)"); continue; }
             if (guerrillaTables.Find(rig) is not { } rigEntry) { waiting.Add($"{face} (Guerrilla has no {rig})"); continue; }
             byte[] cFile = headPack.Read(cEntry);
             if (GuerrillaCharacterMeshes.NotYet(cFile) is { } why) { waiting.Add($"{face} ({why})"); continue; }
+            byte[] gFile = headPack.Read(gEntry);
+            string shape = "no morph: the base head's own shape";
+            if (morphEntry != null)
+            {
+                try { gFile = GuerrillaFaces.Bake(cFile, gFile, morphPack.Read(morphEntry), out string baked); shape = $"its morph baked in: {baked}"; }
+                catch (Exception e) when (e is InvalidDataException or NotSupportedException) { waiting.Add($"{face} (its morph couldn't be baked: {e.Message})"); continue; }
+            }
+            string skeleton = $"the base head's skeleton {rig}";
+            if (guerrillaTables.Find(faceRig) is { } faceRigEntry && !faceRig.Equals(rig, StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    gFile = GuerrillaFaces.Rebase(cFile, gFile, Rig.Read(guerrillaTables.Read(faceRigEntry)), Rig.Read(guerrillaTables.Read(rigEntry)), out float shifted);
+                    skeleton += $" (the face's own, {faceRig}, moved into its vertices: up to {shifted * 1000:0} mm)";
+                }
+                catch (InvalidDataException e) { waiting.Add($"{face} (its skeleton {faceRig} couldn't be moved onto {rig}: {e.Message})"); continue; }
+            }
             var notSkinned = new List<string>();
             var (header, textures) = GuerrillaCharacterMeshes.Convert(cFile, GuerrillaVehicles.Alias, notSkinned, pack.Read(materialEntry));
             files.Add((item + ".ccmesh_pc", header));
-            files.Add((item + ".gcmesh_pc", headPack.Read(gEntry)));
+            files.Add((item + ".gcmesh_pc", gFile));
             var missing = new List<string>();
             foreach (string texture in textures)
             {
@@ -725,8 +892,8 @@ public static class GuerrillaPeople
             rigs[rig] = guerrillaTables.Read(rigEntry);
             items[item] = HeadItem(baseItem, item, rig, itemDescription);
             made.Add(item);
-            log.Add($"head {face}: {item}, the base head {baseHead} ({cFile.Length:N0} → {header.Length:N0} bytes) dressed with {face}.mat_pc, {textures.Count} textures" +
-                    (missing.Count > 0 ? $" ({missing.Count} not found: {string.Join(", ", missing)})" : "") + $", the face's skeleton {rig}; worn as a {HeadPropType} prop" +
+            log.Add($"head {face}: {item}, the base head {baseHead} ({cFile.Length:N0} → {header.Length:N0} bytes; {shape}) dressed with {face}.mat_pc, {textures.Count} textures" +
+                    (missing.Count > 0 ? $" ({missing.Count} not found: {string.Join(", ", missing)})" : "") + $", {skeleton}; worn as a {HeadPropType} prop" +
                     (notSkinned.Count > 0 ? $"; materials the skinned shaders can't draw yet: {string.Join("; ", notSkinned)}" : ""));
         }
         if (waiting.Count > 0) log.Add($"heads not made yet: {string.Join(", ", waiting.Distinct())}");
@@ -735,8 +902,8 @@ public static class GuerrillaPeople
 
     /// <summary>
     /// A head's item: its base head's items_3d entry under the head's own name, its mesh ours (rfg_&lt;Name&gt;, in the
-    /// wearer's container: "Character prop mesh only"), the face's skeleton, and inherit_bone_transforms (the
-    /// face's bones, spine2 to the eyes, follow the wearer's of the same names), fitted as a prop's.
+    /// wearer's container: "Character prop mesh only"), its base head's skeleton, and inherit_bone_transforms (the
+    /// head's bones, spine2 to the eyes, follow the wearer's of the same names), fitted as a prop's.
     /// </summary>
     static XtblElement HeadItem(XtblElement baseItem, string item, string rig, FieldDescription description)
     {
@@ -761,6 +928,9 @@ public static class GuerrillaPeople
     static XtblElement PropItem(XtblElement rfg, FieldDescription description)
     {
         var item = rfg.Copy();
+        // Its mesh is packed in the wearer's container (PortProps), whatever Guerrilla streamed it with.
+        item.Element("streaming_category")?.Remove();
+        item.AddElement("streaming_category", "Character prop mesh only");
         var dropped = new List<string>();
         GuerrillaTableFit.Prune(item, description.Children, "", dropped);
         var flags = item.Element("Item_Flags") ?? item.AddElement("Item_Flags");
@@ -864,6 +1034,29 @@ public static class GuerrillaPeople
     }
 
     /// <summary>
+    /// The people build's rows in the spine bend and limb tables (Mason's), the only ones it writes or takes out there:
+    /// the vehicles build adds its walkers' legs to the same limb table (mods\guerrilla_world\ik_limbs.xtbl).
+    /// </summary>
+    static readonly Dictionary<string, string[]> OurRows = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [SpinebendTable] = [PlayerSpinebendName], [LimbTable] = ["rfg human left hand", "rfg human right hand"],
+    };
+
+    /// <summary>One of Armageddon's tables (misc.vpp_pc), as its file's bytes.</summary>
+    static byte[] ArmageddonsTable(Packfile gameTables, string table) =>
+        gameTables.Read(gameTables.Find(table) ?? throw new InvalidDataException($"no {table} in Armageddon's misc.vpp_pc"));
+
+    /// <summary>A table of mods\guerrilla_world\ another build also adds to: the one written there (else Armageddon's), our rows taken out.</summary>
+    static XtblFile SharedTableWithoutOurs(string worldFolder, Packfile gameTables, string table)
+    {
+        string path = Path.Combine(worldFolder, table);
+        var written = XtblFile.FromBytes(File.Exists(path) ? File.ReadAllBytes(path) : ArmageddonsTable(gameTables, table));
+        foreach (var row in written.Entries.Where(e => OurRows[table].Contains(XtblFile.EntryName(e), StringComparer.OrdinalIgnoreCase)).ToList())
+            written.RemoveEntry(row);
+        return written;
+    }
+
+    /// <summary>
     /// Armageddon's spine bend table with Mason's entry added: its player's (the same turns, limits and
     /// blends) on his bones: his upper arms are l-/r-upperarmtwist1 (Darius's l-/r-upperarm), his eyes l-/r-eye
     /// (Darius's face-l-/r-eye). Guerrilla has no such table (its spine bend is its own code's).
@@ -918,7 +1111,7 @@ public static class GuerrillaPeople
         return System.Convert.ToHexString(hash.GetHashAndReset());
     }
 
-    /// <summary>A character container's asset list entry, as Armageddon lists its people's: the model (type 7), each texture (type 1), each animation (type 16, no data file).</summary>
+    /// <summary>A character container's asset list entry, as Armageddon lists its people's: the model and character-mesh props (type 7), static props (type 6), each texture (type 1), each animation (type 16, no data file).</summary>
     static AsmContainer Entry(string name, byte[] container, IReadOnlyList<(string Name, byte[] Data)> files, byte containerType = CharacterContainerType)
     {
         var c = Packfile.FromBytes(name, container);
@@ -927,7 +1120,7 @@ public static class GuerrillaPeople
         foreach (var (file, data) in files)
         {
             string ext = Path.GetExtension(file).ToLowerInvariant();
-            byte type = ext switch { ".ccmesh_pc" => 7, ".cvbm_pc" or ".cpeg_pc" => 1, ".anim_pc" => 16, _ => 0 };
+            byte type = ext switch { ".ccmesh_pc" => 7, ".csmesh_pc" => 6, ".cvbm_pc" or ".cpeg_pc" => 1, ".anim_pc" => 16, _ => 0 };
             if (type == 0) continue;
             if (type == 16)
             {
@@ -1074,6 +1267,8 @@ public static class GuerrillaPeople
                 skeletonSet.Element("Parent_Skeleton")!.Value = under.Set;
                 packed.AddRange(under.Animations);
             }
+            // Its groups as Armageddon's code knows them (Guerrilla's Nano as Nano Rifle, its civilians' empty Pipe left out).
+            GuerrillaAnimationSets.FitGroups(set, skeletonSet, log);
 
             // Each animation a state or action names: Guerrilla's file, or a blend tree's level one.
             var trees = new List<string>();

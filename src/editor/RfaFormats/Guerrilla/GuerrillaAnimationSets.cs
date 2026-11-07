@@ -83,6 +83,16 @@ public sealed class GuerrillaAnimationSets
     readonly HashSet<string> earlierSets = new(StringComparer.OrdinalIgnoreCase);  // the set tables an earlier run of this tool wrote
     bool statesChanged, actionsChanged, othersInLists;
 
+    /// <summary>
+    /// The animations' sounds (each entry's Sounds: a frame, looping or not, and Guerrilla's cue as Foley), when
+    /// given: a cue's event in our banks (GuerrillaSoundBanks: OneShot, or Loop for a looping one), or null to
+    /// leave that sound out. Not given, the sounds are left out (as for the parts that don't build sounds).
+    /// </summary>
+    public Func<string, bool, string?>? SoundOf { get; set; }
+
+    /// <summary>When given, called with each Guerrilla set (its name, its Skeleton_Set) before its animations are gathered (GuerrillaWalkerTrees: states naming a blend tree).</summary>
+    public Action<string, XtblElement>? Trees { get; set; }
+
     /// <summary>This tool's record of its own entries in the shared lists, beside its skeleton list (mods\guerrilla_vehicles\).</summary>
     public const string OwnEntries = "anim_entries.txt";
     static string OwnEntriesFile(string modFolder) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(modFolder))!, "guerrilla_vehicles", OwnEntries);
@@ -215,6 +225,50 @@ public sealed class GuerrillaAnimationSets
     static string? AnimationName(XtblElement entry) => entry.Element("Animation")?.ValueOf("Filename")?.Trim();
 
     /// <summary>
+    /// The weapon groups Armageddon's code knows (its list at 0x1000128): its set loader (0x97C3A0) loads no set
+    /// naming another ("We should have found the group in the group names array"). Its anim_groups.xtbl
+    /// differs a little (it has no Grinder), so the code's list is the one that counts.
+    /// </summary>
+    static readonly HashSet<string> ArmageddonGroups = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Default", "AK", "Melee", "Pistol", "Revolver", "Rifle", "RPG", "Mortar", "Mine", "Hammer", "Remote Charge", "Turret Machinegun",
+        "Turret Rocket", "Turret Railgun", "2HCarry", "Gutter", "Shotgun", "Sniper", "Arc", "Railgun", "Nano Rifle", "Rocket Launcher", "Unicorn",
+        "Shield", "Grinder", "Enforcer", "Dual Wield", "Nanoforge", "Plasma Cannon", "Laser Pistol", "Plasma Launcher", "Spit", "Spray", "Boom",
+        "Antenna", "Alien Shotgun", "Hand", "Quill", "Magnet Gun", "Machine Pistol", "Gravitic Imploder", "m16", "Plasma Rifle", "RPG Launcher",
+    };
+
+    /// <summary>Guerrilla's groups under Armageddon's name for the same weapon.</summary>
+    static readonly Dictionary<string, string> GroupNames = new(StringComparer.OrdinalIgnoreCase) { ["Nano"] = "Nano Rifle" };
+
+    /// <summary>
+    /// A set's groups as Armageddon's code knows them: Guerrilla's Nano as Nano Rifle; a group it has no name for
+    /// (Guerrilla's Pipe, which its civilians' set has with nothing in it) left out, said in the log. For every
+    /// converter of Guerrilla's sets (the vehicles', the people's): call it on the Skeleton_Set before writing it.
+    /// </summary>
+    internal static void FitGroups(string set, XtblElement skeletonSet, List<string> log)
+    {
+        if (skeletonSet.Element("Groups") is not { } groups) return;
+        var names = groups.Elements.Select(g => g.ValueOf("group")?.Trim() ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups.Elements.ToList())
+        {
+            if (group.Element("group") is not { } field) continue;
+            string name = field.Value.Trim();
+            if (ArmageddonGroups.Contains(name)) continue;
+            if (GroupNames.TryGetValue(name, out var ours) && !names.Contains(ours))
+            {
+                field.Value = ours;
+                names.Add(ours);
+                log.Add($"animation set {set}: its group {name} is Armageddon's {ours}");
+                continue;
+            }
+            int held = (group.Element("States")?.Elements.Count() ?? 0) + (group.Element("Actions")?.Elements.Count() ?? 0);
+            group.Remove();
+            log.Add(held == 0 ? $"animation set {set}: left out its empty group {name} (Armageddon has no such weapon group)"
+                              : $"animation set {set}: left out its group {name}'s {held} states and actions (Armageddon has no such weapon group)");
+        }
+    }
+
+    /// <summary>
     /// Guerrilla's set <paramref name="set"/> (its Skeleton_Set name, as an interaction's Anim_Set names
     /// it) for Armageddon: its name there (null if it can't be had), and its animations to pack in the
     /// vehicle's container, looked for first in <paramref name="container"/> (Guerrilla's vehicle
@@ -237,6 +291,7 @@ public sealed class GuerrillaAnimationSets
         var table = XtblFile.FromBytes(guerrillaTables.Read(rfgSet));
         var skeletonSet = table.Entries.FirstOrDefault(e => e.Name.Equals("Skeleton_Set", StringComparison.OrdinalIgnoreCase));
         if (skeletonSet == null) { setNames[set] = ""; log.Add($"animation set {set}: {rfgFile} has no Skeleton_Set"); return (null, []); }
+        Trees?.Invoke(set, skeletonSet);
 
         // Its animations, each moved onto Darius's skeleton (all of them, or the set is left out).
         var files = Descendants(skeletonSet, "Animation").Select(a => a.ValueOf("Filename")?.Trim()).OfType<string>()
@@ -291,6 +346,7 @@ public sealed class GuerrillaAnimationSets
                 log.Add($"animation set {set}: left out its Variant_Type {variant.Value.Trim()} (Armageddon's sets have none)");
                 variant.Remove();
             }
+            FitGroups(set, skeletonSet, log);
             foreach (var animation in Descendants(skeletonSet, "Animation"))
                 if (animation.Element("Filename") is { } filename && ours.TryGetValue(filename.Value.Trim(), out var renamed))
                     filename.Value = renamed;
@@ -352,6 +408,18 @@ public sealed class GuerrillaAnimationSets
         else animation.AddElement("Preload", "False");
         foreach (var part in entry.Elements.ToList())
         {
+            if (SoundOf != null && part.Name.Equals("Sounds", StringComparison.OrdinalIgnoreCase) && part.HasElements)
+            {
+                foreach (var sound in part.Elements.ToList())
+                {
+                    string? cue = sound.ValueOf("Foley")?.Trim();
+                    bool looping = sound.ValueOf("Looping")?.Trim().Equals("True", StringComparison.OrdinalIgnoreCase) == true;
+                    if (!string.IsNullOrEmpty(cue) && SoundOf(cue, looping) is { } eventName) sound.Element("Foley")!.Value = eventName;
+                    else sound.Remove();
+                }
+                if (!part.Elements.Any()) part.Remove();
+                continue;
+            }
             bool leftOut = LeftOutOfFiles.Contains(part.Name, StringComparer.OrdinalIgnoreCase);
             if (leftOut && part.HasElements) log.Add($"animation {rfgFile}: its {part.Name} left out until Guerrilla's audio is ported");
             if (leftOut || (!part.HasElements && part.Value.Trim().Length == 0)) part.Remove();

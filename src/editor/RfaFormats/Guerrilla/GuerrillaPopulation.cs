@@ -12,23 +12,26 @@ namespace RfaFormats.Guerrilla;
 /// navigation mesh). So far: the patrols whose squad is one of Guerrilla's the tables hold
 /// (<see cref="GuerrillaSquads"/>), each with its squad spawn node and every navpoint its route reaches
 /// through their links, handles kept (Guerrilla's, unless taken) and links and parents moved with them.
+/// Also the standing squads (<see cref="StandingSquads"/>) and every zone's pedestrian network (its
+/// pedestrian navpoints and their links, <see cref="Pedestrians"/>), for the ambient people to walk.
 ///   - Navpoint: just_pos, Guerrilla's navpoint_data as it is (version 3, 28 bytes: Armageddon's reader
 ///     reads versions 1 to 4, the 4th adding only transitions' fields), obj_links (to placed ones).
 ///   - object_patrol: looping_patrol, combat_ready, patrol_start, OP, no_check_in, override_patrol (its
 ///     marauder_raid, courier_patrol and ASD_truck_partol aren't read by Armageddon's).
 ///   - object_squad_spawn_node: squad_def, OP, spawn_prob, no_reassignment, squad_vehicle, Guerrilla's
 ///     own; its default_orders, Guerrilla's "Default" (orders from what it hangs under), as Armageddon's
-///     own patrols' squads say it: Patrol; the rest (Armageddon's own switches: exos, leap nodes,
-///     leashes, its vehicle groups) the schema's defaults. Guerrilla's night_spawn_prob, respawn
+///     own patrols' squads say it: Patrol; a squad that rides, Guerrilla's vehicle group (vehicle_type, as
+///     the vehicles build names it); the rest (Armageddon's own switches: exos, leap nodes, leashes, the
+///     vehicle group of a squad that doesn't ride) the schema's defaults. Guerrilla's night_spawn_prob, respawn
 ///     speeds and special flags aren't read by Armageddon's: for the guerrilla_people mod later.
-/// Armageddon holds 24 patrols at once (its object_patrol pool; Guerrilla 72), and the game keeps the
-/// zones within one of the player's loaded: <see cref="Cap"/> keeps every 3 × 3 block of zones within it
-/// until the pool is made bigger.
+/// Armageddon holds 24 patrols at once (its object_patrol pool), Guerrilla 72; the guerrilla_people mod
+/// gives the game Guerrilla's 72. The game keeps the zones within one of the player's loaded, so
+/// <see cref="Cap"/> keeps every 3 × 3 block of zones within that (Guerrilla's world places at most 29 in one).
 /// </summary>
 public static class GuerrillaPopulation
 {
-    /// <summary>How many patrols Armageddon holds at once (its object_patrol pool).</summary>
-    public const int MostPatrols = 24;
+    /// <summary>How many patrols the game holds at once (its object_patrol pool: Guerrilla's 72, which guerrilla_people gives it; Armageddon's own 24).</summary>
+    public const int MostPatrols = 72;
 
     const uint None = 0xFFFFFFFF;
     static readonly uint Navpoint = NameHashes.ClassHash("Navpoint"), Patrol = NameHashes.ClassHash("object_patrol"),
@@ -57,9 +60,71 @@ public static class GuerrillaPopulation
         ["exo_type"] = "rf_exo", ["vehicle_type"] = "Default Guerilla", ["ambient_action_type"] = "civ_stand_greet_b",
     };
 
-    /// <summary>The patrols (by handle) of a zone whose squad is one of <paramref name="squads"/>.</summary>
-    public static List<uint> Patrols(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads) =>
-        [.. zone.Values.Where(o => o.ClassHash == Patrol && SquadOf(zone, o) is { } squad && squads.Contains(squad.Text("squad_def") ?? "")).Select(o => o.Handle)];
+    /// <summary>
+    /// The patrols (by handle) of a zone whose squad is one of <paramref name="squads"/> (by the name
+    /// <paramref name="squadFor"/> gives Guerrilla's: a civilian or guerrilla squad's version for the zone's group).
+    /// </summary>
+    public static List<uint> Patrols(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads, Func<string, string> squadFor) =>
+        [.. zone.Values.Where(o => o.ClassHash == Patrol && SquadOf(zone, o) is { } squad && squads.Contains(squadFor(squad.Text("squad_def") ?? ""))).Select(o => o.Handle)];
+
+    /// <summary>
+    /// How many people the squads of every 3 × 3 block of zones hold at most: Armageddon's people pool holds 100
+    /// (its npc pool), some kept for those dropped in, reinforcements and vehicle crews.
+    /// </summary>
+    public const int MostPeople = 80;
+
+    static readonly uint Building = NameHashes.ClassHash("rfg_mover"), Box = NameHashes.ClassHash("object_bounding_box"),
+                         ActionNode = NameHashes.ClassHash("object_action_node");
+
+    /// <summary>
+    /// A zone's squad spawn nodes that stand on their own in Armageddon (by handle, with the squad they name here,
+    /// <paramref name="squadFor"/>'s name for Guerrilla's, one of <paramref name="squads"/>): those under a building or
+    /// a bounding box (Guerrilla's squads defending it), an action node (sitting, working, smoking: Armageddon has no
+    /// action nodes) or nothing. Armageddon makes orders from a squad node's parent only for patrols and pedestrian
+    /// navpoints (0x8007D0), so these stand where Guerrilla puts them, with their own orders (Guerrilla's Default as
+    /// Armageddon's Standard). Not these: the patrols' (<see cref="Patrols"/>), the Marauders' ambushes (their
+    /// regions, which spawn them as a vehicle drives in, are gone from Armageddon), turrets' and vehicles' crews.
+    /// </summary>
+    public static List<(uint Handle, string Squad)> StandingSquads(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads,
+                                                                  Func<string, string> squadFor) =>
+        [.. zone.Values.Where(o => o.ClassHash == SquadNode)
+                       .Where(o => o.Parent == None || zone.TryGetValue(o.Parent, out var p) && (p.ClassHash == Building || p.ClassHash == Box || p.ClassHash == ActionNode))
+                       .Select(o => (o.Handle, Squad: squadFor(o.Text("squad_def") ?? "")))
+                       .Where(s => squads.Contains(s.Squad))];
+
+    /// <summary>
+    /// The standing squads each zone keeps (<see cref="StandingSquads"/>): every 3 × 3 block of zones holds at most
+    /// <see cref="MostPeople"/> people with its patrols' (<paramref name="patrolPeople"/>, a zone's), the busiest
+    /// zones giving up their last squads first; <paramref name="leftOut"/> counts the squads left out.
+    /// </summary>
+    public static Dictionary<(int, int), List<(uint Handle, string Squad)>> CapPeople(Dictionary<(int, int), List<(uint Handle, string Squad)>> standing,
+        IReadOnlyDictionary<(int, int), int> patrolPeople, Func<string, int> members, out int leftOut)
+    {
+        var kept = standing.ToDictionary(p => p.Key, p => p.Value.ToList());
+        int Here((int, int) z) => (kept.TryGetValue(z, out var l) ? l.Sum(s => members(s.Squad)) : 0) + patrolPeople.GetValueOrDefault(z);
+        IEnumerable<(int, int)> Block((int C, int R) at) => Enumerable.Range(-1, 3).SelectMany(dc => Enumerable.Range(-1, 3).Select(dr => (at.C + dc, at.R + dr)));
+        leftOut = 0;
+        while (true)
+        {
+            var worst = kept.Keys.Select(z => (Zone: z, Count: Block(z).Sum(Here))).OrderByDescending(x => x.Count).FirstOrDefault();
+            if (worst.Count <= MostPeople) break;
+            var busiest = Block(worst.Zone).Where(z => kept.TryGetValue(z, out var l) && l.Count > 0).OrderByDescending(Here).FirstOrDefault();
+            if (!kept.ContainsKey(busiest) || kept[busiest].Count == 0) break;  // only patrols left there
+            kept[busiest].RemoveAt(kept[busiest].Count - 1);
+            leftOut++;
+        }
+        return kept;
+    }
+
+    /// <summary>A navpoint's type (navpoint_data +4: 1 patrol, 2 pedestrian, 10 path, 11 transition, 14 stairs, ...), or -1.</summary>
+    static int NavpointType(GuerrillaZoneObject navpoint) => navpoint.Value("navpoint_data") is { Length: >= 8 } data ? BitConverter.ToInt32(data, 4) : -1;
+
+    /// <summary>The navpoint type of Guerrilla's pedestrian network.</summary>
+    const int PedestrianNavpoint = 2;
+
+    /// <summary>A zone's pedestrian navpoints (type 2): the network its ambient people walk.</summary>
+    public static List<GuerrillaZoneObject> Pedestrians(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone) =>
+        [.. zone.Values.Where(o => o.ClassHash == Navpoint && NavpointType(o) == PedestrianNavpoint)];
 
     /// <summary>A patrol's squad spawn node (the one hung under it), or null.</summary>
     static GuerrillaZoneObject? SquadOf(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, GuerrillaZoneObject patrol) =>
@@ -91,10 +156,13 @@ public static class GuerrillaPopulation
 
     /// <summary>
     /// The patrols named (handles in <paramref name="zone"/>), with their squad spawn nodes and route navpoints,
-    /// as Armageddon's objects (handles not in <paramref name="taken"/>, which gains theirs), each object after
-    /// the ones it names.
+    /// the standing squads' nodes (<see cref="StandingSquads"/>) and the zone's pedestrian network
+    /// (<see cref="Pedestrians"/>), as Armageddon's objects (handles not in
+    /// <paramref name="taken"/>, which gains theirs), each object after the ones it names. Each squad node names
+    /// the squad <paramref name="squadFor"/> gives for Guerrilla's.
     /// </summary>
-    public static List<ZoneObject> Convert(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlyList<uint> patrols, ZoneSchema schema, ISet<uint> taken)
+    public static List<ZoneObject> Convert(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlyList<uint> patrols,
+                                           IReadOnlyList<(uint Handle, string Squad)> standing, Func<string, string> squadFor, ZoneSchema schema, ISet<uint> taken)
     {
         // The navpoints the routes reach, through their links (within the zone).
         var navpoints = new List<GuerrillaZoneObject>();
@@ -117,9 +185,16 @@ public static class GuerrillaPopulation
             }
         }
 
+        // The pedestrian network: every pedestrian navpoint of the zone (type 2), whose links are all to others of the
+        // zone's (Guerrilla's 1,756 in 16 zones, 40 networks), for the ambient people to walk.
+        foreach (var navpoint in Pedestrians(zone))
+            if (reached.Add(navpoint.Handle)) navpoints.Add(navpoint);
+
+        var standingNodes = standing.Where(s => zone.ContainsKey(s.Handle)).Select(s => zone[s.Handle]).ToList();
+
         // Handles: Guerrilla's, unless taken.
         var handleOf = new Dictionary<uint, uint>();
-        foreach (var o in navpoints.Concat(placedPatrols).Concat(squads))
+        foreach (var o in navpoints.Concat(placedPatrols).Concat(squads).Concat(standingNodes))
         {
             uint handle = o.Handle;
             while (!taken.Add(handle)) handle = (handle & 0xFFFF0000) | ((handle + 1) & 0xFFFF);
@@ -166,20 +241,40 @@ public static class GuerrillaPopulation
             patrolObject.Child = handleOf[squad.Handle];
             objects.Add(patrolObject);
 
-            var squadProperties = SquadNodeOrder.Select(name => name switch
-            {
-                "default_orders" => new NewProperty(ZoneProperty.TextType, NameHashes.PropertyHash(name), Text("Patrol")),
-                _ when ArmageddonsOwn.TryGetValue(name, out var own) => new NewProperty(ZoneProperty.TextType, NameHashes.PropertyHash(name), Text(own)),
-                _ when SquadNodeOwn.Contains(name) && squad.Properties.ContainsKey(NameHashes.PropertyHash(name)) => Own(squad, name),
-                _ => Default("object_squad_spawn_node", name),
-            });
-            var squadObject = Make(squad, squadProperties);
+            var squadObject = Make(squad, SquadNodeProperties(squad, "Patrol"));
             squadObject.Parent = handleOf[patrol.Handle];
             squadObject.Sibling = squadObject.Child = None;
             objects.Add(squadObject);
         }
+        foreach (var node in standingNodes)
+        {
+            var squadObject = Make(node, SquadNodeProperties(node, Orders(node.Text("default_orders"))));
+            squadObject.Parent = squadObject.Sibling = squadObject.Child = None;
+            objects.Add(squadObject);
+        }
         return objects;
+
+        // A squad node's properties in Armageddon's order: its squad (by squadFor's name), Guerrilla's own it reads,
+        // the orders given, the vehicle group a squad that rides names (Guerrilla's, as the vehicles build writes it:
+        // EDF_scout_Gauss → rfg_EDF_scout_Gauss), Armageddon's own choices, the schema's defaults.
+        IEnumerable<NewProperty> SquadNodeProperties(GuerrillaZoneObject node, string orders) => SquadNodeOrder.Select(name => name switch
+        {
+            "default_orders" => new NewProperty(ZoneProperty.TextType, NameHashes.PropertyHash(name), Text(orders)),
+            "squad_def" => new NewProperty(ZoneProperty.TextType, NameHashes.PropertyHash(name), Text(squadFor(node.Text("squad_def") ?? ""))),
+            "vehicle_type" when node.Value("squad_vehicle")?.Any(b => b != 0) == true && node.Text(name)?.Trim() is { Length: > 0 } group =>
+                new NewProperty(ZoneProperty.TextType, NameHashes.PropertyHash(name), Text(GuerrillaVehiclePlaces.GroupPrefix + group)),
+            _ when ArmageddonsOwn.TryGetValue(name, out var own) => new NewProperty(ZoneProperty.TextType, NameHashes.PropertyHash(name), Text(own)),
+            _ when SquadNodeOwn.Contains(name) && node.Properties.ContainsKey(NameHashes.PropertyHash(name)) => Own(node, name),
+            _ => Default("object_squad_spawn_node", name),
+        });
     }
+
+    /// <summary>
+    /// A standing squad's orders by Armageddon's names: Guerrilla's zones use Default (Armageddon's Standard: a squad
+    /// not allied to the player waits where it stands, 0x8007D0) and Wait; the names are numbered differently in the
+    /// two games, so by name.
+    /// </summary>
+    static string Orders(string? guerrilla) => guerrilla?.Trim().Equals("Wait", StringComparison.OrdinalIgnoreCase) == true ? "Wait" : "Standard";
 
     static uint? Handle(byte[]? value) => value is { Length: >= 4 } ? BitConverter.ToUInt32(value) : null;
 

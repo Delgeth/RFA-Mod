@@ -25,8 +25,16 @@ namespace RfaFormats.Guerrilla;
 ///                              arrays (none here), Guerrilla's hinge; Guerrilla's +0x8C–0xEF
 ///                              (deformation offsets, morph target, sub-pieces, centre of mass and
 ///                              inertia) at +0xA4.
-///   lights (76 → 80 each)      the same, and a word Armageddon fills at run time: the chassis's,
-///                              then each part's, before the tag lists
+///   lights (76 → 80 each)      the same (+0 Guerrilla's type: the name hash of Headlight_Mesh, ...,
+///                              which Armageddon reads not), and a word: the light's name hash, which
+///                              links it to its vehicle's Lights map (vehicles.xtbl) and so to a
+///                              vehicle_lights.xtbl row (0x5FFAC0); written as Guerrilla's type, which
+///                              the vehicles part's Lights map names (<see cref="LightTypes"/>). The
+///                              chassis's, then each part's, before the tag lists. A light's "on" tags
+///                              are where its glow plays: Guerrilla plays it at its first three, whatever
+///                              their names (but a headlight's "HeadlightSecondary_Glar", its second
+///                              effect); Armageddon only at tags named Mesh_Glare_Primary or
+///                              Mesh_Glare_Secondary, so they're given those names.
 ///   tag lists                  the same (a count, then 52 bytes a tag: name hash, rotation, position)
 ///   mesh block (128)           version 4 or 6 → 9 (<see cref="MeshBlockConversion"/>)
 ///   material map (16)          the same (run-time words: one, the count, one a material)
@@ -45,8 +53,12 @@ namespace RfaFormats.Guerrilla;
 /// exactly that version) and makes the vehicle's dent container when vehicle_deformation_enabled is on
 /// (0x142A484, off in Armageddon; the guerrilla_vehicles mod turns it on, Guerrilla's default). None of
 /// Armageddon's 17 has one. The deformed morph targets (header +0x88, parts +0xA8) are 0 or −1 in every
-/// Guerrilla file: filled at run time, written −1. Not carried over: tracked vehicles' splines (their
-/// files are refused for now).
+/// Guerrilla file: filled at run time, written −1. A tracked vehicle's tread splines (header +0x94 count,
+/// +0x98 tread width, +0x9C the records; Armageddon's +0x134, +0x138, +0x13C) are Guerrilla's records with
+/// a word before each, the part the spline rides on (−1, the vehicle itself, as every one of Armageddon's
+/// Crusader's), their points and tread wheels as they are; a tank's drive wheels, which Guerrilla hides at
+/// run time for a tank, get Armageddon's "never drawn" part flag (0x800, as the Crusader's). No file of
+/// either game has constraint templates (+0x1C; refused if one ever had).
 /// </summary>
 public static class GuerrillaVehicles
 {
@@ -56,16 +68,37 @@ public static class GuerrillaVehicles
     const int GuerrillaLight = 76, Light = 80;
     const int TagSize = 52;
 
+    // Guerrilla's light types (the name hash of each; str_hash_string, NameHashes.ClassHash) and the tags
+    // that matter to them; Armageddon's glare tags (crc_stri, NameHashes.PropertyHash).
+    static readonly string[] LightTypeNames = ["Headlight_Mesh", "Foglight_Mesh", "Taillight_Mesh", "Brakelight_Mesh", "Reverselight_Mesh", "Emergencylight_Mesh", "Strobelight_Mesh"];
+    static readonly uint HeadlightMesh = NameHashes.ClassHash("Headlight_Mesh"), SecondaryGlareTag = NameHashes.PropertyHash("HeadlightSecondary_Glar");
+    static readonly uint GlarePrimary = NameHashes.PropertyHash("Mesh_Glare_Primary"), GlareSecondary = NameHashes.PropertyHash("Mesh_Glare_Secondary");
+
+    /// <summary>The light types a Guerrilla vehicle file has (Headlight_Mesh, ...; the names its lights are linked by).</summary>
+    public static IReadOnlyList<string> LightTypes(byte[] file)
+    {
+        int I(int at) => BitConverter.ToInt32(file, at);
+        var hashes = new HashSet<uint>();
+        void Lights(int count, int at) { for (int l = 0; l < count; l++) hashes.Add((uint)I(at + l * GuerrillaLight)); }
+        if (I(0x8C) > 0) Lights(I(0x8C), I(0x90));
+        for (int p = 0; p < I(0xA4); p++)
+        {
+            int r = GuerrillaHeader + p * GuerrillaPart;
+            if (I(r + 0x80) > 0) Lights(I(r + 0x80), I(r + 0x84));
+        }
+        return LightTypeNames.Where(n => hashes.Contains(NameHashes.ClassHash(n))).ToList();
+    }
+
     /// <summary>
     /// The Armageddon c-file for a Guerrilla one, and the textures its materials name (as Guerrilla
     /// names them, without ".tga"; built-ins among them). With <paramref name="rename"/>, the file
     /// names each texture by what it gives for Guerrilla's name instead.
     /// </summary>
-    public static (byte[] CFile, IReadOnlyList<string> Textures) Convert(byte[] file, Func<string, string>? rename = null)
+    public static (byte[] CFile, IReadOnlyList<string> Textures) Convert(byte[] file, Func<string, string>? rename = null, bool tank = false)
     {
         try
         {
-            return ConvertFile(file, rename ?? (name => name));
+            return ConvertFile(file, rename ?? (name => name), tank);
         }
         catch (ArgumentOutOfRangeException)
         {
@@ -78,12 +111,15 @@ public static class GuerrillaVehicles
     {
         int I(int at) => BitConverter.ToInt32(file, at);
         if (file.Length < GuerrillaHeader || I(0) != GuerrillaVersion) return "not a Guerrilla vehicle file (version 27)";
-        if (I(0x94) != 0) return "a tracked vehicle (its tread splines aren't converted yet)";
         if (I(0x1C) != 0) return "it has constraint templates (not converted yet)";
         return null;
     }
 
-    static (byte[], IReadOnlyList<string>) ConvertFile(byte[] g, Func<string, string> rename)
+    const int GuerrillaSpline = 24, Spline = 28;
+    const uint FrontWheel = 0x0A48F662, RearWheel = 0x6A42CA04;  // part types "Front Wheel", "Rear Wheel"
+    const int HiddenPart = 0x800;                                 // Armageddon's part flag: never drawn (its Crusader's drive wheels)
+
+    static (byte[], IReadOnlyList<string>) ConvertFile(byte[] g, Func<string, string> rename, bool tank)
     {
         int I(int at) => BitConverter.ToInt32(g, at);
         if (NotYet(g) is { } why) throw new NotSupportedException(why);
@@ -150,7 +186,7 @@ public static class GuerrillaVehicles
             for (int l = 0; l < count; l++)
             {
                 Copy(at + l * GuerrillaLight, at + (l + 1) * GuerrillaLight);
-                o.Add(BitConverter.GetBytes(0));
+                o.Add(BitConverter.GetBytes(I(at + l * GuerrillaLight)));  // its name hash: Guerrilla's type's (see the summary)
             }
             cursor = at + count * GuerrillaLight;
         }
@@ -198,7 +234,26 @@ public static class GuerrillaVehicles
         // The rest, up to the collision, as it is.
         o.Align(16);
         if (namesEnd % 16 != 0 || collision % 16 != 0 || moppTable % 16 != 0) throw new InvalidDataException("a section isn't on a 16-byte boundary");
-        if (namesEnd < collision) Copy(namesEnd, collision);
+        int splineCount = I(0x94), splines = I(0x9C), newSplines = -1;
+        if (splineCount is < 0 or > 4) throw new InvalidDataException("bad tread spline count");
+        if (splineCount > 0)
+        {
+            // Guerrilla's records (24 bytes: point count, centre, points' offset, attachments' offset) get
+            // Armageddon's leading word, the part the spline rides on (-1: the vehicle itself); the
+            // points (12 bytes each) and each point's tread wheel (a part index or -1) follow as they are.
+            int recordsEnd = splines + splineCount * GuerrillaSpline;
+            if (splines < namesEnd || recordsEnd > collision) throw new InvalidDataException("the tread splines aren't between the texture names and the collision");
+            Copy(namesEnd, splines);
+            newSplines = o.Count;
+            for (int s = 0; s < splineCount; s++)
+            {
+                o.Add(BitConverter.GetBytes(-1));
+                o.Add(g.AsSpan(splines + s * GuerrillaSpline, GuerrillaSpline));
+            }
+            while (o.Count % 16 != recordsEnd % 16) o.Add(new byte[1]);   // what follows keeps its alignment
+            Copy(recordsEnd, collision);
+        }
+        else if (namesEnd < collision) Copy(namesEnd, collision);
 
         // The collision, Havok 5.5 → 2010.
         o.Align(16);
@@ -243,6 +298,34 @@ public static class GuerrillaVehicles
                 int light = at + l * GuerrillaLight, newLight = Moved(light);
                 o.Put(newLight + 0x38, Offset(I(light + 0x38)));
                 o.Put(newLight + 0x44, Offset(I(light + 0x44)));
+                // Its "on" tags, where its glow plays, named as Armageddon's glare tags.
+                int onTags = I(light + 0x44);
+                if (onTags is 0 or -1 || I(onTags) <= 0) continue;
+                int newTags = Moved(onTags);
+                bool headlight = (uint)I(light) == HeadlightMesh;
+                for (int k = 0; k < I(onTags); k++)
+                {
+                    bool secondary = headlight && (uint)I(onTags + 4 + k * TagSize) == SecondaryGlareTag;
+                    o.Put(newTags + 4 + k * TagSize, unchecked((int)(secondary ? GlareSecondary : GlarePrimary)));
+                }
+            }
+        if (splineCount > 0)
+        {
+            o.Put(0x13C, newSplines);
+            for (int s = 0; s < splineCount; s++)
+            {
+                int r = splines + s * GuerrillaSpline, a = newSplines + s * Spline;
+                o.Put(a + 0x14, Moved(I(r + 0x10)));
+                o.Put(a + 0x18, Moved(I(r + 0x14)));
+            }
+        }
+        // A tank's four Havok drive wheels: Guerrilla hides them at run time (vehicle_component::init, for
+        // a vehicle of type Tank or Artillery Tank); Armageddon only hides a part flagged so.
+        if (tank)
+            for (int p = 0; p < partCount; p++)
+            {
+                int r = GuerrillaHeader + p * GuerrillaPart;
+                if ((uint)I(r) is FrontWheel or RearWheel) o.Put(Header + p * Part + 0x0C, I(r + 0x0C) | HiddenPart);
             }
         int newMoppTable = Moved(moppTable);
         for (int m = 0; m < moppCount; m++)
@@ -258,6 +341,7 @@ public static class GuerrillaVehicles
     {
         int I(int at) => BitConverter.ToInt32(g, at);
         var starts = new List<int> { I(0x04), I(0x0C), I(0x10), I(0x38) };
+        if (I(0x94) > 0) starts.Add(I(0x9C));
         for (int p = 0; p < partCount; p++)
         {
             int r = GuerrillaHeader + p * GuerrillaPart;

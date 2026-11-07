@@ -55,7 +55,9 @@ static class GuerrillaTableFit
     /// <summary>
     /// Writes an entry's numbers as Armageddon reads them: a decimal in a field Armageddon's description makes
     /// a whole number (which would stop its table reader: "Could not parse '.25' into an integer") is
-    /// rounded, and named in <paramref name="rounded"/>.
+    /// rounded, and a number outside the description's range (MinValue, MaxValue: Guerrilla's NPC refire
+    /// delay of 0 where Armageddon's least is 1) is brought to its nearest end; each is named in
+    /// <paramref name="rounded"/>. Inside the groups, the lists' items and a combo's chosen group too.
     /// </summary>
     public static void FitValues(XtblElement element, IReadOnlyList<FieldDescription> fields, string path, List<string> rounded)
     {
@@ -71,11 +73,28 @@ static class GuerrillaTableFit
                     FitValues(one, item.Children, at + "/", rounded);
                 continue;
             }
-            if (child.HasElements || field.Type != FieldType.Int) continue;
-            if (!double.TryParse(child.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double value) || value == Math.Floor(value)) continue;
+            if (field.Type == FieldType.ComboElement)
+            {
+                foreach (var (chosen, choice) in Chosen(child, field)) FitValues(chosen, choice.Children, at + "/" + choice.Name + "/", rounded);
+                continue;
+            }
+            if (child.HasElements || field.Type is not (FieldType.Int or FieldType.Float)) continue;
+            if (!double.TryParse(child.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double value)) continue;
+            double fitted = field.Type == FieldType.Int ? Math.Round(value) : value;
+            if (field.Min is { } min && fitted < min) fitted = min;
+            if (field.Max is { } max && fitted > max) fitted = max;
+            if (fitted == value && (field.Type != FieldType.Int || value == Math.Floor(value))) continue;
             rounded.Add($"{at} {child.Value.Trim()}");
-            child.Value = Math.Round(value).ToString("0", CultureInfo.InvariantCulture);
+            child.Value = fitted.ToString(field.Type == FieldType.Int ? "0" : "0.0###", CultureInfo.InvariantCulture);
         }
+    }
+
+    /// <summary>A combo's chosen groups (the elements in it named as one of its choices) with their descriptions.</summary>
+    static IEnumerable<(XtblElement Chosen, FieldDescription Choice)> Chosen(XtblElement combo, FieldDescription field)
+    {
+        foreach (var chosen in combo.Elements)
+            if (field.Children.FirstOrDefault(c => c.Name.Equals(chosen.Name, StringComparison.OrdinalIgnoreCase)) is { Type: FieldType.Element } choice)
+                yield return (chosen, choice);
     }
 
     /// <summary>
@@ -102,6 +121,9 @@ static class GuerrillaTableFit
             else if (field.Type is FieldType.List or FieldType.Grid && field.Item is { Type: FieldType.Element } item)
                 foreach (var one in child.Elements.Where(e => e.Name.Equals(field.ItemElementName, StringComparison.OrdinalIgnoreCase)))
                     FillRequired(one, item.Children, path + field.Name + "/", added, unfilled);
+            else if (field.Type == FieldType.ComboElement)  // the chosen group's own (the arc welder's Electric_Beam: Beam_Spline_Info)
+                foreach (var (chosen, choice) in Chosen(child, field))
+                    FillRequired(chosen, choice.Children, path + field.Name + "/" + choice.Name + "/", added, unfilled);
         }
     }
 

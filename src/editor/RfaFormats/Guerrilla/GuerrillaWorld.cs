@@ -817,23 +817,54 @@ public static class GuerrillaWorld
             }
         }
 
-        // Guerrilla's people (see GuerrillaPopulation): the patrols whose squad GuerrillaPeople puts in the
-        // squad tables, with their squad spawn nodes and route navpoints, kept within Armageddon's 24 patrols for
-        // every 3 × 3 block of zones. The squads are worked out from Guerrilla's own tables for the people it
-        // makes (its default ones, and any its last run made), so the world needn't wait for it: a squad it
-        // doesn't write after all (its weapons not ported) the game drops, with a warning.
+        // Guerrilla's people (see GuerrillaPopulation, GuerrillaDistricts): the patrols whose squad GuerrillaPeople
+        // puts in the squad tables, with their squad spawn nodes and route navpoints, kept within the game's 72
+        // patrols (Guerrilla's; guerrilla_people gives it them) for every 3 × 3 block of zones; and the squads standing where Guerrilla puts them (at its
+        // buildings, bounding boxes and action nodes), kept within MostPeople people a block with the patrols'. The
+        // squads are worked out from Guerrilla's own tables for the people it makes (its default ones, and any its
+        // last run made), so the world needn't wait for it: a squad it doesn't write after all (its weapons not
+        // ported) the game drops, with a warning. A zone's civilian and guerrilla squads are its human group's
+        // versions, and the zone names its group's spawn resource (its district's people; rfg_Default where it has none).
         var peopleSquads = GuerrillaSquads.Expected(rfgTables, misc, GuerrillaSquads.PlannedCharacters(modFolder));
-        // The zones' spawn resource: the Guerrilla world's own (GuerrillaSquads), written here holding only the
-        // player if GuerrillaPeople hasn't run yet (without it the zones would take Armageddon's "Default",
-        // which streams its aliens and soldiers in).
-        string spawnResource = GuerrillaSquads.SpawnResource;
-        bool resourceWritten = GuerrillaSquads.EnsureSpawnResource(misc, modFolder);
-        log($"People: the zones' spawn resource is {spawnResource}" + (resourceWritten ? " (written with the player only; building the people adds theirs)" : ""));
-        var patrolsIn = GuerrillaPopulation.Cap(guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.Patrols(z.Value, peopleSquads)), out int patrolsLeftOut);
+        var ambientGroups = GuerrillaDistricts.AmbientGroups(rfgTables);
+        var districtGroups = GuerrillaDistricts.DistrictGroups(ambientGroups.Values).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        uint zoneMarkerClass = NameHashes.ClassHash("obj_zone");
+        string? GroupOf((int, int) zone) =>
+            guerrillaObjects.TryGetValue(zone, out var objects) && objects.Values.FirstOrDefault(o => o.ClassHash == zoneMarkerClass) is { } marker &&
+            GuerrillaDistricts.ZoneGroup(marker, ambientGroups) is { } group && districtGroups.Contains(group) ? group : null;
+        Func<string, string> SquadsOf((int, int) zone) { string? group = GroupOf(zone); return squad => GuerrillaDistricts.SquadFor(squad, group); }
+        // The zones' spawn resources (GuerrillaSquads), written here holding only the player where GuerrillaPeople
+        // hasn't run yet (a zone naming a resource the table hasn't would take Armageddon's "Default", which
+        // streams its aliens and soldiers in).
+        bool resourceWritten = GuerrillaSquads.EnsureSpawnResources(rfgTables, misc, modFolder);
+        log($"People: the zones' spawn resources are {string.Join(", ", GuerrillaSquads.SpawnResources(rfgTables))} (rfg_Default where a zone has no human group)" +
+            (resourceWritten ? " (written with the player only; building the people adds theirs)" : ""));
+        var patrolsIn = GuerrillaPopulation.Cap(guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.Patrols(z.Value, peopleSquads, SquadsOf(z.Key))), out int patrolsLeftOut);
         log(peopleSquads.Count == 0 ? "People: none of Guerrilla's squads can be had with the people built so far, so no patrols placed"
-            : $"People: {patrolsIn.Values.Sum(p => p.Count)} of Guerrilla's patrols placed, with their squads ({string.Join(", ", peopleSquads.Order())})" +
+            : $"People: {patrolsIn.Values.Sum(p => p.Count)} of Guerrilla's patrols placed" +
               (patrolsLeftOut > 0 ? $"; {patrolsLeftOut} left out to keep {GuerrillaPopulation.MostPatrols} patrols at most within each 3 x 3 block of zones" : ""));
+        // The standing squads, kept within MostPeople people a 3 × 3 block with the patrols' (the squads' sizes, Guerrilla's).
+        var squadSizes = XtblFile.FromBytes(rfgTables.Read(rfgTables.Find(GuerrillaSquads.SquadTable)!)).Entries
+            .ToDictionary(XtblFile.EntryName, e => int.TryParse(e.ValueOf("member_count"), out int n) ? n : 1, StringComparer.OrdinalIgnoreCase);
+        // A squad's size, Guerrilla's: a district version (rfg_du_csq_2) is its Guerrilla squad's (civilian_squad_2).
+        int Members(string squad) => squadSizes.TryGetValue(GuerrillaDistricts.GuerrillaSquadOf(squad), out int n) ? n : 1;
+        uint patrolClass = NameHashes.ClassHash("object_patrol"), squadNodeClass = NameHashes.ClassHash("object_squad_spawn_node");
+        var patrolPeople = patrolsIn.ToDictionary(p => p.Key, p => p.Value.Sum(handle =>
+            guerrillaObjects[p.Key].Values.FirstOrDefault(o => o.ClassHash == squadNodeClass && o.Parent == handle) is { } node ? Members(node.Text("squad_def") ?? "") : 0));
+        var standingIn = GuerrillaPopulation.CapPeople(guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.StandingSquads(z.Value, peopleSquads, SquadsOf(z.Key))),
+                                                       patrolPeople, Members, out int standingLeftOut);
+        log($"People: {standingIn.Values.Sum(s => s.Count)} of Guerrilla's squads standing where it puts them ({standingIn.Values.Sum(s => s.Sum(x => Members(x.Squad)))} people)" +
+            (standingLeftOut > 0 ? $"; {standingLeftOut} left out to keep {GuerrillaPopulation.MostPeople} people at most within each 3 x 3 block of zones" : "") +
+            $"; squads: {string.Join(", ", peopleSquads.Order())}");
 
+        int pedestriansPlaced = 0;  // Guerrilla's pedestrian navpoints, for the ambient people (counted as the zones are written)
+        var vehiclePlaceProblems = new List<string>();
+        int roadsPlaced = 0, spotsPlaced = 0;
+        // Guerrilla's pickups (its ammo boxes, weapon lockers, propane tanks, singularity bombs; see GuerrillaPickups),
+        // under the names the weapons build gives them.
+        var (pickupItems, pickupWeapons) = GuerrillaWeapons.PickupNames(game);
+        var pickupsLeft = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        int pickupsPlaced = 0;
         foreach (var (col, row) in zones)
         {
             string zone = $"{World}_{col:00}_{row:00}";
@@ -870,11 +901,21 @@ public static class GuerrillaWorld
             // (so "level rfg_CC_RR" starts in any zone: Guerrilla's own where the zone has one, else the
             // zone's middle on the ground, which can be inside a rock or a building).
             var zoneFile = ZoneFile.Create(Class("Default"), Class("none"));
-            var marker = zoneFile.AddNew(Class("obj_zone"), prefix | 0x000020, schema.Class("obj_zone")!.NewObject(zoneMiddle, DefaultChoice),
+            // (Their handles clear of Guerrilla's roads' in the zone, which keep theirs: their junctions name them;
+            // the other Guerrilla objects placed take another handle if theirs is taken.)
+            uint roadClass = Class("object_path_road");
+            var roadHandles = guerrillaObjects.TryGetValue((col, row), out var guerrillaHere)
+                ? guerrillaHere.Values.Where(o => o.ClassHash == roadClass).Select(o => o.Handle).ToHashSet() : [];
+            uint OwnHandle(uint handle)
+            {
+                while (roadHandles.Contains(handle)) handle = (handle & 0xFFFF0000) | ((handle + 1) & 0xFFFF);
+                return handle;
+            }
+            var marker = zoneFile.AddNew(Class("obj_zone"), OwnHandle(prefix | 0x000020), schema.Class("obj_zone")!.NewObject(zoneMiddle, DefaultChoice),
                                          zoneMiddle - new Vector3(0.5f), zoneMiddle + new Vector3(0.5f));
             marker.Property("terrain_file_name")!.SetText(zone);
-            marker.Property("spawn_resource_data")!.SetText(spawnResource);
-            ZoneEnvironment(zoneFile, schema, prefix | 0x030008, zoneMiddle);
+            marker.Property("spawn_resource_data")!.SetText(GuerrillaDistricts.ResourceOf(GroupOf((col, row))));
+            ZoneEnvironment(zoneFile, schema, OwnHandle(prefix | 0x030008), zoneMiddle);
             Vector3 startAt = new(zoneMiddle.X, GuerrillaGround.HeightAt(h, ZoneWidth / 2, ZoneWidth / 2, Layout) + 1, zoneMiddle.Z);
             Matrix4x4? startTurn = null;
             if (guerrillaStarts.TryGetValue((col, row), out var guerrillaStart))
@@ -886,7 +927,7 @@ public static class GuerrillaWorld
             }
             ZoneObject PlayerStart(ZoneFile file)
             {
-                var start = file.AddNew(Class("player_start"), prefix | 0x000004, schema.Class("player_start")!.NewObject(startAt),
+                var start = file.AddNew(Class("player_start"), OwnHandle(prefix | 0x000004), schema.Class("player_start")!.NewObject(startAt),
                                         startAt - new Vector3(0.5f), startAt + new Vector3(0.5f));
                 if (startTurn is { } turn) start.TurnTo(turn);
                 return start;
@@ -902,18 +943,37 @@ public static class GuerrillaWorld
                                                                chunk => BitConverter.ToUInt32(chunkFiles[chunk].Header, 0x24), taken);
                 foreach (var mover in movers) zoneFile.Insert(zoneFile.Objects.Count, mover);
             }
-            // Guerrilla's patrols with their squads and route navpoints.
-            if (patrolsIn.TryGetValue((col, row), out var patrolsHere) && patrolsHere.Count > 0)
+            // Guerrilla's patrols with their squads and route navpoints, its standing squads, and its pedestrian network.
+            var patrolsHere = patrolsIn.GetValueOrDefault((col, row)) ?? [];
+            var standingHere = standingIn.GetValueOrDefault((col, row)) ?? [];
+            int pedestriansHere = guerrillaObjects.TryGetValue((col, row), out var rfgHere) ? GuerrillaPopulation.Pedestrians(rfgHere).Count : 0;
+            pedestriansPlaced += pedestriansHere;
+            if (patrolsHere.Count > 0 || standingHere.Count > 0 || pedestriansHere > 0)
             {
                 var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
-                foreach (var person in GuerrillaPopulation.Convert(guerrillaObjects[(col, row)], patrolsHere, schema, taken))
+                foreach (var person in GuerrillaPopulation.Convert(guerrillaObjects[(col, row)], patrolsHere, standingHere, SquadsOf((col, row)), schema, taken))
                     zoneFile.Insert(zoneFile.Objects.Count, person);
+            }
+            // Guerrilla's roads (traffic's paths) and its parked vehicles' spots (see GuerrillaVehiclePlaces).
+            List<ZoneObject> roadsHere = [];
+            if (guerrillaObjects.TryGetValue((col, row), out var rfgZoneObjects))
+            {
+                var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
+                var (roadObjects, spots) = GuerrillaVehiclePlaces.Convert(rfgZoneObjects, schema, taken, vehiclePlaceProblems);
+                foreach (var placed in roadObjects.Concat(spots)) zoneFile.Insert(zoneFile.Objects.Count, placed);
+                roadsHere = roadObjects;
+                roadsPlaced += roadObjects.Count;
+                spotsPlaced += spots.Count;
+                var pickups = GuerrillaPickups.Convert(rfgZoneObjects, schema, taken, pickupItems, pickupWeapons, pickupsLeft);
+                foreach (var pickup in pickups) zoneFile.Insert(zoneFile.Objects.Count, pickup);
+                pickupsPlaced += pickups.Count;
             }
             byte[] zoneBytes = GuerrillaMovers.WithLinks(zoneFile.ToBytes(), links);
             // The persistent zone: the player start again (as the game's own levels keep one there), and
-            // no district or mission (0, as the game's persistent zones).
+            // no district or mission (0, as the game's persistent zones); the zone's roads again, as Guerrilla's.
             var persistent = ZoneFile.Create(0, 0);
             PlayerStart(persistent);
+            foreach (var road in GuerrillaVehiclePlaces.Copies(roadsHere)) persistent.Insert(persistent.Objects.Count, road);
             zonescript.Add((zone + ".rfgzone_pc", zoneBytes));
             zonescript.Add(("p_" + zone + ".rfgzone_pc", persistent.ToBytes()));
 
@@ -946,6 +1006,12 @@ public static class GuerrillaWorld
             looks.Remove((col, row));
             navigation.Remove((col, row));
         }
+        log($"People: {pedestriansPlaced} of Guerrilla's pedestrian navpoints placed (its pedestrian network, for the ambient people)");
+        log($"Vehicles' places: {roadsPlaced} of Guerrilla's roads (each in its zone and its persistent zone), {spotsPlaced} parked vehicles' spots " +
+            $"(their groups {GuerrillaVehiclePlaces.GroupPrefix}<Guerrilla's name>, which building the vehicles writes)" +
+            (vehiclePlaceProblems.Count > 0 ? $"; left out: {string.Join("; ", vehiclePlaceProblems)}" : ""));
+        log($"Pickups: {pickupsPlaced} of Guerrilla's placed (ammo boxes, weapon lockers, propane tanks, singularity bombs: the weapons build " +
+            "makes their items and weapons)" + (pickupsLeft.Count > 0 ? $"; not yet: {string.Join(", ", pickupsLeft.Select(p => $"{p.Key} {p.Value}"))}" : ""));
         log($"Precache: {precacheFiles.Count} files ({precacheFiles.Values.Sum(d => (long)d.Length) / 1048576:N0} MB) held by more than one container, kept once (its directory " +
             $"{directory / 1024:N0} KB of the {PrecacheDirectoryBudget / 1024:N0} KB it may take; {left} more such files stay in their containers); " +
             $"the containers' files {before / 1048576:N0} MB → {after / 1048576:N0} MB");

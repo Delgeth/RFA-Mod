@@ -13,7 +13,10 @@
 -- from those (rfg_dataitem_set), and Guerrilla's script does the rest as it did in Guerrilla:
 --   - the reticle: the weapon's own picture (Guerrilla's weapons each name one; a weapon without one,
 --     as every Armageddon weapon, gets Guerrilla's assault reticle, as its script says), red over an
---     enemy, green over a friend, Guerrilla's hit markers;
+--     enemy, green over a friend, Guerrilla's hit markers. Which of Guerrilla's weapons is held, the
+--     picture the game gives for it tells (primary_weapon_hud's icon: the weapons build names each one's
+--     own, rfg_ui_hud_weapon_icon_...): GuerrillaBuilder.exe puts the table Rfg_weapon_reticles before
+--     this script, each picture's reticle and its reticle while aiming finely;
 --   - the ammo: rounds in the magazine and the rest in the box beside the reticle (the infinity sign
 --     where Armageddon's is infinite), blinking red when a reload is due;
 --   - the overheat meter: for a weapon without a magazine, filling as the energy Armageddon's
@@ -31,6 +34,19 @@ local WEAPON_FIRE_FIELDS = "bbbbsssfiiiibbfbbibiii"
 
 -- Guerrilla's reticle for a weapon that has none of its own.
 local DEFAULT_RETICLE = "rfg_ui_hud_reti_assault"
+
+-- The reticle for the weapon held: Guerrilla's own for one of its weapons (by its picture; while aiming
+-- finely, its fine-aim reticle where it has one), else the default.
+local function reticle_for(icon, fine_aimed)
+	local own = Rfg_weapon_reticles ~= nil and icon ~= nil and Rfg_weapon_reticles[icon] or nil
+	if own == nil then
+		return DEFAULT_RETICLE
+	end
+	if fine_aimed and own[2] ~= nil then
+		return own[2]
+	end
+	return own[1]
+end
 
 -- Armageddon's values (ui_hud.lua).
 local RETICULE_STATE_HIDE = -1
@@ -127,7 +143,7 @@ local function send()
 	end
 
 	rfg_dataitem_set(WEAPON_FIRE, true, reload_message == RELOAD_MESSAGE_RELOAD, can_fire, false, weapon_name,
-		Weapon[2] or "", DEFAULT_RETICLE, accuracy, rounds, reserve, magazine, targeting, hit,
+		Weapon[2] or "", reticle_for(Weapon[2], fine_aimed), accuracy, rounds, reserve, magazine, targeting, hit,
 		overheated, overheat, target_name ~= "player", true, 0,
 		ammo_status == AMMO_AREA_STATUS_AMMO_COUNT, -1, 0, 0)
 	show_parts()

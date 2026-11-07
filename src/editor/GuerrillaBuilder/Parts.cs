@@ -178,6 +178,16 @@ static class Parts
             log.Line($"==== {Name(part)} ({number} of {parts.Count}) ====");
             if (!Run(setup, part, options, log, record)) return false;
         }
+        // Every table written, checked as the game's reader will take it (see TableCheck).
+        log.Stage?.Invoke("Checking the tables...");
+        log.Line("");
+        log.Line("==== Tables ====");
+        if (!TableCheck.Run(setup, log))
+        {
+            log.Line("");
+            log.Line($"Built in {Took(clock.Elapsed)}, but the game stops at start-up on the tables above. This is a bug in the builder: please report it, with logs\\guerrilla_builder.log.");
+            return false;
+        }
         log.Line("");
         log.Line($"Done in {Took(clock.Elapsed)}. Start the game with RFAModLauncher.exe; in the developer console (the ` key) type: level rfg_12_11");
         return true;

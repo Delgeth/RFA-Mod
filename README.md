@@ -55,7 +55,7 @@ single-player.
   **Items**, every item the game can drop; **Weapons**, given to you; and **Spawned**, the vehicles
   you spawned (the oldest goes after eight), to remove one or all, and how many of the game's
   vehicle slots are free. **Limits** (`limits`, in `rfa_qol`) shows how full the engine's fixed
-  tables are (vehicles, animation sets, triggers, explosions, ...) and which a mod has raised; the
+  tables are (vehicles, animation sets, triggers, explosions, projectiles, ...) and which a mod has raised; the
   game drops what doesn't fit without a word. **Graphics** (`graphics`, in `rfa_qol`) has sliders
   and switches for the Guerrilla world's picture (exposure, sky, sun, fog, sun shafts, sharpening,
   clock speed, tone mapping, shadows, ...): let go of a slider and the world changes within a second,
@@ -186,11 +186,13 @@ Things to know:
   minimap shows each zone's own detailed picture once it has loaded, a moment after you come near.
 - Guerrilla's reticle sits in the middle, turning red over an enemy and green over a friend, with
   the rounds in your magazine beside it and the rest in the box (the infinity sign where ammo is
-  unlimited), which turn red when you should reload. Armageddon's weapons all get Guerrilla's
-  assault rifle reticle for now. `Reticles=0` under `[GuerrillaHud]` brings Armageddon's back.
+  unlimited), which turn red when you should reload. Guerrilla's weapons have their own reticles
+  (another while you zoom, where Guerrilla has one); Armageddon's get Guerrilla's assault rifle
+  reticle. `Reticles=0` under `[GuerrillaHud]` brings Armageddon's back.
 - When you change weapons, Guerrilla's weapon select opens at the bottom right: your four weapons
   on plates in a cross (key 1 is the left one, then clockwise), each with its ammo, the chosen one
-  lit with its name. The pictures are Armageddon's weapons' own. `WeaponSelect=0` brings
+  lit with its name. Each weapon shows its own picture: Guerrilla's weapons Guerrilla's,
+  Armageddon's theirs. `WeaponSelect=0` brings
   Armageddon's selector back.
 - The vehicles have no sounds, lights or turrets yet, and their glass shows too bright. In
   Armageddon's own levels Darius gets in with Mason's animations, so his hands may not land on the
@@ -203,11 +205,45 @@ Things to know:
   you have set for one of them yourself is kept. E also gets you out of Armageddon's own vehicles
   where the game lets you (as a controller's button already does). `Dents=0` there keeps the
   vehicles from denting.
-- To try Guerrilla's guns: with the console open, click **Spawn**, then **Weapons**, type `rfg_` or
-  the gun's name (`rfg_m16` the assault rifle, `rfg_enforcer`, `autoblaster` the Peacekeeper,
-  `gauss_rifle`, `rfg_rail_driver`) and click Give. They have no sounds yet, no melee hit, and
-  Armageddon's bullet impacts. With one of them in your hands you move as Mason did (Guerrilla's
-  player animations); take up one of Armageddon's guns and you move as Darius again.
+- To try Guerrilla's weapons: with the console open, click **Spawn**, then **Weapons**, type the
+  weapon's name and click Give:
+  - guns: `rfg_m16` (the assault rifle), `rfg_enforcer`, `autoblaster` (the Peacekeeper),
+    `gauss_rifle`, `rfg_rail_driver`, `edf_pistol`, `sniper_rifle`, `rfg_shotgun`, `rfg_nano_rifle`;
+  - launchers and explosives: `rfg_rpg_launcher`, `thermobaric_rockets`, `rfg_charge_placer` (the
+    remote charges), `mine_placer` (proximity mines), `singularity_bomb`, `propane_tank`;
+  - Guerrilla's own: `grinder`, `arc_welder`;
+  - melee: `rfg_sledgehammer`, `sledge_upgrade_1` (Stonebreaker), `sledge_upgrade_2` (Shattermaster),
+    `gutter`.
+
+  They fire with Guerrilla's own shot sounds and show Guerrilla's pictures and reticles (other
+  sounds and impact effects aren't there yet), and the melee button with any of them in your hands
+  bashes as in Guerrilla. Throw remote charges with fire and set them all off with alt fire or reload; two
+  can be out at once, as when Guerrilla starts. Swing the hammer with fire (side) or alt fire
+  (overhead). With one of them in your hands
+  you move as Mason did (Guerrilla's player animations); take up one of Armageddon's guns and you move
+  as Darius again.
+- In the Guerrilla world Mason always has his sledgehammer, as in Guerrilla: you're given it (in the
+  weapon select's fourth place) when you have none, and the action button won't swap it for a gun on
+  the ground; hold another gun to swap that one.
+- **Guerrilla's upgrades:** press F7 and open **Guerrilla → Upgrades**. Buy with your salvage, at
+  Guerrilla's prices for your difficulty (cheaper on Easy, dearer on Hard and Insane), in Guerrilla's
+  order: buying the grinder opens its faster and explosive discs, the rocket launcher opens heat-seeking
+  rockets, and so on. Hover an upgrade to see its levels. A gun you buy is given to you, and **Take**
+  gives it again later (Guerrilla's weapon locker). Stonebreaker and Shattermaster replace Mason's
+  hammer. What you buy is kept in `mods\guerrilla_gear\upgrades_bought.txt`, the same for every save.
+  Guerrilla holds some upgrades back until you liberate a district or finish guerrilla activities; the
+  Guerrilla world has neither yet, so the window only notes those. Many upgrades are kept as bought but
+  don't do anything yet (more ammo, the remote charge count, armor and the rest); the window says which.
+- **Guerrilla's backpacks:** buy the jetpack, or one of the nine backpacks Re-Mars-tered sells
+  (Thrust, Fleetfoot, Stealth, Vision, Firepower, Concussion, Heal, Rhino, Tremor; 250 salvage each),
+  in the same window, and pick the one you wear under **Backpacks → Wear**. With the jetpack, hold jump
+  in the air to climb; it runs on fuel that refills while you don't use it (faster with Jetpack
+  Recharge). Switch the others on with **B** (`BackpackKey=` under `[GuerrillaGear]` in
+  `rfa_mods.ini`), each with Guerrilla's numbers: Thrust throws you up and Rhino makes you take no damage
+  while on; Fleetfoot makes you run and sprint faster; Firepower makes your guns, melee and explosions
+  hit harder; Concussion sets off a blast around you a second after you switch it on; Tremor shakes the
+  ground around you while on; Heal heals everyone near you, enemies too. Stealth, Vision and Rhino's
+  charge aren't in yet, and the packs don't show on Mason's back yet.
 - The EDF carry these guns, and you can take one a soldier drops, as in Guerrilla: walk over it to
   take its ammo (if you have that gun) or to take it into a free slot, or use the action button to
   swap it for the gun in your hands. A dropped gun carries what Guerrilla gives: part of a magazine and
@@ -222,7 +258,8 @@ Things to know:
   Darius's does; **F7 → Graphics → Mason's Nano Forge light** turns it off (load the level again
   to see it).
 - `guerrilla_gear` must be on: it makes room in the game for more weapons (Armageddon holds only 85
-  inventory items, and uses up to 79 itself) and for the guns' animations. If you turn it off, take
+  inventory items, and uses up to 79 itself), for their projectiles (100, 91 of them Armageddon's) and
+  for the guns' animations. If you turn it off, take
   the weapons away in the builder first.
 - Nothing made from Guerrilla is ever shipped; it stays on your PC.
 - `guerrilla_world` widens the game's physics for every world, the campaign included. Set

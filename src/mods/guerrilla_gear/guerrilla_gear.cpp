@@ -1,5 +1,6 @@
-// What Red Faction: Guerrilla's player gear (its weapons, and later its backpacks and upgrades) needs
-// from Armageddon's engine that it doesn't do itself. The weapons are made from the player's own copy
+// What Red Faction: Guerrilla's player gear (its weapons, its upgrades, and later its backpacks) needs
+// from Armageddon's engine that it doesn't do itself. Its upgrades, bought in an F7 window, are in
+// upgrades.cpp. The weapons are made from the player's own copy
 // of Guerrilla by GuerrillaBuilder.exe (never shipped): see RfaFormats\Guerrilla\GuerrillaWeapons.cs;
 // the guerrilla_world mod hands the game their tables at start-up.
 //
@@ -96,10 +97,64 @@
 // flag from his entry (the entries are one table, 0x21B7538, kept for the whole game) and lets no
 // camera turn through, as the sprint does; aiming, attacking or standing still he faces the camera
 // as before.
+//
+// Room for more projectiles (the user, 2026-11-06: "Yes, enlarge it"). Every projectile type
+// (projectiles.xtbl: Armageddon's 88, its add-on's 3, Guerrilla's thrown and launched weapons' and its
+// turrets') takes a place in one pool of 100 (0x2174F90, 0xC0 bytes a type), which its start-up
+// constructor (0x82FE60, run with the game's own start-up code, after the mods start) builds in a
+// buffer inside the pool object; a type past it is dropped without a word. Their names go into a
+// 2 KB pool ("Proj String Pool") and their stages into a 96 KB one ("Projectile Mempool"), both blocks
+// the projectile loader (0x82E9F0) takes from the Permanent Mempool once. The constructor's count is a
+// one-byte value (127 at most) and its buffer a fixed part of the object, so the mod runs the
+// constructor itself (its same calls: the pool's base, the pool made in a memory pool laid over a
+// buffer, the memory pool dropped) with a buffer of its own for 256, and changes the loader's four
+// sizes (each a 4-byte value) to 8 KB for the names and 256 KB for the stages: each checked against
+// the game's first, none changed if one differs, those already changed put back if one can't be.
+// After the loader it logs how many places, name bytes and stage bytes are in use.
+//
+// Room for more melee moves (the user, 2026-11-06: "Yes, enlarge it"). Every melee move (melee.xtbl:
+// Armageddon's 22, Guerrilla's under rfg_ names) takes a place in a pool of 32 (0x21AFEF0, 0xE0 bytes a
+// move) its start-up constructor (0x881BC0) builds as the projectiles' is built, in a buffer inside the
+// object with a one-byte count; past it the reader stops. The mod runs that constructor too, with a
+// buffer of its own for 64 (its three values checked first), and logs the use after melee.xtbl is read
+// (0x876900 wrapped). The moves' names go into a string pool of their own, "Melee Combat Strings"
+// (0x21B1BD8), of 512 bytes: the melee set-up (0x8777E0) takes 512 bytes from the Permanent Mempool
+// (`push 200h` at 0x8777F2) and makes the pool over them (`push 200h` at 0x87783C); Armageddon's 22 names
+// nearly fill it, and with Guerrilla's the game stopped ("Length of string pool exceeded", string_pool.cpp,
+// the user's 19:57 run). Both values are made 4 KB, checked first, all or nothing, before the set-up runs
+// (it runs once, at start-up); the use is logged after the reader and shown in F7 Limits. The vehicle
+// reader's names pool is the same kind and as small for Guerrilla's 153 vehicles (the user, 2026-11-06:
+// "Yes, raise both"): "Vehicle info strings" (0x14A15F8: the vehicles' names, models, display names,
+// components, lights and props, about 9.3 KB of 8 KB; `push 2000h` at 0x6271DF and 0x627227); it is made
+// 32 KB the same way. (Its neighbour "Vehicle interaction info strings", whose overflow stopped the user's
+// 20:02 run, is raised by the guerrilla_vehicles mod.)
+//
+// Room for the preloaded items (the user, 2026-11-06: "Yes, raise it"). At start-up (0xA45600) the game
+// allocates a block for its "item_preload" pool (0xA44A20: _aligned_malloc from the process heap, size
+// pushed at 0xA47520) and makes the pool of it (0x512B30 on 0x26AF1A0, the same size pushed at
+// 0xA4754E): 17 MB. Every "General (preloaded)" item's own container goes into it, then Armageddon's
+// items_containers.gpeg_pc (its items' low-detail textures, 8.8 MB); with Guerrilla's weapons' and
+// pickups' containers the peg no longer fit (the user's 18:44 and 19:38 runs). The mod makes both values
+// 32 MB, before the game's start-up code runs: each checked against the game's first, neither changed if
+// one differs, the first put back if the second can't be written. The pool's use shows in F7 Limits.
+//
+// Mason's sledgehammer. Guerrilla's Mason always has his hammer: it starts in his kit (slot 3) and
+// that slot can't be swapped (player_can_swap_inv_item). With Guerrilla's hammer built (the weapons
+// build's rfg_sledgehammer, sledge_upgrade_1, sledge_upgrade_2), the player playing Mason's set
+// (rfg_mason) who has none of them is given the plain one, into slot 3 if it's free (the game's own
+// add-by-inventory-item, 0x85B260, which takes the slot; give_player_item asks it for -1, the first
+// free), checked every two seconds from the heading step above. And the game's swap (0x8BEB00 wrapped:
+// cdecl, the human, the item on the ground, the slot or -1 for the gun in his hands) is refused for the
+// player when the gun it would drop is one of Guerrilla's hammers. With Stonebreaker or Shattermaster
+// bought (upgrades.cpp), that one is the hammer he is given: one he carries that is lesser is dropped
+// (the game's own drop of an inventory record, 0x8A2DB0: cdecl, the human, the record; from his hands
+// or his slots) and the better given into its slot.
 
 #define RFA_MOD_NAME "guerrilla_gear"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "rfa_menu.h"
+#include "guerrilla_gear.h"
 #include <malloc.h>
 #include <algorithm>
 #include <cstring>
@@ -719,12 +774,25 @@ void GiveCameraLookat(BYTE* entry) {
     }
 }
 
+void KeepHammer(BYTE* player);  // (Mason's sledgehammer, below)
+void LogItemPreload();          // (room for the preloaded items, below)
+void LogNameRoom();             // (room in the tables' name pools, below)
+bool g_itemPreloadLogged = false;
+
 void __cdecl HeadingStep(BYTE* human) {
     BYTE* player = LocalPlayer();
     if (!human || human != player) {
         g_headingStep(human);
         return;
     }
+    if (!g_itemPreloadLogged) {  // the first step in a level: every preloaded item is in by now
+        g_itemPreloadLogged = true;
+        LogItemPreload();
+        LogNameRoom();
+    }
+    upgrades::Step(player);
+    backpacks::Step(player);
+    KeepHammer(player);
     const bool free = WalksFree(player);
     BYTE* entry = *reinterpret_cast<BYTE**>(player + kCharacterEntry);
     if (entry) GiveCameraLookat(entry);
@@ -758,6 +826,486 @@ void PlayerMovement() {
     else rfa::Log("Movement: Darius and Mason turn to face where they walk and run, through all 360 degrees; aiming and attacking face the camera");
 }
 
+// ---- Mason's sledgehammer (see the top)
+
+constexpr DWORD kWeaponTable = 0x18F8048;      // the weapon entries (0xE0 bytes each, +0 the name)
+constexpr DWORD kWeaponTableCount = 0x18F804C;
+constexpr DWORD kWeaponEntrySize = 0xE0;
+constexpr int kHammerSlot = 3;                 // Guerrilla's: the hammer's slot
+constexpr int kRadialSlots = 4;
+constexpr ULONGLONG kHammerCheckMs = 2000;
+
+constexpr DWORD kSwapWeapon = 0x8BEB00;
+constexpr size_t kSwapWeaponPrologue = 6;      // push ebp / mov ebp,esp / sub esp,24h
+using SwapWeaponFn = void(__cdecl*)(BYTE* human, BYTE* item, int slot);
+SwapWeaponFn g_swapWeapon;
+
+// The game's add-by-inventory-item (cdecl: the human, the inventory item, rounds (0: its own), the slot
+// (-1: the first free, as give_player_item asks), three flags), the record in a slot (cdecl: the human,
+// the slot) and the one in his hands (cdecl: the human). A record's +0x18 is its weapon's handle.
+auto const GiveByInventoryItem = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human, const void* inventoryItem, int rounds, int slot, bool, bool, bool)>(0x85B260);
+auto const RecordInSlot = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human, int slot)>(0x7A8290);
+auto const RecordInHands = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human)>(0x8BE980);
+
+// Guerrilla's hammers, as the weapons build names them: the sledgehammer and its upgrades (Stonebreaker,
+// Shattermaster), the first the one Mason is given.
+const char* const kHammers[] = {"rfg_sledgehammer", "sledge_upgrade_1", "sledge_upgrade_2"};
+
+ULONGLONG g_nextHammerCheck;
+ULONGLONG g_lastHammerNote;
+
+const BYTE* WeaponEntryNamed(const char* name) {
+    BYTE* entries = *reinterpret_cast<BYTE* const*>(kWeaponTable);
+    const int count = *reinterpret_cast<const int*>(kWeaponTableCount);
+    for (int i = 0; entries && i < count; ++i) {
+        const char* own = *reinterpret_cast<const char* const*>(entries + i * kWeaponEntrySize);
+        if (own && _stricmp(own, name) == 0) return entries + i * kWeaponEntrySize;
+    }
+    return nullptr;
+}
+
+bool IsHammer(const BYTE* info) {
+    const char* name = info ? *reinterpret_cast<const char* const*>(info) : nullptr;
+    if (!name) return false;
+    for (const char* hammer : kHammers)
+        if (_stricmp(name, hammer) == 0) return true;
+    return false;
+}
+
+// The weapon entry of an inventory record, or null.
+const BYTE* RecordWeapon(const BYTE* record) {
+    if (!record) return nullptr;
+    const BYTE* weapon = ObjectFromHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(record + kInventoryInfo));
+    return weapon ? *reinterpret_cast<const BYTE* const*>(weapon + kWeaponInfo) : nullptr;
+}
+
+auto const DropRecord = reinterpret_cast<void(__cdecl*)(BYTE* human, BYTE* record)>(0x8A2DB0);
+
+// Mason always carries his hammer (Guerrilla's start kit, character.xtbl rfg_PC: the sledgehammer in
+// slot 3): every two seconds on foot, the player playing Mason's set who has none of the three is given
+// the best he has bought (Guerrilla's upgrades: Stonebreaker, Shattermaster; else the plain one), into
+// slot 3 if it's free, else the first free one. One he carries that is lesser than that is dropped first.
+void KeepHammer(BYTE* player) {
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_nextHammerCheck) return;
+    g_nextHammerCheck = now + kHammerCheckMs;
+    if (!PlaysSet(player, kMasonSet)) return;
+    // The hammers in order (plain, Stonebreaker, Shattermaster), and the one he should have: the best bought.
+    const std::string bought = upgrades::BestHammer();
+    constexpr int kCount = static_cast<int>(sizeof(kHammers) / sizeof(kHammers[0]));
+    const void* items[kCount] = {};
+    int best = -1;
+    for (int i = 0; i < kCount; ++i) {
+        const BYTE* info = WeaponEntryNamed(kHammers[i]);
+        items[i] = info ? *reinterpret_cast<const void* const*>(info + kInventoryInfo) : nullptr;
+        if (items[i] && (best < 0 || _stricmp(kHammers[i], bought.c_str()) == 0)) best = i;
+    }
+    if (best < 0) return;  // Guerrilla's hammer isn't built
+    const void* give = items[best];
+    BYTE* lesser = nullptr;
+    for (int i = 0; i < kCount; ++i) {
+        BYTE* record = items[i] ? HasItem(player, items[i]) : nullptr;
+        if (!record) continue;
+        if (i >= best) return;  // he has that one, or a better
+        lesser = record;
+    }
+    if (lesser) {
+        DropRecord(player, lesser);
+        rfa::Log("Hammer: dropped the lesser hammer for %s (bought)", bought.c_str());
+    }
+    int slot = RecordInSlot(player, kHammerSlot) ? -1 : kHammerSlot;
+    for (int s = 0; slot < 0 && s < kRadialSlots; ++s)
+        if (!RecordInSlot(player, s)) slot = s;
+    if (slot < 0) {
+        if (now - g_lastHammerNote > 60000) {
+            g_lastHammerNote = now;
+            rfa::Log("Hammer: Mason has no sledgehammer and no free slot for it (four guns); it waits for a free slot");
+        }
+        return;
+    }
+    const BYTE* given = GiveByInventoryItem(player, give, 0, slot, false, false, false);
+    rfa::Log("Hammer: Mason %s; given %s %s, slot %d", lesser ? "had a lesser hammer" : "had no sledgehammer", given ? "him" : "nothing (the game refused)",
+             kHammers[best], slot);
+}
+
+}  // namespace
+
+// ---- What the other parts borrow (guerrilla_gear.h)
+
+std::wstring gear::Folder() { return GearFolder(); }
+
+const BYTE* gear::WeaponEntryNamed(const char* name) { return ::WeaponEntryNamed(name); }
+
+bool gear::PlaysMason(const BYTE* human) { return human && PlaysSet(human, kMasonSet); }
+
+bool gear::GiveWeapon(BYTE* player, const char* name, std::string& why) {
+    const BYTE* info = name && *name ? ::WeaponEntryNamed(name) : nullptr;
+    const void* inventoryItem = info ? *reinterpret_cast<const void* const*>(info + kInventoryInfo) : nullptr;
+    if (!player || !inventoryItem) {
+        why = "not built";
+        return false;
+    }
+    if (HasItem(player, inventoryItem)) {
+        why = "you carry it already";
+        return false;
+    }
+    // A free slot; Mason's hammer slot last, as it is his hammer's.
+    const bool mason = PlaysSet(player, kMasonSet);
+    int slot = -1;
+    for (int s = 0; slot < 0 && s < kRadialSlots; ++s)
+        if (!(mason && s == kHammerSlot) && !RecordInSlot(player, s)) slot = s;
+    if (slot < 0 && !mason) {
+        why = "no free slot";
+        return false;
+    }
+    if (slot < 0 && !RecordInSlot(player, kHammerSlot)) slot = kHammerSlot;
+    if (slot < 0) {
+        why = "no free slot (drop a gun)";
+        return false;
+    }
+    if (!GiveByInventoryItem(player, inventoryItem, 0, slot, false, false, false)) {
+        why = "the game refused it";
+        return false;
+    }
+    rfa::Log("Upgrades: gave %s, slot %d", name, slot);
+    return true;
+}
+
+// ---- The player's climb, for the jetpack (backpacks.cpp)
+//
+// Armageddon moves a human through its character controller (human+0x98, there while human+0xAC is 1;
+// Guerrilla's character_controller): the game's own get and set of its velocity (0x850950 / 0x850990,
+// cdecl: the human, a vector; Guerrilla's human_controller_get_vel / _set_vel, which its jetpack uses),
+// and whether it stands on the ground (0x850830: the controller's +0x38 bit 2). The heading step runs
+// before the controller's step each frame, so a velocity set here is the one the step starts from. One
+// catch: for the player, the step puts a climb a little above the last one it worked out (controller
+// +0x60) back to it, unless he jumps (0x79E77E); Guerrilla skips that while its jetpack is on, Armageddon
+// has no such case, so Lift also writes the new climb there (the step writes its own after).
+
+struct Vector3 {
+    float x, y, z;
+};
+auto const ControllerVelocity = reinterpret_cast<void(__cdecl*)(BYTE* human, Vector3* out)>(0x850950);
+auto const SetControllerVelocity = reinterpret_cast<void(__cdecl*)(BYTE* human, const Vector3* velocity)>(0x850990);
+auto const OnGround = reinterpret_cast<bool(__cdecl*)(BYTE* human)>(0x850830);
+constexpr DWORD kController = 0x98, kHasController = 0xAC, kLastClimb = 0x60;
+
+bool gear::Airborne(BYTE* player) {
+    return player && *reinterpret_cast<const int*>(player + kOnFootState) == 0 && player[kHasController] == 1 && !OnGround(player);
+}
+
+float gear::Climb(BYTE* player) {
+    Vector3 velocity{};
+    ControllerVelocity(player, &velocity);
+    return velocity.y;
+}
+
+void gear::Lift(BYTE* player, float climb) {
+    if (!player || player[kHasController] != 1) return;
+    Vector3 velocity{};
+    ControllerVelocity(player, &velocity);
+    velocity.y += climb;
+    SetControllerVelocity(player, &velocity);
+    if (BYTE* controller = *reinterpret_cast<BYTE**>(player + kController))
+        *reinterpret_cast<float*>(controller + kLastClimb) = velocity.y;
+}
+
+namespace {
+
+// Swapping a gun on the ground for one of his (the action button, 0x8BEB00: the gun in the slot asked
+// for, or in his hands, dropped): Guerrilla never lets the hammer go (player_can_swap_inv_item, RM
+// 0xA111B0, refuses slot 3), so for the player a swap that would drop one of Guerrilla's hammers doesn't
+// happen; with a gun in his hands it swaps that.
+void __cdecl SwapWeapon(BYTE* human, BYTE* item, int slot) {
+    if (human && human == LocalPlayer()) {
+        BYTE* out = slot == -1 ? RecordInHands(human) : RecordInSlot(human, slot);
+        if (IsHammer(RecordWeapon(out))) {
+            const ULONGLONG now = GetTickCount64();
+            if (now - g_lastHammerNote > 5000) {
+                g_lastHammerNote = now;
+                rfa::Log("Hammer: not swapped away (Guerrilla never drops it); swap with a gun in his hands");
+            }
+            return;
+        }
+    }
+    g_swapWeapon(human, item, slot);
+}
+
+// ---- Room for more projectiles (see the top)
+
+constexpr DWORD kProjectilePoolConstructor = 0x82FE60;  // the pool's start-up constructor (thiscall: the pool)
+constexpr size_t kProjectilePoolConstructorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,5Ch
+constexpr DWORD kProjectileLoader = 0x82E9F0;            // the projectile tables' set-up and first read (cdecl, none)
+constexpr size_t kProjectileLoaderPrologue = 10;          // push ebp / mov ebp,esp / cmp dword ptr [2174E70h],0
+constexpr DWORD kProjectilePool = 0x2174F90;             // the projectile types (a word at +0xA how many it holds; a byte each at +0x18, 0xFF free)
+constexpr DWORD kPoolHolds = 0xA, kPoolFlags = 0x18;
+constexpr BYTE kPoolFree = 0xFF;
+constexpr DWORD kNamePool = 0x2174ED8, kStagePool = 0x2174F38;  // the "Proj String Pool" and "Projectile Mempool" (size +0x44, used +0x4C)
+constexpr DWORD kGameProjectiles = 100, kProjectiles = 256;
+constexpr DWORD kProjectileTypeSize = 0xC0;              // and a link (4 bytes) and a flag (1 byte) each
+constexpr DWORD kGamePoolMemory = 0x4CF9;                // the constructor's buffer, inside the pool object (+0x30)
+constexpr DWORD kProjectilePoolMemory = kProjectiles * (kProjectileTypeSize + 4 + 1) + 64;  // with room for its alignment
+
+// The constructor's own values, checked before anything changes: its buffer's size (push 4CF9h), its
+// count (push 64h, a one-byte value: 127 at most) and the buffer's place in the object (add eax,30h).
+constexpr DWORD kPoolMemoryValue = 0x82FE7B, kPoolCountValue = 0x82FE8F, kPoolBufferValue = 0x82FE84;
+
+// The four sizes in the loader (each `push imm32`): the names' block and its pool, the stages' block and
+// its pool; the blocks come from the Permanent Mempool once, while the game starts.
+struct ProjectileRoom { const char* what; DWORD at; DWORD game; DWORD ours; };
+const ProjectileRoom kProjectileRooms[] = {
+    {"names' block", 0x82EA03, 0x800, 0x2000},
+    {"names' pool", 0x82EA4D, 0x800, 0x2000},
+    {"stages' block", 0x82EA80, 0x18000, 0x40000},
+    {"stages' pool", 0x82EACB, 0x18000, 0x40000},
+};
+
+alignas(16) BYTE g_projectilePoolMemory[kProjectilePoolMemory];
+
+auto const PoolBase = reinterpret_cast<void(__fastcall*)(BYTE* pool, void* unused)>(0x71C5D0);
+auto const MempoolOver = reinterpret_cast<void(__fastcall*)(void* mempool, void* unused, void* memory, DWORD size, const void* name,
+                                                             DWORD first, DWORD second)>(0x428240);
+using PoolInitFn = void(__fastcall*)(BYTE* pool, void* unused, void* mempool, DWORD holds);
+auto const ProjectilePoolInit = reinterpret_cast<PoolInitFn>(0x82FEB0);
+auto const MempoolDone = reinterpret_cast<void(__fastcall*)(void* mempool, void* unused)>(0x427F40);
+const void* const kObjectPoolName = reinterpret_cast<const void*>(0xF7101C);  // "object pool", the name the game gives it
+
+using ProjectileLoaderFn = void(__cdecl*)();
+ProjectileLoaderFn g_projectileLoader;
+
+// What the game's start-up constructors of its fixed pools do (the projectile types' 0x82FE60, the
+// melee moves' 0x881BC0): the pool's base, a memory pool laid over a buffer, the pool's set-up in it
+// for so many places, the memory pool dropped. The mod's pass a buffer of their own and more places.
+BYTE* BuildPool(BYTE* pool, BYTE* memory, DWORD size, PoolInitFn init, DWORD holds) {
+    PoolBase(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's takes 0x58 bytes of its stack
+    MempoolOver(mempool, nullptr, memory, size, kObjectPoolName, 1, 0);
+    init(pool, nullptr, mempool, holds);
+    MempoolDone(mempool, nullptr);
+    return pool;
+}
+
+// How many places such a pool holds (a word at +0xA) and how many are taken (a byte each, 0xFF while free).
+int PoolHolds(DWORD pool) { return *reinterpret_cast<const WORD*>(pool + kPoolHolds); }
+
+int PoolInUse(DWORD pool) {
+    const BYTE* flags = *reinterpret_cast<BYTE* const*>(pool + kPoolFlags);
+    int used = 0;
+    for (int i = 0, holds = PoolHolds(pool); flags && i < holds; ++i)
+        if (flags[i] != kPoolFree) ++used;
+    return used;
+}
+
+// The projectile pool's constructor, with the mod's buffer and 256 places.
+BYTE* __fastcall ProjectilePoolConstructor(BYTE* pool, void* unused) {
+    return BuildPool(pool, g_projectilePoolMemory, sizeof(g_projectilePoolMemory), ProjectilePoolInit, kProjectiles);
+}
+
+int ProjectilesHeld() { return PoolHolds(kProjectilePool); }
+int ProjectilesInUse() { return PoolInUse(kProjectilePool); }
+
+void LogPoolUse(const char* what, DWORD pool) {
+    rfa::Log("Projectiles: %s %lu of %lu bytes in use", what, *reinterpret_cast<const DWORD*>(pool + kMempoolUsed),
+             *reinterpret_cast<const DWORD*>(pool + kMempoolSize));
+}
+
+// After the game has set up its projectile tables and read projectiles.xtbl (Armageddon's with
+// Guerrilla's, from the guerrilla_world mod): how full they are. Add-ons' come later.
+void __cdecl ProjectileLoader() {
+    g_projectileLoader();
+    rfa::Log("Projectiles: %d of %d places in use", ProjectilesInUse(), ProjectilesHeld());
+    LogPoolUse("names:", kNamePool);
+    LogPoolUse("stages:", kStagePool);
+}
+
+void MoreProjectiles() {
+    if (ProjectilesHeld() != 0) {
+        rfa::Log("Projectiles: the game has already built its table; it keeps its %lu", kGameProjectiles);
+        return;
+    }
+    if (rfa::CodeValue(kPoolMemoryValue) != kGamePoolMemory || *reinterpret_cast<const BYTE*>(kPoolCountValue) != kGameProjectiles ||
+        *reinterpret_cast<const BYTE*>(kPoolBufferValue) != 0x30) {
+        rfa::Log("Projectiles: the game's constructor (0x%08lX) isn't as expected; the game keeps its %lu", kProjectilePoolConstructor, kGameProjectiles);
+        return;
+    }
+    for (const ProjectileRoom& room : kProjectileRooms)
+        if (rfa::CodeValue(room.at) != room.game) {
+            rfa::Log("Projectiles: the game's %s size at 0x%08lX isn't 0x%lX (it's 0x%lX); the game keeps its %lu", room.what, room.at,
+                     room.game, rfa::CodeValue(room.at), kGameProjectiles);
+            return;
+        }
+    // All or nothing: the four sizes, then the constructor; any one failing puts back what changed.
+    size_t changed = 0;
+    for (; changed < std::size(kProjectileRooms); ++changed)
+        if (!rfa::PatchCode(reinterpret_cast<void*>(kProjectileRooms[changed].at), &kProjectileRooms[changed].ours, sizeof(DWORD))) break;
+    const bool hooked = changed == std::size(kProjectileRooms) &&
+        rfa::HookFunction(kProjectilePoolConstructor, kProjectilePoolConstructorPrologue, reinterpret_cast<void*>(&ProjectilePoolConstructor)) != nullptr;
+    if (!hooked) {
+        for (size_t i = 0; i < changed; ++i) rfa::PatchCode(reinterpret_cast<void*>(kProjectileRooms[i].at), &kProjectileRooms[i].game, sizeof(DWORD));
+        rfa::Log("Projectiles: could not change the game's code; it keeps its %lu", kGameProjectiles);
+        return;
+    }
+    g_projectileLoader = reinterpret_cast<ProjectileLoaderFn>(
+        rfa::HookFunction(kProjectileLoader, kProjectileLoaderPrologue, reinterpret_cast<void*>(&ProjectileLoader)));
+    rfa::Log("Projectiles: the game holds %lu (its own %lu), their names %lu bytes (0x%lX), their stages %lu bytes (0x%lX)", kProjectiles,
+             kGameProjectiles, kProjectileRooms[1].ours, kProjectileRooms[1].game, kProjectileRooms[3].ours, kProjectileRooms[3].game);
+}
+
+// ---- Room for more melee moves (see the top)
+
+constexpr DWORD kMeleeConstructor = 0x881BC0;    // the melee moves' pool's start-up constructor (thiscall: the pool)
+constexpr size_t kMeleeConstructorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,5Ch
+constexpr DWORD kMeleeLoader = 0x876900;         // melee.xtbl's reader (cdecl: two values)
+constexpr size_t kMeleeLoaderPrologue = 6;       // push ebp / mov ebp,esp / sub esp,68h
+constexpr DWORD kMeleePool = 0x21AFEF0;
+constexpr DWORD kGameMeleeMoves = 32, kMeleeMoves = 64;
+constexpr DWORD kMeleeMoveSize = 0xE0;           // and a link (4 bytes) and a flag (1 byte) each
+constexpr DWORD kGameMeleeMemory = 0x1CA5;       // the constructor's buffer, inside the pool object (+0x30)
+constexpr DWORD kMeleePoolMemory = kMeleeMoves * (kMeleeMoveSize + 4 + 1) + 64;
+// The constructor's own values, checked first: its buffer's size (push 1CA5h), its count (push 20h, one
+// byte) and the buffer's place in the object (add eax,30h).
+constexpr DWORD kMeleeMemoryValue = 0x881BDB, kMeleeCountValue = 0x881BEF, kMeleeBufferValue = 0x881BE4;
+
+alignas(16) BYTE g_meleePoolMemory[kMeleePoolMemory];
+auto const MeleePoolInit = reinterpret_cast<PoolInitFn>(0x7FD7C0);
+
+using MeleeLoaderFn = int(__cdecl*)(int first, int second);
+MeleeLoaderFn g_meleeLoader;
+
+BYTE* __fastcall MeleePoolConstructor(BYTE* pool, void* unused) {
+    return BuildPool(pool, g_meleePoolMemory, sizeof(g_meleePoolMemory), MeleePoolInit, kMeleeMoves);
+}
+
+// After melee.xtbl is read (Armageddon's with Guerrilla's, from the guerrilla_world mod): how full the table is.
+// ---- Room in the tables' name pools (see the top: the moves' names, and the vehicles')
+//
+// A string pool's set-up takes its memory from a memory pool (`push size`) and makes the string pool over it
+// (`push size` again); both values are made ours, checked against the game's first, all or nothing.
+struct NamePool {
+    const char* what;
+    DWORD memoryValue;  // the push of the bytes taken for it
+    DWORD poolValue;    // the push of the pool's size
+    DWORD pool;         // the string pool (size +0x44, bytes used +0x4C)
+    DWORD memory;       // where the set-up keeps its memory (0 until it has run)
+    DWORD game, ours;
+};
+
+const NamePool kNamePools[] = {
+    // "Melee Combat Strings": melee.xtbl's moves, set up by 0x8777E0.
+    {"Melee move names", 0x8777F3, 0x87783D, 0x21B1BD8, 0x21AFDE0, 0x200, 0x1000},
+    // "Vehicle info strings": vehicles.xtbl's names, models, display names, components, lights and props, set
+    // up by 0x6271C0 (its memory from the pool its caller hands it: the Permanent Mempool at start-up).
+    {"Vehicle names", 0x6271E0, 0x627228, 0x14A15F8, 0x14A15D0, 0x2000, 0x8000},
+    // ("Vehicle interaction info strings", vehicle_interactions.xtbl's, is the guerrilla_vehicles mod's.)
+};
+
+DWORD NamePoolValue(const NamePool& p, DWORD field) { return *reinterpret_cast<const DWORD*>(p.pool + field); }
+
+void MoreNameRoom() {
+    for (const NamePool& p : kNamePools) {
+        if (*reinterpret_cast<const DWORD*>(p.memory) != 0) {
+            rfa::Log("%s: the game has already made its pool; it keeps its %lu bytes", p.what, p.game);
+            continue;
+        }
+        if (rfa::CodeValue(p.memoryValue) != p.game || rfa::CodeValue(p.poolValue) != p.game) {
+            rfa::Log("%s: the game's code (0x%08lX, 0x%08lX) isn't as expected; it keeps its %lu bytes", p.what, p.memoryValue, p.poolValue,
+                     p.game);
+            continue;
+        }
+        if (!rfa::PatchCode(reinterpret_cast<void*>(p.memoryValue), &p.ours, sizeof(p.ours))) {
+            rfa::Log("%s: could not change the game's code; it keeps its %lu bytes", p.what, p.game);
+            continue;
+        }
+        if (!rfa::PatchCode(reinterpret_cast<void*>(p.poolValue), &p.ours, sizeof(p.ours))) {
+            rfa::PatchCode(reinterpret_cast<void*>(p.memoryValue), &p.game, sizeof(p.game));
+            rfa::Log("%s: could not change the game's code; it keeps its %lu bytes", p.what, p.game);
+            continue;
+        }
+        rfa::Log("%s: %lu bytes (the game's %lu)", p.what, p.ours, p.game);
+    }
+}
+
+// Each pool's use, once its tables are read (logged at the player's first step).
+void LogNameRoom() {
+    for (const NamePool& p : kNamePools)
+        if (NamePoolValue(p, kMempoolSize)) rfa::Log("%s: %lu of %lu bytes in use", p.what, NamePoolValue(p, kMempoolUsed), NamePoolValue(p, kMempoolSize));
+}
+
+constexpr DWORD kMeleeNamesPool = 0x21B1BD8;
+
+int __cdecl MeleeLoader(int first, int second) {
+    const int result = g_meleeLoader(first, second);
+    rfa::Log("Melee moves: %d of %d places in use; names %lu of %lu bytes", PoolInUse(kMeleePool), PoolHolds(kMeleePool),
+             *reinterpret_cast<const DWORD*>(kMeleeNamesPool + kMempoolUsed), *reinterpret_cast<const DWORD*>(kMeleeNamesPool + kMempoolSize));
+    return result;
+}
+
+// The user, 2026-11-06: "Yes, enlarge it". The constructor's count is one byte and its buffer a fixed part
+// of the object (as the projectiles'), so the mod runs the constructor itself with a buffer for 64.
+void MoreMeleeMoves() {
+    if (PoolHolds(kMeleePool) != 0) {
+        rfa::Log("Melee moves: the game has already built its table; it keeps its %lu", kGameMeleeMoves);
+        return;
+    }
+    if (rfa::CodeValue(kMeleeMemoryValue) != kGameMeleeMemory || *reinterpret_cast<const BYTE*>(kMeleeCountValue) != kGameMeleeMoves ||
+        *reinterpret_cast<const BYTE*>(kMeleeBufferValue) != 0x30) {
+        rfa::Log("Melee moves: the game's constructor (0x%08lX) isn't as expected; the game keeps its %lu", kMeleeConstructor, kGameMeleeMoves);
+        return;
+    }
+    if (!rfa::HookFunction(kMeleeConstructor, kMeleeConstructorPrologue, reinterpret_cast<void*>(&MeleePoolConstructor))) {
+        rfa::Log("Melee moves: could not change the game's code; it keeps its %lu", kGameMeleeMoves);
+        return;
+    }
+    g_meleeLoader = reinterpret_cast<MeleeLoaderFn>(rfa::HookFunction(kMeleeLoader, kMeleeLoaderPrologue, reinterpret_cast<void*>(&MeleeLoader)));
+    rfa::Log("Melee moves: the game holds %lu (its own %lu)", kMeleeMoves, kGameMeleeMoves);
+}
+
+// ---- Room for the preloaded items (see the top)
+
+constexpr DWORD kItemPreloadBlockSize = 0xA47521;  // push 1100000h (the block 0xA44A20 allocates)
+constexpr DWORD kItemPreloadPoolSize = 0xA4754F;   // push 1100000h (the pool 0x512B30 makes of it)
+constexpr DWORD kItemPreloadPool = 0x26AF1A0;      // the pool (size +0x44, bytes used +0x4C)
+constexpr DWORD kGameItemPreload = 0x1100000;      // 17 MB
+constexpr DWORD kItemPreload = 32 * 1024 * 1024;
+
+void MoreItemPreload() {
+    if (*reinterpret_cast<const DWORD*>(kItemPreloadPool + kMempoolSize) != 0) {
+        rfa::Log("Item preload: the game has already made its pool; it keeps its %lu MB", kGameItemPreload / (1024 * 1024));
+        return;
+    }
+    if (rfa::CodeValue(kItemPreloadBlockSize) != kGameItemPreload || rfa::CodeValue(kItemPreloadPoolSize) != kGameItemPreload) {
+        rfa::Log("Item preload: the game's code (0x%08lX, 0x%08lX) isn't as expected; it keeps its 17 MB", kItemPreloadBlockSize,
+                 kItemPreloadPoolSize);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kItemPreloadBlockSize), &kItemPreload, sizeof(kItemPreload))) {
+        rfa::Log("Item preload: could not change the game's code; it keeps its 17 MB");
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kItemPreloadPoolSize), &kItemPreload, sizeof(kItemPreload))) {
+        rfa::PatchCode(reinterpret_cast<void*>(kItemPreloadBlockSize), &kGameItemPreload, sizeof(kGameItemPreload));
+        rfa::Log("Item preload: could not change the game's code; it keeps its 17 MB");
+        return;
+    }
+    rfa::Log("Item preload: %lu MB (the game's %lu MB): the preloaded items' containers, then Armageddon's items' low-detail textures",
+             kItemPreload / (1024 * 1024), kGameItemPreload / (1024 * 1024));
+}
+
+// After the items' start-up (the projectile loader runs later): the pool's use, logged once.
+void LogItemPreload() {
+    const DWORD size = *reinterpret_cast<const DWORD*>(kItemPreloadPool + kMempoolSize);
+    const DWORD used = *reinterpret_cast<const DWORD*>(kItemPreloadPool + kMempoolUsed);
+    if (size) rfa::Log("Item preload: %lu of %lu bytes in use", used, size);
+}
+
+bool g_upgradesRunning = false;
+
+void MasonsHammer() {
+    g_swapWeapon = reinterpret_cast<SwapWeaponFn>(rfa::HookFunction(kSwapWeapon, kSwapWeaponPrologue, reinterpret_cast<void*>(&SwapWeapon)));
+    if (!g_swapWeapon) rfa::Log("Hammer: could not wrap the swap; Guerrilla's hammer can be swapped away");
+    else rfa::Log("Hammer: Mason is given Guerrilla's sledgehammer (slot 3) when he has none, and never swaps it away");
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -766,8 +1314,25 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         return;
     }
     MoreInventoryItems();
+    MoreItemPreload();
+    MoreProjectiles();
+    MoreMeleeMoves();
+    MoreNameRoom();
     MoreTriggerRoom();
     PlayerAnimations();
     DroppedGuns();
     PlayerMovement();
+    MasonsHammer();
+    // The upgrades' purchases happen in the heading step: without it the window stays shut.
+    if (g_headingStep) {
+        upgrades::Init();
+        backpacks::Init();
+        g_upgradesRunning = true;
+    } else {
+        rfa::Log("Upgrades: no heading step to buy them in; the window is off");
+    }
+}
+
+extern "C" __declspec(dllexport) void __cdecl RFAMod_Menu(const RFAMenu* menu) {
+    if (g_upgradesRunning) upgrades::Menu(menu);
 }

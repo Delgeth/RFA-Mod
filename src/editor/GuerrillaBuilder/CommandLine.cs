@@ -22,6 +22,8 @@ static class CommandLine
         GuerrillaBuilder.exe remove [<parts>]             takes them away again (all of them if none are named),
                                                           with the parts built on them
         GuerrillaBuilder.exe status                       says what is built
+        GuerrillaBuilder.exe check                        checks the tables built, as the game's reader takes
+                                                          them at start-up (a build ends with this too)
           <parts>: world hud vehicles weapons people, in any order; they're built in that order, with
           the ones they need that aren't built yet.
         Options for build:
@@ -63,6 +65,12 @@ static class CommandLine
         {
             Console.WriteLine(Usage);
             return 0;
+        }
+        if (command == "check")
+        {
+            var checkSetup = Setup.Find();
+            using var checkLog = new BuildLog(checkSetup.LogFile, Console.WriteLine);
+            return TableCheck.Run(checkSetup, checkLog) ? 0 : 1;
         }
         if (command is not ("build" or "remove" or "status"))
             return Fail($"Unknown command {args[0]}.\n\n{Usage}");

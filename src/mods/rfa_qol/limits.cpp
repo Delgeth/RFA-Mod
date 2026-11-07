@@ -22,6 +22,21 @@
 //   vehicle slots      the vehicle pool 0x1972900: taken of the slots it holds (+0x10; 0x7612F0 the free)
 //   animation names    the "Anim strings" pool 0x2684EC8: bytes used (+0x4C) of its size (+0x44; 128 KB,
 //                      guerrilla_people gives it 512 KB): every animation's, set's, state's and action's name
+//   projectiles        the projectile types' pool 0x2174F90: how many it holds (a word at +0xA; 100,
+//                      guerrilla_gear gives it 256), each place taken unless its byte (+0x18's array) is 0xFF
+//   projectile names   the "Proj String Pool" 0x2174ED8 (+0x4C of +0x44; 2 KB, guerrilla_gear 8 KB)
+//   projectile stages  the "Projectile Mempool" 0x2174F38 (+0x4C of +0x44; 96 KB, guerrilla_gear 256 KB)
+//   melee move names   the "Melee Combat Strings" pool 0x21B1BD8 (+0x4C of +0x44; 512 bytes, guerrilla_gear 4 KB)
+//   vehicle names,     the "Vehicle info strings" pool 0x14A15F8 and "Vehicle interaction info strings"
+//   interaction names  0x14E6990 (+0x4C of +0x44; 8 KB each; guerrilla_gear and guerrilla_vehicles 32 KB)
+//   item preload       the "item_preload" pool 0x26AF1A0 (+0x4C of +0x44; 17 MB, guerrilla_gear 32 MB): the
+//                      preloaded items' containers, then Armageddon's items_containers.gpeg_pc (8.8 MB)
+//   melee moves        the melee moves' pool 0x21AFEF0, a pool as the projectiles' (32, guerrilla_gear 64)
+//   character names    the "Human info strings" pool 0x21DC118 (+0x4C of +0x44; 6,200 bytes, guerrilla_people 64 KB)
+//   patrols            the object_patrol pool 0x20F3B10, a pool as the projectiles' (24, guerrilla_people 72)
+//   people, squads,    the npc pool 0x21DCE30 (100), the object_squad pool 0x2160AF0 (100) and the
+//   squad spawn nodes  object_squad_spawn_node pool 0x2108CE0 (384): the game's own sizes, as Guerrilla's
+//                      (it holds 100 NPCs and 100 squads, and 256 squad spawn nodes)
 #define RFA_MOD_NAME "limits"
 #include "rfa_mod.h"
 #include "rfa_menu.h"
@@ -55,7 +70,34 @@ const Limit kLimits[] = {
     {"Visual effects", 0x1200BF4, 0x4EE40A, 0, 950, "vfx.xtbl: Armageddon's, Guerrilla's props', and a DLC level's while it's loaded"},
     {"Effects", 0x1200BEC, 0x4EEA51, 0, 1225, "effects.xtbl: Armageddon's, Guerrilla's props' and vehicles', and a DLC level's while it's loaded"},
     {"Inventory items", 0x19F8570, 0x7A77F6, 0, 85, "items_inventory.xtbl: one for each weapon you can carry (Armageddon's, Guerrilla's), and a DLC level's while it's loaded", 1},
+    {"Character names (bytes)", 0x21DC118 + 0x4C, 0x21DC118 + 0x44, 0, 0x1838,
+     "Every character's names, models, skeletons and props' names (character.xtbl); full, the game stops while it starts"},
+    {"Projectile names (bytes)", 0x2174ED8 + 0x4C, 0x2174ED8 + 0x44, 0, 0x800, "Every projectile type's name"},
+    {"Projectile stages (bytes)", 0x2174F38 + 0x4C, 0x2174F38 + 0x44, 0, 0x18000, "Every projectile type's stages, triggers and effects"},
+    {"Melee move names (bytes)", 0x21B1BD8 + 0x4C, 0x21B1BD8 + 0x44, 0, 0x200, "melee.xtbl's move names: Armageddon's and Guerrilla's (rfg_)"},
+    {"Vehicle names (bytes)", 0x14A15F8 + 0x4C, 0x14A15F8 + 0x44, 0, 0x2000,
+     "vehicles.xtbl's names, models, display names, components, lights and props"},
+    {"Vehicle interaction names (bytes)", 0x14E6990 + 0x4C, 0x14E6990 + 0x44, 0, 0x2000, "vehicle_interactions.xtbl's names"},
+    {"Item preload (bytes)", 0x26AF1A0 + 0x4C, 0x26AF1A0 + 0x44, 0, 0x1100000,
+     "Every preloaded item's own container (guns, clips, pickups), then Armageddon's items' low-detail textures (8.8 MB)"},
 };
+
+// The projectile types', melee moves' and the world's object pools: how many places each holds (a word at
+// +0xA), and a byte for each place (an array at +0x18), 0xFF while free.
+constexpr DWORD kProjectilePool = 0x2174F90, kMeleePool = 0x21AFEF0, kPoolHolds = 0xA, kPoolFlags = 0x18;
+constexpr DWORD kPatrolPool = 0x20F3B10, kNpcPool = 0x21DCE30, kSquadPool = 0x2160AF0, kSquadNodePool = 0x2108CE0;
+
+void Row(const char* what, int used, int size, int game, const char* about);
+
+void PoolRow(const char* what, DWORD pool, int game, const char* about) {
+    const int holds = *reinterpret_cast<const volatile WORD*>(pool + kPoolHolds);
+    const BYTE* flags = *reinterpret_cast<BYTE* const volatile*>(pool + kPoolFlags);
+    if (holds <= 0 || !flags) return;
+    int used = 0;
+    for (int i = 0; i < holds; ++i)
+        if (flags[i] != 0xFF) ++used;
+    Row(what, used, holds, game, about);
+}
 
 BYTE* const kVehiclePool = reinterpret_cast<BYTE*>(0x1972900);
 constexpr DWORD kPoolSlots = 0x10;  // how many slots the pool holds (its slot list's count)
@@ -98,6 +140,13 @@ void DrawWindow() {
         if (slots > 0)
             Row("Vehicle slots", slots - PoolRoom(kVehiclePool, nullptr), slots, slots,
                 "Room in the vehicle pool for vehicles streamed in now");
+        PoolRow("Projectiles", kProjectilePool, 100,
+                "projectiles.xtbl: Armageddon's, a DLC's, and Guerrilla's thrown and launched weapons' and turrets'");
+        PoolRow("Melee moves", kMeleePool, 32, "melee.xtbl: Armageddon's, and Guerrilla's swings and bashes (rfg_)");
+        PoolRow("Patrols", kPatrolPool, 24, "Patrol routes in the zones loaded now (Guerrilla's world places up to 29 in one 3 x 3 block)");
+        PoolRow("People (NPCs)", kNpcPool, 100, "Everyone but the player: squads, people dropped in, crews (Guerrilla holds 100 too)");
+        PoolRow("Squads", kSquadPool, 100, "Squads made from the loaded zones' squad spawn nodes, and those dropped in");
+        PoolRow("Squad spawn nodes", kSquadNodePool, 384, "Squad spawn nodes in the zones loaded now");
         ImGui::EndTable();
     }
     ImGui::End();

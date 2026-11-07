@@ -75,8 +75,13 @@ public static class GuerrillaPlayerAnimations
     const int MasonBones = 53, SharedBones = 52;
     const string SetList = "anim_set_filenames.xtbl", FileList = "anim_files.xtbl";
 
-    /// <summary>What the game holds (with guerrilla_vehicles, and the set loader's list of set files on its stack); see GuerrillaPeople.</summary>
-    const int MaxAnimSets = 255, MaxSetFiles = 88, MaxAnimations = 8192;
+    /// <summary>
+    /// What the game holds (with guerrilla_vehicles), and the set loader's list of set files: their names on
+    /// its stack (0x979C20), 32 bytes each from ebp−0xB48 up to its one local above them at ebp−4, so 90
+    /// exactly. The people's build stops its own sets at 88 (GuerrillaPeople), leaving these two player sets
+    /// (Darius's with Guerrilla's guns, Mason's) the last two.
+    /// </summary>
+    const int MaxAnimSets = 255, MaxSetFiles = 90, MaxAnimations = 8192;
 
     /// <summary>
     /// The (set, animation) map every set's states and actions go in: the game's own 6,344 places (it
@@ -128,6 +133,11 @@ public static class GuerrillaPlayerAnimations
 
     /// <summary>One of our guns that takes the set up: its weapons.xtbl name (ours) and Guerrilla's animation group.</summary>
     public readonly record struct PlayerWeapon(string Name, string Group);
+
+    /// <summary>A jump, fall or landing state or action (their names in Armageddon's player set).</summary>
+    static bool Airborne(string id) =>
+        id.StartsWith("jump start", StringComparison.OrdinalIgnoreCase) || id.StartsWith("calm fall", StringComparison.OrdinalIgnoreCase) ||
+        id.StartsWith("land ", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Builds rfg_player for the groups <paramref name="weapons"/> use: the set's table (overrides\build\pc\cache\),
@@ -291,6 +301,9 @@ public static class GuerrillaPlayerAnimations
                 int direct = 0, aliased = 0, missingClip = 0;
                 void Add(XtblElement list, string kind, string id, bool isState)
                 {
+                    // Darius jumps as Armageddon has him (his own clips, the base set's): Guerrilla's carry a hop of
+                    // their own in the root track, which kept him a hand's height off the ground.
+                    if (onDarius && Airborne(id)) return;
                     string? source = null;
                     bool alias = false;
                     var (mine, other) = isState ? (states, actions) : (actions, states);
@@ -395,7 +408,9 @@ public static class GuerrillaPlayerAnimations
         // down by frame 60, 0.49 m forward), which the game plays as the character's own movement, so Mason
         // hopped a hand's height and no more. Every jump, fall and landing name in Mason's groups takes
         // Darius's clip for it (moved onto Mason), from Darius's group of that name or the game's parent of
-        // it (anim_groups.xtbl: AK, then Rifle); where Darius has none, Guerrilla's stays.
+        // it (anim_groups.xtbl: AK, then Rifle); where that chain has none (Guerrilla's RPG, Rocket Launcher,
+        // Grinder, Arc and 2HCarry groups), from his Rifle group, as Armageddon's own launchers (Plasma
+        // Launcher, Gravitic Imploder, ...) take theirs; where Darius has none at all, Guerrilla's stays.
         if (retarget != null)
         {
             var gameParents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -410,10 +425,7 @@ public static class GuerrillaPlayerAnimations
                     if (item.ValueOf("ID")?.Trim() is { Length: > 0 } id && item.Element("Animation")?.ValueOf("Filename")?.Trim() is { Length: > 0 } file)
                         names.TryAdd(id, file);
             }
-            static bool Airborne(string id) =>
-                id.StartsWith("jump start", StringComparison.OrdinalIgnoreCase) || id.StartsWith("calm fall", StringComparison.OrdinalIgnoreCase) ||
-                id.StartsWith("land ", StringComparison.OrdinalIgnoreCase);
-            int jumps = 0, kept = 0;
+            int jumps = 0, kept = 0, fromRifle = 0;
             foreach (var group in masonSkeletonSet.Element("Groups")!.Elements)
             {
                 string name = group.ValueOf("group")?.Trim() ?? "";
@@ -425,18 +437,25 @@ public static class GuerrillaPlayerAnimations
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     for (string? g = name; g != null && seen.Add(g) && dariusFile == null; g = gameParents.GetValueOrDefault(g))
                         if (dariusByGroup.TryGetValue(g, out var names)) names.TryGetValue(id, out dariusFile);
+                    if (dariusFile == null && dariusByGroup.TryGetValue("Rifle", out var rifle) && rifle.TryGetValue(id, out dariusFile)) fromRifle++;
                     if (dariusFile != null && FromDarius(dariusFile) is { } clip) { filename.Value = clip; jumps++; }
                     else kept++;
                 }
             }
             log.Add($"Mason's animations: jumping as Armageddon's: {jumps} jump, fall and landing entries take Darius's clip" +
+                    (fromRifle > 0 ? $" ({fromRifle} from his Rifle group, as Armageddon's launchers)" : "") +
                     (kept > 0 ? $", {kept} keep Guerrilla's (Darius has none for them)" : ""));
         }
         // Empty-handed: Guerrilla's Mason always carries his sledgehammer, so no set has him walk with
         // nothing in his hands (Darius's Default group hasn't either: he always has his). The game plays
-        // Default for a player with no weapon, and with only its idles he stands still or T-poses. Every
-        // name his hammer group has and Default lacks is the hammer group's, Guerrilla's own Mason clips:
-        // with nothing in his hands he moves as he does with the hammer.
+        // Default for a player with no weapon, and with only its idles he stands still or T-poses. While
+        // Guerrilla's hammer isn't built, every name his hammer group has and Default lacks is the hammer
+        // group's, Guerrilla's own Mason clips: with nothing in his hands he moves as he does with the
+        // hammer. Built, it is in his hands as in Guerrilla (the guerrilla_gear mod gives it and keeps it),
+        // and Default is Guerrilla's own.
+        if (weapons.Any(w => w.Group.Equals("Hammer", StringComparison.OrdinalIgnoreCase)))
+            log.Add("Mason's animations: empty-handed (Default) is Guerrilla's own (his sledgehammer is built: he always carries it)");
+        else
         {
             var groups = masonSkeletonSet.Element("Groups")!.Elements.ToDictionary(g => g.ValueOf("group")?.Trim() ?? "", StringComparer.OrdinalIgnoreCase);
             if (groups.TryGetValue("Default", out var unarmed) && groups.TryGetValue("Hammer", out var hammer))
@@ -493,7 +512,7 @@ public static class GuerrillaPlayerAnimations
         int adding = (hasDarius ? 1 : 0) + (hasMason ? 1 : 0);
         if (adding > 0 && (otherSets + adding > MaxAnimSets || otherSetFiles + adding > MaxSetFiles))
         {
-            log.Add($"player animations: left out, the game has no room for {adding} more sets (sets {otherSets} of {MaxAnimSets}, set files {otherSetFiles} of about {MaxSetFiles + 2})");
+            log.Add($"player animations: left out, the game has no room for {adding} more sets (sets {otherSets} of {MaxAnimSets}, set files {otherSetFiles} of {MaxSetFiles})");
             hasDarius = hasMason = false;
         }
         // A set left out takes its animations with it.

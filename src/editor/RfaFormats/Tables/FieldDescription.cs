@@ -43,8 +43,14 @@ public sealed class FieldDescription
     /// <summary>For a List or Grid: the description of one item.</summary>
     public FieldDescription? Item => Children.Count > 0 ? Children[0] : null;
 
-    /// <summary>For a List or Grid: the element name each item is written with.</summary>
-    public string ItemElementName => ItemName ?? Item?.Name ?? "Item";
+    /// <summary>
+    /// For a List or Grid: the element name each item is written with. A description's Element_Name is the
+    /// item's element and, after a dot, the field that labels each row in Volition's editor ("Mount.Name",
+    /// "squad_member.member_info", melee.xtbl's "AnimSet.AnimSetName"; "Distance" alone): the part before the
+    /// dot is the element (taking the whole as the name, the melee moves' items were never matched and their
+    /// required fields never filled).
+    /// </summary>
+    public string ItemElementName => (ItemName?.Split('.')[0] is { Length: > 0 } element ? element : null) ?? Item?.Name ?? "Item";
 
     public bool HoldsFields => Type is FieldType.Element or FieldType.Vector or FieldType.Color;
 

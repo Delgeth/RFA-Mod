@@ -84,6 +84,55 @@
 // has the game load each of them by name after its own (0x973550, cdecl, the file's name: it opens the
 // file by name, where the loader finds a new file).
 //
+// Room for Guerrilla's vehicles in the world: Armageddon holds fewer of them than Guerrilla. Its object
+// pools are made by start-up constructors, each carving its slots out of a buffer inside the pool
+// object sized for its count (0x71C5D0 sets the pool up, a memory pool is made on the buffer, 0x428240,
+// and the pool's fill takes from it each slot's object, handle and byte); Armageddon made two smaller
+// than Guerrilla's: the vehicle spawn nodes (parked vehicles' spots) 12 (Guerrilla 128; constructor
+// 0x805710) and the cars 16 at once (Guerrilla 32; 0x5F97F0). The mod replaces both constructors with
+// ones doing the same on buffers of its own, for Guerrilla's counts. And every vehicle model the vehicle
+// table names takes one of the vehicle resource pool's records (0x1972900, built by the start-up code at
+// 0xF29510 and 0xF29550 on a static array of 84); once they are all taken, a model gets none and its
+// vehicles never spawn, without a word; Armageddon's and Guerrilla's models together are more than 84.
+// The mod builds the records on an array of 255 of its own (the 16 models streamed at once stay the
+// game's). The constructors' values are checked first, and nothing changed if one differs.
+//
+// Room for Guerrilla's walkers' blend trees: Armageddon keeps every blend tree (its .blend_treex files,
+// listed in blendTree_filenames.xtbl) in a table of 24, and its own fill 23 of them (the loader stops at
+// the 24th), so Guerrilla's walkers' trees (GuerrillaWalkerTrees) wouldn't fit. The table is a global the
+// start-up constructor builds, its address in four instructions and its size in two, so the mod moves it
+// as it does the animation sets: a table of 64 of its own, checked first, before the constructor runs.
+//
+// A vehicle is made only once its model has streamed in (object_spawn_vehicle, 0x761790: refused, 2,
+// unless the model's record is reserved or in use; then "not yet", 1, until it has streamed in). Where a
+// spawn resource is in force (our worlds, as Wrecking Crew's levels) the game streams only the models
+// the resource holds, so Guerrilla's parked vehicles' spots and its traffic would be refused for good.
+// Guerrilla chose its streamed vehicles by what was wanted near the player. The mod wraps that spawn:
+// one refused for want of its model reserves it in the resource in force (0x761DC0, cdecl: category 8,
+// owner 3, the vehicle's entry, as the game's own reservations and the Spawn menu's; it makes room only by
+// letting go of a reservation nothing uses, 16 models at most) and says "not yet", so the spot asks again
+// until it has streamed in.
+//
+// Guerrilla's lights (GuerrillaVehicleLights: each light linked to a vehicle_lights row of its type, its
+// glow Guerrilla's): Armageddon turns a vehicle's lights on and off by its own rules (0x61BA60 each frame,
+// 0x61B280 only when the headlight state or the half-second blink changes): headlights by the driver, tail
+// lights off while braking, steady running lights. Guerrilla's (vehicle_effects_process_lights): every
+// frame; headlights and fog lights while the engine runs at night (18:00 to 6:00 by the game clock, at first
+// sight as the hour says, then changing at a random moment within the hour), tail lights with the brake
+// light's glow while braking, else as the headlights; brake lights while braking, reverse lights while
+// reversing, emergency lights blinking every half second, strobes while the engine runs. The mod wraps
+// 0x61BA60: a vehicle with lights of Guerrilla's rows gets Guerrilla's rules, through the game's own
+// steps for turning a light on (0x5FB700), swapping its glow, and off (0x5FB920); breaking stays the game's.
+//
+// Guerrilla's engine sounds (GuerrillaVehicleSounds builds them): each frame the game sets four game
+// parameters on a vehicle's engine sound (0x5FABA0, cdecl: the sound, then SPEED, RPM, ENGINE_LOAD and
+// DAMAGE, from the vehicle's sounds' frame 0x5FA1F0), which Guerrilla's engine layers follow. Guerrilla's
+// own audio code eased the load toward the game's, 0.12 of the way every 10 ms, and played the player's
+// own vehicle's stereo loops in 2D, the others' mono loops in 3D. The mod replaces that function with one
+// doing the same and also easing the load as Guerrilla did, and setting RFG_PLAYER_IN_VEHICLE (1 for the
+// vehicle the player is in: the game's own check, 0x605550, made in a wrapper of the frame), which the
+// banks' two sets of loops fade on. Armageddon's own engines read neither.
+//
 // Dents: Guerrilla's cars crumple where they are hit, by a morph target in the vehicle's file (46 of its
 // 74 have one; GuerrillaArsenal carries it over). Armageddon kept the whole of it, Guerrilla's code as
 // it was: the vehicle loader reads the morph target (0x622110 → 0xD40580) and makes the vehicle's dent
@@ -629,6 +678,416 @@ void MeasureDoorsAsGuerrilla() {
         rfa::Log("Doors: measured as Guerrilla measures them (a shut door's next-to-no turn is none, not a half turn)");
 }
 
+// ---- Room for Guerrilla's vehicles in the world (see the top)
+
+using PoolSetUpFn = void(__fastcall*)(void* pool, void* unused);
+using MempoolMakeFn = void*(__fastcall*)(void* mempool, void* unused, void* buffer, DWORD size, const char* name, int one, int zero);
+using MempoolEndFn = void(__fastcall*)(void* mempool, void* unused);
+using PoolFillFn = void(__fastcall*)(void* pool, void* unused, void* mempool, int count);
+auto const PoolSetUp = reinterpret_cast<PoolSetUpFn>(0x71C5D0);
+auto const MempoolMake = reinterpret_cast<MempoolMakeFn>(0x428240);
+auto const MempoolEnd = reinterpret_cast<MempoolEndFn>(0x427F40);
+auto const FillSpawnNodePool = reinterpret_cast<PoolFillFn>(0x805760);
+auto const FillAutomobilePool = reinterpret_cast<PoolFillFn>(0x5F9840);
+constexpr DWORD kPoolName = 0xF7101C;  // "object pool", the name the game's constructors give
+
+// The two constructors, and the values in them that say they are as expected: each pushes the
+// buffer's size (4 bytes) and the count (a one-byte push).
+constexpr DWORD kSpawnNodePoolMake = 0x805710, kSpawnNodeBufferSize = 0x80572B, kSpawnNodeCount = 0x80573F;
+constexpr DWORD kAutomobilePoolMake = 0x5F97F0, kAutomobileBufferSize = 0x5F980B, kAutomobileCount = 0x5F981F;
+constexpr DWORD kSpawnNodeSize = 0xB0, kAutomobileSize = 0x5DE8;
+constexpr int kGameSpawnNodes = 12, kSpawnNodes = 128;   // Guerrilla's 128
+constexpr int kGameAutomobiles = 16, kAutomobiles = 32;  // Guerrilla's 32
+
+// A slot's bytes: its object, its handle (4) and its byte; then room for the memory pool's alignment.
+constexpr DWORD PoolBytes(int count, DWORD size) { return count * (size + 5) + 64; }
+alignas(16) BYTE g_spawnNodeBuffer[PoolBytes(kSpawnNodes, kSpawnNodeSize)];
+alignas(16) BYTE g_automobileBuffer[PoolBytes(kAutomobiles, kAutomobileSize)];
+
+// What the game's constructor does, on the mod's buffer and with its count.
+void* MakePool(void* pool, BYTE* buffer, DWORD size, PoolFillFn fill, int count) {
+    PoolSetUp(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's is 0x58 bytes on its stack
+    MempoolMake(mempool, nullptr, buffer, size, reinterpret_cast<const char*>(kPoolName), 1, 0);
+    fill(pool, nullptr, mempool, count);
+    MempoolEnd(mempool, nullptr);
+    return pool;
+}
+void* __fastcall MakeSpawnNodePool(void* pool, void*) {
+    return MakePool(pool, g_spawnNodeBuffer, sizeof(g_spawnNodeBuffer), FillSpawnNodePool, kSpawnNodes);
+}
+void* __fastcall MakeAutomobilePool(void* pool, void*) {
+    return MakePool(pool, g_automobileBuffer, sizeof(g_automobileBuffer), FillAutomobilePool, kAutomobiles);
+}
+
+// The vehicle records: the start-up code builds the records (0xF29510: the array constructor 0x422890,
+// stdcall (array, 0x1C bytes, 84, the record's constructor 0x75FD20)), then the vehicle resource pool
+// on them (0xF29550: 0x7650F0, thiscall (pool, 84, the records, 16, the streamed list)).
+using VectorMakeFn = void(__stdcall*)(void* array, DWORD size, int count, void* constructor);
+using ResourcePoolMakeFn = void(__fastcall*)(void* pool, void* unused, int count, void* records, int streamed, void* list);
+auto const VectorMake = reinterpret_cast<VectorMakeFn>(0x422890);
+auto const ResourcePoolMake = reinterpret_cast<ResourcePoolMakeFn>(0x7650F0);
+constexpr DWORD kRecordsMake = 0xF29510, kRecordsPoolMake = 0xF29550;
+constexpr DWORD kGameRecords = 0x1971FB8, kRecordConstructor = 0x75FD20, kVehicleResourcePool = 0x1972900, kStreamedList = 0x19709C8;
+constexpr DWORD kRecordSize = 0x1C;
+constexpr int kGameVehicleRecords = 84, kVehicleRecords = 255, kStreamedVehicles = 16;
+alignas(16) BYTE g_vehicleRecords[kVehicleRecords * kRecordSize];
+
+void __cdecl MakeVehicleRecords() {
+    VectorMake(g_vehicleRecords, kRecordSize, kVehicleRecords, reinterpret_cast<void*>(kRecordConstructor));
+}
+void __cdecl MakeVehicleResourcePool() {
+    ResourcePoolMake(reinterpret_cast<void*>(kVehicleResourcePool), nullptr, kVehicleRecords, g_vehicleRecords, kStreamedVehicles,
+                     reinterpret_cast<void*>(kStreamedList));
+}
+
+BYTE CodeByte(DWORD address) { return *reinterpret_cast<const BYTE*>(address); }
+
+void MakeRoomForVehiclesInTheWorld() {
+    // Each constructor pushes its buffer's size (the game's count × (the object + 5) + alignment) and its count.
+    if (rfa::CodeValue(kSpawnNodeBufferSize) == 0x881 && CodeByte(kSpawnNodeCount) == kGameSpawnNodes &&
+        rfa::ReplaceFunction(kSpawnNodePoolMake, reinterpret_cast<void*>(&MakeSpawnNodePool)))
+        rfa::Log("Vehicle spawn nodes: the game holds %d (its own %d)", kSpawnNodes, kGameSpawnNodes);
+    else rfa::Log("Vehicle spawn nodes: the pool's constructor isn't as expected; the game keeps its %d", kGameSpawnNodes);
+
+    if (rfa::CodeValue(kAutomobileBufferSize) == 0x5DED9 && CodeByte(kAutomobileCount) == kGameAutomobiles &&
+        rfa::ReplaceFunction(kAutomobilePoolMake, reinterpret_cast<void*>(&MakeAutomobilePool)))
+        rfa::Log("Cars: the game holds %d at once (its own %d)", kAutomobiles, kGameAutomobiles);
+    else rfa::Log("Cars: the pool's constructor isn't as expected; the game keeps its %d", kGameAutomobiles);
+
+    // The records' constructor (push the record's constructor, push 54h, push 1Ch, push the records)
+    // and the pool's (push the list, push 10h, push the records, push 54h).
+    const bool recordsAsExpected = rfa::CodeValue(kRecordsMake + 4) == kRecordConstructor && CodeByte(kRecordsMake + 9) == kGameVehicleRecords &&
+                                   CodeByte(kRecordsMake + 11) == kRecordSize && rfa::CodeValue(kRecordsMake + 13) == kGameRecords &&
+                                   rfa::CodeValue(kRecordsPoolMake + 4) == kStreamedList && CodeByte(kRecordsPoolMake + 9) == kStreamedVehicles &&
+                                   rfa::CodeValue(kRecordsPoolMake + 11) == kGameRecords && CodeByte(kRecordsPoolMake + 16) == kGameVehicleRecords;
+    if (recordsAsExpected && rfa::ReplaceFunction(kRecordsMake, reinterpret_cast<void*>(&MakeVehicleRecords)) &&
+        rfa::ReplaceFunction(kRecordsPoolMake, reinterpret_cast<void*>(&MakeVehicleResourcePool)))
+        rfa::Log("Vehicle records: the game holds %d vehicle models (its own %d); %d streamed at once, as the game", kVehicleRecords,
+                 kGameVehicleRecords, kStreamedVehicles);
+    else rfa::Log("Vehicle records: the start-up code isn't as expected; the game keeps its %d (vehicles past them can't spawn)", kGameVehicleRecords);
+}
+
+// ---- Vehicles the game would refuse for want of their model: reserved (see the top)
+
+constexpr DWORD kSpawnVehicle = 0x761790;     // cdecl (the spawn's parameters, the vehicle's table entry first): 0 made, 1 not yet, 2 refused
+constexpr size_t kSpawnVehiclePrologue = 6;   // push ebp / mov ebp,esp / sub esp,0Ch
+using SpawnVehicleFn = int(__cdecl*)(void** parameters);
+SpawnVehicleFn g_spawnVehicle;
+auto const VehicleRecord = reinterpret_cast<void*(__cdecl*)(void* entry)>(0x7618A0);
+auto const RecordReserved = reinterpret_cast<bool(__fastcall*)(void* record, void* unused)>(0x75FE90);
+auto const RecordInUse = reinterpret_cast<bool(__fastcall*)(void* record, void* unused)>(0x75FEB0);
+auto const ReserveInResource = reinterpret_cast<bool(__cdecl*)(int category, int owner, void* entry)>(0x761DC0);
+constexpr int kMissionCategory = 8, kReservationOwner = 3;  // as the game's own and the Spawn menu's (rfa_qol)
+auto& g_spawnResourceState = *reinterpret_cast<const volatile int*>(0x19734CC);  // 0: no spawn resource in force
+
+int __cdecl SpawnVehicle(void** parameters) {
+    const int result = g_spawnVehicle(parameters);
+    if (result != 2 || !parameters || !parameters[0] || !g_spawnResourceState) return result;
+    void* entry = parameters[0];
+    void* record = VehicleRecord(entry);
+    if (!record || RecordReserved(record, nullptr) || RecordInUse(record, nullptr)) return result;  // refused for another reason
+    const char* name = *reinterpret_cast<const char* const*>(entry);
+    if (!ReserveInResource(kMissionCategory, kReservationOwner, entry)) {
+        RFA_LOG_FIRST(40, "Spawning: no room to stream %s in (16 models at once); it isn't made", name ? name : "?");
+        return result;
+    }
+    RFA_LOG_FIRST(200, "Spawning: %s reserved; it is made once it has streamed in", name ? name : "?");
+    return 1;  // not yet: the spot (or spawner) asks again
+}
+
+void ReserveWantedVehicles() {
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C};
+    if (memcmp(reinterpret_cast<const void*>(kSpawnVehicle), opening, sizeof(opening)) != 0) {
+        rfa::Log("Spawning: the game's vehicle spawn isn't as expected; vehicles whose model isn't streamed aren't made");
+        return;
+    }
+    g_spawnVehicle = reinterpret_cast<SpawnVehicleFn>(rfa::HookFunction(kSpawnVehicle, kSpawnVehiclePrologue, reinterpret_cast<void*>(&SpawnVehicle)));
+    rfa::Log(g_spawnVehicle ? "Spawning: a vehicle refused for want of its model reserves it and waits (parked vehicles, traffic)"
+                            : "Spawning: could not hook the game's vehicle spawn");
+}
+
+// ---- Room for Guerrilla's walkers' blend trees (see the top)
+
+// The table (0x40 bytes a tree), built by the start-up constructor 0xF4A230 (the array constructor 0x422890:
+// the table, 0x40, 24, a tree's constructor 0x963420), read by the loader (0x961D70: full at `cmp ecx,18h`,
+// the table's address in `add edx,...`) and the look-up by name (0x962980: the table and its first tree's
+// +4). Four addresses and two one-byte sizes.
+constexpr DWORD kBlendTrees = 0x25CD828, kBlendTreeSize = 0x40;
+constexpr int kGameBlendTrees = 24, kBlendTreeCount = 64;
+constexpr DWORD kBlendTreeReferences[] = {0xF4A23D, 0x961E50, 0x9629C4, 0x9629AD};  // the last: the table + 4
+constexpr DWORD kBlendTreeSizes[] = {0xF4A239, 0x961E35};                         // push 18h, cmp ecx,18h
+alignas(16) BYTE g_blendTrees[kBlendTreeCount * kBlendTreeSize];
+
+void MoveBlendTrees() {
+    for (DWORD at : kBlendTreeReferences) {
+        const DWORD value = rfa::CodeValue(at);
+        if (value < kBlendTrees || value >= kBlendTrees + kBlendTreeSize) {
+            rfa::Log("Blend trees: the game's code at 0x%08lX isn't as expected; the game keeps its %d", at, kGameBlendTrees);
+            return;
+        }
+    }
+    for (DWORD at : kBlendTreeSizes)
+        if (CodeByte(at) != kGameBlendTrees) {
+            rfa::Log("Blend trees: the game's size at 0x%08lX isn't %d; the game keeps its own", at, kGameBlendTrees);
+            return;
+        }
+    for (DWORD at : kBlendTreeReferences) {
+        const DWORD moved = reinterpret_cast<DWORD>(g_blendTrees) + (rfa::CodeValue(at) - kBlendTrees);
+        rfa::PatchCode(reinterpret_cast<void*>(at), &moved, sizeof(moved));
+    }
+    const BYTE count = kBlendTreeCount;
+    for (DWORD at : kBlendTreeSizes) rfa::PatchCode(reinterpret_cast<void*>(at), &count, 1);
+    rfa::Log("Blend trees: the game holds %d (its own %d, all taken by its own trees)", kBlendTreeCount, kGameBlendTrees);
+}
+
+// ---- Guerrilla's lights: when each is on (see the top)
+
+using LightFrameFn = void(__cdecl*)(BYTE* vehicle);
+constexpr DWORD kLightFrame = 0x61BA60;          // cdecl (vehicle): its lights, each frame
+constexpr size_t kLightFramePrologue = 7;        // push ebp / mov ebp,esp / push ecx / mov eax,[ebp+8]
+LightFrameFn g_lightFrame;
+auto const ApplyLights = reinterpret_cast<void(__cdecl*)(BYTE* vehicle, int headlights, int blink)>(0x61B280);  // the game's own
+auto const VehicleParts = reinterpret_cast<BYTE*(__fastcall*)(BYTE* partsOwner, void* unused)>(0x4F3850);       // on vehicle + 0x1C4
+auto const VehicleShown = reinterpret_cast<bool(__fastcall*)(BYTE* vehicle, void* unused)>(0x4C3180);
+auto const PartState = reinterpret_cast<DWORD(__fastcall*)(BYTE* part, void* unused)>(0x76A5F0);
+auto const StartGlares = reinterpret_cast<void(__fastcall*)(BYTE* light, void* unused, int primary, int secondary, int renderLight, BYTE* vehicle)>(0x5FB700);
+auto const StopGlares = reinterpret_cast<void(__fastcall*)(BYTE* light, void* unused)>(0x5FB920);
+auto const BrakeLightsOn = reinterpret_cast<bool(__cdecl*)(BYTE* vehicle)>(0x61B9D0);
+auto const ObjectSubtype = reinterpret_cast<int(__fastcall*)(BYTE* object, void* unused)>(0x423530);
+auto const ObjectHandle = reinterpret_cast<DWORD(__fastcall*)(BYTE* object, void* unused)>(0x424850);
+auto const VehicleDriver = reinterpret_cast<int(__cdecl*)(BYTE* vehicle, int seat)>(0x603AE0);
+auto const HumanAlive = reinterpret_cast<bool(__cdecl*)(DWORD handle)>(0x5F2B20);
+auto const TimerUp = reinterpret_cast<bool(__fastcall*)(BYTE* timer, void* unused)>(0xC8B120);
+auto const TimerSet = reinterpret_cast<void(__fastcall*)(BYTE* timer, void* unused, int ms)>(0xC8B030);
+auto const BlinkTime = reinterpret_cast<int(__cdecl*)()>(0x61BC80);
+// A vehicle: +0x4FB0 bit 13 its engine running; +0x4FB4 bit 13 its headlights, 14 lights by script, 15 the
+// blink; +0x5048 the blink's timer; +0x3DF4 its forward speed. Its parts' light instances: count +0x30E8,
+// 0x44 bytes each from +0x30EC (+0x04 its vehicle_lights row, +0x08 its part or -1, +0x24 the glow playing,
+// +0x2C its file light (+0 Guerrilla's type), +0x40 flags: 2 on, 4 broken, 8 to break, 0x10 changed).
+// A vehicle_lights row (36 bytes from *0x14A9F00, how many at 0x14A9F04): +0 its name, +0x14, +0x18 its
+// glows, +0x1C its render light. The game clock: the hour 0x12F76D4 (a byte), its speed 0x12F76D8; the
+// frame's time 0x11217C8.
+constexpr DWORD kLightRows = 0x14A9F00, kLightRowCount = 0x14A9F04, kHour = 0x12F76D4, kClockSpeed = 0x12F76D8, kFrameTime = 0x11217C8;
+constexpr float kReverseSpeed = -1.0f;  // Guerrilla's: reversing below this forward speed
+constexpr DWORD kHeadlightMesh = 0x05C0B2B7, kFoglightMesh = 0x35DAB18F, kTaillightMesh = 0x85C7B697, kBrakelightMesh = 0x13E6369F,
+                kReverselightMesh = 0x86A3E58C, kEmergencylightMesh = 0x1BB5B29A, kStrobelightMesh = 0xDE8638BA;
+
+struct LightState {
+    DWORD handle;
+    LONGLONG seen;
+};
+std::vector<LightState> g_lightStates;  // Guerrilla's lit vehicles seen (their headlights set at first sight)
+int g_brakeGlow = -2;                   // the rfg_Brake_light row's glow (-2: not looked up yet)
+
+int BrakeGlow() {
+    if (g_brakeGlow != -2) return g_brakeGlow;
+    g_brakeGlow = -1;
+    const BYTE* rows = *reinterpret_cast<BYTE* const*>(kLightRows);
+    const int count = *reinterpret_cast<const int*>(kLightRowCount);
+    for (int i = 0; rows && i < count; ++i) {
+        const char* name = *reinterpret_cast<const char* const*>(rows + i * 36);
+        if (name && _stricmp(name, "rfg_Brake_light") == 0) g_brakeGlow = *reinterpret_cast<const int*>(rows + i * 36 + 0x14);
+    }
+    return g_brakeGlow;
+}
+
+bool Bit(const BYTE* vehicle, DWORD at, int bit) { return (*reinterpret_cast<const DWORD*>(vehicle + at) >> bit) & 1; }
+void SetBit(BYTE* vehicle, DWORD at, int bit, bool on) {
+    DWORD& word = *reinterpret_cast<DWORD*>(vehicle + at);
+    word = on ? word | (1u << bit) : word & ~(1u << bit);
+}
+
+// Guerrilla's: night is from 18:00 to 6:00.
+bool Night() { const int hour = *reinterpret_cast<const BYTE*>(kHour); return hour >= 18 || hour <= 6; }
+
+void RefreshRender(BYTE* vehicle) {
+    auto refresh = reinterpret_cast<void(__fastcall*)(BYTE*, void*, int)>((*reinterpret_cast<void***>(vehicle))[0x44 / 4]);
+    refresh(vehicle, nullptr, 8);
+}
+
+// Guerrilla's vehicle_effects_process_lights, on the game's light instances: each light on by its type's
+// rule, with its row's glows (a tail light while braking with the brake light's), as the game's own
+// (0x61B280) turns them on, swaps and off.
+void __cdecl LightFrame(BYTE* vehicle) {
+    BYTE* parts = vehicle ? VehicleParts(vehicle + 0x1C4, nullptr) : nullptr;
+    const int count = parts ? *reinterpret_cast<const int*>(parts + 0x30E8) : 0;
+    bool ours = false, breaking = false;
+    for (int i = 0; i < count; ++i) {
+        const BYTE* light = parts + 0x30EC + i * 0x44;
+        const BYTE* row = *reinterpret_cast<BYTE* const*>(light + 4);
+        const char* name = row ? *reinterpret_cast<const char* const*>(row) : nullptr;
+        if (name && _strnicmp(name, "rfg_", 4) == 0) ours = true;
+        if (light[0x40] & 8) breaking = true;
+    }
+    if (!ours) {
+        g_lightFrame(vehicle);
+        return;
+    }
+    // The headlights: at first sight as the hour says; then, when the hour says otherwise, they change at a
+    // random moment (Guerrilla: within an hour of game time, max_delay 1.0).
+    LARGE_INTEGER now, frequency;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    const DWORD handle = ObjectHandle(vehicle, nullptr);
+    auto state = std::find_if(g_lightStates.begin(), g_lightStates.end(), [&](const LightState& s) { return s.handle == handle; });
+    bool headlights = Bit(vehicle, 0x4FB4, 13);
+    if (state == g_lightStates.end()) {
+        g_lightStates.erase(std::remove_if(g_lightStates.begin(), g_lightStates.end(),
+                                           [&](const LightState& s) { return now.QuadPart - s.seen > 10 * frequency.QuadPart; }), g_lightStates.end());
+        g_lightStates.push_back({handle, now.QuadPart});
+        headlights = Night();
+    } else {
+        state->seen = now.QuadPart;
+        const float chance = *reinterpret_cast<const float*>(kClockSpeed) * *reinterpret_cast<const float*>(kFrameTime) / 3600.0f;
+        if (headlights != Night() && static_cast<float>(std::rand()) / RAND_MAX < chance) headlights = !headlights;
+    }
+    // The blink (Guerrilla's emergency lights), every half second, as the game's.
+    bool blink = Bit(vehicle, 0x4FB4, 15);
+    if (TimerUp(vehicle + 0x5048, nullptr)) {
+        blink = !blink;
+        TimerSet(vehicle + 0x5048, nullptr, BlinkTime());
+    }
+    if (breaking) {  // the game's own breaks them (its death effect); Guerrilla's rules again next frame
+        ApplyLights(vehicle, headlights, blink);
+        return;
+    }
+    SetBit(vehicle, 0x4FB4, 13, headlights);
+    SetBit(vehicle, 0x4FB4, 15, blink);
+    const bool running = Bit(vehicle, 0x4FB0, 13) || Bit(vehicle, 0x4FB4, 14);
+    const bool braking = BrakeLightsOn(vehicle);
+    const bool reversing = ObjectSubtype(vehicle, nullptr) == 5 && VehicleDriver(vehicle, 0) && HumanAlive(ObjectHandle(vehicle, nullptr)) &&
+                           *reinterpret_cast<const float*>(vehicle + 0x3DF4) < kReverseSpeed;
+    const bool shown = VehicleShown(vehicle, nullptr);
+    bool changed = false;
+    for (int i = 0; i < count; ++i) {
+        BYTE* light = parts + 0x30EC + i * 0x44;
+        const BYTE* row = *reinterpret_cast<BYTE* const*>(light + 4);
+        const BYTE* file = *reinterpret_cast<BYTE* const*>(light + 0x2C);
+        if (!row || !file || (light[0x40] & 4)) continue;
+        int primary = *reinterpret_cast<const int*>(row + 0x14), secondary = *reinterpret_cast<const int*>(row + 0x18);
+        const int render = *reinterpret_cast<const int*>(row + 0x1C);
+        bool on = false;
+        switch (*reinterpret_cast<const DWORD*>(file)) {
+        case kHeadlightMesh:
+        case kFoglightMesh: on = running && headlights; break;
+        case kTaillightMesh:
+            if (braking) { on = true; primary = BrakeGlow(); secondary = -1; }
+            else on = running && headlights;
+            break;
+        case kBrakelightMesh: on = braking; break;
+        case kReverselightMesh: on = reversing; break;
+        case kEmergencylightMesh: on = running && blink; break;
+        case kStrobelightMesh: on = running; break;
+        default: on = running && headlights; break;
+        }
+        const int part = *reinterpret_cast<const int*>(light + 8);
+        if (!shown || (part != -1 && (PartState(parts + 8 + part * 0xB8, nullptr) & 0x4020000))) on = false;
+        const bool lit = light[0x40] & 2;
+        if (on && !lit) {
+            StartGlares(light, nullptr, primary, secondary, render, vehicle);
+            light[0x40] |= 2 | 0x10;
+            changed = true;
+        } else if (on && *reinterpret_cast<const int*>(light + 0x24) != primary) {
+            StopGlares(light, nullptr);
+            StartGlares(light, nullptr, primary, secondary, render, vehicle);
+        } else if (!on && lit) {
+            StopGlares(light, nullptr);
+            light[0x40] = static_cast<BYTE>((light[0x40] & ~2) | 0x10);
+            changed = true;
+        }
+    }
+    if (changed) RefreshRender(vehicle);
+}
+
+void HookLights() {
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x51, 0x8B, 0x45, 0x08};
+    if (memcmp(reinterpret_cast<const void*>(kLightFrame), opening, sizeof(opening)) != 0) {
+        rfa::Log("Lights: the game's light frame isn't as expected; Guerrilla's vehicles' lights follow Armageddon's rules");
+        return;
+    }
+    g_lightFrame = reinterpret_cast<LightFrameFn>(rfa::HookFunction(kLightFrame, kLightFramePrologue, reinterpret_cast<void*>(&LightFrame)));
+    rfa::Log(g_lightFrame ? "Lights: Guerrilla's vehicles' lights on by Guerrilla's rules (headlights at night, tail lights brake, emergency lights blink)"
+                          : "Lights: could not hook the game's light frame");
+}
+
+// ---- Guerrilla's engine sounds: the player's own vehicle, the load eased (see the top)
+
+using EngineFrameFn = void(__cdecl*)(void* vehicle);
+constexpr DWORD kEngineFrame = 0x5FA1F0;       // cdecl (vehicle): the vehicle's sounds each frame
+constexpr size_t kEngineFramePrologue = 9;     // push ebp / mov ebp,esp / sub esp,1B0h
+constexpr DWORD kSetEngineValues = 0x5FABA0;   // cdecl (the engine's sound, speed, RPM, load, damage)
+auto const PlayerInVehicle = reinterpret_cast<bool(__cdecl*)(void* vehicle)>(0x605550);
+auto const SoundObject = reinterpret_cast<DWORD(__cdecl*)(int sound)>(0xB84D20);  // the sound's Wwise game object
+auto const SetGameParameter = reinterpret_cast<void(__cdecl*)(DWORD parameter, float value, DWORD gameObject)>(0xB852C0);
+// The game's game parameters' ids, which it works out while it starts: RPM, ENGINE_LOAD, SPEED, DAMAGE.
+constexpr DWORD kRpmId = 0x13032A8, kLoadId = 0x1303278, kSpeedId = 0x13032AC, kDamageId = 0x130326C;
+
+// Wwise's id of a name: FNV-1 (32 bits) of its lower-case letters (as the game's GetIDFromString).
+constexpr DWORD WwiseId(const char* name) {
+    DWORD h = 2166136261u;
+    for (; *name; ++name) h = (h * 16777619u) ^ static_cast<BYTE>(*name >= 'A' && *name <= 'Z' ? *name + 32 : *name);
+    return h;
+}
+constexpr DWORD kPlayerInVehicleId = WwiseId("RFG_PLAYER_IN_VEHICLE");  // the banks' (GuerrillaVehicleSounds)
+
+EngineFrameFn g_engineFrame;
+bool g_playerInThisVehicle;  // while the game does a vehicle's sounds
+
+struct EasedEngine {
+    float load;
+    LONGLONG at;  // when it was last set (performance counter)
+};
+std::vector<std::pair<DWORD, EasedEngine>> g_easedEngines;  // by the engine sound's game object
+
+void __cdecl EngineFrame(void* vehicle) {
+    g_playerInThisVehicle = vehicle && PlayerInVehicle(vehicle);
+    g_engineFrame(vehicle);
+    g_playerInThisVehicle = false;
+}
+
+// What the game does (each value on the sound's game object), and Guerrilla's: the load eased toward the
+// game's, 0.12 of the way each 10 ms (Guerrilla's audio thread's), and RFG_PLAYER_IN_VEHICLE.
+void __cdecl SetEngineValues(int sound, float speed, float rpm, float load, float damage) {
+    const DWORD object = SoundObject(sound);
+    LARGE_INTEGER now, frequency;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    auto found = std::find_if(g_easedEngines.begin(), g_easedEngines.end(), [&](const auto& e) { return e.first == object; });
+    float eased = load;
+    if (found != g_easedEngines.end()) {
+        const double ms = static_cast<double>(now.QuadPart - found->second.at) * 1000.0 / static_cast<double>(frequency.QuadPart);
+        if (ms < 1000) eased = found->second.load + (load - found->second.load) * static_cast<float>(1 - std::pow(0.88, ms / 10));
+        found->second = {eased, now.QuadPart};
+    } else {
+        // Forget engines not heard of for 10 s (their vehicles gone).
+        g_easedEngines.erase(std::remove_if(g_easedEngines.begin(), g_easedEngines.end(), [&](const auto& e) {
+                                 return (now.QuadPart - e.second.at) > 10 * frequency.QuadPart; }), g_easedEngines.end());
+        g_easedEngines.push_back({object, {load, now.QuadPart}});
+    }
+    SetGameParameter(*reinterpret_cast<const DWORD*>(kRpmId), rpm, object);
+    SetGameParameter(*reinterpret_cast<const DWORD*>(kLoadId), eased, object);
+    SetGameParameter(*reinterpret_cast<const DWORD*>(kSpeedId), speed, object);
+    SetGameParameter(*reinterpret_cast<const DWORD*>(kDamageId), damage, object);
+    SetGameParameter(kPlayerInVehicleId, g_playerInThisVehicle ? 1.0f : 0.0f, object);
+}
+
+void HookEngineSounds() {
+    // The function's code as expected: its opening, and the four ids it reads.
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x51, 0x8B, 0x45, 0x08};
+    if (memcmp(reinterpret_cast<const void*>(kSetEngineValues), opening, sizeof(opening)) != 0 || rfa::CodeValue(0x5FABC0) != kRpmId ||
+        rfa::CodeValue(0x5FABDA) != kLoadId || rfa::CodeValue(0x5FABF3) != kSpeedId || rfa::CodeValue(0x5FAC0D) != kDamageId) {
+        rfa::Log("Engine sounds: the game's code isn't as expected; Guerrilla's engines play as the game sets them (the others' 3D sound in the player's vehicle too)");
+        return;
+    }
+    g_engineFrame = reinterpret_cast<EngineFrameFn>(rfa::HookFunction(kEngineFrame, kEngineFramePrologue, reinterpret_cast<void*>(&EngineFrame)));
+    if (!g_engineFrame || !rfa::ReplaceFunction(kSetEngineValues, reinterpret_cast<void*>(&SetEngineValues))) {
+        rfa::Log("Engine sounds: could not hook the vehicles' sounds; Guerrilla's engines play as the game sets them");
+        return;
+    }
+    rfa::Log("Engine sounds: the load eased as Guerrilla's, and RFG_PLAYER_IN_VEHICLE set on each vehicle's engine (1 for the player's own)");
+}
+
 // ---- Dents (see the top)
 
 constexpr DWORD kDeformationEnabled = 0x142A484;  // vehicle_deformation_enabled, a bool
@@ -645,6 +1104,77 @@ void TurnOnDents() {
     }
     *reinterpret_cast<bool*>(kDeformationEnabled) = true;
     rfa::Log("Dents: vehicle_deformation_enabled on (Guerrilla's vehicles dent where they're hit)");
+}
+
+// ---- Room for the vehicle interactions' names
+//
+// vehicle_interactions.xtbl's reader (0x65F360) keeps every interaction's, waypoint's and transition's name
+// in a string pool, "Vehicle interaction info strings" (0x14E6990), of 8 KB: its set-up (0x660710, at
+// start-up) takes 8 KB from the Permanent Mempool (`push 2000h` at 0x660733, kept at 0x14E6968) and makes
+// the pool over them (`push 2000h` at 0x660760), then reads the table. Guerrilla's vehicles' interactions
+// need about 9 KB more than Armageddon's; a full pool hands back no name, and the vehicle reader then
+// compares a vehicle's Vehicle_Interaction with a missing one (0x628461) and the game ends (the 20:02 crash,
+// at Min_DumpTruck_1, the 38th). The user, 2026-11-06: "Yes, raise it": both values 32 KB, each checked
+// against the game's before either is written; the log says how much of it the table took.
+constexpr DWORD kInteractionNamesBlock = 0x660734;  // push 2000h: the bytes taken from the Permanent Mempool
+constexpr DWORD kInteractionNamesSize = 0x660761;   // push 2000h: the string pool made over them
+constexpr DWORD kInteractionNamesPool = 0x14E6990;  // the pool (size +0x44, bytes used +0x4C)
+constexpr DWORD kInteractionNamesMemory = 0x14E6968;
+constexpr DWORD kGameInteractionNames = 0x2000, kInteractionNames = 0x8000;
+constexpr DWORD kInteractionSetup = 0x660710;
+constexpr size_t kInteractionSetupPrologue = 5;  // push ebp / mov ebp,esp / push 0
+using InteractionSetupFn = void(__cdecl*)();
+InteractionSetupFn g_interactionSetup;
+
+// The interactions' records (32 bytes each, the name first): how many, and where (the reader's).
+constexpr DWORD kInteractionCount = 0x14E6960, kInteractionRecords = 0x14E6964;
+
+void __cdecl InteractionSetup() {
+    g_interactionSetup();
+    const int count = *reinterpret_cast<const int*>(kInteractionCount);
+    BYTE* records = *reinterpret_cast<BYTE**>(kInteractionRecords);
+    rfa::Log("Vehicle interaction names: %lu of %lu bytes, %d interactions", *reinterpret_cast<const DWORD*>(kInteractionNamesPool + 0x4C),
+             *reinterpret_cast<const DWORD*>(kInteractionNamesPool + 0x44), count);
+    // A record the pool gave no name (it was full, or refused it) ends the game when a vehicle's interaction is
+    // looked up (_stricmp with a null). Each one is named "" instead, and said here: its vehicle then finds no
+    // interaction (no getting in) rather than stopping the game.
+    static const char kNoName[] = "";
+    int unnamed = 0, first = -1;
+    for (int i = 0; records && i < count; ++i) {
+        const char*& name = *reinterpret_cast<const char**>(records + i * 32);
+        if (name) continue;
+        name = kNoName;
+        if (first < 0) first = i;
+        ++unnamed;
+    }
+    if (unnamed > 0)
+        rfa::Log("Vehicle interaction names: %d of the %d interactions got no name from the game's pool (the first, number %d); "
+                 "their vehicles can't be got into", unnamed, count, first);
+}
+
+void MoreInteractionNames() {
+    if (*reinterpret_cast<const DWORD*>(kInteractionNamesMemory) != 0) {
+        rfa::Log("Vehicle interaction names: the game has already made its pool; it keeps its %lu bytes", kGameInteractionNames);
+        return;
+    }
+    if (rfa::CodeValue(kInteractionNamesBlock) != kGameInteractionNames || rfa::CodeValue(kInteractionNamesSize) != kGameInteractionNames) {
+        rfa::Log("Vehicle interaction names: the game's code (0x%08lX, 0x%08lX) isn't as expected; it keeps its %lu bytes", kInteractionNamesBlock,
+                 kInteractionNamesSize, kGameInteractionNames);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kInteractionNamesBlock), &kInteractionNames, sizeof(kInteractionNames))) {
+        rfa::Log("Vehicle interaction names: could not change the game's code; it keeps its %lu bytes", kGameInteractionNames);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kInteractionNamesSize), &kInteractionNames, sizeof(kInteractionNames))) {
+        rfa::PatchCode(reinterpret_cast<void*>(kInteractionNamesBlock), &kGameInteractionNames, sizeof(kGameInteractionNames));
+        rfa::Log("Vehicle interaction names: could not change the game's code; it keeps its %lu bytes", kGameInteractionNames);
+        return;
+    }
+    rfa::Log("Vehicle interaction names: %lu bytes (the game's %lu)", kInteractionNames, kGameInteractionNames);
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x6A, 0x00};
+    if (memcmp(reinterpret_cast<const void*>(kInteractionSetup), opening, sizeof(opening)) == 0)
+        g_interactionSetup = reinterpret_cast<InteractionSetupFn>(rfa::HookFunction(kInteractionSetup, kInteractionSetupPrologue, reinterpret_cast<void*>(&InteractionSetup)));
 }
 
 // ---- Guerrilla's vehicles' own skeletons (see the top)
@@ -684,16 +1214,24 @@ void __cdecl LoadSkeletons() {
     LogDoorAnimations();
 }
 
-// The skeletons GuerrillaBuilder.exe listed, one file name a line.
+// The skeletons GuerrillaBuilder.exe listed, one file name a line: the vehicles', and Guerrilla's guns'
+// (mods\guerrilla_gear\rigs.txt: a gun of character mesh, such as the shotgun, has a skeleton of its own,
+// looked up by name when its container loads, so it too must be loaded with the game's).
 void ReadSkeletonList() {
-    std::ifstream list(rfa::RootDir() + L"\\mods\\guerrilla_vehicles\\rigs.txt");
-    for (std::string line; std::getline(list, line);) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-        if (!line.empty() && line.size() < 64) g_skeletons.push_back(line);
+    for (const wchar_t* file : {L"\\mods\\guerrilla_vehicles\\rigs.txt", L"\\mods\\guerrilla_gear\\rigs.txt"}) {
+        std::ifstream list(rfa::RootDir() + file);
+        for (std::string line; std::getline(list, line);) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            if (!line.empty() && line.size() < 64 && std::find(g_skeletons.begin(), g_skeletons.end(), line) == g_skeletons.end())
+                g_skeletons.push_back(line);
+        }
     }
 }
 
 }  // namespace
+
+void StartTraffic();  // traffic.cpp (with convoys.cpp, edf.cpp, crews.cpp on its frame)
+namespace gv { void StartFlyers(); }  // flyers.cpp
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!rfa::game::IsSupportedBuild()) {
@@ -708,6 +1246,14 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoveAnimationLibrary();
     g_buildVehicleList = reinterpret_cast<BuildVehicleListFn>(rfa::HookFunction(kBuildVehicleList, kBuildVehicleListPrologue, reinterpret_cast<void*>(&BuildVehicleList)));
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
+    MakeRoomForVehiclesInTheWorld();
+    MoreInteractionNames();
+    MoveBlendTrees();
+    ReserveWantedVehicles();
+    HookEngineSounds();
+    HookLights();
+    StartTraffic();
+    gv::StartFlyers();
     if (rfa::IniInt(L"GuerrillaVehicles", L"Dents", 1) != 0) TurnOnDents();
     else rfa::Log("Dents: off ([GuerrillaVehicles] Dents=0)");
     HookDoors();

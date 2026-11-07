@@ -63,6 +63,27 @@ public static class GuerrillaEffectTables
     public static string Added(string guerrillaName) => "rfg_" + guerrillaName;
 
     /// <summary>
+    /// The longest name a level object may have: Armageddon's reader copies Name into a 32-byte buffer with a
+    /// checked copy, which ends the game when it doesn't fit (its own longest is 31 characters).
+    /// </summary>
+    const int MostObjectName = 31;
+
+    /// <summary>
+    /// An added level object's name: <see cref="Added"/>'s, or, where that's longer than a level object's name
+    /// may be (Guerrilla's 0101machine_big_mining_a_engine and two others), its start and four hex digits of a
+    /// hash of Guerrilla's whole name (FNV-1a), so each stays one of its own. The world's objects name it
+    /// through <see cref="Tables.PropsOf"/>.
+    /// </summary>
+    public static string ObjectName(string guerrillaName)
+    {
+        string name = Added(guerrillaName);
+        if (name.Length <= MostObjectName) return name;
+        uint hash = 2166136261;
+        foreach (char c in guerrillaName.ToLowerInvariant()) hash = (hash ^ c) * 16777619;
+        return $"{name[..(MostObjectName - 5)].TrimEnd('_')}_{hash & 0xFFFF:x4}";
+    }
+
+    /// <summary>
     /// The tables (Armageddon's with Guerrilla's entries added), each of Guerrilla's level object names
     /// the world uses to its added entry, each to the effect files (Guerrilla's names, without
     /// extension) its added effects show, every effect file to convert, the files of the effects the
@@ -202,6 +223,11 @@ public static class GuerrillaEffectTables
             string body = Rename(visuals[v], Added(v));
             body = Replace(body, "Filename", Added(FileOf(visuals[v])) + ".effectx");
             body = Replace(body, "Streaming_Category", "Environmental");
+            // Guerrilla's Start_time is seconds with a fraction; Armageddon's reader takes whole seconds (it cuts the
+            // fraction off): the nearest whole second (Guerrilla's three fires' 3.5 → 4).
+            body = Regex.Replace(body, @"<Start_time>\s*([^<]*?)\s*</Start_time>", m =>
+                double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double seconds)
+                    ? $"<Start_time>{(long)Math.Round(seconds, MidpointRounding.AwayFromZero)}</Start_time>" : m.Value);
             visualText.Append($"\t<Effect>{Fit(body, "Effect", visualShape)}</Effect>\n");
         }
         var effectShape = new Shape(ourEffects, "Effect", Text(guerrillaMisc, "effects.xtbl"));
@@ -220,8 +246,9 @@ public static class GuerrillaEffectTables
         var explosionsLeft = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string p in used.Keys.Where(objects.ContainsKey).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
         {
-            string name = Added(p);
+            string name = ObjectName(p);
             if (takenObjects.Contains(name)) throw new InvalidDataException($"Armageddon's level_objects.xtbl already has an entry {name}");
+            if (propsOf.Values.Contains(name, StringComparer.OrdinalIgnoreCase)) throw new InvalidDataException($"two of Guerrilla's level objects would both be named {name}");
             string body = Rename(objects[p], name);
             foreach (string field in EffectFields)
                 body = Regex.Replace(body, $@"(\s*)<{field}>([^<]*)</{field}>", m =>
