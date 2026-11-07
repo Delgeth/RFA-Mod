@@ -62,6 +62,7 @@ auto const WorldThrustMatrix = reinterpret_cast<void(__cdecl*)(const M3* orient,
 auto const MakeIdentity = reinterpret_cast<void(__fastcall*)(M3* m, void* unused)>(0xC9D8C0);
 auto const RotateAroundLocalZ = reinterpret_cast<void(__fastcall*)(M3* m, void* unused, float angle)>(0xC9E800);
 auto const RotateAroundLocalX = reinterpret_cast<void(__fastcall*)(M3* m, void* unused, float angle)>(0xC9E6F0);
+auto const HavokBody = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);  // the body of a handle, null for −1
 auto const BodyPosOrient = reinterpret_cast<void(__cdecl*)(BYTE* body, V3* pos, M3* orient)>(0x776520);
 auto const BodyVelocity = reinterpret_cast<void(__cdecl*)(BYTE* body, V3* out)>(0x776770);
 auto const BodySpin = reinterpret_cast<void(__cdecl*)(BYTE* body, V3* out)>(0x776DB0);
@@ -365,7 +366,10 @@ void __cdecl Presim(BYTE* vehicle) {
     if (!model) return;
     BYTE* pilot = SeatOccupant(vehicle, 0);
     if (pilot && pilot == Player()) return;  // the player's flight is Armageddon's
-    BYTE* body = *reinterpret_cast<BYTE**>(vehicle + 0x4C);
+    // Its Havok body, looked up as the game does (0x778440: the handle at +0x4C, or null for −1). A vehicle
+    // without one yet (or any more) still gets its presim, with −1 there; update_flight_info then reads its mass
+    // through null (0x5F19F0 → 0xACA3B0: the 22:08:21 crash, reading 0x1A0, as the EDF's fly-by came in).
+    BYTE* body = HavokBody(*reinterpret_cast<const DWORD*>(vehicle + 0x4C));
     if (!body) return;
     const DWORD flags = *reinterpret_cast<const DWORD*>(vehicle + kVehicleFlags);
     if (pilot && !(flags & kEngineRunning)) {

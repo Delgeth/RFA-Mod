@@ -157,7 +157,7 @@ public static class GuerrillaVehicleSounds
             [(0, WwiseBankWriter.Silent), (0.5f, WwiseBankWriter.Silent), (0.51f, GuerrillaSoundBanks.Db(scalar)), (1, GuerrillaSoundBanks.Db(scalar))]);
         // (Guerrilla sets its volume itself, the scalar × the damage, in place of the cue's.)
         WwiseBankWriter.Settings DamageLoop(string cue) =>
-            new() { Curves = [damageCurve], VirtualWhenQuiet = true, Volume = -GuerrillaSoundBanks.Db(sounds.Sounds.FindCue(cue)?.Volume ?? 1) };
+            new() { Curves = [damageCurve], Volume = -GuerrillaSoundBanks.Db(sounds.Sounds.FindCue(cue)?.Volume ?? 1) };
         if (damage?.ValueOf("Foley")?.Trim() is { Length: > 0 } damageCue && scalar > 0 &&
             sounds.CueObject(bank, damageCue, $"{name}:damage:player", loops: true, DamageLoop(damageCue), player) is { } dp) playerLoops.Add(dp);
         if ((damage?.ValueOf("Mono_Foley")?.Trim() is { Length: > 0 } m ? m : damage?.ValueOf("Foley")?.Trim()) is { Length: > 0 } monoDamage && scalar > 0 &&
@@ -166,12 +166,10 @@ public static class GuerrillaVehicleSounds
         // The player's 2D, the others' 3D, each heard on its side of RFG_PLAYER_IN_VEHICLE.
         var playerSettings = new WwiseBankWriter.Settings
         {
-            VirtualWhenQuiet = true,
             Curves = [new(WwiseBankWriter.PlayerInVehicle, WwiseBankWriter.Property.Volume, [(0, WwiseBankWriter.Silent), (1, 0)])],
         };
         var otherSettings = new WwiseBankWriter.Settings
         {
-            VirtualWhenQuiet = true,
             Curves = [new(WwiseBankWriter.PlayerInVehicle, WwiseBankWriter.Property.Volume, [(0, 0), (1, WwiseBankWriter.Silent)])],
         };
         bank.Layer($"{name}:player", playerLoops, playerSettings, 0, new(WwiseBankWriter.EngineBus, 0, false));
@@ -179,7 +177,13 @@ public static class GuerrillaVehicleSounds
         return new Engine(bank, player, others, delay);
     }
 
-    static WwiseBankWriter.Settings Loop(List<WwiseBankWriter.Curve> curves) => new() { Curves = curves, VirtualWhenQuiet = true };
+    // An engine's loops (and its damage loop and layer containers) keep playing while quiet, as every one of
+    // Armageddon's own engine loops does (its vehicles.bnk_pc: the below-threshold byte 0). Set to go virtual (2),
+    // the game's Wwise ended a loop once its curves made it silent, and the whole engine sound once every loop was
+    // at the same moment (Round 2: the Kitsune's, whose RPM1 layer is silent below 1,008 rpm and off-load layer at
+    // full load, went silent for good three seconds into a drive, as the RPM left its idle layer's range; the sound's
+    // game object 0 from then on). The quiet loops play on unheard, as Armageddon's engines' do.
+    static WwiseBankWriter.Settings Loop(List<WwiseBankWriter.Curve> curves) => new() { Curves = curves };
 
     /// <summary>A range list's layers by slot (from the sound's name: IDLE 0, RPM1 1, RPM2 2, RPM3 3, as Guerrilla's parser).</summary>
     static Dictionary<int, Layer> Layers(XtblElement? list)

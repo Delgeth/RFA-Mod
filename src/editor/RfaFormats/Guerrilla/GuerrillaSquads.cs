@@ -143,7 +143,13 @@ public static class GuerrillaSquads
 
         var written = new List<string>();
         var leftOut = new List<string>();
-        int groupSquads = 0;
+        int groupSquads = 0, notPlaced = 0;
+        // The district versions the world's zones name (the world build's list); the others aren't written, as the
+        // game keeps few squads (SquadEntries). Before the world is built, none.
+        string placedFile = Path.Combine(worldFolder, PlacedList);
+        var placed = File.Exists(placedFile)
+            ? File.ReadAllLines(placedFile).Select(l => l.Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var rfg in Read(guerrillaTables, SquadTable).Entries)
         {
             string name = XtblFile.EntryName(rfg), team = rfg.ValueOf("team_name")?.Trim() ?? "";
@@ -162,7 +168,9 @@ public static class GuerrillaSquads
                     if (people.Count == 0) continue;
                     List<(string, string, double)> pool = civilians ? [.. people.Select(p => (p, CivilianLoadout, 1.0))]
                                                                     : [.. people.SelectMany(p => guerrillaLoadouts.Select(l => (p, l.Loadout, l.Weight)))];
-                    squads.Table!.AddElement(Squad(GuerrillaDistricts.SquadFor(name, group == "default" ? null : group), team, count, pool, people.Count));
+                    string version = GuerrillaDistricts.SquadFor(name, group == "default" ? null : group);
+                    if (!placed.Contains(version)) { notPlaced++; continue; }
+                    squads.Table!.AddElement(Squad(version, team, count, pool, people.Count));
                     groupSquads++;
                 }
                 written.Add($"{name} ({count}, a version a group)");
@@ -174,6 +182,28 @@ public static class GuerrillaSquads
         }
 
         var (resources, playerOverride) = WithSpawnResources(gameTables, resourceLists, containerOf, player);
+        // As many squads as the game keeps (SquadEntries), and their names in the string pools the game keeps them in
+        // (guerrilla_people gives both pools room).
+        int squadEntries = squads.Entries.Count();
+        if (squadEntries > SquadEntries)
+            throw new InvalidDataException($"squads.xtbl would hold {squadEntries} squads, more than the {SquadEntries} the game keeps of it (its squad definitions' pool holds 128, and the DLC's squads take 7)");
+        // As many different members (character, loadout, variant) as the game's pool of them holds (guerrilla_people's).
+        int squadMembers = SquadMembers(squads);
+        if (squadMembers > SquadMemberPool)
+            throw new InvalidDataException($"the squads would have {squadMembers} different members, more than the {SquadMemberPool} the game holds with guerrilla_people (its own 64): every squad after the last that fits wouldn't be read");
+        // As many loadouts as the game holds (guerrilla_people's), and every squad's members naming ones it has.
+        var allWeapons = new HashSet<string>(gameWeapons.Concat(ported), StringComparer.OrdinalIgnoreCase);
+        if (SquadProblems(squads, loadouts, allWeapons, null, gameSquads) is { Count: > 0 } squadProblems)
+            throw new InvalidDataException("the squads the game would turn down: " + string.Join("; ", squadProblems));
+        // Every squad the world's zones name is written (a zone naming another destroys its squad spawn node).
+        var writtenNames = squads.Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (placed.Where(p => !writtenNames.Contains(p)).ToList() is { Count: > 0 } unwritten)
+            throw new InvalidDataException($"the world's zones name squads the people build doesn't write: {string.Join(", ", unwritten)} (build the world and the people again)");
+        int squadNames = PoolBytes(squads), resourceNames = PoolBytes(resources);
+        if (squadNames > SquadNamePool)
+            throw new InvalidDataException($"the squads' names need {squadNames} bytes, more than the {SquadNamePool} the game holds with guerrilla_people");
+        if (resourceNames > ResourceNamePool)
+            throw new InvalidDataException($"the spawn resources' names need {resourceNames} bytes, more than the {ResourceNamePool} the game holds with guerrilla_people");
         Directory.CreateDirectory(worldFolder);
         File.WriteAllBytes(Path.Combine(worldFolder, ResourceTable), resources.ToBytes());
         File.WriteAllBytes(Path.Combine(worldFolder, SquadTable), squads.ToBytes());
@@ -188,6 +218,9 @@ public static class GuerrillaSquads
                      (playerOverride != null ? $"; the player {playerOverride}" + (player != null ? " (Guerrilla's player, made by the people)" : ", as Armageddon's Default") : "");
         yield return $"Loadouts: {loadoutName.Count} of Guerrilla's ({string.Join(", ", loadoutName.Values)}); not yet, their weapons not ported: {leftOutLoadouts.Count}; with their grenades: {withGrenades.Count}" +
                      (leftOutGrenades.Count > 0 ? $"; grenades not yet: {string.Join(", ", leftOutGrenades)}" : "");
+        yield return $"Squads: {squadEntries} in squads.xtbl of the {SquadEntries} the game keeps, {squadMembers} different members of the {SquadMemberPool} it holds with guerrilla_people (its own 64); district versions the world's zones don't name, left out: {notPlaced}" +
+                     (placed.Count == 0 ? " (the world isn't built yet: none of the district versions written)" : "");
+        yield return $"Names: the squads' {squadNames} bytes of the {SquadNamePool} the game holds with guerrilla_people (its own 1,280), the spawn resources' {resourceNames} of {ResourceNamePool} (its own 1,024)";
         yield return written.Count == 0 ? "Squads: none of Guerrilla's can be had yet" : $"Squads: {written.Count} of Guerrilla's ({groupSquads} versions of its civilian and guerrilla squads, a group each), members picked from its progression at level {Level}: {string.Join(", ", written)}";
         if (leftOut.Count > 0) yield return $"Squads not yet: {string.Join(", ", leftOut)}";
     }
@@ -313,6 +346,93 @@ public static class GuerrillaSquads
         }
         return (resources, string.IsNullOrEmpty(player) ? null : player);
     }
+
+    /// <summary>
+    /// How many different squad members (a character, a loadout and a variant) the game holds with guerrilla_people: the
+    /// squad reader makes one record for each (pool 0x12EFEF0, 64 of the game's own), and past them every later squad fails.
+    /// </summary>
+    public const int SquadMemberPool = 256;
+
+    /// <summary>A squad table's different members (leaders' and members': a character, a loadout and a variant each).</summary>
+    public static int SquadMembers(XtblFile table)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var squad in table.Entries)
+        {
+            var members = new List<XtblElement>();
+            if (squad.Element("squad_leader") is { } leader) members.Add(leader);
+            members.AddRange(squad.Element("squad_member_list")?.Elements ?? []);
+            foreach (var m in members)
+                seen.Add($"{m.ValueOf("member_info")?.Trim()}|{m.ValueOf("weapon_info")?.Trim()}|{m.ValueOf("member_variant")?.Trim()}");
+        }
+        return seen.Count;
+    }
+
+    /// <summary>
+    /// How many squad_loadout.xtbl entries the game holds with guerrilla_people: its own table holds 36 (0x12F33A0, made
+    /// by 0x50D5B0) and drops every entry past them without a word, and a squad member naming a dropped loadout fails its
+    /// whole squad, so a zone naming the squad gets "invalid squad definition" (marauder_squad_6 in the user's Round 1).
+    /// </summary>
+    public const int LoadoutEntries = 128;
+
+    /// <summary>
+    /// What the game's readers would turn down in a squad table and its loadout table, a line each (none: nothing): the
+    /// loadouts past the <see cref="LoadoutEntries"/> the game holds; a loadout whose weapon isn't one of
+    /// <paramref name="weapons"/> (the loadout reader drops it, 0x50CFFA); a squad whose leader or member names a loadout
+    /// the game won't have, or a character not in <paramref name="characters"/> (the squad reader fails the squad,
+    /// 0x50BD2A / 0x50BD6B). A null set isn't checked; squads named in <paramref name="armageddons"/> (Armageddon's own) are
+    /// checked for loadouts only, as the game's own data is.
+    /// </summary>
+    public static List<string> SquadProblems(XtblFile squads, XtblFile loadouts, IReadOnlySet<string>? weapons, IReadOnlySet<string>? characters,
+                                             IReadOnlySet<string>? armageddons = null)
+    {
+        var problems = new List<string>();
+        var entries = loadouts.Entries.ToList();
+        if (entries.Count > LoadoutEntries)
+            problems.Add($"squad_loadout.xtbl holds {entries.Count} loadouts, more than the {LoadoutEntries} the game holds with guerrilla_people (its own 36): " +
+                         $"{string.Join(", ", entries.Skip(LoadoutEntries).Select(XtblFile.EntryName))} would be dropped");
+        var kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries.Take(LoadoutEntries))
+        {
+            string name = XtblFile.EntryName(entry), weapon = entry.ValueOf("weapon_type")?.Trim() ?? "";
+            if (weapons != null && !weapons.Contains(weapon)) problems.Add($"the loadout {name}'s weapon {(weapon.Length > 0 ? weapon : "(none)")} isn't in weapons.xtbl: the game drops the loadout");
+            else kept.Add(name);
+        }
+        foreach (var squad in squads.Entries)
+        {
+            string name = XtblFile.EntryName(squad);
+            var members = new List<XtblElement>();
+            if (squad.Element("squad_leader") is { } leader) members.Add(leader);
+            members.AddRange(squad.Element("squad_member_list")?.Elements ?? []);
+            bool own = armageddons?.Contains(name) == true;
+            var missingLoadouts = members.Select(m => m.ValueOf("weapon_info")?.Trim() ?? "").Where(l => !kept.Contains(l)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            List<string> missingCharacters = characters == null || own ? [] :
+                members.Select(m => m.ValueOf("member_info")?.Trim() ?? "").Where(c => !characters.Contains(c)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (missingLoadouts.Count > 0) problems.Add($"{name} names loadouts the game won't have: {string.Join(", ", missingLoadouts.Select(l => l.Length > 0 ? l : "(none)"))}");
+            if (missingCharacters.Count > 0) problems.Add($"{name} names characters not in character.xtbl: {string.Join(", ", missingCharacters.Select(c => c.Length > 0 ? c : "(none)"))}");
+        }
+        return problems;
+    }
+
+    /// <summary>The world build's list of the squads its zones name (in mods\guerrilla_world\): the district versions the people build writes.</summary>
+    public const string PlacedList = "placed_squads.txt";
+
+    /// <summary>
+    /// How many squads.xtbl entries the game keeps: it makes each squad definition from a pool of 128 (constructor
+    /// 0x50CC50, pool 0x12F0370; its name table at 0x12F2E98 holds 128 too) and skips an entry the pool can't give one
+    /// to without a word, so a zone naming it gets "invalid squad definition"; the DLC's dlc04_squads.xtbl takes 7.
+    /// </summary>
+    public const int SquadEntries = 128 - 7;
+
+    /// <summary>
+    /// How many bytes the game's string pools for the squads' and spawn resources' names hold with guerrilla_people
+    /// ("Squad Def String Pool", 1,280 bytes of the game's own; "Spawn Resource Data", 1,024): past it the game stops.
+    /// </summary>
+    public const int SquadNamePool = 0x4000, ResourceNamePool = 0x2000;
+
+    /// <summary>A table's entries' names in one of the game's string pools: each once, with its NUL, rounded up as the pool does.</summary>
+    public static int PoolBytes(XtblFile table) =>
+        table.Entries.Select(XtblFile.EntryName).Distinct(StringComparer.Ordinal).Sum(n => { int k = n.Length + 1; return k % 2 == 1 ? k + 1 : k + 2; });
 
     /// <summary>How many characters' containers the game streams in at once (its human allocator, 0x26B07B0: 16 slots).</summary>
     const int HumanSlots = 16;

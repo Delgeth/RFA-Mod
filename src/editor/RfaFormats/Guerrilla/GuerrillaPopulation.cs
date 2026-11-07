@@ -74,7 +74,26 @@ public static class GuerrillaPopulation
     public const int MostPeople = 80;
 
     static readonly uint Building = NameHashes.ClassHash("rfg_mover"), Box = NameHashes.ClassHash("object_bounding_box"),
-                         ActionNode = NameHashes.ClassHash("object_action_node");
+                         ActionNode = NameHashes.ClassHash("object_action_node"), GuardNode = NameHashes.ClassHash("object_guard_node");
+
+    /// <summary>The bounding box's properties in the order Armageddon's own zones write them (Guerrilla's boxes have the same three).</summary>
+    static readonly string[] BoxOrder = ["bounding_box_type", "OP", "bb"];
+
+    /// <summary>
+    /// A squad node's guard post: the bounding box it hangs under in Guerrilla when the box also holds guard nodes (the
+    /// squad guards that area, standing at the guard nodes: Guerrilla's go_to_guard_post / guard_at_post AI), or null.
+    /// Armageddon deleted the guard AI (its object_guard_node is editor-only), so the box is placed with the node under it
+    /// and guerrilla_people leashes the squad to it as it spawns (Armageddon's leash to an anchor's bounding box), until
+    /// Guerrilla's guard post AI is ported. Without it the squad, under Standard orders, hunts the player down walks the
+    /// pathfinder won't take ("Failed pathfind", the user's Round 2: the EDF post over the Dust safehouse).
+    /// </summary>
+    public static GuerrillaZoneObject? GuardBoxOf(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, GuerrillaZoneObject node)
+    {
+        if (node.Parent == None || !zone.TryGetValue(node.Parent, out var box) || box.ClassHash != Box) return null;
+        for (uint h = box.Child; h != None && zone.TryGetValue(h, out var child); h = child.Sibling)
+            if (child.ClassHash == GuardNode) return box;
+        return null;
+    }
 
     /// <summary>
     /// A zone's squad spawn nodes that stand on their own in Armageddon (by handle, with the squad they name here,
@@ -191,10 +210,13 @@ public static class GuerrillaPopulation
             if (reached.Add(navpoint.Handle)) navpoints.Add(navpoint);
 
         var standingNodes = standing.Where(s => zone.ContainsKey(s.Handle)).Select(s => zone[s.Handle]).ToList();
+        // The guard posts' boxes (GuardBoxOf), each once, with the standing nodes under it.
+        var guardBoxes = standingNodes.Select(n => (Node: n, Box: GuardBoxOf(zone, n))).Where(x => x.Box != null)
+                                      .GroupBy(x => x.Box!.Handle).ToDictionary(g => g.First().Box!, g => g.Select(x => x.Node).ToList());
 
         // Handles: Guerrilla's, unless taken.
         var handleOf = new Dictionary<uint, uint>();
-        foreach (var o in navpoints.Concat(placedPatrols).Concat(squads).Concat(standingNodes))
+        foreach (var o in navpoints.Concat(placedPatrols).Concat(squads).Concat(guardBoxes.Keys).Concat(standingNodes))
         {
             uint handle = o.Handle;
             while (!taken.Add(handle)) handle = (handle & 0xFFFF0000) | ((handle + 1) & 0xFFFF);
@@ -246,10 +268,28 @@ public static class GuerrillaPopulation
             squadObject.Sibling = squadObject.Child = None;
             objects.Add(squadObject);
         }
+        // Each guard post's box as Guerrilla's (its place, orientation and extent), before the nodes under it.
+        var boxOfNode = new Dictionary<uint, uint>();
+        foreach (var (box, nodes) in guardBoxes)
+        {
+            var boxObject = Make(box, BoxOrder.Select(name => Own(box, name)));
+            boxObject.Parent = boxObject.Sibling = None;
+            boxObject.Child = handleOf[nodes[0].Handle];
+            objects.Add(boxObject);
+            foreach (var node in nodes) boxOfNode[node.Handle] = handleOf[box.Handle];
+        }
         foreach (var node in standingNodes)
         {
             var squadObject = Make(node, SquadNodeProperties(node, Orders(node.Text("default_orders"))));
             squadObject.Parent = squadObject.Sibling = squadObject.Child = None;
+            if (boxOfNode.TryGetValue(node.Handle, out uint boxHandle))
+            {
+                // Under its guard post's box; the box's other nodes follow it as its siblings.
+                squadObject.Parent = boxHandle;
+                var siblings = guardBoxes.First(g => handleOf[g.Key.Handle] == boxHandle).Value;
+                int at = siblings.IndexOf(node);
+                if (at + 1 < siblings.Count) squadObject.Sibling = handleOf[siblings[at + 1].Handle];
+            }
             objects.Add(squadObject);
         }
         return objects;

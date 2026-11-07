@@ -77,6 +77,9 @@ public sealed class GuerrillaSoundBanks
     public static float Number(string? text) =>
         float.TryParse(text?.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float f) ? f : 0;
 
+    /// <summary>Whether this part is already making the bank for a Guerrilla sound bank (some cue of it asked for).</summary>
+    public bool Builds(string guerrillaSoundBank) => banks.ContainsKey(BankPrefix + guerrillaSoundBank.ToLowerInvariant());
+
     /// <summary>The bank for a Guerrilla sound bank (made the first time).</summary>
     public WwiseBankWriter Bank(string guerrillaSoundBank)
     {

@@ -63,8 +63,12 @@ public static class GuerrillaWorld
     /// starting the game with a world of another, or with one built before worlds were stamped).
     /// 2 (v0.5.7-beta): the zones name the world's own spawn resource, rfg_Default; a world without
     /// it gives the game Armageddon's Default people, whose effects run its pools out at start.
+    /// 3 (v0.5.8-beta): Guerrilla's people, guard boxes, turret parts and looping sounds; the mods
+    /// size the game's tables for what the world's zones and tables now name.
     /// </summary>
-    public const int Format = 2;
+    public const int Format = 3;
+    // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
+    const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
     /// <summary>The stamp's file name, in the mod's folder (mods\guerrilla_world\).</summary>
     public const string StampFile = "world.txt";
@@ -581,6 +585,14 @@ public static class GuerrillaWorld
             (effectTables.VisualsLeft.Count > 0 ? $"; {effectTables.VisualsLeft.Count} visual effects past the game's room of {GuerrillaEffectTables.VisualLimit} left out: {string.Join(", ", effectTables.VisualsLeft)}" : "") +
             (effectTables.ExplosionsLeft.Count > 0 ? $"; explosions neither added nor Armageddon's left out: {string.Join(", ", effectTables.ExplosionsLeft)}" : "") +
             (unshipped.Count > 0 ? $"; textures Guerrilla never shipped, drawn as nothing: {string.Join(", ", unshipped)}" : ""));
+        // The effects' emitters: each emitter of each loaded effect file takes a place in a pool guerrilla_world makes
+        // 6,600 (the game's 2,200); Armageddon's own files have 3,457 in all, so ours must stay within the rest.
+        int ourEmitters = effectFiles.Values.Sum(l => l.Where(f => f.Name.EndsWith(".cefct_pc", StringComparison.OrdinalIgnoreCase) && f.Data.Length >= 0x34)
+                                                    .Sum(f => Math.Max(0, BitConverter.ToInt32(f.Data, 0x30))));
+        if (ourEmitters + ArmageddonEmitters > EmitterRoom)
+            throw new InvalidDataException($"the effect files' emitters ({ourEmitters}, with Armageddon's {ArmageddonEmitters}) are more than the {EmitterRoom} "
+                                           + "guerrilla_world makes room for: a load past it crashes");
+        log($"Effects: the effect files' emitters {ourEmitters}, with Armageddon's {ArmageddonEmitters} {ourEmitters + ArmageddonEmitters} of the {EmitterRoom} the game holds");
         string? PropsOf(string name) => effectTables.PropsOf.GetValueOrDefault(name) ?? (levelObjects.Contains(name) ? name : null);
 
         var schema = ZoneSchema.FromGame(game) ?? throw new InvalidDataException($"no {ZoneSchema.FileName} in the game's {ZoneSchema.ArchiveName}");
@@ -856,9 +868,26 @@ public static class GuerrillaWorld
         log($"People: {standingIn.Values.Sum(s => s.Count)} of Guerrilla's squads standing where it puts them ({standingIn.Values.Sum(s => s.Sum(x => Members(x.Squad)))} people)" +
             (standingLeftOut > 0 ? $"; {standingLeftOut} left out to keep {GuerrillaPopulation.MostPeople} people at most within each 3 x 3 block of zones" : "") +
             $"; squads: {string.Join(", ", peopleSquads.Order())}");
+        // The squads the zones name, for the people build (GuerrillaSquads.PlacedList): it writes only the district
+        // versions placed, as the game keeps few squads.
+        {
+            var placedSquads = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (zone, handles) in patrolsIn)
+                foreach (uint handle in handles)
+                    if (guerrillaObjects[zone].Values.FirstOrDefault(o => o.ClassHash == squadNodeClass && o.Parent == handle) is { } node)
+                        placedSquads.Add(SquadsOf(zone)(node.Text("squad_def") ?? ""));
+            foreach (var (_, list) in standingIn)
+                foreach (var (_, squad) in list) placedSquads.Add(squad);
+            Directory.CreateDirectory(modFolder);
+            File.WriteAllLines(Path.Combine(modFolder, GuerrillaSquads.PlacedList), placedSquads);
+            log($"People: the zones name {placedSquads.Count} squads ({placedSquads.Count(s => s.StartsWith("rfg_", StringComparison.OrdinalIgnoreCase))} district versions)");
+        }
 
         int pedestriansPlaced = 0;  // Guerrilla's pedestrian navpoints, for the ambient people (counted as the zones are written)
+        int guardPostsPlaced = 0;   // Guerrilla's guard posts' boxes, with their squads' nodes under them (GuerrillaPopulation.GuardBoxOf)
+        uint guardBoxClass = NameHashes.ClassHash("object_bounding_box");
         var vehiclePlaceProblems = new List<string>();
+        var roadsMoved = new List<string>();  // roads whose own position was moved into their zone's square
         int roadsPlaced = 0, spotsPlaced = 0;
         // Guerrilla's pickups (its ammo boxes, weapon lockers, propane tanks, singularity bombs; see GuerrillaPickups),
         // under the names the weapons build gives them.
@@ -952,14 +981,18 @@ public static class GuerrillaWorld
             {
                 var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
                 foreach (var person in GuerrillaPopulation.Convert(guerrillaObjects[(col, row)], patrolsHere, standingHere, SquadsOf((col, row)), schema, taken))
+                {
                     zoneFile.Insert(zoneFile.Objects.Count, person);
+                    if (person.ClassHash == guardBoxClass) guardPostsPlaced++;
+                }
             }
             // Guerrilla's roads (traffic's paths) and its parked vehicles' spots (see GuerrillaVehiclePlaces).
             List<ZoneObject> roadsHere = [];
             if (guerrillaObjects.TryGetValue((col, row), out var rfgZoneObjects))
             {
                 var taken = new HashSet<uint>(zoneFile.Objects.Select(o => o.Handle));
-                var (roadObjects, spots) = GuerrillaVehiclePlaces.Convert(rfgZoneObjects, schema, taken, vehiclePlaceProblems);
+                var (roadObjects, spots) = GuerrillaVehiclePlaces.Convert(rfgZoneObjects, schema, taken, vehiclePlaceProblems, (corner.X, corner.Y), ZoneWidth,
+                                                                          roadsMoved);
                 foreach (var placed in roadObjects.Concat(spots)) zoneFile.Insert(zoneFile.Objects.Count, placed);
                 roadsHere = roadObjects;
                 roadsPlaced += roadObjects.Count;
@@ -1006,9 +1039,11 @@ public static class GuerrillaWorld
             looks.Remove((col, row));
             navigation.Remove((col, row));
         }
-        log($"People: {pedestriansPlaced} of Guerrilla's pedestrian navpoints placed (its pedestrian network, for the ambient people)");
+        log($"People: {pedestriansPlaced} of Guerrilla's pedestrian navpoints placed (its pedestrian network, for the ambient people); " +
+            $"{guardPostsPlaced} guard posts' boxes with their squads' nodes under them (guerrilla_people leashes each squad to its box)");
         log($"Vehicles' places: {roadsPlaced} of Guerrilla's roads (each in its zone and its persistent zone), {spotsPlaced} parked vehicles' spots " +
             $"(their groups {GuerrillaVehiclePlaces.GroupPrefix}<Guerrilla's name>, which building the vehicles writes)" +
+            (roadsMoved.Count > 0 ? $"; {roadsMoved.Count} roads' own positions moved into their zone (their points as they are): {string.Join(", ", roadsMoved)}" : "") +
             (vehiclePlaceProblems.Count > 0 ? $"; left out: {string.Join("; ", vehiclePlaceProblems)}" : ""));
         log($"Pickups: {pickupsPlaced} of Guerrilla's placed (ammo boxes, weapon lockers, propane tanks, singularity bombs: the weapons build " +
             "makes their items and weapons)" + (pickupsLeft.Count > 0 ? $"; not yet: {string.Join(", ", pickupsLeft.Select(p => $"{p.Key} {p.Value}"))}" : ""));

@@ -55,6 +55,11 @@
 // +0x18, 0xFF while free). So the mod replaces the constructor with one doing the same on a buffer of its
 // own, for Guerrilla's 72, after checking the constructor's buffer size and count are the game's (nothing
 // changes if not). Always, whatever [GuerrillaPeople] Enabled= says: the world's zones place them.
+// The world also keeps a list of each type's objects (0x1870630 +0x68, 12 bytes a type: its objects, how many it
+// holds, how many it has; the zone loader 0x6D4880 adds each object made, saying "!type_objects[stub->obj_type]
+// .full()" when the list is full and adding it anyway), each list as big as the count the type registers at
+// start-up (0xF2E4A0 → 0x4FAD90, patrols' 24), not its pool. So the mod also replaces that registration with the
+// same call (the same callbacks and name) giving Guerrilla's 72, after checking each value it pushes is the game's.
 //
 // Guerrilla's sides: both games keep the teams by the same numbers (0 Guerrilla's Red Faction, 1 its
 // EDF, Armageddon's Legion, 2 civilians, 3 Marauders; Armageddon adds 4, its cultists) and how each
@@ -180,6 +185,21 @@ constexpr DWORD kGameHumanInfoBytes = 0x1838;   // its own: 6,200 bytes
 constexpr DWORD kHumanInfoBytes = 0x10000;      // ours: 64 KB
 alignas(16) BYTE g_humanInfoStrings[kHumanInfoBytes];
 
+// The squads' and spawn resources' names, the same way: the squad table's reader (0x50C000, then 0x50BA30 an
+// entry) keeps each squad's Name in "Squad Def String Pool" (0x12F2E38) on 0x500 bytes (1,280) it takes once
+// (kept at 0x12EFED0), and the spawn resources' reader (0x75F190, then 0x75ED30) each resource's Name in
+// "Spawn Resource Data" (0x19706E0) on 0x400 (1,024; kept at 0x1969950). Armageddon's 51 squads and Guerrilla's
+// 92 need about 2.1 KB, the 83 resources about 1.1 KB, so they get 16 KB and 8 KB of their own (the people
+// build checks its tables' names fit them).
+BYTE* const kSquadNames = reinterpret_cast<BYTE*>(0x12F2E38);
+constexpr DWORD kGameSquadNameBytes = 0x500;    // its own: 1,280 bytes
+constexpr DWORD kSquadNameBytes = 0x4000;       // ours: 16 KB
+alignas(16) BYTE g_squadNames[kSquadNameBytes];
+BYTE* const kResourceNames = reinterpret_cast<BYTE*>(0x19706E0);
+constexpr DWORD kGameResourceNameBytes = 0x400; // its own: 1,024 bytes
+constexpr DWORD kResourceNameBytes = 0x2000;    // ours: 8 KB
+alignas(16) BYTE g_resourceNames[kResourceNameBytes];
+
 void __fastcall PoolInit(void* pool, void* unused, void* memory, DWORD size, const char* name, int flag, int alignment) {
     if (pool == kRigPool && size == kGameRigPoolBytes) {
         g_poolInit(pool, unused, g_rigPool, kRigPoolBytes, name, flag, alignment);
@@ -189,6 +209,16 @@ void __fastcall PoolInit(void* pool, void* unused, void* memory, DWORD size, con
     if (pool == kHumanInfoStrings && size == kGameHumanInfoBytes) {
         g_poolInit(pool, unused, g_humanInfoStrings, kHumanInfoBytes, name, flag, alignment);
         rfa::Log("Characters' names: their pool holds %lu KB (its own %lu bytes)", kHumanInfoBytes / 1024, kGameHumanInfoBytes);
+        return;
+    }
+    if (pool == kSquadNames && size == kGameSquadNameBytes) {
+        g_poolInit(pool, unused, g_squadNames, kSquadNameBytes, name, flag, alignment);
+        rfa::Log("Squads' names: their pool holds %lu KB (its own %lu bytes)", kSquadNameBytes / 1024, kGameSquadNameBytes);
+        return;
+    }
+    if (pool == kResourceNames && size == kGameResourceNameBytes) {
+        g_poolInit(pool, unused, g_resourceNames, kResourceNameBytes, name, flag, alignment);
+        rfa::Log("Spawn resources' names: their pool holds %lu KB (its own %lu bytes)", kResourceNameBytes / 1024, kGameResourceNameBytes);
         return;
     }
     g_poolInit(pool, unused, memory, size, name, flag, alignment);
@@ -248,11 +278,220 @@ void* __fastcall MakePatrolPool(void* pool, void*) {
     return pool;
 }
 
+// The patrols' registration (0xF2E4A0): it pushes nine values and calls 0x4FAD90 (thiscall) on the type's entry.
+constexpr DWORD kPatrolRegistration = 0xF2E4A0, kRegisterType = 0x4FAD90, kPatrolTypeEntry = 0x20F3B04;
+// Each push's value and where it is in the registration's code (push imm32 at +3, +10, ...; push imm8 at +8).
+struct PushedValue { DWORD at; DWORD value; };
+constexpr PushedValue kPatrolPushes[] = {
+    {0xF2E4A4, 0x7F7E30}, {0xF2E4AB, 0x1070}, {0xF2E4B0, 0x7F7E80}, {0xF2E4B5, 0x7F7E60}, {0xF2E4BA, 0x813EA0},
+    {0xF2E4BF, 0x7F7E40}, {0xF2E4C4, 0x7F7E10}, {0xF2E4C9, 0xFBE430}, {0xF2E4CE, kPatrolTypeEntry},
+};
+constexpr DWORD kPatrolRegisteredCount = 0xF2E4A9;  // push 18h: the count, one byte
+using RegisterTypeFn = void(__fastcall*)(void* entry, void* unused, const char* name, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e,
+                                         DWORD bytes, DWORD count, DWORD f);
+auto const RegisterType = reinterpret_cast<RegisterTypeFn>(kRegisterType);
+
+// The game's registration, with Guerrilla's count (and the bytes it books scaled to it).
+void __cdecl RegisterPatrols() {
+    RegisterType(reinterpret_cast<void*>(kPatrolTypeEntry), nullptr, reinterpret_cast<const char*>(0xFBE430), 0x7F7E10, 0x7F7E40, 0x813EA0,
+                 0x7F7E60, 0x7F7E80, 0x1070 * kPatrols / kGamePatrols, kPatrols, 0x7F7E30);
+}
+
+bool PatrolRegistrationAsExpected() {
+    for (const PushedValue& push : kPatrolPushes)
+        if (rfa::CodeValue(push.at) != push.value) return false;
+    return *reinterpret_cast<const BYTE*>(kPatrolRegisteredCount) == kGamePatrols;
+}
+
 void MakeRoomForPatrols() {
+    // Both or neither: the pool and the world's list of patrols.
+    if (!PatrolRegistrationAsExpected()) {
+        rfa::Log("Patrols: the type's registration isn't as expected; the game keeps its %d", kGamePatrols);
+        return;
+    }
     if (rfa::CodeValue(kPatrolBufferSize) == kGamePatrolBuffer && *reinterpret_cast<const BYTE*>(kPatrolCount) == kGamePatrols &&
-        rfa::ReplaceFunction(kPatrolPoolMake, reinterpret_cast<void*>(&MakePatrolPool)))
-        rfa::Log("Patrols: the game holds %d at once (its own %d), as Guerrilla", kPatrols, kGamePatrols);
+        rfa::ReplaceFunction(kPatrolPoolMake, reinterpret_cast<void*>(&MakePatrolPool))) {
+        if (rfa::ReplaceFunction(kPatrolRegistration, reinterpret_cast<void*>(&RegisterPatrols)))
+            rfa::Log("Patrols: the game holds %d at once (its own %d), as Guerrilla, in its pool and the world's list", kPatrols, kGamePatrols);
+        else rfa::Log("Patrols: the pool holds %d, but the registration couldn't be replaced; the world's list keeps %d", kPatrols, kGamePatrols);
+    }
     else rfa::Log("Patrols: the pool's constructor isn't as expected; the game keeps its %d (the world places more than fit in some places)", kGamePatrols);
+}
+
+// ---- Room for Guerrilla's squads' members (the user, 2026-11-06: "Yes, raise it")
+//
+// Every squad's leader and member is a record of (character, loadout, variant) the squad table's reader shares between
+// squads (0x50BCE0 → 0x50BDD0: found in the list 0x12EFF0C, else a new one from its pool, 0x50C440). The pool is made
+// at start-up (0xF1D740 → 0x50CB70, as the patrols': the pool set up, a memory pool on the buffer inside the pool
+// object, then its fill, 0x4D64A0, carving 12-byte slots) for 64; with none left the member, so its squad, fails, and
+// every later squad in the table with it. Armageddon's own squads use 43; Guerrilla's district squads bring each
+// civilian and each guerrilla look with its weapons (95 in all with Armageddon's). So the mod builds it on a buffer of
+// its own for 256, after checking the constructor's buffer size and count are the game's. Nothing else names the
+// count (the pool object 0x12EFEF0 is reached through its initializer, its client 0x12EFED4/0x12EFF0C and its
+// destructor only). Always, whatever [GuerrillaPeople] Enabled= says: the squad table holds Guerrilla's squads.
+auto const FillMemberPool = reinterpret_cast<PoolFillFn>(0x4D64A0);
+constexpr DWORD kMemberPoolMake = 0x50CB70, kMemberBufferSize = 0x50CB8B, kMemberCount = 0x50CB9F;
+constexpr DWORD kMemberSize = 12, kGameMemberBuffer = 0x445;
+constexpr int kGameMembers = 64, kMembers = 256;
+alignas(16) BYTE g_memberBuffer[PoolBytes(kMembers, kMemberSize)];
+
+void* __fastcall MakeMemberPool(void* pool, void*) {
+    PoolSetUp(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's is 0x58 bytes on its stack
+    MempoolMake(mempool, nullptr, g_memberBuffer, sizeof(g_memberBuffer), reinterpret_cast<const char*>(kPoolName), 1, 0);
+    FillMemberPool(pool, nullptr, mempool, kMembers);
+    MempoolEnd(mempool, nullptr);
+    return pool;
+}
+
+void MakeRoomForSquadMembers() {
+    if (rfa::CodeValue(kMemberBufferSize) == kGameMemberBuffer && *reinterpret_cast<const BYTE*>(kMemberCount) == kGameMembers &&
+        rfa::ReplaceFunction(kMemberPoolMake, reinterpret_cast<void*>(&MakeMemberPool)))
+        rfa::Log("Squad members: the game holds %d (its own %d)", kMembers, kGameMembers);
+    else rfa::Log("Squad members: the pool's constructor isn't as expected; the game keeps its %d (squads past them aren't read)", kGameMembers);
+}
+
+// ---- Room for Guerrilla's squad loadouts (the user's Round 1, 2026-11-06: marauder_squad_6 "invalid")
+//
+// The game keeps squad_loadout.xtbl's entries in a fixed table at 0x12F33A0 (its items' pointer, capacity and count,
+// then 36 entries of 0x1C bytes in place), set up at start-up by 0x50D5B0 (from the initializer 0xF1D850). The reader
+// (0x50D160 → 0x50CF90, added by 0x7642F0) drops every entry past the 36th without a word (the table can't grow:
+// 0x7476F0), and a squad member naming a dropped loadout fails its whole squad (0x50BD6B), so a zone naming the squad
+// gets "invalid squad definition". Armageddon's own loadouts take 31; Guerrilla's 20 make 51. Everything reaches the
+// entries through the items' pointer (0x50D530) and the count (0x55B3D0), and the exit's clean-up (0xF62490 →
+// 0x926130) does nothing, so the mod builds the table on a buffer of its own for 128, after checking the constructor
+// is the game's. Always, whatever [GuerrillaPeople] Enabled= says: the loadout table holds Guerrilla's loadouts.
+constexpr DWORD kLoadoutTableMake = 0x50D5B0;
+constexpr DWORD kLoadoutMakePush = 0x50D5B8;      // push 50D280h: each entry's constructor
+constexpr DWORD kLoadoutCountPushes[] = {0x50D5BD, 0x50D5CF};  // push 24h, twice: the count
+constexpr DWORD kLoadoutSizePush = 0x50D5BF;      // push 1Ch: an entry's bytes
+constexpr DWORD kLoadoutSize = 0x1C;
+constexpr int kGameLoadouts = 36, kLoadouts = 128;
+using LoadoutMakeFn = void*(__fastcall*)(void* loadout, void*);
+using ArraySetUpFn = void(__fastcall*)(void* array, void*, void* items, int capacity, int count);
+auto const LoadoutMake = reinterpret_cast<LoadoutMakeFn>(0x50D280);
+auto const ArraySetUp = reinterpret_cast<ArraySetUpFn>(0x47CE00);
+alignas(16) BYTE g_loadoutBuffer[kLoadouts * kLoadoutSize];
+
+void* __fastcall MakeLoadoutTable(void* table, void*) {
+    for (int i = 0; i < kLoadouts; ++i) LoadoutMake(g_loadoutBuffer + i * kLoadoutSize, nullptr);
+    ArraySetUp(table, nullptr, g_loadoutBuffer, kLoadouts, 0);
+    return table;
+}
+
+bool LoadoutTableAsExpected() {
+    if (rfa::CodeValue(kLoadoutMakePush) != 0x50D280) return false;
+    for (DWORD at : kLoadoutCountPushes)
+        if (*reinterpret_cast<const BYTE*>(at) != kGameLoadouts) return false;
+    return *reinterpret_cast<const BYTE*>(kLoadoutSizePush) == kLoadoutSize;
+}
+
+void MakeRoomForLoadouts() {
+    if (LoadoutTableAsExpected() && rfa::ReplaceFunction(kLoadoutTableMake, reinterpret_cast<void*>(&MakeLoadoutTable)))
+        rfa::Log("Squad loadouts: the game holds %d (its own %d)", kLoadouts, kGameLoadouts);
+    else rfa::Log("Squad loadouts: the table's constructor isn't as expected; the game keeps its %d (loadouts past them are dropped, and squads naming them aren't read)", kGameLoadouts);
+}
+
+// ---- Guerrilla's standing squads spread out from their node (the user's Round 1, 2026-11-06: "Static Spawn Error")
+//
+// A squad on foot with Standard orders spawns "static", at its node: the squad's spawn (0x80EC20 → 0x80E2F0, by the
+// orders' type; 0x80E1C0 for Standard) gets the node's place and the static flag (+0x3E0 bit 5), and a squad of several
+// (0x758C20 → 0x75B010) needs one object_spawn_point placed under the node for each member (gathered by 0x75E0C0);
+// with too few the game writes "Static Spawn Error, not enough spawn points placed under spawn node 0x…" and nobody
+// spawns. Armageddon's levels place the points (all but three of its own nodes of several have them). Guerrilla has no
+// spawn points: its squads spread out from the node over the people's nav mesh (object_squad::spawn_squad_members), and
+// its Default orders are our Standard. So in our worlds a squad whose node has fewer points than members spreads out
+// from the node's place the way the game places every squad that isn't static (0x759270: from the nav cell under the
+// spawn's place, cell by cell, a member to each free spot). A node with enough points keeps the game's own way.
+constexpr DWORD kSquadStaticSpawn = 0x75B010;
+constexpr size_t kSquadStaticSpawnPrologue = 9;  // push ebp / mov ebp,esp / sub esp,420h
+constexpr DWORD kSpawnNode = 0x3B0;              // in the squad's spawn: its node (an object)
+constexpr DWORD kSpawnMemberCount = 0x18;        // the count of the members' list at +0x10
+using SquadStaticSpawnFn = bool(__cdecl*)(BYTE* spawn);
+using SpawnPointListFn = void(__fastcall*)(void* list, void*);
+using GatherSpawnPointsFn = void(__cdecl*)(void* node, void* list, int, int);
+using SpreadOverNavMeshFn = void(__cdecl*)(BYTE* spawn);
+using AllMembersSpawnedFn = bool(__fastcall*)(BYTE* spawn, void*);
+using ObjectHandleFn = DWORD(__fastcall*)(void* object, void*);
+auto const SpawnPointListMake = reinterpret_cast<SpawnPointListFn>(0xA347C0);  // farray<object*, 256>
+auto const SpawnPointListFree = reinterpret_cast<SpawnPointListFn>(0x926130);
+auto const GatherSpawnPoints = reinterpret_cast<GatherSpawnPointsFn>(0x75E0C0);
+auto const SpreadOverNavMesh = reinterpret_cast<SpreadOverNavMeshFn>(0x759270);
+auto const AllMembersSpawned = reinterpret_cast<AllMembersSpawnedFn>(0x75E840);
+auto const ObjectHandle = reinterpret_cast<ObjectHandleFn>(0x424850);
+SquadStaticSpawnFn g_squadStaticSpawn = nullptr;
+int g_spreadSquadsLogged = 0;
+
+int SpawnPointsUnder(void* node) {
+    alignas(16) BYTE list[0x420];  // the game's is 0x410 bytes on its stack: its count at +8, the 256 in place from +0xC
+    SpawnPointListMake(list, nullptr);
+    GatherSpawnPoints(node, list, 0, 0);
+    const int count = *reinterpret_cast<const int*>(list + 8);
+    SpawnPointListFree(list, nullptr);
+    return count;
+}
+
+// ---- Guerrilla's guard posts: their squads leashed to the post's box (the user's Round 2, 2026-11-06: "Yes, use the box")
+//
+// STAND-IN until Guerrilla's guard post AI (go_to_guard_post, guard_at_post, guard_at_post_scan and its guard nodes) is
+// ported after the safe spot. In Guerrilla a squad whose node hangs under a bounding box holding guard nodes guards that
+// box: its members stand at the guard nodes and fight from there. Armageddon deleted that AI (object_guard_node is
+// editor-only in it), so under Standard orders the squad hunted the player down walks the pathfinder won't take ("Failed
+// pathfind, probably bad navmesh in the area": the EDF post over the Dust safehouse, a 500-730 m way round, past the
+// search's limit of distance x 1.5 + 150, at most 500, the same in Guerrilla). The world build places the box with the
+// node under it (GuerrillaPopulation.GuardBoxOf); here, as such a node spawns its squad (0x800040, the node's spawn:
+// thiscall, two arguments, the squad's handle or -1), the squad is leashed to the box with Armageddon's own leash to an
+// anchor's bounding box (type 4; the squad's leash 0x810990(type, anchor), which only scripts use, sf_update_leash
+// 0x94E2DF; the check 0x810710 keeps it inside the anchor's oriented box). Only in our worlds, and only for a node whose
+// parent (object +0x6C) is a bounding box.
+constexpr DWORD kNodeSpawn = 0x800040;
+constexpr size_t kNodeSpawnPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0ECh
+constexpr DWORD kObjectParent = 0x6C;     // an object's parent's handle (Guerrilla's object::parent, +0x70 there)
+constexpr DWORD kWorld = 0x1870630;
+constexpr int kBoxLeash = 4;              // the leash's types: 1-3 Low/Medium/High (30/50/70 m round the anchor), 4 inside its box
+constexpr DWORD kNoHandle = 0xFFFFFFFF;
+using NodeSpawnFn = DWORD(__fastcall*)(BYTE* node, void*, DWORD a, DWORD b);
+using WorldObjectFn = BYTE*(__fastcall*)(void* world, void*, DWORD handle);
+using AsBoundingBoxFn = BYTE*(__fastcall*)(void* world, void*, BYTE* object);
+using SetLeashFn = void(__fastcall*)(BYTE* squad, void*, int type, DWORD anchor);
+auto const WorldObject = reinterpret_cast<WorldObjectFn>(0x6CB9E0);
+auto const AsBoundingBox = reinterpret_cast<AsBoundingBoxFn>(0x452170);
+auto const SetLeash = reinterpret_cast<SetLeashFn>(0x810990);
+NodeSpawnFn g_nodeSpawn = nullptr;
+int g_leashesLogged = 0;
+
+DWORD __fastcall NodeSpawn(BYTE* node, void* edx, DWORD a, DWORD b) {
+    const DWORD squadHandle = g_nodeSpawn(node, edx, a, b);
+    if (squadHandle == kNoHandle || !node || !InOurWorld()) return squadHandle;
+    void* world = reinterpret_cast<void*>(kWorld);
+    const DWORD boxHandle = *reinterpret_cast<const DWORD*>(node + kObjectParent);
+    if (boxHandle == kNoHandle) return squadHandle;
+    BYTE* parent = WorldObject(world, nullptr, boxHandle);
+    BYTE* squad = WorldObject(world, nullptr, squadHandle);
+    if (!parent || !squad || !AsBoundingBox(world, nullptr, parent)) return squadHandle;
+    SetLeash(squad, nullptr, kBoxLeash, boxHandle);
+    if (g_leashesLogged < 64) {
+        ++g_leashesLogged;
+        rfa::Log("Squads: node 0x%08X's squad 0x%08X leashed to its guard post's box 0x%08X (Guerrilla's guard area; a stand-in until its guard post AI is ported)",
+                 ObjectHandle(node, nullptr), squadHandle, boxHandle);
+    }
+    return squadHandle;
+}
+
+bool __cdecl SquadStaticSpawn(BYTE* spawn) {
+    void* node = *reinterpret_cast<void**>(spawn + kSpawnNode);
+    if (!node || !InOurWorld()) return g_squadStaticSpawn(spawn);
+    const int members = *reinterpret_cast<const int*>(spawn + kSpawnMemberCount);
+    const int points = SpawnPointsUnder(node);
+    if (points >= members) return g_squadStaticSpawn(spawn);
+    SpreadOverNavMesh(spawn);
+    const bool all = AllMembersSpawned(spawn, nullptr);
+    if (g_spreadSquadsLogged < 32) {
+        ++g_spreadSquadsLogged;
+        rfa::Log("Squads: node 0x%08X's %d spread out from it over the nav mesh, as in Guerrilla (%d spawn point(s) under it)%s",
+                 ObjectHandle(node, nullptr), members, points, all ? "" : "; not all of them found room");
+    }
+    return all;
 }
 
 // The mods the people's animations need room from (they move the game's tables at start-up): the
@@ -485,6 +724,9 @@ void* __cdecl PickPlayer(const void* startPosition) {
 
 // Writes which of the people are loaded, on their way, or neither (`after`: how long in the world).
 void ReportOurPeople(const char* after) {
+    rfa::Log("Squads' names: %lu of their pool's %lu bytes used; spawn resources' names: %lu of %lu",
+             *reinterpret_cast<const DWORD*>(kSquadNames + 0x4C), *reinterpret_cast<const DWORD*>(kSquadNames + 0x44),
+             *reinterpret_cast<const DWORD*>(kResourceNames + 0x4C), *reinterpret_cast<const DWORD*>(kResourceNames + 0x44));
     std::string loaded, coming, not_loaded, missing;
     auto add = [](std::string& list, const std::string& name) { list += (list.empty() ? "" : ", ") + name; };
     for (const std::string& name : g_people) {
@@ -689,6 +931,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_animStringsInit = reinterpret_cast<AnimStringsInitFn>(rfa::HookFunction(kAnimStringsInit, kAnimStringsInitPrologue, reinterpret_cast<void*>(&AnimStringsInit)));
     if (!g_animStringsInit) rfa::Log("Animation names: could not hook the pool's start-up; it keeps its 128 KB (too few for Guerrilla's people and vehicles)");
     MakeRoomForPatrols();
+    MakeRoomForSquadMembers();
+    MakeRoomForLoadouts();
     if (rfa::IniInt(L"GuerrillaPeople", L"Enabled", 1) == 0) {
         rfa::Log("Off ([GuerrillaPeople] Enabled=0)");
         return;
@@ -717,6 +961,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_humanJump) rfa::Log("Jump: could not hook the jump; a jump turned down isn't written in the log");
     g_gameplayFrame = reinterpret_cast<GameplayFrameFn>(rfa::HookFunction(kGameplayFrame, kGameplayFramePrologue, reinterpret_cast<void*>(&GameplayFrame)));
     if (!g_gameplayFrame) rfa::Log("Could not hook the gameplay update; Guerrilla's sides are set only at a level's start, and the people's loading isn't reported");
+    g_squadStaticSpawn = reinterpret_cast<SquadStaticSpawnFn>(rfa::HookFunction(kSquadStaticSpawn, kSquadStaticSpawnPrologue, reinterpret_cast<void*>(&SquadStaticSpawn)));
+    if (!g_squadStaticSpawn) rfa::Log("Squads: could not hook the static spawn; a standing squad of several with no spawn points under its node doesn't spawn");
+    g_nodeSpawn = reinterpret_cast<NodeSpawnFn>(rfa::HookFunction(kNodeSpawn, kNodeSpawnPrologue, reinterpret_cast<void*>(&NodeSpawn)));
+    if (!g_nodeSpawn) rfa::Log("Squads: could not hook the squad nodes' spawn; Guerrilla's guard posts' squads aren't leashed to their boxes (they chase the player)");
     rfa::Log("Guerrilla's people in world(s) %ls: %u character(s) made by editor\\GuerrillaBuilder.exe", rfa::IniString(L"GuerrillaPeople", L"Worlds", L"rfg").c_str(),
              static_cast<unsigned>(g_people.size()));
 }

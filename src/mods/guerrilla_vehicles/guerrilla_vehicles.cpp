@@ -768,6 +768,47 @@ void MakeRoomForVehiclesInTheWorld() {
     else rfa::Log("Vehicle records: the start-up code isn't as expected; the game keeps its %d (vehicles past them can't spawn)", kGameVehicleRecords);
 }
 
+// ---- The world's lists of spawn nodes and cars, as big as their pools
+//
+// Besides each type's pool, the world (0x1870630) keeps a list of the objects of each type (+0x68 + type x 12:
+// pointer, capacity, count) and stops a zone's load on a full one ("!type_objects[stub->obj_type].full()",
+// 0x6D49DB; the user's 21:23 run hung there: object_vehicle_spawn_node 12 of 12). A list's capacity is the
+// count its type registers at start-up (0x4FAD90, thiscall: name, five handlers, the object's size, the count,
+// one more handler; it only records them, the world sizes the lists from them later), not its pool's size. The
+// pools above are made 128 spawn nodes and 32 cars, so their types register those: the cars' count is a one-byte
+// value in their registration (`push 10h` at 0xF23058), changed to 32 (checked first); the spawn nodes' (`push
+// 0Ch` at 0xF33918) can't hold 128 in one byte, so their registration (0xF33910) is replaced by one making the same
+// call with 128, after its bytes are checked to be the game's.
+auto const RegisterType = reinterpret_cast<void*(__fastcall*)(void* type, void* unused, const char* name, DWORD a, DWORD b, DWORD c, DWORD d,
+                                                               DWORD e, DWORD size, DWORD count, DWORD f)>(0x4FAD90);
+constexpr DWORD kCarCountValue = 0xF23059;            // push 10h: automobile's count
+constexpr DWORD kSpawnNodeRegistration = 0xF33910;
+const BYTE kSpawnNodeRegistrationBytes[] = {0x55, 0x8B, 0xEC, 0x68, 0x30, 0xDB, 0x7F, 0x00, 0x6A, 0x0C, 0x68, 0xC0, 0x08, 0x00, 0x00,
+                                            0x68, 0x80, 0xDB, 0x7F, 0x00, 0x68, 0x60, 0xDB, 0x7F, 0x00, 0x68, 0xA0, 0x3E, 0x81, 0x00,
+                                            0x68, 0x40, 0xDB, 0x7F, 0x00, 0x68, 0x10, 0xDB, 0x7F, 0x00, 0x68, 0x40, 0x0E, 0xFC, 0x00,
+                                            0xB9, 0xD0, 0x8C, 0x10, 0x02, 0xE8};
+
+// object_vehicle_spawn_node's registration, as the game's (0xF33910) but for kSpawnNodes.
+void __cdecl RegisterSpawnNodeType() {
+    RegisterType(reinterpret_cast<void*>(0x2108CD0), nullptr, reinterpret_cast<const char*>(0xFC0E40), 0x7FDB10, 0x7FDB40, 0x813EA0, 0x7FDB60,
+                 0x7FDB80, 0x8C0, static_cast<DWORD>(kSpawnNodes), 0x7FDB30);
+}
+
+void RegisterBiggerTypes() {
+    if (*reinterpret_cast<const BYTE*>(kCarCountValue) == kGameAutomobiles) {
+        const BYTE cars = static_cast<BYTE>(kAutomobiles);
+        if (rfa::PatchCode(reinterpret_cast<void*>(kCarCountValue), &cars, 1)) rfa::Log("Cars: the world's list of them holds %d (its own %d)", kAutomobiles, kGameAutomobiles);
+        else rfa::Log("Cars: could not change the game's code; the world's list of them holds %d", kGameAutomobiles);
+    } else rfa::Log("Cars: the type's registration (0x%08lX) isn't as expected; the world's list of them holds what it says", kCarCountValue);
+    if (memcmp(reinterpret_cast<const void*>(kSpawnNodeRegistration), kSpawnNodeRegistrationBytes, sizeof(kSpawnNodeRegistrationBytes)) != 0) {
+        rfa::Log("Vehicle spawn nodes: the type's registration (0x%08lX) isn't as expected; the world's list of them holds %d", kSpawnNodeRegistration, kGameSpawnNodes);
+        return;
+    }
+    if (rfa::ReplaceFunction(kSpawnNodeRegistration, reinterpret_cast<void*>(&RegisterSpawnNodeType)))
+        rfa::Log("Vehicle spawn nodes: the world's list of them holds %d (its own %d)", kSpawnNodes, kGameSpawnNodes);
+    else rfa::Log("Vehicle spawn nodes: could not change the game's code; the world's list of them holds %d", kGameSpawnNodes);
+}
+
 // ---- Vehicles the game would refuse for want of their model: reserved (see the top)
 
 constexpr DWORD kSpawnVehicle = 0x761790;     // cdecl (the spawn's parameters, the vehicle's table entry first): 0 made, 1 not yet, 2 refused
@@ -1070,6 +1111,16 @@ void __cdecl SetEngineValues(int sound, float speed, float rpm, float load, floa
     SetGameParameter(*reinterpret_cast<const DWORD*>(kSpeedId), speed, object);
     SetGameParameter(*reinterpret_cast<const DWORD*>(kDamageId), damage, object);
     SetGameParameter(kPlayerInVehicleId, g_playerInThisVehicle ? 1.0f : 0.0f, object);
+    // What the game feeds the player's own vehicle's engine sound, once a second (at most 600 lines): for Round 1's
+    // "engine silent" in the Kitsune, whose bank, events, loops and volumes are all as built.
+    if (g_playerInThisVehicle) {
+        static LONGLONG lastLogged;
+        if (now.QuadPart - lastLogged > frequency.QuadPart) {
+            lastLogged = now.QuadPart;
+            RFA_LOG_FIRST(600, "Engine sounds: the player's vehicle: sound %d (object 0x%08lX), RPM %.0f, load %.2f (eased %.2f), speed %.1f, damage %.2f",
+                          sound, object, rpm, load, eased, speed, damage);
+        }
+    }
 }
 
 void HookEngineSounds() {
@@ -1086,6 +1137,49 @@ void HookEngineSounds() {
         return;
     }
     rfa::Log("Engine sounds: the load eased as Guerrilla's, and RFG_PLAYER_IN_VEHICLE set on each vehicle's engine (1 for the player's own)");
+}
+
+// ---- A log of the turrets' item parts as the game makes them
+//
+// For Round 3's Kitsune with no turret to be seen: each base, middle or top a turret makes from an item (0x83D250,
+// cdecl: the turret's physics, the turret, the part (0 base, 1 middle, 2 top), its collision filter, a position;
+// true if made; a part that's one of the vehicle's own is made elsewhere, 0x83C310). The turret's info is the
+// turret's +0x98: its name at +0, each part's item at +0xD8 + 8 x part (Guerrilla's item_info: name +0, static mesh +4,
+// character mesh +8; the game draws a part from the static mesh alone), the weapon's info at +0x104, whose item
+// (+0x14) the game takes for a top the table names none for.
+constexpr DWORD kMakeTurretPart = 0x83D250;
+constexpr size_t kMakeTurretPartPrologue = 9;  // push ebp / mov ebp,esp / sub esp,124h
+using MakeTurretPartFn = bool(__cdecl*)(void* physics, BYTE* turret, int part, DWORD filter, void* where);
+MakeTurretPartFn g_makeTurretPart;
+
+const char* Text(const BYTE* record, DWORD at) {
+    const char* text = record ? *reinterpret_cast<const char* const*>(record + at) : nullptr;
+    return text && *text ? text : "-";
+}
+
+bool __cdecl MakeTurretPart(void* physics, BYTE* turret, int part, DWORD filter, void* where) {
+    const bool made = g_makeTurretPart(physics, turret, part, filter, where);
+    const BYTE* info = turret ? *reinterpret_cast<const BYTE* const*>(turret + 0x98) : nullptr;
+    if (info && part >= 0 && part <= 2) {
+        static const char* const kParts[] = {"base", "middle", "top"};
+        const BYTE* item = *reinterpret_cast<const BYTE* const*>(info + 0xD8 + part * 8);
+        const BYTE* weapon = *reinterpret_cast<const BYTE* const*>(info + 0x104);
+        const BYTE* weaponItem = !item && part == 2 && weapon ? *reinterpret_cast<const BYTE* const*>(weapon + 0x14) : nullptr;
+        const BYTE* shown = item ? item : weaponItem;
+        RFA_LOG_FIRST(300, "Turrets: %s's %s %s: item %s%s (static mesh %s, character mesh %s)", Text(info, 0), kParts[part],
+                      made ? "made" : "NOT made", Text(shown, 0), weaponItem ? " (the weapon's, the table names none)" : "", Text(shown, 4), Text(shown, 8));
+    }
+    return made;
+}
+
+void HookTurretParts() {
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x24, 0x01, 0x00, 0x00};
+    if (memcmp(reinterpret_cast<const void*>(kMakeTurretPart), opening, sizeof(opening)) != 0) {
+        rfa::Log("Turrets: the game's turret part code isn't as expected; their parts aren't logged");
+        return;
+    }
+    g_makeTurretPart = reinterpret_cast<MakeTurretPartFn>(rfa::HookFunction(kMakeTurretPart, kMakeTurretPartPrologue, reinterpret_cast<void*>(&MakeTurretPart)));
+    if (!g_makeTurretPart) rfa::Log("Turrets: could not hook the turret part code; their parts aren't logged");
 }
 
 // ---- Dents (see the top)
@@ -1106,25 +1200,35 @@ void TurnOnDents() {
     rfa::Log("Dents: vehicle_deformation_enabled on (Guerrilla's vehicles dent where they're hit)");
 }
 
-// ---- Room for the vehicle interactions' names
+// ---- Room for the vehicle interactions
 //
-// vehicle_interactions.xtbl's reader (0x65F360) keeps every interaction's, waypoint's and transition's name
-// in a string pool, "Vehicle interaction info strings" (0x14E6990), of 8 KB: its set-up (0x660710, at
-// start-up) takes 8 KB from the Permanent Mempool (`push 2000h` at 0x660733, kept at 0x14E6968) and makes
-// the pool over them (`push 2000h` at 0x660760), then reads the table. Guerrilla's vehicles' interactions
-// need about 9 KB more than Armageddon's; a full pool hands back no name, and the vehicle reader then
-// compares a vehicle's Vehicle_Interaction with a missing one (0x628461) and the game ends (the 20:02 crash,
-// at Min_DumpTruck_1, the 38th). The user, 2026-11-06: "Yes, raise it": both values 32 KB, each checked
-// against the game's before either is written; the log says how much of it the table took.
-constexpr DWORD kInteractionNamesBlock = 0x660734;  // push 2000h: the bytes taken from the Permanent Mempool
-constexpr DWORD kInteractionNamesSize = 0x660761;   // push 2000h: the string pool made over them
-constexpr DWORD kInteractionNamesPool = 0x14E6990;  // the pool (size +0x44, bytes used +0x4C)
+// vehicle_interactions.xtbl's reader (0x65F360), run by its set-up (0x660710, at start-up), keeps the table in
+// two places, each sized for Armageddon's handful of interactions:
+// - its records, waypoints and transitions in one block of 64 KB taken from the Permanent Mempool (`push 10000h`
+//   at 0x660719, kept at 0x14E696C, used [0x14E6970]): 32 bytes a record (count + 3), 36 a waypoint, 48 a
+//   transition, 12 a step of a transition (Interactions/Interaction). After each it checks the use against
+//   10000h (`cmp [14E6970h],10000h` at 0x65F4C9, 0x65F4FE, 0x65F7AA, 0x66001E, 0x6604E5) and, once over, stops
+//   reading: the rest of the table is left out, its records without names. Ours need about 70 KB: the block
+//   ran out in the 37th interaction (Col_TrashTruck_1) and the last 4 (from Min_DumpTruck_1) had no name;
+// - their names (each interaction's, waypoint's Name and Parent_Component, transition's Door_N) in a string
+//   pool, "Vehicle interaction info strings" (0x14E6990), of 8 KB: `push 2000h` at 0x660733 (the memory, kept
+//   at 0x14E6968) and at 0x660760 (the pool); ours take about 5.5 KB.
+// A record with no name ended the game when a vehicle's interaction was looked up (0x628461, _stricmp with a
+// null: the user's 20:02 run). The user, 2026-11-06: "Yes, raise it": the block 256 KB (the six values) and
+// the pool 32 KB (the two), each group checked against the game's values before any is written, all or
+// nothing; the log says how much of each the table took, and names any record still without a name.
+constexpr DWORD kInteractionBlockValues[] = {0x66071A, 0x65F4CF, 0x65F504, 0x65F7B0, 0x660024, 0x6604EB};  // push / cmp ...,10000h
+constexpr DWORD kInteractionBlockMemory = 0x14E696C, kInteractionBlockUsed = 0x14E6970;
+constexpr DWORD kGameInteractionBlock = 0x10000, kInteractionBlock = 0x40000;
+constexpr DWORD kInteractionNameValues[] = {0x660734, 0x660761};  // push 2000h: the memory, the string pool made over it
+constexpr DWORD kInteractionNamesPool = 0x14E6990;              // the pool (size +0x44, bytes used +0x4C)
 constexpr DWORD kInteractionNamesMemory = 0x14E6968;
 constexpr DWORD kGameInteractionNames = 0x2000, kInteractionNames = 0x8000;
 constexpr DWORD kInteractionSetup = 0x660710;
 constexpr size_t kInteractionSetupPrologue = 5;  // push ebp / mov ebp,esp / push 0
 using InteractionSetupFn = void(__cdecl*)();
 InteractionSetupFn g_interactionSetup;
+DWORD g_interactionBlock = kGameInteractionBlock;
 
 // The interactions' records (32 bytes each, the name first): how many, and where (the reader's).
 constexpr DWORD kInteractionCount = 0x14E6960, kInteractionRecords = 0x14E6964;
@@ -1133,11 +1237,12 @@ void __cdecl InteractionSetup() {
     g_interactionSetup();
     const int count = *reinterpret_cast<const int*>(kInteractionCount);
     BYTE* records = *reinterpret_cast<BYTE**>(kInteractionRecords);
-    rfa::Log("Vehicle interaction names: %lu of %lu bytes, %d interactions", *reinterpret_cast<const DWORD*>(kInteractionNamesPool + 0x4C),
-             *reinterpret_cast<const DWORD*>(kInteractionNamesPool + 0x44), count);
-    // A record the pool gave no name (it was full, or refused it) ends the game when a vehicle's interaction is
-    // looked up (_stricmp with a null). Each one is named "" instead, and said here: its vehicle then finds no
-    // interaction (no getting in) rather than stopping the game.
+    rfa::Log("Vehicle interactions: %d read; their records, waypoints and transitions %lu of %lu bytes, their names %lu of %lu bytes", count,
+             *reinterpret_cast<const DWORD*>(kInteractionBlockUsed), g_interactionBlock,
+             *reinterpret_cast<const DWORD*>(kInteractionNamesPool + 0x4C), *reinterpret_cast<const DWORD*>(kInteractionNamesPool + 0x44));
+    // A record left without a name (the reader stopped before it, or the pool refused it) ends the game when a
+    // vehicle's interaction is looked up (_stricmp with a null). Each one is named "" instead, and said here: its
+    // vehicle then finds no interaction (no getting in) rather than stopping the game.
     static const char kNoName[] = "";
     int unnamed = 0, first = -1;
     for (int i = 0; records && i < count; ++i) {
@@ -1148,33 +1253,113 @@ void __cdecl InteractionSetup() {
         ++unnamed;
     }
     if (unnamed > 0)
-        rfa::Log("Vehicle interaction names: %d of the %d interactions got no name from the game's pool (the first, number %d); "
+        rfa::Log("Vehicle interactions: %d of the %d have no name (the first, number %d: the reader stopped, or the names' pool refused it); "
                  "their vehicles can't be got into", unnamed, count, first);
 }
 
-void MoreInteractionNames() {
-    if (*reinterpret_cast<const DWORD*>(kInteractionNamesMemory) != 0) {
-        rfa::Log("Vehicle interaction names: the game has already made its pool; it keeps its %lu bytes", kGameInteractionNames);
+// Writes `value` over each of `places` once all hold `game`; all or nothing. False (and nothing changed) otherwise.
+template <size_t N>
+bool RaiseAll(const char* what, const DWORD (&places)[N], DWORD game, DWORD value) {
+    for (DWORD at : places)
+        if (rfa::CodeValue(at) != game) {
+            rfa::Log("%s: the game's code at 0x%08lX isn't as expected (0x%08lX); it keeps its %lu bytes", what, at, rfa::CodeValue(at), game);
+            return false;
+        }
+    for (size_t i = 0; i < N; ++i)
+        if (!rfa::PatchCode(reinterpret_cast<void*>(places[i]), &value, sizeof(value))) {
+            for (size_t k = 0; k < i; ++k) rfa::PatchCode(reinterpret_cast<void*>(places[k]), &game, sizeof(game));
+            rfa::Log("%s: could not change the game's code; it keeps its %lu bytes", what, game);
+            return false;
+        }
+    rfa::Log("%s: %lu bytes (the game's %lu)", what, value, game);
+    return true;
+}
+
+void MoreInteractionRoom() {
+    if (*reinterpret_cast<const DWORD*>(kInteractionNamesMemory) != 0 || *reinterpret_cast<const DWORD*>(kInteractionBlockMemory) != 0) {
+        rfa::Log("Vehicle interactions: the game has already set them up; it keeps its %lu and %lu bytes", kGameInteractionBlock, kGameInteractionNames);
         return;
     }
-    if (rfa::CodeValue(kInteractionNamesBlock) != kGameInteractionNames || rfa::CodeValue(kInteractionNamesSize) != kGameInteractionNames) {
-        rfa::Log("Vehicle interaction names: the game's code (0x%08lX, 0x%08lX) isn't as expected; it keeps its %lu bytes", kInteractionNamesBlock,
-                 kInteractionNamesSize, kGameInteractionNames);
-        return;
-    }
-    if (!rfa::PatchCode(reinterpret_cast<void*>(kInteractionNamesBlock), &kInteractionNames, sizeof(kInteractionNames))) {
-        rfa::Log("Vehicle interaction names: could not change the game's code; it keeps its %lu bytes", kGameInteractionNames);
-        return;
-    }
-    if (!rfa::PatchCode(reinterpret_cast<void*>(kInteractionNamesSize), &kInteractionNames, sizeof(kInteractionNames))) {
-        rfa::PatchCode(reinterpret_cast<void*>(kInteractionNamesBlock), &kGameInteractionNames, sizeof(kGameInteractionNames));
-        rfa::Log("Vehicle interaction names: could not change the game's code; it keeps its %lu bytes", kGameInteractionNames);
-        return;
-    }
-    rfa::Log("Vehicle interaction names: %lu bytes (the game's %lu)", kInteractionNames, kGameInteractionNames);
+    if (RaiseAll("Vehicle interactions' records, waypoints and transitions", kInteractionBlockValues, kGameInteractionBlock, kInteractionBlock))
+        g_interactionBlock = kInteractionBlock;
+    RaiseAll("Vehicle interaction names", kInteractionNameValues, kGameInteractionNames, kInteractionNames);
     const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x6A, 0x00};
     if (memcmp(reinterpret_cast<const void*>(kInteractionSetup), opening, sizeof(opening)) == 0)
         g_interactionSetup = reinterpret_cast<InteractionSetupFn>(rfa::HookFunction(kInteractionSetup, kInteractionSetupPrologue, reinterpret_cast<void*>(&InteractionSetup)));
+}
+
+// ---- Room for the vehicle spawn groups
+//
+// spawn_group_vehicle.xtbl's groups (each a list of vehicles a spawn node, a squad that rides or the game's own
+// code picks from) live in a fixed pool, "vehicle group" (0x19691C0), of 32 places: its start-up constructor
+// (0x7581D0) lays a memory pool over a buffer inside the object (+0x30, `push 4A5h`) and sets the pool up for
+// `push 20h` places (a one-byte value) of 37 bytes (a 32-byte group, a 4-byte link, a 1-byte flag). The reader
+// (0x757670) asks it for a place for each group and stops the game when there is none ("NULL != veh_group_info",
+// int 3 at 0x757748: the user's 20:50 run). Armageddon's own 23 groups fit; with Guerrilla's 108 they're 131.
+// Guerrilla's own pool holds 136 (object_pool<vehicle_spawn_group_info,136>). The user, 2026-11-06: OK'd: the mod
+// runs the constructor itself, as the gear part does for its pools: the pool's base, a memory pool over the mod's
+// buffer, the pool's set-up for 136, the memory pool dropped; the constructor's own values checked first.
+constexpr DWORD kGroupPool = 0x19691C0;
+constexpr DWORD kGroupPoolConstructor = 0x7581D0;
+constexpr size_t kGroupPoolConstructorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,5Ch
+constexpr DWORD kGameGroups = 32, kGroups = 136;
+constexpr DWORD kGroupPlace = 32 + 4 + 1;            // a group, its link, its flag
+constexpr DWORD kGameGroupMemory = 0x4A5;
+// The constructor's own values: its buffer's size (push 4A5h), its count (push 20h, one byte) and the buffer's
+// place in the object (add eax,30h).
+constexpr DWORD kGroupMemoryValue = 0x7581EB, kGroupCountValue = 0x7581FF, kGroupBufferValue = 0x7581F4;
+alignas(16) BYTE g_groupPoolMemory[kGroups * kGroupPlace + 64];
+
+auto const PoolBase = reinterpret_cast<void(__fastcall*)(BYTE* pool, void* unused)>(0x71C5D0);
+auto const MempoolOver = reinterpret_cast<void(__fastcall*)(void* mempool, void* unused, void* memory, DWORD size, const void* name,
+                                                             DWORD first, DWORD second)>(0x428240);
+auto const MempoolDone = reinterpret_cast<void(__fastcall*)(void* mempool, void* unused)>(0x427F40);
+auto const GroupPoolInit = reinterpret_cast<void(__fastcall*)(BYTE* pool, void* unused, void* mempool, DWORD holds)>(0x758220);
+const void* const kObjectPoolName = reinterpret_cast<const void*>(0xF7101C);  // "object pool", the name the game gives it
+
+BYTE* __fastcall GroupPoolConstructor(BYTE* pool, void* unused) {
+    PoolBase(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's takes 0x58 bytes of its stack
+    MempoolOver(mempool, nullptr, g_groupPoolMemory, sizeof(g_groupPoolMemory), kObjectPoolName, 1, 0);
+    GroupPoolInit(pool, nullptr, mempool, kGroups);
+    MempoolDone(mempool, nullptr);
+    return pool;
+}
+
+// After the groups are read (0x757670, cdecl: -1 at start-up), how full the pool is: a byte a place, 0xFF while free.
+constexpr DWORD kGroupReader = 0x757670;
+constexpr size_t kGroupReaderPrologue = 9;  // push ebp / mov ebp,esp / sub esp,110h
+using GroupReaderFn = void(__cdecl*)(int which);
+GroupReaderFn g_groupReader;
+
+void __cdecl GroupReader(int which) {
+    g_groupReader(which);
+    const WORD holds = *reinterpret_cast<const WORD*>(kGroupPool + 0xA);
+    const BYTE* flags = *reinterpret_cast<BYTE* const*>(kGroupPool + 0x18);
+    int used = 0;
+    for (int i = 0; flags && i < holds; ++i)
+        if (flags[i] != 0xFF) ++used;
+    rfa::Log("Vehicle spawn groups: %d of %u places in use", used, holds);
+}
+
+void MoreSpawnGroups() {
+    if (*reinterpret_cast<const WORD*>(kGroupPool + 0xA) != 0) {
+        rfa::Log("Vehicle spawn groups: the game has already built its pool; it keeps its %lu", kGameGroups);
+        return;
+    }
+    if (rfa::CodeValue(kGroupMemoryValue) != kGameGroupMemory || *reinterpret_cast<const BYTE*>(kGroupCountValue) != kGameGroups ||
+        *reinterpret_cast<const BYTE*>(kGroupBufferValue) != 0x30) {
+        rfa::Log("Vehicle spawn groups: the game's constructor (0x%08lX) isn't as expected; it keeps its %lu", kGroupPoolConstructor, kGameGroups);
+        return;
+    }
+    if (!rfa::HookFunction(kGroupPoolConstructor, kGroupPoolConstructorPrologue, reinterpret_cast<void*>(&GroupPoolConstructor))) {
+        rfa::Log("Vehicle spawn groups: could not change the game's code; it keeps its %lu", kGameGroups);
+        return;
+    }
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00};
+    if (memcmp(reinterpret_cast<const void*>(kGroupReader), opening, sizeof(opening)) == 0)
+        g_groupReader = reinterpret_cast<GroupReaderFn>(rfa::HookFunction(kGroupReader, kGroupReaderPrologue, reinterpret_cast<void*>(&GroupReader)));
+    rfa::Log("Vehicle spawn groups: the game holds %lu (its own %lu)", kGroups, kGameGroups);
 }
 
 // ---- Guerrilla's vehicles' own skeletons (see the top)
@@ -1247,10 +1432,13 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_buildVehicleList = reinterpret_cast<BuildVehicleListFn>(rfa::HookFunction(kBuildVehicleList, kBuildVehicleListPrologue, reinterpret_cast<void*>(&BuildVehicleList)));
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
     MakeRoomForVehiclesInTheWorld();
-    MoreInteractionNames();
+    RegisterBiggerTypes();
+    MoreInteractionRoom();
+    MoreSpawnGroups();
     MoveBlendTrees();
     ReserveWantedVehicles();
     HookEngineSounds();
+    HookTurretParts();
     HookLights();
     StartTraffic();
     gv::StartFlyers();

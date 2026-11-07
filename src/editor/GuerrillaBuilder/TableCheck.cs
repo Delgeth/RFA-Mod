@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using RfaFormats;
+using RfaFormats.Guerrilla;
 using RfaFormats.Tables;
 
 namespace GuerrillaBuilder;
@@ -89,10 +90,38 @@ static class TableCheck
                 Report(log, $"Table check: {Relative(setup, file)}: {others.Select(p => p.Entry).Distinct().Count()} entries with values Armageddon's description doesn't allow (to look into: the reader stops on some):", others);
             }
         }
+        if (!SquadsCheck(setup, archives, log)) bad++;
         log.Line(bad == 0
             ? $"Table check: none of the {checkedTables} tables lacks a field the game requires" + (doubtful > 0 ? $"; {doubtful} have values to look into (above)" : "")
             : $"Table check: {bad} of {checkedTables} tables have entries the game stops on at start-up (above)" + (doubtful > 0 ? $"; {doubtful} have values to look into" : ""));
         return bad == 0;
+    }
+
+    /// <summary>
+    /// The squads the world's tables (mods\guerrilla_world\) hand the game, as its squad and loadout readers take them
+    /// (GuerrillaSquads.SquadProblems): the loadouts past the ones the game holds, loadouts whose weapon it hasn't,
+    /// and squads naming a loadout or character it won't have, each of which it turns down without a word until a zone
+    /// names the squad ("invalid squad definition"). False if any.
+    /// </summary>
+    static bool SquadsCheck(Setup setup, List<Packfile> archives, BuildLog log)
+    {
+        string world = Path.Combine(setup.ModFolder, "mods", "guerrilla_world");
+        string squadsFile = Path.Combine(world, GuerrillaSquads.SquadTable), loadoutsFile = Path.Combine(world, GuerrillaSquads.LoadoutTable);
+        if (!File.Exists(squadsFile) || !File.Exists(loadoutsFile)) return true;
+        XtblFile? Game(string name) => archives.Select(a => a.Find(name) is { } e ? XtblFile.FromBytes(a.Read(e)) : null).FirstOrDefault(t => t != null);
+        XtblFile? Ours(string name) => File.Exists(Path.Combine(world, name)) ? XtblFile.FromBytes(File.ReadAllBytes(Path.Combine(world, name))) : Game(name);
+        HashSet<string>? Names(XtblFile? table) => table?.Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var squads = XtblFile.FromBytes(File.ReadAllBytes(squadsFile));
+        var problems = GuerrillaSquads.SquadProblems(squads, XtblFile.FromBytes(File.ReadAllBytes(loadoutsFile)),
+                                                     Names(Ours("weapons.xtbl")), Names(Ours("character.xtbl")), Names(Game(GuerrillaSquads.SquadTable)));
+        if (problems.Count == 0)
+        {
+            log.Line($"Squads check: all {squads.Entries.Count()} squads' members name loadouts and characters the game has");
+            return true;
+        }
+        log.Line($"Squads check: {problems.Count} thing(s) the game would turn down (its squads naming them aren't read):");
+        foreach (string problem in problems) log.Line("  " + problem);
+        return false;
     }
 
     static void Report(BuildLog log, string heading, List<Problem> problems)

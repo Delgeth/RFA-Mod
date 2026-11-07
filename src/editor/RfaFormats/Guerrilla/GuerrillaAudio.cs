@@ -27,7 +27,7 @@ public sealed class GuerrillaSounds
                              int DistanceIndex = 0, int MostAtOnce = 0);
 
     /// <summary>A wave: 16-bit samples (channels interleaved), its rate, and whether Guerrilla loops it.</summary>
-    public sealed record Wave(string Bank, int Index, short[] Samples, int Channels, int Rate, bool Loops);
+    public sealed record Wave(string Bank, int Index, short[] Samples, int Channels, int Rate, bool Loops, int LoopStart = 0);
 
     public GuerrillaSounds(string guerrillaCache)
     {
@@ -203,7 +203,7 @@ public sealed class GuerrillaSounds
             short[] samples = MsAdpcm.Decode(b.AsSpan(waves + offset, length), channels, (block + 22) * channels);
             bool loops = loopLength > 0;
             if (loops && (loopStart + loopLength) * channels <= samples.Length) samples = samples[..((loopStart + loopLength) * channels)];
-            return new Wave(bank, index, samples, channels, rate, loops);
+            return new Wave(bank, index, samples, channels, rate, loops, loops && loopStart * channels < samples.Length ? loopStart : 0);
         }
     }
 }
@@ -553,18 +553,34 @@ public sealed class WwiseBankWriter
 
     static int Align(int n) => (n + 2047) & ~2047;
 
-    /// <summary>A PCM .wem as the game's own: RIFF/WAVE, fmt (extensible, 16-bit, the channels' mask), a 4-byte JUNK, data.</summary>
+    /// <summary>
+    /// A PCM .wem as the game's own: RIFF/WAVE, fmt (extensible, 16-bit, the channels' mask), for a wave Guerrilla
+    /// loops a smpl chunk with its loop, a 4-byte JUNK, data. The game streams its sounds from the media banks, and a
+    /// streamed source loops by the loop its file names: Armageddon's Vorbis files keep theirs in their vorb chunk (and
+    /// one in a smpl chunk, as here: one loop, start, end the last sample, play count 0); a PCM file without one played
+    /// its loop once however looping its sound (Round 3: every engine went silent ~3 s after it started, its 1.7-2.0 s
+    /// loops played once after the 0.9 s start delay).
+    /// </summary>
     static byte[] PcmWem(GuerrillaSounds.Wave wave)
     {
-        int channels = wave.Channels, dataSize = wave.Samples.Length * 2;
+        int channels = wave.Channels, dataSize = wave.Samples.Length * 2, frames = wave.Samples.Length / Math.Max(1, channels);
+        bool loop = wave.Loops && frames > 1;
         var w = new List<byte>();
         void U32(int v) => w.AddRange(BitConverter.GetBytes(v));
         void U16(int v) => w.AddRange(BitConverter.GetBytes((ushort)v));
-        w.AddRange(Encoding.ASCII.GetBytes("RIFF")); U32(4 + 8 + 24 + 8 + 4 + 8 + dataSize);
+        w.AddRange(Encoding.ASCII.GetBytes("RIFF")); U32(4 + 8 + 24 + (loop ? 8 + 60 : 0) + 8 + 4 + 8 + dataSize);
         w.AddRange(Encoding.ASCII.GetBytes("WAVE"));
         w.AddRange(Encoding.ASCII.GetBytes("fmt ")); U32(24);
         U16(0xFFFE); U16(channels); U32(wave.Rate); U32(wave.Rate * 2 * channels); U16(2 * channels); U16(16);
         U16(6); U16(16); U32(channels == 1 ? 4 : channels == 2 ? 3 : (1 << channels) - 1);
+        if (loop)
+        {
+            // manufacturer, product, sample period, MIDI unity note 60, pitch fraction, SMPTE format and offset,
+            // one loop, no sampler data; the loop: cue 0, forward, its start, its end (inclusive), no fraction, for ever.
+            w.AddRange(Encoding.ASCII.GetBytes("smpl")); U32(60);
+            foreach (int v in new[] { 0, 0, 0, 60, 0, 0, 0, 1, 0 }) U32(v);
+            foreach (int v in new[] { 0, 0, Math.Clamp(wave.LoopStart, 0, frames - 1), frames - 1, 0, 0 }) U32(v);
+        }
         w.AddRange(Encoding.ASCII.GetBytes("JUNK")); U32(4); U32(0);
         w.AddRange(Encoding.ASCII.GetBytes("data")); U32(dataSize);
         foreach (short s in wave.Samples) w.AddRange(BitConverter.GetBytes(s));

@@ -1408,16 +1408,32 @@ auto const LoadedEffect = reinterpret_cast<LoadedEffectFn>(0x4EB430);
 int g_effectFilesLoaded = 0, g_ourEffectFilesLogged = 0;
 std::vector<std::string> g_ourEffectFiles;  // the rfg_ effect files the game has loaded (see GuerrillaParticleLight)
 
+// The effects' emitters' pool (0x26BF650: each emitter of each loaded effect takes a place, see "Room for the
+// effects' emitters"): how many places it holds (a word at +0xA) and how many are taken (a byte each at +0x18,
+// 0xFF while free).
+constexpr DWORD kEmitterPool = 0x26BF650;
+int EmitterPoolUse(int& holds) {
+    holds = *reinterpret_cast<const WORD*>(kEmitterPool + 0xA);
+    const BYTE* flags = *reinterpret_cast<BYTE* const*>(kEmitterPool + 0x18);
+    int used = 0;
+    for (int i = 0; flags && i < holds; ++i)
+        if (flags[i] != 0xFF) ++used;
+    return used;
+}
+
 bool __cdecl EffectFileLoad(const char* name, void* unused1, void* data, void* unused2, void* dataFile) {
+    // Each file named before it loads, with the emitters' pool's use, so a load that never returns is named.
+    int holds = 0;
+    const int used = EmitterPoolUse(holds);
+    ++g_effectFilesLoaded;
+    rfa::Log("Effects: loading %d: %s (emitters %d of %d)", g_effectFilesLoaded, name ? name : "?", used, holds);
     const bool loaded = g_effectFileLoad(name, unused1, data, unused2, dataFile);
-    if (++g_effectFilesLoaded % 100 == 1) rfa::Log("Effects: the game has loaded %d effect files (now %s)", g_effectFilesLoaded, name ? name : "?");
     if (loaded && name && _strnicmp(name, "rfg_", 4) == 0 && strstr(name, ".cefct_pc") &&
         std::find(g_ourEffectFiles.begin(), g_ourEffectFiles.end(), name) == g_ourEffectFiles.end())
         g_ourEffectFiles.push_back(name);
-    if (name && _strnicmp(name, "rfg_", 4) == 0 && g_ourEffectFilesLogged < 100) {
+    if (name && (!loaded || (_strnicmp(name, "rfg_", 4) == 0 && strstr(name, ".cefct_pc") && !LoadedEffect(name)))) {
         ++g_ourEffectFilesLogged;
-        rfa::Log("Effects: the game loads %s: %s, %s in its map of loaded effects", name, loaded ? "loaded" : "NOT LOADED",
-                 LoadedEffect(name) ? "now" : "NOT");
+        rfa::Log("Effects: %s: %s, %s in its map of loaded effects", name, loaded ? "loaded" : "NOT LOADED", LoadedEffect(name) ? "now" : "NOT");
     }
     return loaded;
 }
@@ -6904,6 +6920,62 @@ void MoreEffectTemplateRoom() {
     if (!g_memoryPoolsSetUp) rfa::Log("Effect pools: could not wrap the memory pools' set-up; the game keeps its own sizes (more effects can crash it)");
 }
 
+// ---- Room for the effects' emitters
+//
+// Each emitter of each effect file the game loads takes a place (80 bytes) from a fixed pool at 0x26BF650
+// (0xB76040, in the emitter's set-up 0xB6FAF0, the emitter's +0x14); with none left the emitter keeps none, and
+// the template's set-up then uses it anyway (0xB6FE60 → 0xB75FE0 on null: the write to 0x44 at 0x47CE1B, the
+// loading crashes of 2026-11-06 00:28 and 21:45). Its start-up constructor (0xB76720, from 0xF58370) makes it for
+// 2,200 (`push 898h`) in a buffer inside the object (+0x30, `push 2DA7Dh`). Armageddon's 639 effect files have
+// 3,457 emitters in all, the world builder's 188 about 1,300. The user, 2026-11-06: OK'd: the mod runs the
+// constructor itself (as for its other fixed pools): the pool's base, a memory pool over the mod's buffer, the
+// pool's set-up for 6,600 (3 times the game's, as the other effect pools), the memory pool dropped; the
+// constructor's own values checked first. The effect files' log shows its use as each loads.
+constexpr DWORD kEmitterPoolConstructor = 0xB76720;
+constexpr size_t kEmitterPoolConstructorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,64h
+constexpr DWORD kGameEmitters = 2200, kEmitters = 6600;
+constexpr DWORD kEmitterPlace = 0x50 + 4 + 1;          // an emitter's object, its link, its flag
+constexpr DWORD kGameEmitterMemory = 0x2DA7D;
+// The constructor's own values: its buffer's size (push 2DA7Dh), the buffer's place in the object (add eax,30h)
+// and its count (push 898h).
+constexpr DWORD kEmitterMemoryValue = 0xB76745, kEmitterBufferValue = 0xB7674E, kEmitterCountValue = 0xB76759;
+alignas(16) BYTE g_emitterPoolMemory[kEmitters * kEmitterPlace + 64];
+
+auto const EmitterPoolBase = reinterpret_cast<void(__fastcall*)(BYTE* pool, void* unused)>(0x71C5D0);
+auto const EmitterMempoolOver = reinterpret_cast<void(__fastcall*)(void* mempool, void* unused, void* memory, DWORD size, const void* name,
+                                                                    DWORD first, DWORD second)>(0x428240);
+auto const EmitterMempoolDone = reinterpret_cast<void(__fastcall*)(void* mempool, void* unused)>(0x427F40);
+auto const EmitterPoolInit = reinterpret_cast<void(__fastcall*)(BYTE* pool, void* unused, void* mempool, DWORD holds)>(0xB76790);
+const void* const kEmitterPoolName = reinterpret_cast<const void*>(0xF7101C);  // "object pool", the name the game gives it
+
+BYTE* __fastcall EmitterPoolConstructor(BYTE* pool, void* unused) {
+    EmitterPoolBase(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's takes 0x5C bytes of its stack
+    EmitterMempoolOver(mempool, nullptr, g_emitterPoolMemory, sizeof(g_emitterPoolMemory), kEmitterPoolName, 1, 0);
+    EmitterPoolInit(pool, nullptr, mempool, kEmitters);
+    EmitterMempoolDone(mempool, nullptr);
+    return pool;
+}
+
+void MoreEmitterRoom() {
+    if (*reinterpret_cast<const WORD*>(kEmitterPool + 0xA) != 0) {
+        rfa::Log("Effect emitters: the game has already built its pool; it keeps its %lu", kGameEmitters);
+        return;
+    }
+    if (rfa::CodeValue(kEmitterMemoryValue) != kGameEmitterMemory || rfa::CodeValue(kEmitterCountValue) != kGameEmitters ||
+        *reinterpret_cast<const BYTE*>(kEmitterBufferValue) != 0x30) {
+        rfa::Log("Effect emitters: the pool's constructor (0x%08lX) isn't as expected; the game keeps its %lu", kEmitterPoolConstructor, kGameEmitters);
+        return;
+    }
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x64};
+    if (memcmp(reinterpret_cast<const void*>(kEmitterPoolConstructor), opening, sizeof(opening)) != 0 ||
+        !rfa::HookFunction(kEmitterPoolConstructor, kEmitterPoolConstructorPrologue, reinterpret_cast<void*>(&EmitterPoolConstructor))) {
+        rfa::Log("Effect emitters: could not change the game's code; it keeps its %lu", kGameEmitters);
+        return;
+    }
+    rfa::Log("Effect emitters: the game holds %lu (its own %lu)", kEmitters, kGameEmitters);
+}
+
 // ---- Room for more visual effects
 
 // The game keeps every visual effect vfx.xtbl describes (and a DLC level's, while it's loaded) in a
@@ -7655,6 +7727,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreEffectRoom();
     MoreParticleRoom();
     MoreEffectTemplateRoom();
+    MoreEmitterRoom();
     g_loadShaders = reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
     if (!g_loadShaders) rfa::Log("Could not add Guerrilla's material shaders to the game's; materials using them draw red");
     // Guerrilla's undergrowth: its random scatter with the pieces on the ground (see RandomlyPlace).

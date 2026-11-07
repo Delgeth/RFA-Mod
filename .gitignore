@@ -4,6 +4,8 @@
 /bin/
 /build/
 /dist/
+# Staging copies of bin\ that tools\stage.ps1 builds into (one per person or session).
+/stage/
 obj/
 src/**/bin/
 tools/**/bin/

@@ -18,7 +18,8 @@
 // them in a draw list of the interface as the console's vint_doc_load does (a document that is in
 // none is loaded but never drawn). The interface's draw pass (0x564FF0) is wrapped too: our
 // documents stay on the draw list only while the HUD is being updated, so nothing of them is left
-// on loading screens or in the menus.
+// on loading screens or in the menus. And the start of every level load (0x55D870) is wrapped:
+// all of our documents are unloaded there, as the load frees their memory (see LoadStart).
 //
 // Guerrilla's map ([GuerrillaHud] Map=1): its minimap (the document rfg_ui_hud) and its world map
 // (rfg_ui_fullscreen, opened and closed with [GuerrillaHud] MapKey=). Guerrilla drew the map itself
@@ -751,6 +752,38 @@ bool __cdecl DrawPass(bool flag) {
     return g_drawPass(flag);
 }
 
+// Every level load starts in the game's loading state (state 3, registered by 0x55D6D0): a reload
+// (death, a restart, the console's level), another world, or the main menu. Its start, 0x55D870
+// (called through the state's table), prints "LOAD SCREEN: Start time" and closes the screens
+// that are up (0x565C80). The load frees the interface memory our documents' containers are in,
+// but leaves the documents themselves open. After one reload, the game was told to unload the map
+// pictures the player had left behind; it released pictures whose memory was already used for
+// other pictures, and crashed (2026-11-06, rfg_ui_map_07_11). So the mod unloads all of its
+// documents as each load starts, while their memory is still theirs, as the game does with its own
+// screens there. The ones still wanted load again once the HUD runs.
+constexpr DWORD kLoadStart = 0x55D870;
+constexpr size_t kLoadStartPrologue = 6;  // push ebp / mov ebp,esp / sub esp,8
+using LoadStartFn = void(__cdecl*)();
+LoadStartFn g_loadStart;
+
+void __cdecl LoadStart() {
+    int unloaded = 0, forgotten = 0;
+    for (Document& doc : g_documents) {
+        doc.closedByGame = 0;
+        if (!doc.loaded) continue;
+        if (BYTE* open = OpenDocument(doc.name.c_str())) {
+            Unload(doc, open);
+            ++unloaded;
+        } else {
+            doc.loaded = doc.seen = doc.listed = false;  // still waiting: the load empties the game's queue
+            ++forgotten;
+        }
+    }
+    if (unloaded || forgotten)
+        RFA_LOG_FIRST(40, "A load starts: unloaded %d of Guerrilla's HUD documents (and forgot %d still waiting)", unloaded, forgotten);
+    g_loadStart();
+}
+
 // ---- What the documents' scripts ask (Lua, on the game's thread)
 
 using rfa::game::lua_State;
@@ -998,6 +1031,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     }
     g_drawPass = reinterpret_cast<DrawPassFn>(rfa::HookFunction(kDrawPass, kDrawPassPrologue, reinterpret_cast<void*>(&DrawPass)));
     if (!g_drawPass) rfa::Log("Could not hook the interface's draw pass; Guerrilla's HUD may stay up on loading screens and menus");
+    g_loadStart = reinterpret_cast<LoadStartFn>(rfa::HookFunction(kLoadStart, kLoadStartPrologue, reinterpret_cast<void*>(&LoadStart)));
+    if (!g_loadStart) rfa::Log("Could not hook the start of level loads; a reload may crash when the HUD unloads a map picture after it");
     std::string documents, worlds;
     for (const Document& doc : g_documents) documents += (documents.empty() ? "" : ", ") + doc.name;
     for (const std::string& world : g_worlds) worlds += (worlds.empty() ? "" : ", ") + world;

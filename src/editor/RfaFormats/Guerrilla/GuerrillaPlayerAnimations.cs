@@ -33,8 +33,10 @@ namespace RfaFormats.Guerrilla;
 ///     under the name rfgpl_ + Guerrilla's, written into mods\guerrilla_gear\animations\, which the mod
 ///     loads once and keeps (as Armageddon keeps its player's), with Guerrilla's anim_files.xtbl entry:
 ///     its triggers (when a reload hands over the ammo), its hand IK and its props (the magazine moved
-///     from the gun to the hand and back), what Armageddon's tables have of them; its sounds wait for
-///     Guerrilla's audio.
+///     from the gun to the hand and back), what Armageddon's tables have of them; its sounds where the
+///     guns' banks have them (a swing's whoosh: the caller's sound maker), the rest waiting for Guerrilla's
+///     audio; its moving versions (a variant tagged Forward: the hammer swung on the move, which carries
+///     Mason forward), made too though no group names them.
 /// The lists the set and its animations go in (anim_set_filenames.xtbl, anim_files.xtbl) are shared with
 /// the vehicles' and people's tools: this starts from the ones in mods\guerrilla_world\ and replaces only
 /// its own entries, recorded in mods\guerrilla_gear\anim_entries.txt.
@@ -106,13 +108,91 @@ public static class GuerrillaPlayerAnimations
     /// preference (an action may be played by a state's animation and the other way round: Armageddon's
     /// jump start is an action, Guerrilla's a state).
     /// </summary>
+    /// <summary>
+    /// Names a group of Guerrilla's means otherwise, checked before its own name. Guerrilla throws its thrown
+    /// weapons with "throw item" (and "move throw ...", "crouch throw"), and in those groups its "fire" is something
+    /// else: in "remote charge" (the remote charges, the mines, the singularity bomb) the press of the detonator, in
+    /// "2HCarry" (the propane tank) a swing with what he carries. Ours throw with the game's firing (its "fire"
+    /// names), so those take Guerrilla's throws; the charges go off with the second firing mode or reload (its
+    /// "fire alt" and "reload" names), which take Guerrilla's detonator press. (Without this the charge's throw
+    /// played the detonator and the tank's a swing: the user's Round 1, 2026-11-06.)
+    /// </summary>
+    static readonly Dictionary<string, Dictionary<string, string[]>> GroupAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["remote charge"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["fire"] = ["throw item"], ["stand fire"] = ["throw item"],
+            ["walk fire"] = ["move throw forward"], ["run fire"] = ["move throw forward"],
+            ["walk fire back"] = ["move throw back"], ["run fire back"] = ["move throw back"],
+            ["walk fire left"] = ["move throw left"], ["run fire left"] = ["move throw left"],
+            ["walk fire right"] = ["move throw right"], ["run fire right"] = ["move throw right"],
+            ["crouch fire"] = ["crouch throw"], ["crouch walk fire"] = ["crouch throw"], ["crouch walk fire back"] = ["crouch throw"],
+            ["crouch walk fire left"] = ["crouch throw"], ["crouch walk fire right"] = ["crouch throw"],
+            ["stand fire alt"] = ["stand fire"], ["walk fire alt"] = ["walk fire"], ["run fire alt"] = ["run fire"],
+            ["fine aim fire alt"] = ["stand fire"], ["fine aim fire walk alt"] = ["walk fire"],
+            ["crouch fire alt"] = ["crouch fire"], ["crouch walk fire alt"] = ["crouch fire"],
+            ["fine aim crouch fire alt"] = ["crouch fire"], ["fine aim crouch fire walk alt"] = ["crouch fire"],
+            ["reload"] = ["stand fire"], ["walk reload"] = ["walk fire"], ["run reload"] = ["run fire"],
+            ["crouch reload"] = ["crouch fire"], ["crouch walk reload"] = ["crouch fire"],
+            // Guerrilla's Mason never aims a charge: he holds it ready. Armageddon's player is in its aim names
+            // whenever he holds a gun, and Armageddon's own "remote charge" group is its charge launcher's (its
+            // charge_placer shares the group's name): without these the launcher's poses (pc_rcl_aim_*, moved onto
+            // Mason with Armageddon's moves) filled them, and he held the charges like that launcher (the user's
+            // Round 1 rerun, 2026-11-06: "the satchels still used the thrower").
+            ["stand aim"] = ["stand ready"], ["aim turn"] = ["stand ready"], ["fine aim"] = ["stand ready"], ["fine aim turn"] = ["stand ready"],
+            ["walk aim"] = ["walk ready"], ["fine aim walk"] = ["walk ready"],
+            ["walk back aim"] = ["walk ready back"], ["fine aim walk back"] = ["walk ready back"],
+            ["walk left aim"] = ["walk ready left"], ["fine aim walk left"] = ["walk ready left"],
+            ["walk right aim"] = ["walk ready right"], ["fine aim walk right"] = ["walk ready right"],
+            ["run aim"] = ["run ready"], ["run aim back"] = ["run ready back"],
+            ["run aim left"] = ["run ready left"], ["run aim right"] = ["run ready right"],
+            ["crouch aim"] = ["crouch ready"], ["crouch aim turn"] = ["crouch ready"], ["fine aim crouch"] = ["crouch ready"],
+            ["crouch wlk aim fwd"] = ["crouch wlk rdy fwd"], ["fine aim crouch walk"] = ["crouch wlk rdy fwd"],
+            ["crouch wlk aim back"] = ["crouch wlk rdy back"], ["fine aim crouch walk back"] = ["crouch wlk rdy back"],
+            ["crouch wlk aim left"] = ["crouch wlk rdy left"], ["fine aim crouch walk left"] = ["crouch wlk rdy left"],
+            ["crouch wlk aim right"] = ["crouch wlk rdy right"], ["fine aim crouch walk right"] = ["crouch wlk rdy right"],
+        },
+        ["2HCarry"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["fire"] = ["throw item"], ["stand fire"] = ["throw item"], ["walk fire"] = ["throw item"], ["run fire"] = ["throw item"],
+            ["crouch fire"] = ["throw item"],
+        },
+    };
+
     static readonly Dictionary<string, string[]> Aliases = new(StringComparer.OrdinalIgnoreCase)
     {
         ["fire"] = ["stand fire"],
         ["fine aim fire walk"] = ["fine aim fire"], ["fine aim crouch fire walk"] = ["fine aim crouch fire"],
-        ["walk aim"] = ["run aim"], ["walk back aim"] = ["run aim back"], ["walk left aim"] = ["run aim left"], ["walk right aim"] = ["run aim right"],
-        ["ready turn"] = ["stand ready"], ["aim turn"] = ["stand aim"], ["crouch turn"] = ["crouch ready", "crouch"], ["crouch aim turn"] = ["crouch aim"],
-        ["fine aim turn"] = ["fine aim"], ["calm fall state aim"] = ["calm fall run state in air aim", "calm fall state"],
+        // Aiming: Guerrilla's aim names where its group has them, else its ready ones. Its weapons that are never
+        // aimed (the hammer, the gutter, the charges, the tank, the launchers' plain stances) have only ready poses,
+        // and Armageddon's player is in its aim names whenever he holds a weapon: without the ready ones those names
+        // went to Armageddon's poses (Darius's hammer stance moved onto Mason, or his rifle's through the game's
+        // group parents), stand-ins for Guerrilla's own (the user's rule; the Round 1 rerun, 2026-11-06).
+        ["stand aim"] = ["stand ready"],
+        ["walk aim"] = ["run aim", "walk ready"], ["walk back aim"] = ["run aim back", "walk ready back"],
+        ["walk left aim"] = ["run aim left", "walk ready left"], ["walk right aim"] = ["run aim right", "walk ready right"],
+        ["run aim"] = ["run ready"], ["run aim left"] = ["run ready left"], ["run aim right"] = ["run ready right"],
+        ["crouch aim"] = ["crouch ready"],
+        ["crouch wlk aim fwd"] = ["crouch wlk rdy fwd"], ["crouch wlk aim back"] = ["crouch wlk rdy back"],
+        ["crouch wlk aim left"] = ["crouch wlk rdy left"], ["crouch wlk aim right"] = ["crouch wlk rdy right"],
+        ["fine aim"] = ["stand aim", "stand ready"],
+        ["fine aim walk"] = ["walk aim", "walk ready"], ["fine aim walk back"] = ["walk back aim", "walk ready back"],
+        ["fine aim walk left"] = ["walk left aim", "walk ready left"], ["fine aim walk right"] = ["walk right aim", "walk ready right"],
+        ["fine aim crouch"] = ["crouch aim", "crouch ready"],
+        ["fine aim crouch walk"] = ["crouch wlk aim fwd", "crouch wlk rdy fwd"], ["fine aim crouch walk back"] = ["crouch wlk aim back", "crouch wlk rdy back"],
+        ["fine aim crouch walk left"] = ["crouch wlk aim left", "crouch wlk rdy left"], ["fine aim crouch walk right"] = ["crouch wlk aim right", "crouch wlk rdy right"],
+        ["fine aim crouch turn"] = ["fine aim crouch", "crouch aim", "crouch ready"],
+        ["stand turn shuffle left"] = ["stand ready shuffle left", "stand shuffle left"], ["stand turn shuffle right"] = ["stand ready shuffle right", "stand shuffle right"],
+        // A mounted turret: Armageddon's player aims it by height (high, medium, low, each straight, left or right),
+        // Guerrilla's by turn (its Turret Machinegun group: turret left, slight left, middle, slight right, right).
+        ["aim high"] = ["turret middle"], ["aim medium"] = ["turret middle"], ["aim low"] = ["turret middle"],
+        ["aim high left"] = ["turret left"], ["aim medium left"] = ["turret left"], ["aim low left"] = ["turret left"],
+        ["aim high right"] = ["turret right"], ["aim medium right"] = ["turret right"], ["aim low right"] = ["turret right"],
+        ["walk high left"] = ["walk left"], ["walk medium left"] = ["walk left"], ["walk low left"] = ["walk left"],
+        ["walk high right"] = ["walk right"], ["walk medium right"] = ["walk right"], ["walk low right"] = ["walk right"],
+        ["ready turn"] = ["stand ready"], ["aim turn"] = ["stand aim", "ready turn", "stand ready"], ["crouch turn"] = ["crouch ready", "crouch"],
+        ["crouch aim turn"] = ["crouch aim", "crouch ready"],
+        ["fine aim turn"] = ["fine aim", "stand aim", "ready turn", "stand ready"], ["calm fall state aim"] = ["calm fall run state in air aim", "calm fall state"],
         ["jump start"] = ["run jump start", "stand jump start"], ["jump start aim"] = ["stand jump start aim forward", "stand jump start"],
         ["jump start crouch"] = ["stand jump start"], ["jump start back"] = ["run jump start"], ["jump start left"] = ["run jump start"],
         ["jump start right"] = ["run jump start"],
@@ -128,7 +208,11 @@ public static class GuerrillaPlayerAnimations
         ["run aim back"] = ["run ready back"], ["run ready back"] = ["run ready backpedal"],
     };
 
-    /// <summary>The fields of an anim_files.xtbl entry left out for now (Guerrilla's sounds are XACT cues), as the vehicles' and people's.</summary>
+    /// <summary>
+    /// The fields of an anim_files.xtbl entry left out for now, as the vehicles' and people's: Mason's voice
+    /// lines (his voice isn't ported), the old props, and the sounds when no sound maker is given (Guerrilla's
+    /// are XACT cues; with one, each becomes an event of our banks or goes).
+    /// </summary>
     static readonly string[] LeftOutOfFiles = ["Sounds", "Voice_Lines", "OldProps"];
 
     /// <summary>One of our guns that takes the set up: its weapons.xtbl name (ours) and Guerrilla's animation group.</summary>
@@ -142,16 +226,20 @@ public static class GuerrillaPlayerAnimations
     /// <summary>
     /// Builds rfg_player for the groups <paramref name="weapons"/> use: the set's table (overrides\build\pc\cache\),
     /// the animations and the gun list (<paramref name="gearFolder"/>, mods\guerrilla_gear\), the shared lists
-    /// (<paramref name="worldFolder"/>, mods\guerrilla_world\). Returns what was done, a line each.
+    /// (<paramref name="worldFolder"/>, mods\guerrilla_world\). <paramref name="soundOf"/>, when given, makes an
+    /// animation's sound (Guerrilla's cue, looping or not) an event of our banks, or gives null to leave it out.
+    /// Returns what was done, a line each.
     /// </summary>
-    public static IEnumerable<string> Build(string guerrilla, string game, string overrides, string worldFolder, string gearFolder, IReadOnlyList<PlayerWeapon> weapons)
+    public static IEnumerable<string> Build(string guerrilla, string game, string overrides, string worldFolder, string gearFolder, IReadOnlyList<PlayerWeapon> weapons,
+                                            Func<string, bool, string?>? soundOf = null)
     {
         var log = new List<string>();
-        Make(guerrilla, game, overrides, worldFolder, gearFolder, weapons, log);
+        Make(guerrilla, game, overrides, worldFolder, gearFolder, weapons, soundOf, log);
         return log;
     }
 
-    static void Make(string guerrilla, string game, string overrides, string worldFolder, string gearFolder, IReadOnlyList<PlayerWeapon> weapons, List<string> log)
+    static void Make(string guerrilla, string game, string overrides, string worldFolder, string gearFolder, IReadOnlyList<PlayerWeapon> weapons,
+                     Func<string, bool, string?>? soundOf, List<string> log)
     {
         string guerrillaCache = Path.Combine(guerrilla, "build", "pc", "cache"), gameCache = Path.Combine(game, "build", "pc", "cache");
         string cache = Path.Combine(overrides, "build", "pc", "cache");
@@ -307,11 +395,14 @@ public static class GuerrillaPlayerAnimations
                     string? source = null;
                     bool alias = false;
                     var (mine, other) = isState ? (states, actions) : (actions, states);
-                    if (mine.TryGetValue(id, out var f)) source = f;
-                    else foreach (string alt in Aliases.GetValueOrDefault(id) ?? [])
-                        {
+                    string? f = null;
+                    if (GroupAliases.TryGetValue(rfg, out var meant) && meant.TryGetValue(id, out var instead))
+                        foreach (string alt in instead)
                             if (mine.TryGetValue(alt, out f) || other.TryGetValue(alt, out f)) { source = f; alias = true; break; }
-                        }
+                    if (source == null && mine.TryGetValue(id, out f)) source = f;
+                    if (source == null)
+                        foreach (string alt in Aliases.GetValueOrDefault(id) ?? [])
+                            if (mine.TryGetValue(alt, out f) || other.TryGetValue(alt, out f)) { source = f; alias = true; break; }
                     if (source == null) return;
                     string? file = source.EndsWith(".animx", StringComparison.OrdinalIgnoreCase) ? source
                                  : trees.TryGetValue(source, out var tree) ? BandClip(tree, id) : null;
@@ -472,6 +563,27 @@ public static class GuerrillaPlayerAnimations
                 log.Add($"Mason's animations: empty-handed (Default) takes {fromHammer} states and actions from his hammer group");
             }
         }
+        // The moving versions: Guerrilla's entry for a swing plays another animation in its place when the player
+        // swings on the move (a variant tagged Forward: the hammer's plyr_hmr_mele plays plyr_hmr_melemv, which
+        // carries him forward; the gutter's, the guns' bashes alike), and Armageddon plays variants the same way
+        // (its own dual-wield swing, pc_dw_melee, has pc_dw_melee_mv). No group names those animations, so they
+        // are made here, for the set whose animation names them. The other tags stay out: Air (a swing in a jump,
+        // where Armageddon's movement is kept) and the rest.
+        int movingVersions = 0;
+        foreach (var (made, onDarius) in new[] { (masonFiles, false), (dariusFiles, true) })
+            for (bool more = true; more;)
+            {
+                more = false;
+                foreach (string rfgFile in made.Keys.ToList())
+                {
+                    if (onDarius && armageddonOwn.Contains(rfgFile)) continue;  // Armageddon's own, its own entry
+                    foreach (var variant in rfgFiles.GetValueOrDefault(rfgFile)?.Element("Variants")?.ElementsNamed("Variant") ?? [])
+                        if (variant.ValueOf("Anim_Tag")?.Trim().Equals("Forward", StringComparison.OrdinalIgnoreCase) == true &&
+                            variant.ValueOf("File")?.Trim() is { Length: > 0 } file && !made.ContainsKey(file) && Clip(file, onDarius) != null)
+                        { movingVersions++; more = true; }
+                }
+            }
+        if (movingVersions > 0) log.Add($"player animations: {movingVersions} moving versions (Guerrilla's variants tagged Forward: swings on the move) made");
         if (unreadable.Count > 0) log.Add($"player animations: animations left out: {string.Join(", ", unreadable.Distinct())}");
 
         // Each animation's entry, Guerrilla's, with what Armageddon's tables have of it.
@@ -483,7 +595,7 @@ public static class GuerrillaPlayerAnimations
             {
                 if (made == dariusFiles && armageddonOwn.Contains(rfgFile)) continue;  // Armageddon's own, its own entry
                 if (gameNames.Contains(ours)) throw new InvalidDataException($"{FileList} already has an animation {ours} that isn't ours (another tool's): the names would clash");
-                fileEntries.AddElement(FileEntry(rfgFiles.GetValueOrDefault(rfgFile), ours, made, known, leftOut));
+                fileEntries.AddElement(FileEntry(rfgFiles.GetValueOrDefault(rfgFile), ours, made, known, leftOut, soundOf));
                 ownFiles.Add(ours);
             }
         // Armageddon's own moved onto Mason: Armageddon's own entry (its triggers, IKs, props, sounds), under our name.
@@ -659,7 +771,8 @@ public static class GuerrillaPlayerAnimations
     sealed record KnownParts(HashSet<string> Triggers, HashSet<string> IkLocations, HashSet<string> Flags, HashSet<string> PropTypes);
 
     /// <summary>Guerrilla's anim_files.xtbl entry for an animation (or a plain one), under our name, with only what Armageddon's tables have.</summary>
-    static XtblElement FileEntry(XtblElement? rfg, string ours, IReadOnlyDictionary<string, string> ourFiles, KnownParts known, ISet<string> leftOut)
+    static XtblElement FileEntry(XtblElement? rfg, string ours, IReadOnlyDictionary<string, string> ourFiles, KnownParts known, ISet<string> leftOut,
+                                 Func<string, bool, string?>? soundOf)
     {
         var entry = rfg?.Copy() ?? new XtblElement("Anim_file");
         var animation = entry.Element("Animation") ?? entry.AddElement("Animation");
@@ -684,6 +797,19 @@ public static class GuerrillaPlayerAnimations
         if (entry.Element("Variants") is { } variants && !variants.ElementsNamed("Variant").Any()) variants.Remove();
         foreach (var part in entry.Elements.ToList())
         {
+            // Its sounds, given a sound maker: each Foley cue as our banks' event (frame and looping as Guerrilla's); one not had goes.
+            if (soundOf != null && part.Name.Equals("Sounds", StringComparison.OrdinalIgnoreCase) && part.HasElements)
+            {
+                foreach (var sound in part.Elements.ToList())
+                {
+                    string? cue = sound.ValueOf("Foley")?.Trim();
+                    bool looping = sound.ValueOf("Looping")?.Trim().Equals("True", StringComparison.OrdinalIgnoreCase) == true;
+                    if (!string.IsNullOrEmpty(cue) && soundOf(cue, looping) is { } eventName) sound.Element("Foley")!.Value = eventName;
+                    else { leftOut.Add("sounds not built yet (the sounds lines name them)"); sound.Remove(); }
+                }
+                if (!part.Elements.Any()) part.Remove();
+                continue;
+            }
             if (LeftOutOfFiles.Contains(part.Name, StringComparer.OrdinalIgnoreCase))
             {
                 if (part.HasElements) leftOut.Add(part.Name.Replace('_', ' ').ToLowerInvariant());

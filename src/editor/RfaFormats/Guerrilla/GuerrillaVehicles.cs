@@ -118,6 +118,11 @@ public static class GuerrillaVehicles
     const int GuerrillaSpline = 24, Spline = 28;
     const uint FrontWheel = 0x0A48F662, RearWheel = 0x6A42CA04;  // part types "Front Wheel", "Rear Wheel"
     const int HiddenPart = 0x800;                                 // Armageddon's part flag: never drawn (its Crusader's drive wheels)
+    // The parts' flags stay Guerrilla's. Flag 0x20 says a part's collision is pieces of its parent's (the chassis's)
+    // compound shape, its sub-pieces (part +0xC4 start, +0xC8 count): the game breaks it off with those pieces when the
+    // vehicle is destroyed (0x616240, the filters from 0x6149A0). Given to the Kitsune's turret ring (Guerrilla's 0x1,
+    // its pieces 0+0: its collision its own), it crashed the game as a Kitsune was destroyed (Round 3, 23:50:45: no
+    // filter for the ring's shapes, 0x78C5B4). So no flag is added without the pieces it describes.
 
     static (byte[], IReadOnlyList<string>) ConvertFile(byte[] g, Func<string, string> rename, bool tank)
     {

@@ -97,8 +97,11 @@ docs\renderer-plan.md     the plan for drawing levels with Direct3D 11, to look 
 docs\releases\            each release's notes (the GitHub release text)
 tools\game-integrity.ps1  proves the game folder is untouched
 tools\package.ps1         makes a clean copy to share (dist\), without your own settings
+tools\stage.ps1           builds and checks into a staging copy of bin\ of your own (stage\<name>\)
+tools\install-bin.ps1     the one install into bin\ when several people build at once
 reference\build-*\        each Steam build's file list, for tools\game-integrity.ps1
 bin\                      the built mod (what you install); build\ holds compiler leftovers
+stage\<name>\             staging copies of bin\ (tools\stage.ps1), never played from
 dist\                     made by tools\package.ps1: the mod and editor as others get them
 ```
 
@@ -735,6 +738,14 @@ converts:
   load, the groups broke a second load). The game keeps at most 950 visual effects, of
   which Armageddon's own take 904, so the 46 shown by the most placed objects are added (over 92%
   of what the world's objects show) and the other 41 wait for more room.
+- **Room for the effects' emitters**: every emitter of every effect file the game loads takes a place
+  in one fixed pool of 2,200. Armageddon's own files have 3,457 emitters between them, and the
+  world's converted files about 1,300 more, so the pool ran out while a level loaded and the game
+  crashed. The mod gives it room for 6,600 (three times the game's, as for the other effect pools),
+  doing what the game's own start-up step for that pool does over a bigger buffer, with the game's
+  values checked first. The log names each effect file as it loads, with how many places are taken;
+  the F7 menu's Limits window shows it; and the world builder stops if Armageddon's emitters and the
+  world's together would outgrow it.
 - **The precache**: every file more than one container would hold (the ground's texture layers,
   roads, rocks, chunk files and their textures) goes once into `rfg_precache.vpp_pc`, and each
   zone's and sub-zone's precache group in the asset list (`0p_cXXYY`, `1p_cXXYY`) names the ones
@@ -1077,13 +1088,23 @@ skeletons, and their dents.
   thrust, leans into the acceleration, turns and pitches toward where it's going, and banks into turns.
   Its engine's lift cancels gravity while the engine runs, and it falls freely upside down. The
   player's own flyer isn't touched.
-- **Room for the vehicle interactions' names**: the game keeps the names in `vehicle_interactions.xtbl`
-  (each vehicle's getting in and out: its waypoints, the parts they're on, its doors) in 8 KB. Once that
-  space runs out, it stores names as missing, and the game stopped when a vehicle looked up its
-  interaction. The mod makes it 32 KB (both values in the game's code, checked first), and logs how much
-  the table takes. Any interaction still left without a name gets an empty one: its vehicle can't be got
-  into, but the game goes on. The builder adds the names up as the game stores them, and stops if they
-  would outgrow 32 KB.
+- **Room for the vehicle interactions**: `vehicle_interactions.xtbl` describes how each vehicle is got
+  into and out of: its waypoints, the parts they're on, its doors. The game reads it into two fixed spaces:
+  - **the interactions, waypoints and transitions** (64 KB): once that's full, it stops reading, and the
+    rest of the table is left unread. Guerrilla's need about 70 KB, so the last four vehicles' interactions
+    were never read, and the game stopped when one of them was looked up. The mod makes this 256 KB.
+  - **their names** (8 KB): the mod makes this 32 KB.
+
+  Every value in the game's code is checked before any is changed, and the log says how much of each the
+  table takes. Any interaction still left without a name gets an empty one: its vehicle can't be got into,
+  but the game goes on. The builder adds both up as the game lays them out, and stops if either would
+  outgrow its space.
+- **Room for the vehicle spawn groups**: the game keeps the groups of `spawn_group_vehicle.xtbl` (each a
+  list of vehicles that parked spots, squads that ride and traffic pick from) in room for 32. Armageddon's
+  own take 23; with Guerrilla's 108 they're 131, and the game stopped while it started. The mod gives it
+  room for 136, Guerrilla's own size. It does this by doing what the game's own start-up step for that
+  room does, over a bigger buffer; the game's values are checked first. The log says how many are in use,
+  and the builder stops if the table would outgrow it.
 - **Room for blend trees**: Armageddon keeps every blend tree in a table of 24 and fills 23 itself, so
   Guerrilla's walkers' trees (below) wouldn't fit. The mod moves the table to one of 64 (four addresses
   and two sizes in the game's code, checked first), before the game's start-up code builds it.
@@ -1155,7 +1176,9 @@ the player gets in and can't drive or get out. Each vehicle is made of:
   `VRotMaxRampTime`; Armageddon asks its turret's top part whether it makes weapon physics, which
   Guerrilla's "Weapon Physics" flag says); their turning and hatch sounds are Guerrilla's. A turret's
   weapon is Guerrilla's, as the weapons build makes it: a turret whose weapon isn't built yet is left out,
-  with the vehicle's mount (build the weapons, then the vehicles again).
+  with the vehicle's mount (build the weapons, then the vehicles again). The car parts a turret turns (a
+  ring on the roof) keep Guerrilla's flags: a part marked as pieces of the chassis's collision must carry
+  those pieces, or the game crashes when it breaks the part off a destroyed vehicle.
 - **Its sounds**, Guerrilla's own, in Wwise banks of Armageddon's kind (`GuerrillaSoundBanks.cs`,
   `GuerrillaVehicleSounds.cs`, `GuerrillaAudio.cs`). Guerrilla plays XACT: its cues (in
   `sounds_r.vpp_pc`'s `foley.aud_pc`, found by a CRC of their names) lead to XACT sounds and to waves in
@@ -1268,13 +1291,28 @@ mod gives them what the engine lacks around them:
   With Guerrilla's 90 people added, Armageddon's and ours come to about 10.6 KB; past its end the pool
   hands out nothing, and the reader's next compare with it stops the game while it starts. So when the
   game sets that pool up (the same memory pools' init) the mod gives it 64 KB of its own; it is empty
-  then, and no code is changed. The F7 menu's Limits window shows how full it is.
+  then, and no code is changed. The F7 menu's Limits window shows how full it is. The squads' and spawn
+  resources' names get the same: their pools, "Squad Def String Pool" (1,280 bytes) and "Spawn Resource
+  Data" (1,024), take each squad's and resource's name, and Guerrilla's district squads alone take the
+  squads' past its end (2,146 bytes with Armageddon's), which stops a level's load; they get 16 KB and
+  8 KB. The people build adds up the names it writes and refuses a table that wouldn't fit.
+- **Room for the squads' members**: the squad table's reader keeps each different squad member (a
+  character with a loadout and a variant) as a record of its own, from a pool its start-up makes for 64;
+  when it runs out the squad being read fails, and every squad after it in the table with it.
+  Armageddon's own squads take 43, and Guerrilla's district squads (each civilian, and each guerrilla look
+  with each of its weapons) need about 50 more, so the mod builds the pool for 256 (as the patrols' pool,
+  after checking its constructor's values). The world build lists the squads its zones name, the people
+  build writes only those district versions, and it refuses a table whose members wouldn't fit or a
+  squad a zone names but the table hasn't. The F7 menu's Limits window shows the members' pool.
 - **Room for the patrols**: the game keeps the patrol routes of the zones loaded in an object pool its
   start-up makes for 24 (`0x7F9980`: the pool set up, a memory pool on a buffer inside the pool object,
   then each slot carved out of it); Guerrilla's holds 72, and its world places up to 29 in one 3 × 3
   block of zones. Nothing else is sized by that count, so the mod replaces the constructor with one
   doing the same on a buffer of its own for Guerrilla's 72, after checking the constructor's buffer
-  size and count are the game's (nothing changes if not). Always, as the world's zones place them. The
+  size and count are the game's (nothing changes if not). The world also keeps a list of each type's
+  objects, as big as the count the type registers at start-up (not its pool), so the mod also replaces the
+  patrols' registration with the same call giving 72, after checking each value it passes; the pool and the
+  list change together or not at all. Always, as the world's zones place them. The
   F7 menu's Limits window shows how full it is, with the people, squads and squad spawn nodes the game
   holds (100, 100 and 384: Guerrilla's own 100 NPCs and 100 squads, so those stay).
 - **Room for the animations' names**: the game keeps every animation's name (each entry of
@@ -1454,8 +1492,20 @@ or a bounding box (a squad defending it), under an action node (people sitting, 
 Armageddon has no action nodes, so they stand there) or under nothing. Armageddon gives a squad node
 orders from what it hangs under only for patrols and pedestrian navpoints, so these keep their own
 orders (Guerrilla's Default as Armageddon's Standard: a squad not on the player's side waits where it
-is; or Wait). A squad that rides in a vehicle names Guerrilla's vehicle group as the vehicles build
-writes it (the EDF scouts' `EDF_scout_Gauss` as `rfg_EDF_scout_Gauss`). Not placed: the Marauders'
+is; or Wait). Armageddon spawns a standing squad of several on spawn points placed under its node,
+one per member, and spawns nobody when there are too few ("Static Spawn Error"); Guerrilla has no
+spawn points and spreads its squads out from the node. So `guerrilla_people` makes a standing squad
+whose node has too few points spread out from the node over the people's nav mesh, the way Armageddon
+places its other squads; a node with enough points is left to the game. Armageddon's table of squad
+loadouts holds 36 and drops the rest without a word, which fails every squad naming a dropped one;
+with Guerrilla's it has 51, so `guerrilla_people` gives it room for 128, and `GuerrillaBuilder.exe
+check` fails on a squad naming a loadout or character the game won't have. Guerrilla's guard posts (a
+squad node under a bounding box that also holds guard nodes) keep their box: the world build places it
+with the node under it, and `guerrilla_people` leashes the squad to the box as it spawns, Armageddon's
+own leash to an anchor's box, so the squad holds its post instead of chasing you. That stands in for
+Guerrilla's guard post AI until it is ported. A squad that rides in a
+vehicle names Guerrilla's vehicle group as the vehicles build writes it (the EDF scouts'
+`EDF_scout_Gauss` as `rfg_EDF_scout_Gauss`). Not placed: the Marauders'
 ambushes (their regions, which spawn them as a vehicle drives in, are gone from Armageddon), turrets'
 crews, and the squads Guerrilla's missions and activities spawn. Armageddon holds 100 people at once,
 so every 3 × 3 block of zones keeps at most 80 in its patrols and standing squads (room for those
@@ -1474,6 +1524,10 @@ along, and its 306 vehicle spawn nodes, each naming its spawn group as the vehic
 node code does the rest: when you come within 250 m it rolls the spot's chance once, and makes an empty
 vehicle there (guerrilla_vehicles makes room for Guerrilla's number of them and streams the model in).
 Guerrilla's night chance, "special vehicle" and "no parking" settings aren't read by Armageddon.
+A road's own position must lie inside its zone: when a zone streams out, Armageddon keeps a road for
+remaking only if it does, and otherwise drops it for good (Guerrilla doesn't check). 21 of Guerrilla's roads
+run to a zone's edge with their position up to 1.9 m over it, so the builder moves that position (only) half
+a metre inside; the road's points stay where they are.
 
 ### guerrilla_gear
 
@@ -1723,12 +1777,31 @@ Guerrilla (Guerrilla's `weapons.xtbl` names: `m16`, `enforcer`, `autoblaster`, `
   its people's to the people's sets): all 14 the campaign weapons use (the game holds 64 with the mod,
   Armageddon's own 22). A melee weapon (the sledgehammer, the gutter) swings as Armageddon's own sledgehammer
   does: its side swing first, its overhead as the second firing mode; any other weapon's melee button
-  plays Guerrilla's bash for it.
+  plays Guerrilla's bash for it. Swung on the move, a swing plays Guerrilla's moving version of it (a
+  variant tagged `Forward` in its `anim_files.xtbl` entry, which Armageddon plays the same way: its own
+  dual-wield swing has one), which carries the player on; standing, he stops for it, as in Guerrilla.
+  A hit's damage to a building is Guerrilla's figure × 100: Guerrilla's code multiplies a melee hit on a
+  building's piece by 100 (bullets by 7.5), Armageddon's applies the table's figure as it is (its own
+  hammer's 150,000 is Guerrilla's 1,500 with that factor moved into the table). People and vehicles take
+  Guerrilla's figures as written in both games. A gun's damage to a building is likewise its NPC figure
+  × 7.5 (Guerrilla's × 200 on certain pieces belongs to the piece, not the gun, and isn't carried over).
+- **Turret guns.** Most of Guerrilla's turrets have no top part (the gun is the weapon's model), and
+  Armageddon draws a turret's top only from a static model, so each such turret (the vehicles part lists
+  them in `mods\guerrilla_world\turret_items.txt`) gets a top of its own, `<gun>_null`: Guerrilla's empty
+  weapon model with the gun's tags and a `turret_head` tag at its origin, which the game hangs the weapon
+  from. The weapon keeps its own gun model, so the gun sits where the turret's top is, as in Guerrilla,
+  and fires from its own barrels. The turrets' part models listed there are ported too, marked as turret
+  parts as Armageddon marks its own.
+  The hits' effects and impact sounds (Guerrilla's melee groups, `rfg_melee_groups.xtbl`) aren't ported yet.
+  The player's melee hits are logged ("Melee hit:" lines in `rfa_mods.log`: what was hit and for how much),
+  from the game's own damage pick (`0x878780`), whose figure is kept as it is.
 - **Sounds.** Each weapon's shot, the player's and an NPC's, is Guerrilla's own cue as a sound of
   Armageddon's kind (`GuerrillaSoundBanks`, shared with the vehicles: banks `rfgw_<Guerrilla's bank>`,
   their rows in `audio_banks_patch.xtbl`), on Armageddon's weapons' bus. An automatic gun's is a loop
   with a stop event, paired in the game's loop list as Armageddon's own automatic guns' are, so it plays
-  while the trigger is held.
+  while the trigger is held. The player's animations carry Guerrilla's sounds where those are weapons'
+  sounds (a swing's whoosh, the charge's click), in the same banks; one another part's banks already
+  play is named, not made twice. Their movement sounds (reloads, cloth) wait for their bank.
 - **Items Guerrilla's people carry**, built with the weapons under Guerrilla's names: the riot shield,
   which Armageddon's own riot-shield code gives a character with the "riot shield" flag. A model with
   its own collision (the shield, turret parts, pickups) keeps it: Guerrilla's Havok 5.5 shapes written
@@ -1894,7 +1967,30 @@ process) into `bin\`, copies `src\overrides\` into `bin\overrides\`, and copies
 `config\rfa_mods.ini` and `config\console.ini` to `bin\` only if there are none there yet, and to
 `bin\defaults\` every time (the templates the launcher adds new settings from to yours). It
 builds the editor and the Guerrilla builder 64-bit into `bin\editor\`. The build turns off the
-.NET SDK's usage reporting and its first-run web certificate.
+.NET SDK's usage reporting and its first-run web certificate. `build.cmd <folder>` builds into
+another folder instead, with its compiler leftovers in `build\stage-<folder's name>\`, so several
+builds can run at once.
+
+**Building while others work.** When several people (or several Claude sessions) change the source
+at the same time, nobody builds into `bin\` but the one who runs the tests. `bin\` is the copy the
+game is played from, and `build.cmd` compiles the whole source tree, so a build into `bin\` takes
+everyone's unfinished changes with it, and two builds there at once get in each other's way.
+- To build and check your own work, use `tools\stage.ps1 -Name <you> [-Parts <parts>]`. It mirrors
+  `bin\` into `stage\<you>\` (everything but `logs\`; about 2 GB the first time, then only what
+  changed) and runs `build.cmd stage\<you>`. Then it runs the Guerrilla builder there: the parts
+  named in `-Parts` (world, hud, vehicles, weapons, people), built over what `bin\` already has, and
+  its table check; without `-Parts`, only the check. `-NoMirror` builds again on the staging copy as
+  it is. Nobody waits for anybody, and nothing reaches `bin\`. A staging copy is for building and
+  checking, never for playing.
+- To install it all into `bin\` for a test, use `tools\install-bin.ps1 [-Parts <parts>]`. It stops
+  if the game, the launcher, the editor or the builder is running. It then builds into `bin\`,
+  rebuilds the parts named, and runs the check. Last, it lists `bin\`'s programs and mods with
+  their times, the parts built, and every source file changed since the last commit (they're all in
+  the build, finished or not). While it runs, `bin\.installing` keeps `tools\stage.ps1` from copying
+  a half-installed `bin\`.
+
+The Guerrilla builder itself is unchanged by this: it's still the one program players run, to set
+everything up the first time and to build their world again after an update.
 
 `tools\package.ps1` makes the copy to give others, in `dist\RFA-Mod\` and as
 `dist\RFA-Mod-<date>.zip`:

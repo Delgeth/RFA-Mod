@@ -296,20 +296,30 @@ public sealed class GuerrillaAnimationSets
         // Its animations, each moved onto Darius's skeleton (all of them, or the set is left out).
         var files = Descendants(skeletonSet, "Animation").Select(a => a.ValueOf("Filename")?.Trim()).OfType<string>()
                         .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        // Their variants: animations the game plays in an animation's place by a tag (anim_files Variants: a car's
+        // driver's "Reverse", looking back as it reverses, and "Coat"), named in the animation's entry, not the set's.
+        // Made too, under our names, and the entries name ours (Round 3: the Kitsune's driver's Reverse variant still
+        // named scout_dr_lookarnd_bck, a name Armageddon's table has without the animation, and the driver T-posed
+        // when reversing). One Guerrilla's archives haven't is left out of its entry, the set kept.
+        var variantFiles = files.SelectMany(f => rfgFileEntries.TryGetValue(f, out var e) ? VariantFiles(e) : [])
+                                .Where(v => !files.Contains(v, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var ours = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);  // Guerrilla's x.animx → ours
         var made = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);  // our .anim_pc files new in this set
         var missing = new List<string>();
-        foreach (string file in files)
+        var missingVariants = new List<string>();
+        foreach (string file in files.Concat(variantFiles))
         {
+            bool variant = variantFiles.Contains(file, StringComparer.OrdinalIgnoreCase);
+            var lacking = variant ? missingVariants : missing;
             if (toDarius && ArmageddonsOwn(file, container)) { ours[file] = file; continue; }
             string name = gameAnimations.Contains(file) ? "rfg_" + file : file;
             string pc = Path.ChangeExtension(name, ".anim_pc"), rfgPc = Path.ChangeExtension(file, ".anim_pc");
-            ours[file] = name;
-            if (animations.ContainsKey(pc) || made.ContainsKey(pc)) continue;
+            if (animations.ContainsKey(pc) || made.ContainsKey(pc)) { ours[file] = name; continue; }
             Packfile? source = container?.Find(rfgPc) != null ? container : guerrillaAnims.Find(rfgPc) != null ? guerrillaAnims : null;
-            if (source == null) { missing.Add(file); continue; }
+            if (source == null) { lacking.Add(file); continue; }
             byte[] bytes = source.Read(source.Find(rfgPc)!);
-            if (bytes.Length < 0x30) { missing.Add($"{file} (too short to be an animation)"); continue; }
+            if (bytes.Length < 0x30) { lacking.Add($"{file} (too short to be an animation)"); continue; }
+            ours[file] = name;
             bool additive = rfgFileEntries.TryGetValue(file, out var rfgEntry) &&
                             (rfgEntry.Element("Flags")?.Elements.Any(f => f.Value.Trim().Equals("Additive", StringComparison.OrdinalIgnoreCase)) ?? false);
             try
@@ -319,7 +329,7 @@ public sealed class GuerrillaAnimationSets
                          : additive ? GuerrillaAnimations.RetargetAdditive(bytes, skeleton, darius)
                          : GuerrillaAnimations.Retarget(bytes, skeleton, darius);
             }
-            catch (InvalidDataException e) { missing.Add($"{file} ({e.Message})"); }
+            catch (InvalidDataException e) { ours.Remove(file); lacking.Add($"{file} ({e.Message})"); }
         }
         if (missing.Count > 0)
         {
@@ -327,12 +337,13 @@ public sealed class GuerrillaAnimationSets
             log.Add($"animation set {set}: left out, its animations can't all be had: {string.Join(", ", missing)}");
             return (null, []);
         }
+        if (missingVariants.Count > 0) log.Add($"animation set {set}: variants Guerrilla's archives haven't, left out of their entries: {string.Join(", ", missingVariants)}");
         foreach (var (file, name) in ours)
         {
             string pc = Path.ChangeExtension(name, ".anim_pc");
             if (!made.TryGetValue(pc, out var bytes)) continue;
             animations[pc] = bytes;
-            AddFileEntry(file, name, log);
+            AddFileEntry(file, name, log, ours);
         }
 
         // Its table, with our names, and the state and action names Armageddon hasn't.
@@ -397,12 +408,25 @@ public sealed class GuerrillaAnimationSets
     }
 
     /// <summary>Guerrilla's anim_files.xtbl entry for an animation, under our name, added to Armageddon's (or a plain one if Guerrilla's table hasn't it).</summary>
-    void AddFileEntry(string rfgFile, string ourFile, List<string> log)
+    /// <summary>The animations an anim_files entry's Variants name (each Variant's File).</summary>
+    static IEnumerable<string> VariantFiles(XtblElement entry) =>
+        (entry.Element("Variants")?.Elements ?? []).Where(v => v.Name.Equals("Variant", StringComparison.OrdinalIgnoreCase))
+                                                   .Select(v => v.ValueOf("File")?.Trim()).OfType<string>().Where(f => f.Length > 0);
+
+    /// <param name="names">Guerrilla's animations' names to ours (its variants named by them; one not in it is left out).</param>
+    void AddFileEntry(string rfgFile, string ourFile, List<string> log, IReadOnlyDictionary<string, string> names)
     {
         var entry = rfgFileEntries.TryGetValue(rfgFile, out var rfg) ? rfg.Copy() : new XtblElement("Anim_file");
         var animation = entry.Element("Animation") ?? entry.AddElement("Animation");
         if (animation.Element("Filename") is { } filename) filename.Value = ourFile;
         else animation.AddElement("Filename", ourFile);
+        if (entry.Element("Variants") is { } variants)
+            foreach (var variant in variants.Elements.Where(v => v.Name.Equals("Variant", StringComparison.OrdinalIgnoreCase)).ToList())
+            {
+                if (variant.Element("File") is not { } file || file.Value.Trim().Length == 0) continue;
+                if (names.TryGetValue(file.Value.Trim(), out var ourVariant)) file.Value = ourVariant;
+                else variant.Remove();
+            }
         // In the vehicle's container, loaded with it (as Armageddon's own vehicles' animations).
         if (animation.Element("Preload") is { } preload) preload.Value = "False";
         else animation.AddElement("Preload", "False");

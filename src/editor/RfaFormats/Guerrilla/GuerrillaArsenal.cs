@@ -453,12 +453,16 @@ public static class GuerrillaArsenal
         File.WriteAllBytes(listFile, assetList.ToBytes());
         Directory.CreateDirectory(modFolder);
         File.WriteAllBytes(Path.Combine(modFolder, Table), ourVehicles.ToBytes());
-        int interactionNames = InteractionNameBytes(ourInteractions);
+        int interactionNames = InteractionNameBytes(ourInteractions), interactionBlock = InteractionBlockBytes(ourInteractions);
         if (interactionNames > MostInteractionNames)
             throw new InvalidDataException($"{InteractionTable}'s names need {interactionNames} bytes of the game's {MostInteractionNames} (guerrilla_vehicles' " +
                                            "\"Vehicle interaction info strings\"): a vehicle whose interaction's name doesn't fit stops the game");
+        if (interactionBlock >= MostInteractionBlock)
+            throw new InvalidDataException($"{InteractionTable}'s records, waypoints and transitions need {interactionBlock} bytes of the game's {MostInteractionBlock} " +
+                                           "(guerrilla_vehicles'): the game would stop reading the table there, and a vehicle whose interaction it never read stops the game");
         File.WriteAllBytes(Path.Combine(modFolder, InteractionTable), ourInteractions.ToBytes());
-        yield return $"Vehicle interactions: {ourInteractions.Entries.Count()} in {InteractionTable}, their names {interactionNames} of {MostInteractionNames} bytes";
+        yield return $"Vehicle interactions: {ourInteractions.Entries.Count()} in {InteractionTable}; their records, waypoints and transitions " +
+                     $"{interactionBlock} of {MostInteractionBlock} bytes, their names {interactionNames} of {MostInteractionNames} bytes";
         // Guerrilla's vehicle spawn groups (the groups its parked vehicles' spots and traffic pick from; the
         // world builder places the spots, see GuerrillaVehiclePlaces), each as GroupPrefix + its name with the
         // vehicles built here, after Armageddon's own; a group none of whose vehicles were built is left out.
@@ -478,6 +482,9 @@ public static class GuerrillaArsenal
             groupsWritten++;
             writtenGroups[XtblFile.EntryName(rfgGroup)] = group.Element("vehicle_list")!.Elements.Select(v => v.Value.Trim()).ToList();
         }
+        if (ourGroups.Entries.Count() > MostSpawnGroups)
+            throw new InvalidDataException($"{SpawnGroupTable} has {ourGroups.Entries.Count()} groups, more than the {MostSpawnGroups} guerrilla_vehicles makes room for: "
+                                           + "the game stops while it starts (\"NULL != veh_group_info\")");
         File.WriteAllBytes(Path.Combine(modFolder, SpawnGroupTable), ourGroups.ToBytes());
         turrets.Write(modFolder);
         yield return GuerrillaVehicleLights.Write(guerrillaTables, gameTables, modFolder, worldEffects);
@@ -503,6 +510,7 @@ public static class GuerrillaArsenal
         yield return convoyLine;
         yield return $"Turrets: {turrets.Added} of Guerrilla's in {GuerrillaTurrets.Table}" +
                      (turrets.LeftOut.Any() ? $"; left out (their vehicles' mounts too): {string.Join(", ", turrets.LeftOut)}" : "");
+        yield return $"Turrets: for the weapons part ({GuerrillaTurrets.ItemList}): {turrets.ItemsSummary}";
         if (soundBanks != null)
         {
             List<string> written;
@@ -606,8 +614,8 @@ public static class GuerrillaArsenal
             File.Delete(listFile);
             yield return $"Deleted {listFile}";
         }
-        foreach (string name in new[] { Table, InteractionTable, SpawnGroupTable, GuerrillaTurrets.Table, GuerrillaVehicleLights.Table,
-                                        GuerrillaWalkerTrees.FileList, GuerrillaWalkerTrees.TreeFile })
+        foreach (string name in new[] { Table, InteractionTable, SpawnGroupTable, GuerrillaTurrets.Table, GuerrillaTurrets.ItemList,
+                                        GuerrillaVehicleLights.Table, GuerrillaWalkerTrees.FileList, GuerrillaWalkerTrees.TreeFile })
         {
             string table = Path.Combine(modFolder, name);
             if (File.Exists(table)) { File.Delete(table); yield return $"Deleted {table}"; }
@@ -637,6 +645,29 @@ public static class GuerrillaArsenal
 
     /// <summary>The room for vehicle_interactions.xtbl's names: guerrilla_vehicles' "Vehicle interaction info strings" (the game's 8 KB).</summary>
     const int MostInteractionNames = 0x8000;
+
+    /// <summary>The vehicle spawn groups the game holds with guerrilla_vehicles (its own 32; Guerrilla's 136).</summary>
+    const int MostSpawnGroups = 136;
+
+    /// <summary>The room for vehicle_interactions.xtbl's records, waypoints and transitions: guerrilla_vehicles' block (the game's 64 KB).</summary>
+    const int MostInteractionBlock = 0x40000;
+
+    /// <summary>
+    /// The bytes vehicle_interactions.xtbl takes in the game's block as its reader (0x65F360) lays it out: 32 a record
+    /// (one an entry, and three more), 36 a waypoint, 48 a transition, 12 a step of a transition (its Interactions);
+    /// it stops reading once they reach the block's size.
+    /// </summary>
+    static int InteractionBlockBytes(XtblFile interactions)
+    {
+        int bytes = (interactions.Entries.Count() + 3) * 32;
+        foreach (var entry in interactions.Entries)
+        {
+            bytes += (entry.Element("Waypoints")?.Elements.Count() ?? 0) * 36;
+            foreach (var transition in entry.Element("Waypoint_transitions")?.Elements ?? [])
+                bytes += 48 + (transition.Element("Interactions")?.Elements.Count() ?? 0) * 12;
+        }
+        return bytes;
+    }
 
     /// <summary>
     /// The bytes vehicle_interactions.xtbl's names take in the game's string pool, as its reader (0x65F360) stores them:

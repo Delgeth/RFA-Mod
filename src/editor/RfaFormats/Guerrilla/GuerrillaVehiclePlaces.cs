@@ -37,15 +37,20 @@ public static class GuerrillaVehiclePlaces
     /// gains the handles used) is left out and named in <paramref name="problems"/>. Nodes keep Guerrilla's
     /// handles unless taken.
     /// </summary>
+    /// <param name="corner">The zone's square: its corner (x, z), <paramref name="width"/> on each side.</param>
+    /// <param name="moved">Gains each road whose own position was moved into the zone's square (see <see cref="InsideSquare"/>).</param>
     public static (List<ZoneObject> Roads, List<ZoneObject> Nodes) Convert(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, ZoneSchema schema,
-                                                                          ISet<uint> taken, List<string> problems)
+                                                                          ISet<uint> taken, List<string> problems, (float X, float Z) corner, float width,
+                                                                          List<string> moved)
     {
         var roads = new List<ZoneObject>();
         var nodes = new List<ZoneObject>();
         foreach (var o in zone.Values.Where(o => o.ClassHash == Road))
         {
             if (!taken.Add(o.Handle)) { problems.Add($"road {o.Handle:X8}: its handle is another object's"); continue; }
-            roads.Add(Make(o, o.Handle, RoadOrder.Where(name => o.Properties.ContainsKey(NameHashes.PropertyHash(name))).Select(name => Own(o, name))));
+            var properties = RoadOrder.Where(name => o.Properties.ContainsKey(NameHashes.PropertyHash(name))).Select(name => Own(o, name)).ToList();
+            InsideSquare(o.Handle, properties, corner, width, moved);
+            roads.Add(Make(o, o.Handle, properties));
         }
         foreach (var o in zone.Values.Where(o => o.ClassHash == Node))
         {
@@ -59,6 +64,33 @@ public static class GuerrillaVehiclePlaces
             })));
         }
         return (roads, nodes);
+    }
+
+    /// <summary>
+    /// A road's own position (op) kept inside its zone's square. When a zone streams out, Armageddon keeps each
+    /// object that asks to be made again from the zone's file on its list for that only if the object's position
+    /// lies in the zone its handle names (0x6CCCA0, the handle's top byte against the zone at its position; Guerrilla
+    /// has no such check). Otherwise it saves the object's state instead; a road can't ("path roads serialize out not
+    /// implemented"), so it's dropped, and isn't made again when the zone streams back in, nor in a save made after
+    /// ("... is attempting to OSM_RESTORE despite not physically being in original zone"). 21 of Guerrilla's 261
+    /// roads, those running to a zone's edge, have their position (their first point) 0.03-1.4 m over it; no other
+    /// object of Guerrilla's world is outside its zone. Their position alone is moved 0.5 m inside; the road's
+    /// points (world positions, path_road_data) and everything else stay as Guerrilla's.
+    /// </summary>
+    static void InsideSquare(uint handle, List<NewProperty> properties, (float X, float Z) corner, float width, List<string> moved)
+    {
+        const float Margin = 0.5f;
+        int op = properties.FindIndex(p => p.NameHash == NameHashes.PropertyHash("op"));
+        if (op < 0 || properties[op].Value.Length < 12) return;
+        byte[] value = properties[op].Value;
+        float x = BitConverter.ToSingle(value, 0), z = BitConverter.ToSingle(value, 8);
+        if (x >= corner.X && x < corner.X + width && z >= corner.Z && z < corner.Z + width) return;  // in it: as Guerrilla's
+        float inX = Math.Clamp(x, corner.X + Margin, corner.X + width - Margin), inZ = Math.Clamp(z, corner.Z + Margin, corner.Z + width - Margin);
+        byte[] inside = (byte[])value.Clone();
+        BitConverter.TryWriteBytes(inside.AsSpan(0, 4), inX);
+        BitConverter.TryWriteBytes(inside.AsSpan(8, 4), inZ);
+        properties[op] = new NewProperty(properties[op].Type, properties[op].NameHash, inside);
+        moved.Add($"{handle:X8} {MathF.Sqrt((inX - x) * (inX - x) + (inZ - z) * (inZ - z)):0.##} m");
     }
 
     /// <summary>The roads again, for the zone's persistent p_ zone (Guerrilla keeps each road in both).</summary>

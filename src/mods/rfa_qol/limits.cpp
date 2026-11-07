@@ -29,9 +29,15 @@
 //   melee move names   the "Melee Combat Strings" pool 0x21B1BD8 (+0x4C of +0x44; 512 bytes, guerrilla_gear 4 KB)
 //   vehicle names,     the "Vehicle info strings" pool 0x14A15F8 and "Vehicle interaction info strings"
 //   interaction names  0x14E6990 (+0x4C of +0x44; 8 KB each; guerrilla_gear and guerrilla_vehicles 32 KB)
+//   vehicle spawn      the vehicle spawn groups' pool 0x19691C0, a pool as the projectiles' (32, guerrilla_vehicles
+//   groups             136, Guerrilla's own): spawn_group_vehicle.xtbl's groups
+//   permanent mempool  the "Permanent mempool" 0x26AEE78 (+0x4C of +0x44; 12 MB, guerrilla_gear 24 MB)
 //   item preload       the "item_preload" pool 0x26AF1A0 (+0x4C of +0x44; 17 MB, guerrilla_gear 32 MB): the
 //                      preloaded items' containers, then Armageddon's items_containers.gpeg_pc (8.8 MB)
 //   melee moves        the melee moves' pool 0x21AFEF0, a pool as the projectiles' (32, guerrilla_gear 64)
+//   squad members      the squad members' pool 0x12EFEF0, a pool as the projectiles' (64, guerrilla_people 256)
+//   squad names        the "Squad Def String Pool" 0x12F2E38 (+0x4C of +0x44; 1,280 bytes, guerrilla_people 16 KB)
+//   resource names     the "Spawn Resource Data" pool 0x19706E0 (+0x4C of +0x44; 1,024 bytes, guerrilla_people 8 KB)
 //   character names    the "Human info strings" pool 0x21DC118 (+0x4C of +0x44; 6,200 bytes, guerrilla_people 64 KB)
 //   patrols            the object_patrol pool 0x20F3B10, a pool as the projectiles' (24, guerrilla_people 72)
 //   people, squads,    the npc pool 0x21DCE30 (100), the object_squad pool 0x2160AF0 (100) and the
@@ -70,6 +76,12 @@ const Limit kLimits[] = {
     {"Visual effects", 0x1200BF4, 0x4EE40A, 0, 950, "vfx.xtbl: Armageddon's, Guerrilla's props', and a DLC level's while it's loaded"},
     {"Effects", 0x1200BEC, 0x4EEA51, 0, 1225, "effects.xtbl: Armageddon's, Guerrilla's props' and vehicles', and a DLC level's while it's loaded"},
     {"Inventory items", 0x19F8570, 0x7A77F6, 0, 85, "items_inventory.xtbl: one for each weapon you can carry (Armageddon's, Guerrilla's), and a DLC level's while it's loaded", 1},
+    {"Squad loadouts", 0x12F33A8, 0x12F33A4, 0, 36,
+     "squad_loadout.xtbl: Armageddon's and Guerrilla's; full, the loadouts after it are dropped and squads naming them aren't read"},
+    {"Squad names (bytes)", 0x12F2E38 + 0x4C, 0x12F2E38 + 0x44, 0, 0x500,
+     "Every squad's name (squads.xtbl): Armageddon's and Guerrilla's district versions; full, the level's load stops"},
+    {"Spawn resource names (bytes)", 0x19706E0 + 0x4C, 0x19706E0 + 0x44, 0, 0x400,
+     "Every spawn resource's name (spawn_resource.xtbl), the Guerrilla world's districts' among them"},
     {"Character names (bytes)", 0x21DC118 + 0x4C, 0x21DC118 + 0x44, 0, 0x1838,
      "Every character's names, models, skeletons and props' names (character.xtbl); full, the game stops while it starts"},
     {"Projectile names (bytes)", 0x2174ED8 + 0x4C, 0x2174ED8 + 0x44, 0, 0x800, "Every projectile type's name"},
@@ -78,6 +90,8 @@ const Limit kLimits[] = {
     {"Vehicle names (bytes)", 0x14A15F8 + 0x4C, 0x14A15F8 + 0x44, 0, 0x2000,
      "vehicles.xtbl's names, models, display names, components, lights and props"},
     {"Vehicle interaction names (bytes)", 0x14E6990 + 0x4C, 0x14E6990 + 0x44, 0, 0x2000, "vehicle_interactions.xtbl's names"},
+    {"Permanent mempool (bytes)", 0x26AEE78 + 0x4C, 0x26AEE78 + 0x44, 0, 0xC00000,
+     "What the game keeps for good from start-up: its tables, pegs and effects, and the mods' raised tables"},
     {"Item preload (bytes)", 0x26AF1A0 + 0x4C, 0x26AF1A0 + 0x44, 0, 0x1100000,
      "Every preloaded item's own container (guns, clips, pickups), then Armageddon's items' low-detail textures (8.8 MB)"},
 };
@@ -86,6 +100,8 @@ const Limit kLimits[] = {
 // +0xA), and a byte for each place (an array at +0x18), 0xFF while free.
 constexpr DWORD kProjectilePool = 0x2174F90, kMeleePool = 0x21AFEF0, kPoolHolds = 0xA, kPoolFlags = 0x18;
 constexpr DWORD kPatrolPool = 0x20F3B10, kNpcPool = 0x21DCE30, kSquadPool = 0x2160AF0, kSquadNodePool = 0x2108CE0;
+constexpr DWORD kVehicleGroupPool = 0x19691C0;  // the vehicle spawn groups (32, guerrilla_vehicles 136)
+constexpr DWORD kEmitterPool = 0x26BF650;       // the effects' emitters (2,200, guerrilla_world 6,600)
 
 void Row(const char* what, int used, int size, int game, const char* about);
 
@@ -147,6 +163,9 @@ void DrawWindow() {
         PoolRow("People (NPCs)", kNpcPool, 100, "Everyone but the player: squads, people dropped in, crews (Guerrilla holds 100 too)");
         PoolRow("Squads", kSquadPool, 100, "Squads made from the loaded zones' squad spawn nodes, and those dropped in");
         PoolRow("Squad spawn nodes", kSquadNodePool, 384, "Squad spawn nodes in the zones loaded now");
+        PoolRow("Squad members", 0x12EFEF0, 64, "Each different squad member (a character, a loadout, a variant) of squads.xtbl; full, the squads after it aren't read");
+        PoolRow("Effect emitters", kEmitterPool, 2200, "One for each emitter of each effect loaded (Armageddon's and Guerrilla's rfg_); full, a load crashes");
+        PoolRow("Vehicle spawn groups", kVehicleGroupPool, 32, "spawn_group_vehicle.xtbl: Armageddon's and Guerrilla's (rfg_); full, the game stops while it starts");
         ImGui::EndTable();
     }
     ImGui::End();

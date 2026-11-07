@@ -137,6 +137,10 @@
 // pickups' containers the peg no longer fit (the user's 18:44 and 19:38 runs). The mod makes both values
 // 32 MB, before the game's start-up code runs: each checked against the game's first, neither changed if
 // one differs, the first put back if the second can't be written. The pool's use shows in F7 Limits.
+// The Permanent Mempool (0x26AEE78, what the game keeps for good from start-up) is made the same way just
+// before it, 12 MB (`push 0C00000h` at 0xA47276 and 0xA472A4); Armageddon's own and the mods' raised tables
+// no longer fit (the user's 21:19 run: "Failed aligned alloc ... in Permanent mempool cpu pool"), so it is
+// made 24 MB the same way. Both pools' use is logged at the player's first step.
 //
 // Mason's sledgehammer. Guerrilla's Mason always has his hammer: it starts in his kit (slot 3) and
 // that slot can't be swapped (player_can_swap_inv_item). With Guerrilla's hammer built (the weapons
@@ -392,7 +396,7 @@ LoadAnimationSetsFn g_loadAnimationSets;
 constexpr DWORD kMapPlaces = 0x1107C58;      // how many places the map gets (the game's data)
 constexpr DWORD kGameMapPlaces = 6344, kOurMapPlaces = 16384;
 constexpr DWORD kMapBytesPerPlace = 12;      // three tables of 4-byte values (and a bit each in the bit set)
-constexpr DWORD kPermanentMempool = 0x26AEE78;  // 12 MB (set up at 0xA472A4)
+constexpr DWORD kPermanentMempool = 0x26AEE78;  // 12 MB, 24 MB with MoreStartupRoom (set up at 0xA472A4)
 constexpr DWORD kMempoolSize = 0x44, kMempoolUsed = 0x4C;
 constexpr DWORD kMempoolMargin = 1024 * 1024;  // left for what the game takes from it after (the sets' groups take ~350 KB next)
 // The groups' records the lookup reads (44 of them, 12 bytes each: +4 each name's count of sets, a
@@ -1260,42 +1264,62 @@ void MoreMeleeMoves() {
     rfa::Log("Melee moves: the game holds %lu (its own %lu)", kMeleeMoves, kGameMeleeMoves);
 }
 
-// ---- Room for the preloaded items (see the top)
+// ---- Room in the start-up's memory pools (see the top: the preloaded items, the Permanent Mempool)
+//
+// The game's start-up (0xA45600) makes each of these pools the same way: `push size` → 0xA44A20 (the block,
+// _aligned_malloc from the process heap), then `push size` again → 0x512B30 (the pool made of it). Both values
+// are made ours, before the start-up runs: each checked against the game's first, neither changed if one
+// differs, the first put back if the second can't be written.
+struct StartupPool {
+    const char* what;
+    DWORD blockValue;  // the push of the block's size
+    DWORD poolValue;   // the push of the pool's size
+    DWORD pool;        // the pool (size +0x44, bytes used +0x4C)
+    DWORD game, ours;
+    const char* holds;
+};
 
-constexpr DWORD kItemPreloadBlockSize = 0xA47521;  // push 1100000h (the block 0xA44A20 allocates)
-constexpr DWORD kItemPreloadPoolSize = 0xA4754F;   // push 1100000h (the pool 0x512B30 makes of it)
-constexpr DWORD kItemPreloadPool = 0x26AF1A0;      // the pool (size +0x44, bytes used +0x4C)
-constexpr DWORD kGameItemPreload = 0x1100000;      // 17 MB
-constexpr DWORD kItemPreload = 32 * 1024 * 1024;
+const StartupPool kStartupPools[] = {
+    {"Item preload", 0xA47521, 0xA4754F, 0x26AF1A0, 0x1100000, 32 * 1024 * 1024,
+     "the preloaded items' containers, then Armageddon's items' low-detail textures"},
+    // The user's 21:19 start stopped on it ("Failed aligned alloc ... in Permanent mempool cpu pool (max
+    // 12.00MB, space left 3104)"): Armageddon's own (its permanent pegs 3.6 MB, the effects 3.1 MB, ...) and the
+    // mods' raised tables (animation map, name pools, patrols, ...) no longer fit in 12 MB.
+    {"Permanent mempool", 0xA47277, 0xA472A5, kPermanentMempool, 0xC00000, 24 * 1024 * 1024,
+     "what the game keeps for good from start-up (its tables, pegs, effects; the mods' raised tables)"},
+};
 
-void MoreItemPreload() {
-    if (*reinterpret_cast<const DWORD*>(kItemPreloadPool + kMempoolSize) != 0) {
-        rfa::Log("Item preload: the game has already made its pool; it keeps its %lu MB", kGameItemPreload / (1024 * 1024));
-        return;
+void MoreStartupRoom() {
+    for (const StartupPool& p : kStartupPools) {
+        const DWORD gameMb = p.game / (1024 * 1024), oursMb = p.ours / (1024 * 1024);
+        if (*reinterpret_cast<const DWORD*>(p.pool + kMempoolSize) != 0) {
+            rfa::Log("%s: the game has already made its pool; it keeps its %lu MB", p.what, gameMb);
+            continue;
+        }
+        if (rfa::CodeValue(p.blockValue) != p.game || rfa::CodeValue(p.poolValue) != p.game) {
+            rfa::Log("%s: the game's code (0x%08lX, 0x%08lX) isn't as expected; it keeps its %lu MB", p.what, p.blockValue, p.poolValue, gameMb);
+            continue;
+        }
+        if (!rfa::PatchCode(reinterpret_cast<void*>(p.blockValue), &p.ours, sizeof(p.ours))) {
+            rfa::Log("%s: could not change the game's code; it keeps its %lu MB", p.what, gameMb);
+            continue;
+        }
+        if (!rfa::PatchCode(reinterpret_cast<void*>(p.poolValue), &p.ours, sizeof(p.ours))) {
+            rfa::PatchCode(reinterpret_cast<void*>(p.blockValue), &p.game, sizeof(p.game));
+            rfa::Log("%s: could not change the game's code; it keeps its %lu MB", p.what, gameMb);
+            continue;
+        }
+        rfa::Log("%s: %lu MB (the game's %lu MB): %s", p.what, oursMb, gameMb, p.holds);
     }
-    if (rfa::CodeValue(kItemPreloadBlockSize) != kGameItemPreload || rfa::CodeValue(kItemPreloadPoolSize) != kGameItemPreload) {
-        rfa::Log("Item preload: the game's code (0x%08lX, 0x%08lX) isn't as expected; it keeps its 17 MB", kItemPreloadBlockSize,
-                 kItemPreloadPoolSize);
-        return;
-    }
-    if (!rfa::PatchCode(reinterpret_cast<void*>(kItemPreloadBlockSize), &kItemPreload, sizeof(kItemPreload))) {
-        rfa::Log("Item preload: could not change the game's code; it keeps its 17 MB");
-        return;
-    }
-    if (!rfa::PatchCode(reinterpret_cast<void*>(kItemPreloadPoolSize), &kItemPreload, sizeof(kItemPreload))) {
-        rfa::PatchCode(reinterpret_cast<void*>(kItemPreloadBlockSize), &kGameItemPreload, sizeof(kGameItemPreload));
-        rfa::Log("Item preload: could not change the game's code; it keeps its 17 MB");
-        return;
-    }
-    rfa::Log("Item preload: %lu MB (the game's %lu MB): the preloaded items' containers, then Armageddon's items' low-detail textures",
-             kItemPreload / (1024 * 1024), kGameItemPreload / (1024 * 1024));
 }
 
-// After the items' start-up (the projectile loader runs later): the pool's use, logged once.
+// At the player's first step (start-up and the level's load done): each pool's use, logged once.
 void LogItemPreload() {
-    const DWORD size = *reinterpret_cast<const DWORD*>(kItemPreloadPool + kMempoolSize);
-    const DWORD used = *reinterpret_cast<const DWORD*>(kItemPreloadPool + kMempoolUsed);
-    if (size) rfa::Log("Item preload: %lu of %lu bytes in use", used, size);
+    for (const StartupPool& p : kStartupPools) {
+        const DWORD size = *reinterpret_cast<const DWORD*>(p.pool + kMempoolSize);
+        const DWORD used = *reinterpret_cast<const DWORD*>(p.pool + kMempoolUsed);
+        if (size) rfa::Log("%s: %lu of %lu bytes in use (%lu left)", p.what, used, size, size > used ? size - used : 0);
+    }
 }
 
 bool g_upgradesRunning = false;
@@ -1306,6 +1330,52 @@ void MasonsHammer() {
     else rfa::Log("Hammer: Mason is given Guerrilla's sledgehammer (slot 3) when he has none, and never swaps it away");
 }
 
+// ---- The player's melee hits, logged (the user's Round 1, 2026-11-06: the hammer "does no damage")
+//
+// A diagnostic for that report, to keep or take out once its cause is known: it changes nothing in
+// the game. So a test shows whether a swing lands, on what, and for how much. Armageddon picks a melee hit's
+// damage in 0x878780 (cdecl: the attacker, the move's data for the attacker's animation set, the object
+// hit; the damage returned): by the object's type (0x422AD0: 0 a person, 2 a building or other mover,
+// 3 a vehicle) the data's figure for it (people, structures, vehicles), or 10 when there is no data.
+// The wrap calls it and returns its figure unchanged; for the player's hits it logs a line, at most
+// four a second. No line while swinging at someone means the hit test never got that far.
+constexpr DWORD kMeleeDamage = 0x878780;
+constexpr size_t kMeleeDamagePrologue = 6;  // push ebp / mov ebp,esp / sub esp,24h
+using MeleeDamageFn = float(__cdecl*)(BYTE* attacker, const BYTE* data, BYTE* target);
+MeleeDamageFn g_meleeDamage = nullptr;
+auto const ObjectTypeOf = reinterpret_cast<int(__thiscall*)(const BYTE* object)>(0x422AD0);
+DWORD g_lastMeleeLog = 0;
+
+const char* ObjectKind(int type) {
+    switch (type) {
+        case 0: return "person";
+        case 2: return "building or other mover";
+        case 3: return "vehicle";
+        default: return "object";
+    }
+}
+
+float __cdecl MeleeDamage(BYTE* attacker, const BYTE* data, BYTE* target) {
+    const float damage = g_meleeDamage(attacker, data, target);
+    if (attacker && attacker == LocalPlayer()) {
+        const DWORD now = GetTickCount();
+        if (now - g_lastMeleeLog >= 250) {
+            g_lastMeleeLog = now;
+            const char* weapon = WeaponName(HeldWeapon(attacker));
+            const int type = target ? ObjectTypeOf(target) : -1;
+            rfa::Log("Melee hit: %s hit a %s (type %d) for %.0f%s", weapon ? weapon : "(nothing in hand)", ObjectKind(type), type,
+                     damage, data ? "" : " (the move has no data for the player's set: the game's 10)");
+        }
+    }
+    return damage;
+}
+
+void LogMeleeHits() {
+    g_meleeDamage = reinterpret_cast<MeleeDamageFn>(rfa::HookFunction(kMeleeDamage, kMeleeDamagePrologue, reinterpret_cast<void*>(&MeleeDamage)));
+    if (!g_meleeDamage) rfa::Log("Melee hits: could not wrap the damage pick; they aren't logged");
+    else rfa::Log("Melee hits: the player's are logged (\"Melee hit:\" lines)");
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -1314,7 +1384,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         return;
     }
     MoreInventoryItems();
-    MoreItemPreload();
+    MoreStartupRoom();
     MoreProjectiles();
     MoreMeleeMoves();
     MoreNameRoom();
@@ -1323,6 +1393,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     DroppedGuns();
     PlayerMovement();
     MasonsHammer();
+    LogMeleeHits();
     // The upgrades' purchases happen in the heading step: without it the window stays shut.
     if (g_headingStep) {
         upgrades::Init();
