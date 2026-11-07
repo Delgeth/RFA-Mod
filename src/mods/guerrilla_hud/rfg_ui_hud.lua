@@ -17,7 +17,8 @@
 --     where x + y = 59);
 --   - in them, a group turned against the camera, holding Guerrilla's world map picture (a zone
 --     every 85 1/3 pixels, under everything, for the zones whose own pictures aren't loaded) and
---     up to nine zones' own pictures;
+--     up to nine zones' own pictures, and over them Guerrilla's map icons near the player (its
+--     safehouses and its missions' and activities' starts, from map_icons.txt), each kept upright;
 --   - the frame on top: the document's own map element, which GuerrillaBuilder.exe made a picture.
 -- How far the minimap shows is Guerrilla's: 40 metres from the player to the frame's edge, and half
 -- the vehicle's speed more while driving. Where the player is, which way the camera looks and which
@@ -38,6 +39,9 @@ local TILE_PIXELS = 512                 -- a zone's own picture
 local RADIUS = 40                       -- Guerrilla's minimap: metres from the player to the frame's edge
 local SPEED_RADIUS = 0.5                -- and this much more per m/s of the vehicle's speed
 local TILES = 9
+local ICONS = 24                        -- icons shown at once (the nearest first come first)
+local ICON_SCALE = 0.55                 -- Guerrilla's map icons are 40 x 40 pictures
+local ICON_REACH = 1.5                  -- icons drawn this many radii out (the octagon's corners are 1.41)
 -- The game's Lua has no math or string library (its globals are checked: reading a missing one is
 -- an error), so these are written out.
 local QUARTER_TURN = 1.5707963267949
@@ -54,6 +58,9 @@ local HIDDEN = { "control_meter", "morale_meter", "action_group", "radio_main", 
 
 local Map_handles = {}                  -- the elements this script made
 local Tile_handles = {}
+local Icons = {}                        -- Guerrilla's map icons: { picture, x, y } on its world map picture
+local Icon_handles = {}
+local Icon_shown = {}                   -- the picture each icon element shows, or nil while hidden
 local Tile_shown = {}                   -- "column_row" each tile element shows, or nil
 local In_vehicle = false
 local Shown_district = nil
@@ -156,6 +163,53 @@ local function build_map()
 		vint_set_property(Tile_handles[i], "visible", false)
 		vint_set_property(Tile_handles[i], "depth", 0)
 	end
+
+	-- Guerrilla's map icons (its safehouses, missions and activities: map_icons.txt, through the mod),
+	-- over the map, each kept upright as the map turns.
+	if rfg_map_icon_count ~= nil then
+		for i = 1, rfg_map_icon_count() do
+			local kind, image, x, y = rfg_map_icon(i)
+			if kind == "icon" or kind == "bomb" then	-- a M.O.A.B. only once its radio tags are found
+				Icons[#Icons + 1] = { picture = image, x = x, y = y, index = i, bomb = kind == "bomb" }
+			end
+		end
+	end
+	for i = 1, ICONS do
+		Icon_handles[i] = make("rfg_minimap_icon" .. i, "bitmap", turn)
+		vint_set_property(Icon_handles[i], "visible", false)
+		vint_set_property(Icon_handles[i], "auto_offset", "c")
+		vint_set_property(Icon_handles[i], "scale", ICON_SCALE, ICON_SCALE)
+		vint_set_property(Icon_handles[i], "depth", -5)
+	end
+	log(#Icons .. " map icons")
+end
+
+-- Guerrilla's icons within reach of the player, upright (the map group turns by -heading).
+local function place_icons(map_x, map_y, heading, radius, world_scale)
+	local reach = radius * ICON_REACH * ZONE_PIXELS / ZONE_METRES	-- in world map pixels
+	local used = 0
+	for i, icon in ipairs(Icons) do
+		local dx, dy = icon.x - map_x, icon.y - map_y
+		if used < ICONS and dx > -reach and dx < reach and dy > -reach and dy < reach and (not icon.bomb or rfg_map_icon_shown(icon.index)) then
+			used = used + 1
+			local handle = Icon_handles[used]
+			if Icon_shown[used] ~= icon.picture then
+				vint_set_property(handle, "image", icon.picture)
+				if Icon_shown[used] == nil then
+					vint_set_property(handle, "visible", true)
+				end
+				Icon_shown[used] = icon.picture
+			end
+			vint_set_property(handle, "anchor", dx * world_scale, dy * world_scale)
+			vint_set_property(handle, "rotation", heading)
+		end
+	end
+	for i = used + 1, ICONS do
+		if Icon_shown[i] ~= nil then
+			vint_set_property(Icon_handles[i], "visible", false)
+			Icon_shown[i] = nil
+		end
+	end
 end
 
 -- The map around the player: turned against the camera, scaled to the minimap's reach.
@@ -192,6 +246,8 @@ local function place_map(map_x, map_y, heading, speed)
 			Tile_shown[i] = nil
 		end
 	end
+
+	place_icons(map_x, map_y, heading, radius, world_scale)
 end
 
 -- Guerrilla's set_district_info: shows the name with its animation, the text fitted to its box.

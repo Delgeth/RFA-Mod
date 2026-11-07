@@ -428,3 +428,75 @@ void upgrades::Menu(const RFAMenu* menu) {
     }
     if (g_open) DrawWindow();
 }
+
+// ---- For other mods: guerrilla_hud's safehouse shop (Guerrilla's own upgrade screen) lists the same upgrades and
+// buys them through the same requests, made on the game's thread like the window's. Its struct is the same in both
+// mods (guerrilla_hud.cpp), and starts with its size.
+
+struct GuerrillaGearUpgrade {
+    int size;               // sizeof(GuerrillaGearUpgrade), set by the caller
+    char name[64];          // upgrades.txt's name (Guerrilla's upgrades.xtbl Name)
+    char shown[96];         // its name as Guerrilla shows it
+    char type[32];          // Weapon, Weapon Upgrade, General, Backpack
+    char levelName[96];     // the next level's name ("" when all are bought)
+    char levelText[256];    // and its description
+    int bought;             // levels bought (0: none past the first)
+    int levels;             // levels in all (the first is what you start with)
+    int cost;               // the next level's cost, at this difficulty (0 when all are bought)
+    int available;          // 1: the next level can be bought now (its chain met), 0: not yet or all bought
+};
+
+namespace {
+void Copy(char* to, size_t size, const std::string& from) {
+    strncpy_s(to, size, from.c_str(), _TRUNCATE);
+}
+}  // namespace
+
+extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_UpgradeCount() { return static_cast<int>(g_upgrades.size()); }
+
+extern "C" __declspec(dllexport) bool __cdecl GuerrillaGear_Upgrade(int index, GuerrillaGearUpgrade* out) {
+    if (!out || out->size != sizeof(GuerrillaGearUpgrade) || index < 0 || index >= static_cast<int>(g_upgrades.size())) return false;
+    const Upgrade& u = g_upgrades[index];
+    std::lock_guard<std::mutex> hold(g_lock);
+    const int bought = BoughtLocked(u.name);
+    const int next = bought + 1;
+    Copy(out->name, sizeof(out->name), u.name);
+    Copy(out->shown, sizeof(out->shown), u.shown);
+    Copy(out->type, sizeof(out->type), u.type);
+    out->bought = bought;
+    out->levels = static_cast<int>(u.levels.size());
+    std::string why;
+    if (next < out->levels) {
+        const Level& level = u.levels[next];
+        Copy(out->levelName, sizeof(out->levelName), level.name.empty() ? u.shown : level.name);
+        Copy(out->levelText, sizeof(out->levelText), level.description);
+        out->cost = Cost(level);
+        out->available = NeedsMetLocked(level, why) ? 1 : 0;
+    } else {
+        Copy(out->levelName, sizeof(out->levelName), "");
+        Copy(out->levelText, sizeof(out->levelText), "");
+        out->cost = 0;
+        out->available = 0;
+    }
+    return true;
+}
+
+// Buys the next level of an upgrade (on the game's thread, at the player's next step); GuerrillaGear_Status says how it went.
+extern "C" __declspec(dllexport) void __cdecl GuerrillaGear_Buy(int index) {
+    if (index < 0 || index >= static_cast<int>(g_upgrades.size())) return;
+    std::lock_guard<std::mutex> hold(g_lock);
+    g_requests.push_back({Request::kBuy, index});
+}
+
+// Buys it now: only on the game's thread (guerrilla_hud's shop calls it from the HUD's update, which runs while the
+// game is paused, when the player's step doesn't). GuerrillaGear_Status says how it went.
+extern "C" __declspec(dllexport) void __cdecl GuerrillaGear_BuyNow(BYTE* player, int index) {
+    if (!player || index < 0 || index >= static_cast<int>(g_upgrades.size())) return;
+    Buy(player, index);
+}
+
+extern "C" __declspec(dllexport) void __cdecl GuerrillaGear_Status(char* out, int size) {
+    if (!out || size <= 0) return;
+    std::lock_guard<std::mutex> hold(g_lock);
+    strncpy_s(out, static_cast<size_t>(size), g_status.c_str(), _TRUNCATE);
+}

@@ -45,8 +45,22 @@ public static partial class GuerrillaHud
         new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Reticles),
         new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Icons),
         new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player"]),
-        new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap]),
+        new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap, .. HintKeys], GuerrillaScript: true, BridgedItems: true,
+            ExtraTextures: ["interface-pc"]),
+        // Guerrilla's prompts under the reticle (so far its use prompt, at the safehouses' stations), and its upgrade
+        // screen (the safehouses' shops: their upgrades, pictures and blueprints from upgrades.xtbl). The upgrade
+        // screen's set_header, set_button, set_hints and set_highlight are named as Armageddon's own scripts name theirs,
+        // and a global is read from whichever document has it first, so they're renamed rfg_ui_upgrades_....
+        new("rfg_ui_messages", [], GuerrillaScript: true, BridgedItems: true),
+        new("rfg_ui_upgrades", ["ui_hud_icon_salvage"], GuerrillaScript: true, BridgedItems: true, UpgradePictures: true,
+            RenamedGlobals: ["set_header", "set_button", "set_hints", "set_highlight"]),
     ];
+
+    /// <summary>
+    /// Guerrilla's PC key pictures the world map's hints show (its sheet ui_bms_pc_buttons, in misc.vpp_pc's
+    /// interface-pc; the number isn't a key code: W A S D, the mouse wheel, Esc and X, read off the sheet).
+    /// </summary>
+    static string[] HintKeys => ["key_06", "key_48", "key_49", "key_50", "key_133", "key_124", "key_75"];  // a property: Documents, above, reads it
 
     /// <summary>
     /// Guerrilla's picture of its whole world (terr01_l0.vpp_pc &gt; terr01_map.str2_pc), 1024 × 1024:
@@ -57,11 +71,15 @@ public static partial class GuerrillaHud
     /// <summary>
     /// Guerrilla's minimap shows each zone's own picture (terr01_l0.vpp_pc &gt; terr01_&lt;col&gt;_&lt;row&gt;_map.str2_pc,
     /// 512 × 512, a metre a pixel, north up), each in a container of its own, which its streaming
-    /// loaded with the zone. Here each one comes the same way, in a document of its own that only
-    /// brings that texture (rfg_ui_map_&lt;col&gt;_&lt;row&gt;), which the mod loads while the player is near.
-    /// (Not rfg_&lt;col&gt;_&lt;row&gt;_map: Armageddon's level streaming still knows that name, &lt;world&gt;_%02d_%02d_map.)
+    /// loaded with the zone. Armageddon's interface can't stream them so: its memory for documents is a
+    /// stack, and unloading one out of order frees every document loaded after it while they're still
+    /// on screen (2026-11-07: three freezes). So every zone's picture, as Guerrilla made it, comes in one
+    /// of four documents by quarter of the world (rfg_ui_map_zones_nw, _ne, _sw, _se: columns below 8 are
+    /// west, rows below 8 north), which the mod loads with the HUD and keeps until the next level load.
     /// </summary>
-    public static string ZoneDocument(int column, int row) => $"rfg_ui_map_{column:00}_{row:00}";
+    public static string ZoneSetDocument(int column, int row) =>
+        "rfg_ui_map_zones_" + (row < 8 ? "n" : "s") + (column < 8 ? "w" : "e");
+    static readonly string[] ZoneSets = ["rfg_ui_map_zones_nw", "rfg_ui_map_zones_ne", "rfg_ui_map_zones_sw", "rfg_ui_map_zones_se"];
     const int FirstZone = 2, LastZone = 13;
 
     /// <summary>The districts' names by zone, for the minimap (written next to our scripts, made from the player's copy).</summary>
@@ -151,6 +169,15 @@ public static partial class GuerrillaHud
                 foreach (PegTexture texture in peg.Textures) textures.TryAdd(Path.GetFileNameWithoutExtension(texture.Name), (peg, texture));
             }
             foreach (PegTexture texture in worldMap.Textures) textures.TryAdd(Path.GetFileNameWithoutExtension(texture.Name), (worldMap, texture));
+            foreach (string extra in hud.ExtraTextures ?? [])
+                if (ReadPeg(guerrillaMisc, extra) is { } extraPeg)
+                    foreach (PegTexture texture in extraPeg.Textures) textures.TryAdd(Path.GetFileNameWithoutExtension(texture.Name), (extraPeg, texture));
+                else report.Add($"{name}: Guerrilla's texture file {extra} not found; its pictures are left out");
+            // Guerrilla's upgrades' blueprints: each a picture of its own in interface.vpp_pc (ui_blueprint_<x>.str2_pc).
+            var upgradePictures = hud.UpgradePictures ? UpgradePictures(ReadText(guerrillaMisc, "upgrades.xtbl")) : [];
+            foreach (var (_, _, blueprint) in upgradePictures)
+                if (blueprint != null && ReadBitmap(guerrillaInterface, blueprint) is { } drawing)
+                    foreach (PegTexture texture in drawing.Textures) textures.TryAdd(Path.GetFileNameWithoutExtension(texture.Name), (drawing, texture));
 
             // Guerrilla's map elements were drawn by its game code (the cartographer), which
             // Armageddon has only as a compass. Here each is a plain picture (its own picture, the
@@ -191,6 +218,7 @@ public static partial class GuerrillaHud
                 HudWeaponPictures.Reticles => hud.ScriptPictures.Concat(weaponPictures.SelectMany(w => new[] { w.Reticle, w.FineAimReticle }).OfType<string>()),
                 _ => hud.ScriptPictures,
             };
+            scriptPictures = scriptPictures.Concat(upgradePictures.SelectMany(u => new[] { u.Icon, u.Blueprint }).OfType<string>());
             foreach (string picture in scriptPictures.Distinct(StringComparer.OrdinalIgnoreCase))
                 if (TextureFor(picture) is { } texture && !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
                 else if (TextureFor(picture) == null) report.Add($"{name}: its script's picture {picture} isn't in Guerrilla's textures");
@@ -241,7 +269,9 @@ public static partial class GuerrillaHud
                 ? Encoding.Latin1.GetBytes(GuerrillaScriptFor(name, guerrillaScript,
                                                               File.ReadAllText(Path.Combine(scriptsFolder, ShimsScript), Encoding.Latin1),
                                                               (hud.WeaponPictures == HudWeaponPictures.Reticles ? WeaponReticlesScript(weaponPictures) : "") +
-                                                              File.ReadAllText(script, Encoding.Latin1), sheetOf.Keys))
+                                                              (hud.UpgradePictures ? UpgradePicturesScript(upgradePictures, picture => TextureFor(picture) != null) : "") +
+                                                              File.ReadAllText(script, Encoding.Latin1), sheetOf.Keys, hud.BridgedItems,
+                                                              hud.RenamedGlobals ?? []))
                 : File.ReadAllBytes(script);
             byte[] main = Packfile.CreateContainer(documentTemplate, [(name + ".vint_doc", documentBytes), (name + ".lua", scriptBytes)]);
             byte[] art = Packfile.CreateContainer(textureTemplate, ownTextures
@@ -267,8 +297,10 @@ public static partial class GuerrillaHud
                        (unknown.Count > 0 ? $"; not found, left as they are: {string.Join(", ", unknown)}" : ""));
         }
 
-        // Each zone's own picture, in a document of its own that brings nothing but that texture.
+        // Each zone's own picture, in the document of its quarter of the world (see ZoneSetDocument), which
+        // brings nothing but those textures.
         int zonePicturesBytes = 0, zonePictures = 0;
+        var zoneSets = new Dictionary<string, List<(PegFile Peg, PegTexture Texture, string Name)>>(StringComparer.OrdinalIgnoreCase);
         foreach (PackfileEntry entry in guerrillaWorld.Entries)
         {
             Match zone = ZoneMap().Match(entry.Name);
@@ -276,10 +308,16 @@ public static partial class GuerrillaHud
             string tile = Path.GetFileNameWithoutExtension(entry.Name);
             PegFile? peg = ReadBitmap(guerrillaWorld, tile);
             if (peg == null || peg.Textures.Count != 1) continue;
-            string name = ZoneDocument(int.Parse(zone.Groups[1].Value), int.Parse(zone.Groups[2].Value));
-            string textureFile = "interface-" + name;
-            (byte[] pegHeader, byte[] pegData) = MergePegs([(peg, peg.Textures[0], Prefix + tile + WholeSheetSuffix + ".tga")]);
+            string set = ZoneSetDocument(int.Parse(zone.Groups[1].Value), int.Parse(zone.Groups[2].Value));
+            if (!zoneSets.TryGetValue(set, out var setTextures)) zoneSets[set] = setTextures = [];
+            setTextures.Add((peg, peg.Textures[0], Prefix + tile + WholeSheetSuffix + ".tga"));
             wholeTextures.Add((tile, peg.Textures[0].Width, peg.Textures[0].Height));
+            zonePictures++;
+        }
+        foreach (var (name, setTextures) in zoneSets)
+        {
+            string textureFile = "interface-" + name;
+            (byte[] pegHeader, byte[] pegData) = MergePegs(setTextures);
             byte[] documentBytes = VintDocument.TexturesOnly(textureFile, name, name + ".lua");
             byte[] scriptBytes = Encoding.Latin1.GetBytes(TilesScript(name));
             byte[] main = Packfile.CreateContainer(documentTemplate, [(name + ".vint_doc", documentBytes), (name + ".lua", scriptBytes)]);
@@ -294,15 +332,17 @@ public static partial class GuerrillaHud
                 [(name + ".vint_doc", 0), (name + ".lua", 1)]));
             containers.Containers.Add(Entry(textureEntry, name + "2", Packfile.FromBytes(name + "2.str2_pc", art), [(textureFile + ".cpeg_pc", 0)]));
             documentNames.Add(name);
-            zonePictures++;
             zonePicturesBytes += pegData.Length;
+            report.Add($"{name}: {setTextures.Count} zones' own pictures ({pegData.Length / 1024} KB)");
         }
-        report.Add($"rfg_ui_map_<column>_<row>: {zonePictures} zones' own pictures, a document each ({zonePicturesBytes / 1024} KB in all)");
+        report.Add($"rfg_ui_map_zones_*: {zonePictures} zones' own pictures in {zoneSets.Count} documents ({zonePicturesBytes / 1024} KB in all)");
 
         // The districts' names by zone, in the player's language, for the minimap.
         List<string> districts = DistrictLines(guerrillaMisc, report);
         Directory.CreateDirectory(scriptsFolder);
         File.WriteAllLines(Path.Combine(scriptsFolder, DistrictsFile), districts);
+        // Guerrilla's map icons and places, for the minimap and the world map.
+        report.AddRange(GuerrillaMapIcons.Build(guerrillaCache, scriptsFolder));
 
         string listsOut = Path.Combine(cacheOut, "interface.vpp_pc");
         Write(Path.Combine(listsOut, "vint_doc_containers.asm_pc"), containers.ToBytes());
@@ -359,7 +399,13 @@ public static partial class GuerrillaHud
         foreach (string document in Documents.Select(d => d.Name).Concat(ZoneDocuments()))
             foreach (string file in new[] { ".str2_pc", "2.str2_pc", ".vint_doc", ".lua" })
                 files.Add(Path.Combine(cacheOut, document + file));
-        if (scriptsFolder != null) files.Add(Path.Combine(scriptsFolder, DistrictsFile));
+        if (scriptsFolder != null)
+        {
+            files.Add(Path.Combine(scriptsFolder, DistrictsFile));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.FileName));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.RadioTagsFile));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.SafehousesFile));
+        }
         files.AddRange(OldFiles(overridesFolder));
         var report = new List<string>();
         foreach (string file in files.Where(File.Exists))
@@ -380,15 +426,14 @@ public static partial class GuerrillaHud
         foreach (string quarter in new[] { "nw", "ne", "sw", "se" })  // the zone pictures, four to a document at first
             foreach (string file in new[] { ".str2_pc", "2.str2_pc", ".vint_doc", ".lua" })
                 yield return Path.Combine(cacheOut, "rfg_map_tiles_" + quarter + file);
+        for (int column = FirstZone; column <= LastZone; column++)  // then a document a zone (to 2026-11-07)
+            for (int row = FirstZone; row <= LastZone; row++)
+                foreach (string file in new[] { ".str2_pc", "2.str2_pc", ".vint_doc", ".lua" })
+                    yield return Path.Combine(cacheOut, $"rfg_ui_map_{column:00}_{row:00}" + file);
     }
 
-    /// <summary>Every zone's picture's document name, whether Guerrilla has that zone or not.</summary>
-    static IEnumerable<string> ZoneDocuments()
-    {
-        for (int column = FirstZone; column <= LastZone; column++)
-            for (int row = FirstZone; row <= LastZone; row++)
-                yield return ZoneDocument(column, row);
-    }
+    /// <summary>The zone pictures' documents.</summary>
+    static IEnumerable<string> ZoneDocuments() => ZoneSets;
 
     static byte[] Read(Packfile archive, string file) =>
         archive.Read(archive.Find(file) ?? throw new FileNotFoundException($"{archive.Name} has no {file}"));
@@ -414,14 +459,20 @@ public static partial class GuerrillaHud
     /// pictures are (rfg_...), its property calls made through the shims (tints differ), and its
     /// document clock calls naming the document, then our script.
     /// </summary>
-    public static string GuerrillaScriptFor(string document, string guerrillaScript, string shims, string ours, IEnumerable<string> pictures)
+    public static string GuerrillaScriptFor(string document, string guerrillaScript, string shims, string ours, IEnumerable<string> pictures,
+                                            bool bridgedItems = false, IReadOnlyList<string>? renamedGlobals = null)
     {
         var pictureNames = new HashSet<string>(pictures, StringComparer.OrdinalIgnoreCase);
         string script = Regex.Replace(guerrillaScript, $@"\b{Regex.Escape(document)}_(init|cleanup)\b", m => $"{document}_guerrilla_{m.Groups[1].Value}");
+        // Its globals named as another document's are (see HudDocument.RenamedGlobals): <document>_<name>.
+        foreach (string global in renamedGlobals ?? [])
+            script = Regex.Replace(script, $@"(?<![A-Za-z0-9_]){Regex.Escape(global)}(?![A-Za-z0-9_])", $"{document}_{global}");
         script = ScriptString().Replace(script, m => pictureNames.Contains(m.Groups[1].Value) ? $"\"{Prefix}{m.Groups[1].Value}\"" : m.Value);
         // Properties through the shims' rfg_vint_set_property / rfg_vint_get_property: Armageddon's
         // Lua takes and gives tints as 0-255, Guerrilla's scripts as 0-1.
         script = PropertyCall().Replace(script, m => "rfg_" + m.Value);
+        // Data items our script hands Guerrilla's callbacks as tables (see HudDocument.BridgedItems).
+        if (bridgedItems) script = DataItemCall().Replace(script, m => "rfg_" + m.Value);
         // The document's clock: both games read and set the clock of the document whose script is
         // running when no document is named; here each call names its own.
         string thisDocument = $"vint_document_find(\"{document}\")";
@@ -454,10 +505,40 @@ public static partial class GuerrillaHud
         return text.ToString();
     }
 
+    /// <summary>
+    /// Guerrilla's upgrades' pictures (upgrades.xtbl): each upgrade's Name, its Icon_Image (a weapon's icon) and its
+    /// Blueprint (the drawing the upgrade screen shows), either absent.
+    /// </summary>
+    static List<(string Name, string? Icon, string? Blueprint)> UpgradePictures(string table)
+    {
+        var pictures = new List<(string, string?, string?)>();
+        foreach (Match upgrade in Regex.Matches(table, @"<Upgrade>.*?</Upgrade>", RegexOptions.Singleline | RegexOptions.IgnoreCase))
+            if (TagValue(upgrade.Value, "Name") is { } name)
+                pictures.Add((name, TagValue(upgrade.Value, "Icon_Image"), TagValue(upgrade.Value, "Blueprint")));
+        return pictures;
+    }
+
+    /// <summary>
+    /// For the upgrade screen's script: Guerrilla's upgrades' pictures by upgrade name, a table Rfg_upgrade_pictures of
+    /// { icon, blueprint } (renamed as the document's pictures are; nil for one Guerrilla's sheets don't have).
+    /// </summary>
+    static string UpgradePicturesScript(List<(string Name, string? Icon, string? Blueprint)> upgrades, Func<string, bool> known)
+    {
+        const string newline = "\r\n";
+        string Picture(string? name) => name != null && known(name) ? $"\"{Prefix}{name}\"" : "nil";
+        var text = new StringBuilder();
+        text.Append("-- Guerrilla's upgrades' pictures (icon, blueprint) by upgrade: from your copy's upgrades.xtbl (GuerrillaBuilder.exe)." + newline);
+        text.Append("Rfg_upgrade_pictures = {" + newline);
+        foreach (var (name, icon, blueprint) in upgrades)
+            text.Append($"\t[\"{name}\"] = {{ {Picture(icon)}, {Picture(blueprint)} }}," + newline);
+        text.Append("}" + newline + newline);
+        return text.ToString();
+    }
+
     /// <summary>The script of a document of zone pictures: nothing to do, its init and cleanup only.</summary>
     static string TilesScript(string document) =>
         $"-- {document}: Guerrilla's zone pictures for its minimap, made by GuerrillaBuilder.exe from your copy of Guerrilla.\r\n" +
-        "-- The document only brings them (the guerrilla_hud mod loads it while you're near); the minimap shows them.\r\n" +
+        "-- The document only brings them (the guerrilla_hud mod loads it with the HUD); the minimap and world map show them.\r\n" +
         $"function {document}_init()\r\nend\r\n\r\nfunction {document}_cleanup()\r\nend\r\n";
 
     /// <summary>A single bitmap (&lt;name&gt;.cvbm_pc and .gvbm_pc, laid out as a texture file) in its own container &lt;name&gt;.str2_pc.</summary>
@@ -702,6 +783,10 @@ public static partial class GuerrillaHud
     [GeneratedRegex(@"(?<![A-Za-z0-9_])vint_[sg]et_property(?=\s*\()")]
     private static partial Regex PropertyCall();
 
+    // A call of vint_dataitem_get, vint_dataitem_add_subscription or vint_datagroup_add_subscription (the name).
+    [GeneratedRegex(@"(?<![A-Za-z0-9_])vint_data(item_get|item_add_subscription|group_add_subscription)(?=\s*\()")]
+    private static partial Regex DataItemCall();
+
     // vint_get_time_index() with no document named.
     [GeneratedRegex(@"(?<![A-Za-z0-9_])vint_get_time_index\s*\(\s*\)")]
     private static partial Regex GetTimeIndexCall();
@@ -717,8 +802,18 @@ public static partial class GuerrillaHud
 /// (see <see cref="GuerrillaHud.GuerrillaScriptFor"/>); otherwise it is our script alone.
 /// </param>
 /// <param name="WeaponPictures">Guerrilla's weapons' pictures it shows too: their icons (the weapon select) or their reticles.</param>
+/// <param name="BridgedItems">
+/// Guerrilla's script reads data items Armageddon has nothing like (the world map's, which Guerrilla's
+/// game code filled): our script calls its callbacks itself with a table of the values, so its
+/// vint_dataitem_get and subscription calls go through the shims (rfg_vint_dataitem_get, ...).
+/// </param>
+/// <param name="ExtraTextures">Guerrilla's texture files (in its misc.vpp_pc) its script's pictures come from besides the document's own.</param>
+/// <param name="UpgradePictures">It shows Guerrilla's upgrades' pictures (upgrades.xtbl): they come along, and its script gets Rfg_upgrade_pictures.</param>
+/// <param name="RenamedGlobals">Globals of Guerrilla's script named as some of Armageddon's scripts name theirs: renamed &lt;document&gt;_&lt;name&gt;.</param>
 public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures, bool GuerrillaScript = false,
-                                 HudWeaponPictures WeaponPictures = HudWeaponPictures.None);
+                                 HudWeaponPictures WeaponPictures = HudWeaponPictures.None, bool BridgedItems = false,
+                                 IReadOnlyList<string>? ExtraTextures = null, bool UpgradePictures = false,
+                                 IReadOnlyList<string>? RenamedGlobals = null);
 
 /// <summary>Which of Guerrilla's weapons' pictures a HUD document brings along (see <see cref="GuerrillaHud.Build"/>).</summary>
 public enum HudWeaponPictures { None, Icons, Reticles }

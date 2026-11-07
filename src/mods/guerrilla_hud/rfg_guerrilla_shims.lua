@@ -16,6 +16,14 @@ string = { find = rfg_string_find }
 -- Guerrilla's scripts give and read tints as 0-1, Armageddon's interface as 0-255 (in its documents
 -- both are 0-1). GuerrillaBuilder.exe makes their vint_set_property and vint_get_property calls these.
 function rfg_vint_set_property(handle, property, ...)
+	-- Guerrilla's game named many texts by their string tag's hash (text_tag_crc), which Armageddon's
+	-- string tables don't have: our bridges hand the words instead, as a string.
+	if property == "text_tag_crc" then
+		local value = ...
+		if type(value) == "string" then
+			return vint_set_property(handle, "text_tag", value)
+		end
+	end
 	if property == "tint" then
 		local r, g, b = ...
 		return vint_set_property(handle, property, r * 255, g * 255, b * 255)
@@ -53,4 +61,38 @@ Btn_slot_3 = 27
 
 function rfg_get_button_image_name(button)
 	return "null"
+end
+
+-- Guerrilla's game filled the world map's data items (FS_HighlightItem, FS_Hints, the group
+-- FS_POI_Group, ...), which Armageddon has none of: there our bridge calls the script's callbacks
+-- itself, handing a table of the item's values in place of the item. GuerrillaBuilder.exe makes the
+-- world map's vint_dataitem_get calls this, and its subscriptions the two below.
+function rfg_vint_dataitem_get(item, ...)
+	if type(item) == "table" then
+		return unpack(item, 1, item.n or #item)	-- n: how many, for a table with empty (nil) values
+	end
+	return vint_dataitem_get(item, ...)
+end
+
+-- A subscription to an item or group Armageddon doesn't have isn't an error then.
+function rfg_vint_dataitem_add_subscription(...)
+	local values = { ... }
+	return pcall(function() return vint_dataitem_add_subscription(unpack(values)) end)
+end
+
+function rfg_vint_datagroup_add_subscription(...)
+	local values = { ... }
+	return pcall(function() return vint_datagroup_add_subscription(unpack(values)) end)
+end
+
+-- Guerrilla's script helpers: a number from a string (0 for none), and a whole number between two
+-- (the game's Lua has no math library: a plain sequence, enough for a picture's tilt).
+function rfg_tonumber(value)
+	return tonumber(value) or 0
+end
+
+Rfg_rand_state = 12345
+function rfg_rand(low, high)
+	Rfg_rand_state = (Rfg_rand_state * 16807) % 2147483647	-- stays exact in Lua's doubles
+	return low + Rfg_rand_state % (high - low + 1)
 end

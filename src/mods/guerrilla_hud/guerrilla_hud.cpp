@@ -34,9 +34,11 @@
 #define RFA_MOD_NAME "guerrilla_hud"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #pragma comment(lib, "user32.lib")  // the world map's key: GetAsyncKeyState, GetForegroundWindow
@@ -106,7 +108,7 @@ auto& g_cameraRotation = *reinterpret_cast<float(*)[9]>(0x11B9C90);
 // and the pool's).
 constexpr DWORD kInterfacePoolSizes[] = {0xA47355, 0xA4736A, 0xA4739F};  // mov [ebp-238h],imm / mov ...,imm / push imm
 constexpr DWORD kInterfacePoolGame[] = {0xA20000, 0xC00000, 0xA20000};
-constexpr DWORD kInterfacePoolOurs = 32 * 1024 * 1024;
+constexpr DWORD kInterfacePoolOurs = 48 * 1024 * 1024;  // with every zone's picture loaded (about 13 MB of it)
 
 void EnlargeInterfacePool() {
     for (int i = 0; i < 3; ++i)
@@ -141,7 +143,7 @@ void EnlargeInterfacePool() {
 //   its own (0x428240, released after as the game does, 0x427F40), and our count.
 // Both are made before the game's own start-up code runs (the mods load first).
 constexpr int kMaxDocuments = 256;
-constexpr int kMaxOpenDocuments = 40;
+constexpr int kMaxOpenDocuments = 64;  // 40 filled up with the world map's zone pictures too (2026-11-07)
 constexpr DWORD kDocumentLimitValues[] = {0x566BC9, 0x566BD0, 0x566BEB};  // cmp [ebp-54h],imm / push imm / mov [ebp-54h],imm
 constexpr DWORD kGameMaxDocuments = 0x80;
 constexpr int kDocumentRecordSize = 0x3B8;
@@ -410,13 +412,17 @@ struct Document {
     std::string name;
     bool drawn = true;       // put on the draw list (the zone pictures' documents only bring textures)
     bool whileOpen = false;  // drawn only while the world map is open
-    int zone = -1;           // the zone whose picture it brings (column × 100 + row), loaded while near
+    bool whileShop = false;  // drawn only while a safehouse's upgrade shop is open
+    bool zoneSet = false;    // one of the four documents of the zones' pictures (ZoneSetDocument)
     bool loaded = false;     // the mod asked for it
     bool seen = false;       // and the game has had it open since
     bool missing = false;    // not in the game's interface project, or the game couldn't load it
     bool listed = false;     // in the draw list (only while the HUD runs)
     int closedByGame = 0;    // times the game closed it after loading it (it does when its memory runs out)
+    ULONGLONG retryAt = 0;   // a zone picture the game refused (no room for another open document): when to ask again
+    ULONGLONG readyAt = 0;   // when the game first had it ready (see ZoneReady), 0 while not
 };
+constexpr ULONGLONG kRetryRefusedMs = 2000;
 
 // The interface's draw pass, bool(bool), cdecl: draws every document in its draw lists, every frame,
 // whatever is on screen (loading screens and menus too).
@@ -446,19 +452,17 @@ constexpr int kFirstZone = 2;
 constexpr int kZonesAcross = 12;
 constexpr double kZonePixels = kMapPixels / kZonesAcross;
 
-// A zone's picture's document, as GuerrillaBuilder.exe names it: rfg_ui_map_<column>_<row>.
-std::string ZoneDocument(int column, int row) {
-    char name[32];
-    sprintf_s(name, "rfg_ui_map_%02d_%02d", column, row);
-    return name;
+// Every zone's own picture comes in one of four documents, by quarter of the world, as
+// GuerrillaBuilder.exe makes them (GuerrillaHud.ZoneSetDocument: columns below 8 west, rows below 8
+// north): loaded with the HUD and kept until the next level load. Not streamed zone by zone, as
+// Guerrilla's were: the interface's memory for documents is a stack, and unloading one out of order
+// freed the zones loaded after it while they were on screen; the next one loaded over them, and
+// drawing them crashed the render thread (2026-11-07, three freezes: game-notes).
+std::string ZoneSetDocument(int column, int row) {
+    return std::string("rfg_ui_map_zones_") + (row < 8 ? "n" : "s") + (column < 8 ? "w" : "e");
 }
+const char* const kZoneSets[] = {"rfg_ui_map_zones_nw", "rfg_ui_map_zones_ne", "rfg_ui_map_zones_sw", "rfg_ui_map_zones_se"};
 int ZoneKey(int column, int row) { return column * 100 + row; }
-
-// Zone pictures are wanted within this distance of the player (the minimap shows Guerrilla's 80 m
-// and half the vehicle's speed, and its octagon's corners reach 1.4 times that), and kept loaded
-// for a while after.
-constexpr double kTilesWithinMetres = 250.0;
-constexpr ULONGLONG kTilesKeptMs = 20000;
 
 struct MapView {
     bool active = false;     // in our world, with a player
@@ -475,7 +479,6 @@ int g_mapKey = 'M';
 bool g_mapKeyDown = false;
 std::map<int, std::string> g_districts;          // column × 100 + row -> name (districts.txt)
 std::map<int, bool> g_tilePictures;              // column × 100 + row -> the zone has its picture
-std::map<int, ULONGLONG> g_zoneWanted;          // column × 100 + row -> until when its picture is wanted
 double g_lastX, g_lastZ;
 ULONGLONG g_lastMove;
 
@@ -533,6 +536,62 @@ void ReadDistricts() {
     rfa::Log("Districts of %u zones, for the minimap", static_cast<unsigned>(g_districts.size()));
 }
 
+// Guerrilla's map icons and places (map_icons.txt, made by GuerrillaBuilder.exe): its safehouses,
+// missions' and activities' starts, the world map's named places, the player's own icon and the world
+// map's hints, a line each: "icon|picture|x|z|caption|description|on the world map", "place||x|z|name||1",
+// "player|picture|0|0|caption|description|1", "text||0|0|what|text|1".
+struct MapIcon {
+    std::string kind;       // icon, place, player or text
+    std::string picture;    // rfg_ui_map_icon_...
+    double mapX = 0, mapY = 0;  // on Guerrilla's world map picture, in its pixels
+    std::string caption, description;
+    bool onWorldMap = true;
+    int pair = -1;          // a M.O.A.B.'s pair number (kind "bomb"), shown once its radio tags are found
+};
+std::vector<MapIcon> g_mapIcons;
+void FollowRadioTags();  // Guerrilla's radio tags (below)
+void FollowSafehouses();  // Guerrilla's safehouses' stations (below)
+bool ShopIsOpen();
+void CloseShop(const char* why);
+
+// Where a point of Guerrilla's world (x, z metres) is on its world map picture, in its pixels.
+void MapPixels(double x, double z, double& mapX, double& mapY) {
+    mapX = (8.0 + x / kZoneMetres - kFirstZone) * kZonePixels;  // column 8 starts at x 0, row 8 at z 0
+    mapY = (8.0 - z / kZoneMetres - kFirstZone) * kZonePixels;
+}
+
+void ReadMapIcons() {
+    const std::wstring path = rfa::RootDir() + L"\\mods\\guerrilla_hud\\map_icons.txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"r") != 0 || !file) {
+        rfa::Log("No mods\\guerrilla_hud\\map_icons.txt (editor\\GuerrillaBuilder.exe build hud makes it): the maps show no icons");
+        return;
+    }
+    char line[1024];
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == ';') continue;
+        std::vector<std::string> fields(1);
+        for (const char* c = line; *c && *c != '\n' && *c != '\r'; ++c) {
+            if (*c == '|') fields.emplace_back();
+            else fields.back() += *c;
+        }
+        if (fields.size() < 7 || (fields[0] != "icon" && fields[0] != "place" && fields[0] != "player" && fields[0] != "text" &&
+                                  fields[0] != "bomb"))
+            continue;
+        MapIcon icon;
+        icon.kind = fields[0];
+        icon.picture = fields[1];
+        MapPixels(atof(fields[2].c_str()), atof(fields[3].c_str()), icon.mapX, icon.mapY);
+        icon.caption = fields[4];
+        icon.description = fields[5];
+        icon.onWorldMap = fields[6] != "0";
+        if (fields.size() >= 8) icon.pair = atoi(fields[7].c_str());
+        g_mapIcons.push_back(icon);
+    }
+    fclose(file);
+    rfa::Log("%u map icons and places, for the maps", static_cast<unsigned>(g_mapIcons.size()));
+}
+
 // Whether a zone has its own picture (in one of the zone pictures' documents), asked once.
 bool HasTilePicture(int column, int row) {
     const int key = column * 100 + row;
@@ -551,13 +610,24 @@ Document* FindDocument(const std::string& name) {
     return nullptr;
 }
 
-// Whether a zone's picture is in (its document loaded, its texture too).
+// Whether a zone's picture can be shown: its document loaded and ready (its texture in) for a second.
+// The game calls a document ready a moment before its texture can be drawn: a picture shown 26 ms after
+// its document opened was drawn from an empty texture record (rfg_terr01_04_11_map_sheet.tga) and
+// crashed the render thread (2026-11-07, 10:58: the game froze).
+constexpr ULONGLONG kReadySettleMs = 1000;
+
 bool ZoneReady(int column, int row) {
-    const int key = ZoneKey(column, row);
+    const std::string set = ZoneSetDocument(column, row);
     for (Document& doc : g_documents) {
-        if (doc.zone != key || !doc.loaded) continue;
+        if (!doc.zoneSet || !doc.loaded || doc.name != set) continue;
         BYTE* open = OpenDocument(doc.name.c_str());
-        return open && DocumentStatus(*reinterpret_cast<unsigned short*>(open + 0x40)) == kDocumentReady;
+        if (!open || DocumentStatus(*reinterpret_cast<unsigned short*>(open + 0x40)) != kDocumentReady) {
+            doc.readyAt = 0;
+            return false;
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (doc.readyAt == 0) doc.readyAt = now;
+        return now - doc.readyAt >= kReadySettleMs;
     }
     return false;
 }
@@ -570,8 +640,7 @@ void UpdateMapView() {
     const float* position = reinterpret_cast<const float*>(player + 4);
     const double x = position[0], z = position[2];
     const double column = 8.0 + x / kZoneMetres, row = 8.0 - z / kZoneMetres;  // column 8 starts at x 0, row 8 at z 0
-    g_view.mapX = (column - kFirstZone) * kZonePixels;
-    g_view.mapY = (row - kFirstZone) * kZonePixels;
+    MapPixels(x, z, g_view.mapX, g_view.mapY);
     const float* forward = &g_cameraRotation[6];
     g_view.heading = std::atan2(static_cast<double>(forward[0]), static_cast<double>(forward[2]));
 
@@ -593,51 +662,200 @@ void UpdateMapView() {
     g_view.row = static_cast<int>(std::floor(row));
     auto district = g_districts.find(g_view.column * 100 + g_view.row);
     g_view.district = district != g_districts.end() ? district->second : "";
-
-    // The zones whose pictures could show: the player's and its neighbours within reach.
-    for (int dc = -1; dc <= 1; ++dc)
-        for (int dr = -1; dr <= 1; ++dr) {
-            const int c = g_view.column + dc, r = g_view.row + dr;
-            if (c < kFirstZone || r < kFirstZone || c >= kFirstZone + kZonesAcross || r >= kFirstZone + kZonesAcross) continue;
-            // Distance from the player to that zone's square, in zones.
-            const double nearX = column < c ? c - column : column > c + 1 ? column - (c + 1) : 0.0;
-            const double nearY = row < r ? r - row : row > r + 1 ? row - (r + 1) : 0.0;
-            if (std::sqrt(nearX * nearX + nearY * nearY) * kZoneMetres > kTilesWithinMetres) continue;
-            if (HasTilePicture(c, r)) g_zoneWanted[ZoneKey(c, r)] = now + kTilesKeptMs;
-        }
 }
 
 bool HeldDown(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+
+bool GameFocused() {
+    DWORD process = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &process);
+    return process == GetCurrentProcessId();
+}
+
+// A key that has just gone down (was: its state last time).
+bool Pressed(int key, bool& was) {
+    const bool down = HeldDown(key);
+    const bool pressed = down && !was;
+    was = down;
+    return pressed;
+}
+
+// ---- Guerrilla's world map: what it shows, its keys, and the game paused while it's open
+//
+// Guerrilla's zoom (fullscreen_map_get_zoom_info, RM 0x841220) runs from 0.1 to 0.8 and is shown as
+// (zoom - 0.1) / 0.7 (fullscreen_map_get_zoom_pct, 0x841340); its map opened zoomed all the way out
+// (Zoom_map_out_on_start, fsm_determine_zoom_level 0x840540, which zooms at half a unit a second).
+// How much of the world a zoom shows is ours: all of it (the picture's 1024 pixels over the screen's
+// height) at the least, kViewLeastMetres at the most, evenly in between on a log scale.
+// Guerrilla paused its game while the map was up (a game state of its own). Armageddon's pause is
+// counted (0x12F76E0): 0x520280(a, b, c, d) pauses at the first count, 0x520310(a, b) unpauses at the
+// last; its console's "pause" command calls them with (1, 1, 0, 0) and (1, 1), and its UI screens
+// pause through the same (0x58CC36). So the map holds one count while it's open, as a menu does.
+constexpr double kZoomMin = 0.1, kZoomMax = 0.8;
+constexpr double kZoomPerSecond = 0.5;    // Guerrilla's
+constexpr double kZoomPerNotch = 0.05;    // a step of the mouse wheel
+constexpr int kWheelNotch = 120;          // WHEEL_DELTA
+constexpr double kViewMostMetres = kZonesAcross * kZoneMetres;
+constexpr double kViewLeastMetres = 400.0;
+constexpr double kPanScreensPerSecond = 0.6;           // panning moves this much of the screen's height a second
+constexpr double kZonePicturesBelowMetres = 2000.0;    // the zones' own pictures under a view this close
+constexpr size_t kFullMapTiles = 16;
+constexpr double kScreenAspect = 16.0 / 9.0;           // the documents' layout, 1280 x 720
+constexpr ULONGLONG kSwallowPauseMs = 500;             // after Esc closes the map, the pause menu it asked for isn't opened
+auto& g_wheelTotal = *reinterpret_cast<int*>(0x2939B2C);         // the mouse wheel's running total (0xCDF220)
+auto& g_pauseMenuRequest = *reinterpret_cast<BYTE*>(0x135B3F1);  // "open the pause menu" (the HUD opens it at 0x57B774)
+using PauseFn = void(__cdecl*)(int, int, int, int);
+using UnpauseFn = void(__cdecl*)(int, int);
+auto const PauseGame = reinterpret_cast<PauseFn>(0x520280);
+auto const UnpauseGame = reinterpret_cast<UnpauseFn>(0x520310);
+
+struct FullMap {
+    double centreX = 512, centreY = 512;  // the world map picture's pixel in the middle of the screen
+    double zoom = kZoomMin;
+    bool paused = false;                  // the map holds one of the game's pause counts
+    ULONGLONG lastStep = 0;
+    int lastWheel = 0;
+    bool escDown = false, centreDown = false;
+    ULONGLONG swallowPauseUntil = 0;
+    int hudSteps = 0, scriptSteps = 0;   // for the log: which of the two ran while the game was paused
+};
+FullMap g_full;
+
+double ZoomPercent() { return (g_full.zoom - kZoomMin) / (kZoomMax - kZoomMin); }
+// How many metres of the world the screen's height shows.
+double ViewMetres() { return kViewMostMetres * std::pow(kViewLeastMetres / kViewMostMetres, ZoomPercent()); }
+double ViewPixels() { return ViewMetres() / kZoneMetres * kZonePixels; }
+
+void OpenMap() {
+    if (g_mapOpen) return;
+    g_mapOpen = true;
+    g_full.centreX = g_view.mapX;
+    g_full.centreY = g_view.mapY;
+    g_full.zoom = kZoomMin;
+    g_full.lastStep = 0;
+    g_full.lastWheel = g_wheelTotal;
+    g_full.escDown = HeldDown(VK_ESCAPE);
+    g_full.centreDown = HeldDown('X');
+    if (!g_full.paused) {
+        PauseGame(1, 1, 0, 0);
+        g_full.paused = true;
+    }
+    rfa::Log("World map opened; the game paused");
+}
+
+void CloseMap(const char* why) {
+    if (g_mapOpen)
+        rfa::Log("World map closed (%s); while it was open the HUD's update ran %d times, its script %d", why, g_full.hudSteps,
+                 g_full.scriptSteps);
+    g_full.hudSteps = g_full.scriptSteps = 0;
+    g_mapOpen = false;
+    if (g_full.paused) {
+        UnpauseGame(1, 1);
+        g_full.paused = false;
+    }
+}
 
 // The world map's key, pressed in the game's window, the console and menus closed: opens or closes it.
 // Not with Alt or the Windows key held: Alt+Tab and Win+Tab are Windows' own, and the game still has
 // the focus when Tab goes down.
 void FollowTheMapKey() {
-    if (!g_mapKey) return;
+    if (!g_mapKey || ShopIsOpen()) return;
     const bool down = HeldDown(g_mapKey);
     const bool windowsShortcut = HeldDown(VK_MENU) || HeldDown(VK_LWIN) || HeldDown(VK_RWIN);
-    if (down && !g_mapKeyDown && !windowsShortcut) {
-        DWORD process = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &process);
-        if (process == GetCurrentProcessId() && !MenusShown()) {
-            g_mapOpen = !g_mapOpen;
-            rfa::Log(g_mapOpen ? "World map opened" : "World map closed");
-        }
+    if (down && !g_mapKeyDown && !windowsShortcut && GameFocused()) {
+        if (g_mapOpen) CloseMap("its key");
+        else if (!MenusShown()) OpenMap();
     }
     g_mapKeyDown = down;
 }
 
-// Whether a document should be loaded now (in our world).
-bool Wanted(const Document& doc) {
-    if (doc.zone >= 0) {
-        auto until = g_zoneWanted.find(doc.zone);
-        return until != g_zoneWanted.end() && GetTickCount64() < until->second;
-    }
-    return true;
+// The world map's zone pictures: those of the zones under the view (nearest the middle first, at most
+// kFullMapTiles: up to 4 × 3 zones are under a view of 2 km, 16 with the edges), when the view is close
+// enough to want them.
+std::vector<std::pair<int, int>> FullMapZones() {
+    std::vector<std::pair<int, int>> zones;
+    if (!g_mapOpen || ViewMetres() >= kZonePicturesBelowMetres) return zones;
+    const double halfHeight = ViewPixels() / 2, halfWidth = halfHeight * kScreenAspect;
+    std::vector<std::pair<double, std::pair<int, int>>> found;
+    for (int c = kFirstZone; c < kFirstZone + kZonesAcross; ++c)
+        for (int r = kFirstZone; r < kFirstZone + kZonesAcross; ++r) {
+            const double left = (c - kFirstZone) * kZonePixels, top = (r - kFirstZone) * kZonePixels;
+            if (left > g_full.centreX + halfWidth || left + kZonePixels < g_full.centreX - halfWidth ||
+                top > g_full.centreY + halfHeight || top + kZonePixels < g_full.centreY - halfHeight || !HasTilePicture(c, r))
+                continue;
+            const double dx = left + kZonePixels / 2 - g_full.centreX, dy = top + kZonePixels / 2 - g_full.centreY;
+            found.push_back({dx * dx + dy * dy, {c, r}});
+        }
+    std::sort(found.begin(), found.end());
+    for (size_t i = 0; i < found.size() && i < kFullMapTiles; ++i) zones.push_back(found[i].second);
+    return zones;
 }
 
+// Each frame while the map is open, from the HUD's update and from the map's own script (whichever
+// the game runs while paused; a step moves by the time since the last one): its keys (Guerrilla's
+// PAN, ZOOM, CENTER and BACK, on the keyboard and the mouse wheel) and the zone pictures it wants.
+void StepFullMap(bool fromScript) {
+    const ULONGLONG now = GetTickCount64();
+    if (g_mapOpen) ++(fromScript ? g_full.scriptSteps : g_full.hudSteps);
+    if (!g_mapOpen) {
+        g_full.lastStep = 0;
+        return;
+    }
+    double seconds = g_full.lastStep ? (now - g_full.lastStep) / 1000.0 : 0.0;
+    if (seconds > 0.1) seconds = 0.1;  // a stall isn't a long press
+    g_full.lastStep = now;
+    const int notches = (g_wheelTotal - g_full.lastWheel) / kWheelNotch;
+    g_full.lastWheel += notches * kWheelNotch;
+    FollowTheMapKey();
+    if (!g_mapOpen) return;
+    const bool focused = GameFocused();
+    if (Pressed(VK_ESCAPE, g_full.escDown) && focused) {
+        g_full.swallowPauseUntil = now + kSwallowPauseMs;
+        CloseMap("Esc");
+        return;
+    }
+    if (focused) {
+        const double right = (HeldDown('D') || HeldDown(VK_RIGHT) ? 1.0 : 0.0) - (HeldDown('A') || HeldDown(VK_LEFT) ? 1.0 : 0.0);
+        const double down = (HeldDown('S') || HeldDown(VK_DOWN) ? 1.0 : 0.0) - (HeldDown('W') || HeldDown(VK_UP) ? 1.0 : 0.0);
+        const double pan = kPanScreensPerSecond * ViewPixels() * seconds;
+        g_full.centreX += right * pan;
+        g_full.centreY += down * pan;
+        const double zoomIn = (HeldDown(VK_PRIOR) || HeldDown('E') || HeldDown(VK_ADD) || HeldDown(VK_OEM_PLUS) ? 1.0 : 0.0) -
+                              (HeldDown(VK_NEXT) || HeldDown('Q') || HeldDown(VK_SUBTRACT) || HeldDown(VK_OEM_MINUS) ? 1.0 : 0.0);
+        g_full.zoom += zoomIn * kZoomPerSecond * seconds + notches * kZoomPerNotch;
+        if (Pressed('X', g_full.centreDown)) {
+            g_full.centreX = g_view.mapX;
+            g_full.centreY = g_view.mapY;
+        }
+    }
+    g_full.zoom = g_full.zoom < kZoomMin ? kZoomMin : g_full.zoom > kZoomMax ? kZoomMax : g_full.zoom;
+    g_full.centreX = g_full.centreX < 0 ? 0 : g_full.centreX > kMapPixels ? kMapPixels : g_full.centreX;
+    g_full.centreY = g_full.centreY < 0 ? 0 : g_full.centreY > kMapPixels ? kMapPixels : g_full.centreY;
+}
+
+// While the map is open the game is paused already, and the pause menu isn't opened over it: Esc closes
+// the map (the game asks for its menu on the same key), and a request for it otherwise (borderless asks
+// for it when the window loses the focus) is dropped. With the pause menu up, the game stops the HUD's
+// update, which loads the map's zone pictures (2026-11-07: none loaded after an Alt+Tab). Called from
+// the HUD's update, which runs before the HUD opens the menu (0x57B774).
+void SwallowPauseMenuRequest() {
+    if (!g_pauseMenuRequest) return;
+    if (g_mapOpen || ShopIsOpen() || (GetTickCount64() < g_full.swallowPauseUntil && HeldDown(VK_ESCAPE))) {
+        g_pauseMenuRequest = 0;
+        RFA_LOG_FIRST(20, "The pause menu wasn't opened: the world map is open (or Esc just closed it)");
+    }
+}
+
+// Whether a document should be loaded now (in our world): all of them, for as long as the level lasts
+// (see the zone pictures' documents above).
+bool Wanted(const Document&) { return true; }
+
 // Whether a loaded document should be on the draw list now.
-bool ShouldDraw(const Document& doc, bool hudRuns) { return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen); }
+// While a shop is open only its screen is drawn (Guerrilla hid its HUD for it).
+bool ShouldDraw(const Document& doc, bool hudRuns) {
+    if (ShopIsOpen() && !doc.whileShop && !doc.zoneSet) return false;
+    return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen) && (!doc.whileShop || ShopIsOpen());
+}
 
 void Unload(Document& doc, BYTE* open) {
     const unsigned short handle = *reinterpret_cast<unsigned short*>(open + 0x40);
@@ -645,6 +863,19 @@ void Unload(Document& doc, BYTE* open) {
     UnloadDocument(handle);
     RFA_LOG_FIRST(200, "Unloaded %s", doc.name.c_str());
     doc.loaded = doc.seen = doc.listed = false;
+    doc.readyAt = 0;
+}
+
+// The game's state (0x53FE80, cdecl: the top of its state stack, [0x10F8BE8] into 0x1307898, -1 for
+// none); 3 is the level load (registered by 0x55D6D0, see LoadStart).
+using GameStateFn = int(__cdecl*)();
+auto const GameState = reinterpret_cast<GameStateFn>(0x53FE80);
+constexpr int kLoadingState = 3;
+constexpr ULONGLONG kAfterLoadStartMs = 1000;  // the load's state may not be on the stack yet in the frame it starts
+ULONGLONG g_loadStartedAt = 0;
+
+bool LevelLoading() {
+    return GameState() == kLoadingState || (g_loadStartedAt != 0 && GetTickCount64() - g_loadStartedAt < kAfterLoadStartMs);
 }
 
 // In our worlds, the documents wanted are loaded (and loaded again if the game closes one); the
@@ -654,11 +885,21 @@ void FollowTheWorld() {
     if (static_cast<int>(ours) != g_inOurWorld) {
         rfa::Log(ours ? "World %s: Guerrilla's HUD" : "World %s: Armageddon's own HUD", WorldName());
         g_inOurWorld = ours;
-        if (!ours) g_mapOpen = false;
+        if (!ours) CloseMap("another world");
+    }
+    // Nothing is loaded or unloaded during a level load, nor the player read (see LoadStart): the HUD's
+    // update can run again in the frame the load starts, and once did (2026-11-07, the reload crash at
+    // 04:05:37: it loaded all 20 documents again into the memory the load was freeing).
+    if (LevelLoading()) {
+        RFA_LOG_FIRST(20, "A level load runs: Guerrilla's HUD documents wait for it to end");
+        return;
     }
     if (ours) {
         UpdateMapView();
-        FollowTheMapKey();
+        if (g_mapOpen) StepFullMap(false);
+        else FollowTheMapKey();
+        FollowRadioTags();
+        FollowSafehouses();
     } else {
         g_view.active = false;
     }
@@ -674,7 +915,7 @@ void FollowTheWorld() {
             if (doc.loaded && open) Unload(doc, open);  // one still loading is unloaded once it is open
             continue;
         }
-        if (open || doc.missing || (doc.loaded && !doc.seen)) continue;
+        if (open || doc.missing || (doc.loaded && !doc.seen) || GetTickCount64() < doc.retryAt) continue;
         if (doc.loaded) {
             // The game closes a document whose containers don't fit its interface memory (see
             // EnlargeInterfacePool); loading it again and again wouldn't help.
@@ -696,8 +937,16 @@ void FollowTheWorld() {
         RFA_LOG_FIRST(200, "Loading %s", doc.name.c_str());  // before the game's call, so a log ending here points at it
         const unsigned short handle = LoadWhilePlaying(doc.name.c_str());
         if (handle == kNoDocument) {
-            rfa::Log("The game couldn't load %s", doc.name.c_str());
-            doc.missing = true;
+            // A zone's picture is asked for again a little later: the game refuses one when its room for
+            // open documents is full (kMaxOpenDocuments), which frees up as other zones' pictures go.
+            if (doc.zoneSet) {
+                RFA_LOG_FIRST(40, "The game couldn't load %s (no room for another open document?); asking again in %llu s",
+                              doc.name.c_str(), kRetryRefusedMs / 1000);
+                doc.retryAt = GetTickCount64() + kRetryRefusedMs;
+            } else {
+                rfa::Log("The game couldn't load %s", doc.name.c_str());
+                doc.missing = true;
+            }
             continue;
         }
         doc.loaded = true;
@@ -712,6 +961,7 @@ void __cdecl HudUpdate(void* hud) {
     g_hudUpdate(hud);
     g_lastHudUpdate = GetTickCount64();
     FollowTheWorld();
+    SwallowPauseMenuRequest();
     // For the log: an element pool past the game's own size (each pool: +0x0C in use, +0x10 room).
     struct PoolWatch { const char* type; DWORD pool; DWORD game; DWORD logged; };
     static PoolWatch watched[] = {{"tween", 0x28EEB00, 0x334, 0}, {"document", 0x28F15CC, 0xC4, 0},
@@ -737,7 +987,8 @@ void __cdecl HudUpdate(void* hud) {
 // Before each draw pass: our loaded documents on the draw list while the HUD runs (the world map
 // only while it is open), off it otherwise.
 bool __cdecl DrawPass(bool flag) {
-    const bool hudRuns = GetTickCount64() - g_lastHudUpdate <= kHudGoneAfterMs;
+    // While the world map is open the game is paused, which may stop the HUD's update: still ours.
+    const bool hudRuns = g_mapOpen || ShopIsOpen() || GetTickCount64() - g_lastHudUpdate <= kHudGoneAfterMs;
     for (Document& doc : g_documents) {
         const bool draw = ShouldDraw(doc, hudRuns);
         if (!doc.loaded || doc.listed == draw) continue;
@@ -767,6 +1018,9 @@ using LoadStartFn = void(__cdecl*)();
 LoadStartFn g_loadStart;
 
 void __cdecl LoadStart() {
+    g_loadStartedAt = GetTickCount64();
+    CloseMap("a level load");  // and the game unpaused
+    CloseShop("a level load");
     int unloaded = 0, forgotten = 0;
     for (Document& doc : g_documents) {
         doc.closedByGame = 0;
@@ -776,6 +1030,7 @@ void __cdecl LoadStart() {
             ++unloaded;
         } else {
             doc.loaded = doc.seen = doc.listed = false;  // still waiting: the load empties the game's queue
+            doc.readyAt = 0;
             ++forgotten;
         }
     }
@@ -784,9 +1039,411 @@ void __cdecl LoadStart() {
     g_loadStart();
 }
 
+// ---- Guerrilla's radio tags ("Blast from the past")
+//
+// Guerrilla hid 36 radio tags about its world (object_bftp_node with tag_node 1), each paired with a
+// M.O.A.B. (the node with the same pair_number and tag_node 0). Its blast_from_the_past_process_car_bombs
+// (RM 0xAA4C60) finds a tag when the player is on foot within 1.5 m of it (distance squared under 2.25,
+// [0x1311020]); bftp_touch_tag (0xA8DB50) then counts it, and every third tag found
+// (blast_from_the_past_tags_collected() % 3 == 0) shows that tag's pair's M.O.A.B. on the maps
+// (spawn_bomb_from_tag: the bomb node's add_icon with MAP_ELEMENT_CARBOMB) and says so
+// (HM_BFTP_SPAWN_BOMB); otherwise it says how many more tags are needed (HM_BFTP_TAG_FOUND for one,
+// HM_BFTP_TAGS_FOUND), each a HUD message for 4 s; here Armageddon's own message line (0x581820, which
+// shows one for 5 s). Not yet: the bomb itself (the item bftp_bomb, which a car drives up to, to start
+// Guerrilla's car bomb activity), the handbook's entry, the tool tips, the sound, the stats.
+// The tags found are kept in mods\guerrilla_hud\radio_tags_found.txt, one list for every save.
+struct RadioTag {
+    bool tag = false;  // a radio tag, else a M.O.A.B.
+    int pair = 0;
+    float x = 0, y = 0, z = 0;
+};
+std::vector<RadioTag> g_radioTags;
+std::map<std::string, std::string> g_radioTagTexts;  // Guerrilla's messages: tag_found, tags_found, spawn_bomb
+std::set<int> g_tagsFound;                           // the pairs whose radio tag was found
+std::vector<int> g_tagsFoundOrder;                   // and in the order found
+std::set<int> g_bombsShown;                          // the pairs whose M.O.A.B. is on the maps
+constexpr float kTagReachSquared = 2.25f;
+constexpr DWORD kHumanVehicle = 0x1160;              // the vehicle a human is in (as guerrilla_vehicles reads it)
+using AddHudMessageFn = void(__cdecl*)(const char* text);
+auto const AddHudMessage = reinterpret_cast<AddHudMessageFn>(0x581820);
+
+std::wstring RadioTagsFoundPath() { return rfa::RootDir() + L"\\mods\\guerrilla_hud\\radio_tags_found.txt"; }
+
+// Which M.O.A.B.s the tags found show: Guerrilla's rule, every third tag shows its own pair's.
+void ShowBombsOfTagsFound() {
+    g_bombsShown.clear();
+    for (size_t i = 0; i < g_tagsFoundOrder.size(); ++i)
+        if ((i + 1) % 3 == 0) g_bombsShown.insert(g_tagsFoundOrder[i]);
+}
+
+// radio_tags.txt (made by GuerrillaBuilder.exe) and the list of tags found.
+void ReadRadioTags() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_hud\\radio_tags.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("No mods\\guerrilla_hud\\radio_tags.txt (editor\\GuerrillaBuilder.exe build hud makes it): no radio tags");
+        return;
+    }
+    char line[1024];
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == ';') continue;
+        std::vector<std::string> fields(1);
+        for (const char* c = line; *c && *c != '\n' && *c != '\r'; ++c) {
+            if (*c == '|') fields.emplace_back();
+            else fields.back() += *c;
+        }
+        if (fields[0] == "text" && fields.size() >= 3) {
+            g_radioTagTexts[fields[1]] = fields[2];
+        } else if ((fields[0] == "tag" || fields[0] == "bomb") && fields.size() >= 5) {
+            RadioTag node;
+            node.tag = fields[0] == "tag";
+            node.pair = atoi(fields[1].c_str());
+            node.x = static_cast<float>(atof(fields[2].c_str()));
+            node.y = static_cast<float>(atof(fields[3].c_str()));
+            node.z = static_cast<float>(atof(fields[4].c_str()));
+            g_radioTags.push_back(node);
+        }
+    }
+    fclose(file);
+    if (_wfopen_s(&file, RadioTagsFoundPath().c_str(), L"r") == 0 && file) {
+        while (fgets(line, sizeof(line), file)) {
+            if (line[0] == ';' || line[0] < '0' || line[0] > '9') continue;
+            const int pair = atoi(line);
+            if (g_tagsFound.insert(pair).second) g_tagsFoundOrder.push_back(pair);
+        }
+        fclose(file);
+    }
+    ShowBombsOfTagsFound();
+    rfa::Log("%u radio tags and M.O.A.B.s; %u tags found so far, %u M.O.A.B.s shown", static_cast<unsigned>(g_radioTags.size()),
+             static_cast<unsigned>(g_tagsFound.size()), static_cast<unsigned>(g_bombsShown.size()));
+}
+
+void SaveRadioTagsFound() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, RadioTagsFoundPath().c_str(), L"w") != 0 || !file) {
+        rfa::Log("Couldn't write mods\\guerrilla_hud\\radio_tags_found.txt");
+        return;
+    }
+    fputs("; Guerrilla's radio tags you have found (their pair numbers, in the order found), kept by guerrilla_hud.\n"
+          "; Every third shows its M.O.A.B. on the maps. Delete this file to start the hunt again.\n", file);
+    for (int pair : g_tagsFoundOrder) fprintf(file, "%d\n", pair);
+    fclose(file);
+}
+
+// Guerrilla's message with the number of tags still needed put in for its %ls.
+std::string RadioTagMessage(const char* what, int number) {
+    std::string text = g_radioTagTexts.count(what) ? g_radioTagTexts[what] : what;
+    const size_t at = text.find("%ls");
+    if (at != std::string::npos) text.replace(at, 3, std::to_string(number));
+    return text;
+}
+
+// Each HUD update in our world: a radio tag the player walks up to on foot is found (bftp_touch_tag).
+void FollowRadioTags() {
+    BYTE* player = g_player;
+    if (!player || g_radioTags.empty()) return;
+    const DWORD vehicle = *reinterpret_cast<const DWORD*>(player + kHumanVehicle);
+    if (vehicle != 0xFFFFFFFF && vehicle != 0) return;
+    const float* position = reinterpret_cast<const float*>(player + 4);
+    for (const RadioTag& node : g_radioTags) {
+        if (!node.tag || g_tagsFound.count(node.pair)) continue;
+        const float dx = node.x - position[0], dy = node.y - position[1], dz = node.z - position[2];
+        if (dx * dx + dy * dy + dz * dz >= kTagReachSquared) continue;
+        g_tagsFound.insert(node.pair);
+        g_tagsFoundOrder.push_back(node.pair);
+        SaveRadioTagsFound();
+        const int left = 3 - static_cast<int>(g_tagsFoundOrder.size() % 3);
+        std::string message;
+        if (left == 3) {
+            g_bombsShown.insert(node.pair);
+            message = RadioTagMessage("spawn_bomb", 0);
+        } else {
+            message = left == 1 ? RadioTagMessage("tag_found", 1) : RadioTagMessage("tags_found", left);
+        }
+        AddHudMessage(message.c_str());
+        rfa::Log("Radio tag %d found (%u of 36): %s", node.pair, static_cast<unsigned>(g_tagsFoundOrder.size()), message.c_str());
+    }
+}
+
+// ---- Guerrilla's safehouses: the upgrade shop
+//
+// Each of Guerrilla's safehouses has an upgrade shop (its object_upgrade_node, at the safehouse's own spot) and a
+// weapon cabinet (an object_action_node "Player Open Weapon Cabinet"), which Armageddon never makes: safehouses.txt
+// (made by GuerrillaBuilder.exe) has where they are. Walking up to a shop on foot shows Guerrilla's use prompt
+// (rfg_ui_messages), and the game's own use key (the action 0x4E1B70 gives for what the player is doing, held as
+// 0x4E4800 reads it, so whatever the player bound) opens Guerrilla's upgrade screen (rfg_ui_upgrades). Guerrilla ran
+// it as a game state of its own (hud_ui_upgrades_process, RM 0x87FD20) with the game paused; here it takes one of
+// the game's pause counts, as the world map does. The upgrades and buying are guerrilla_gear's (its F7 window's):
+// the list through its exported GuerrillaGear_Upgrade, a purchase at once (GuerrillaGear_BuyNow, on this thread).
+// Keys while it's open: W / S, the arrows or the mouse wheel pick, the use key, Enter or Space buy, Esc or Tab
+// close. Not yet: the weapon cabinet (its screen, rfg_ui_safehouse_weapons), Guerrilla's purchase message box.
+struct GuerrillaGearUpgrade {  // as guerrilla_gear's upgrades.cpp has it
+    int size;
+    char name[64];
+    char shown[96];
+    char type[32];
+    char levelName[96];
+    char levelText[256];
+    int bought;
+    int levels;
+    int cost;
+    int available;
+};
+using GearCountFn = int(__cdecl*)();
+using GearUpgradeFn = bool(__cdecl*)(int, GuerrillaGearUpgrade*);
+using GearBuyNowFn = void(__cdecl*)(BYTE*, int);
+using GearStatusFn = void(__cdecl*)(char*, int);
+struct GearApi {
+    GearCountFn count = nullptr;
+    GearUpgradeFn upgrade = nullptr;
+    GearBuyNowFn buyNow = nullptr;
+    GearStatusFn status = nullptr;
+};
+
+GearApi& Gear() {
+    static GearApi api;
+    static bool asked = false;
+    if (!asked) {
+        asked = true;
+        if (HMODULE gear = GetModuleHandleW(L"guerrilla_gear.dll")) {
+            api.count = reinterpret_cast<GearCountFn>(GetProcAddress(gear, "GuerrillaGear_UpgradeCount"));
+            api.upgrade = reinterpret_cast<GearUpgradeFn>(GetProcAddress(gear, "GuerrillaGear_Upgrade"));
+            api.buyNow = reinterpret_cast<GearBuyNowFn>(GetProcAddress(gear, "GuerrillaGear_BuyNow"));
+            api.status = reinterpret_cast<GearStatusFn>(GetProcAddress(gear, "GuerrillaGear_Status"));
+        }
+        if (!api.count || !api.upgrade || !api.buyNow || !api.status)
+            rfa::Log("Safehouses: guerrilla_gear.dll's upgrades aren't there (an older guerrilla_gear, or it's off): the shops stay shut");
+    }
+    return api;
+}
+bool GearReady() {
+    const GearApi& api = Gear();
+    return api.count && api.upgrade && api.buyNow && api.status;
+}
+
+struct Station {
+    bool shop = false;  // an upgrade shop, else a weapon cabinet
+    float x = 0, y = 0, z = 0;
+};
+std::vector<Station> g_stations;
+std::map<std::string, std::string> g_shopTexts;  // the upgrade screen's words: title, price, credits, select, back, locked, use
+constexpr float kStationReachSquared = 2.5f * 2.5f;
+using UseActionFn = int(__cdecl*)(int player);
+using ButtonHeldFn = bool(__cdecl*)(int action, int player);
+auto const UseAction = reinterpret_cast<UseActionFn>(0x4E1B70);
+auto const ButtonHeld = reinterpret_cast<ButtonHeldFn>(0x4E4800);
+auto& g_localPlayer = *reinterpret_cast<int*>(0x11C0580);
+auto const GetSalvage = reinterpret_cast<bool(__cdecl*)(int* out)>(0x54C2B0);
+
+struct Shop {
+    bool open = false;
+    bool paused = false;
+    int nearStation = -1;   // the station the player could use now
+    bool useDown = true;    // the use key's last state (true at first: a key held then isn't a press)
+    std::vector<GuerrillaGearUpgrade> list;
+    int highlighted = 0;    // in list
+    int top = 0;            // the list's first row shown
+    int lastWheel = 0;
+    bool upDown = false, wDown = false, downDown = false, sDown = false, buyDown = false, closeDown = false;
+    std::string status;     // the last purchase's outcome, shown for a while
+    ULONGLONG statusUntil = 0;
+};
+Shop g_shop;
+constexpr int kShopRows = 4;  // Guerrilla's screen has four rows (MAX_BUTTONS)
+constexpr ULONGLONG kShopStatusMs = 3000;
+
+// safehouses.txt (made by GuerrillaBuilder.exe): "shop|x|y|z", "cabinet|x|y|z", "text|what|text".
+void ReadSafehouses() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_hud\\safehouses.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("No mods\\guerrilla_hud\\safehouses.txt (editor\\GuerrillaBuilder.exe build hud makes it): no safehouse shops");
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == ';') continue;
+        std::vector<std::string> fields(1);
+        for (const char* c = line; *c && *c != '\n' && *c != '\r'; ++c) {
+            if (*c == '|') fields.emplace_back();
+            else fields.back() += *c;
+        }
+        if (fields[0] == "text" && fields.size() >= 3) {
+            g_shopTexts[fields[1]] = fields[2];
+        } else if ((fields[0] == "shop" || fields[0] == "cabinet") && fields.size() >= 4) {
+            Station station;
+            station.shop = fields[0] == "shop";
+            station.x = static_cast<float>(atof(fields[1].c_str()));
+            station.y = static_cast<float>(atof(fields[2].c_str()));
+            station.z = static_cast<float>(atof(fields[3].c_str()));
+            g_stations.push_back(station);
+        }
+    }
+    fclose(file);
+    rfa::Log("%u safehouse stations", static_cast<unsigned>(g_stations.size()));
+}
+
+void RefreshShopList() {
+    GearApi& api = Gear();
+    g_shop.list.clear();
+    const int count = api.count();
+    for (int i = 0; i < count; ++i) {
+        GuerrillaGearUpgrade upgrade{};
+        upgrade.size = sizeof(upgrade);
+        if (api.upgrade(i, &upgrade)) g_shop.list.push_back(upgrade);
+    }
+    if (g_shop.highlighted >= static_cast<int>(g_shop.list.size())) g_shop.highlighted = static_cast<int>(g_shop.list.size()) - 1;
+    if (g_shop.highlighted < 0) g_shop.highlighted = 0;
+}
+
+void OpenShop() {
+    g_shop.open = true;
+    g_shop.highlighted = g_shop.top = 0;
+    g_shop.lastWheel = g_wheelTotal;
+    g_shop.upDown = g_shop.wDown = g_shop.downDown = g_shop.sDown = g_shop.buyDown = g_shop.closeDown = true;  // keys held as it opens aren't presses
+    g_shop.status.clear();
+    RefreshShopList();
+    if (!g_shop.paused) {
+        PauseGame(1, 1, 0, 0);
+        g_shop.paused = true;
+    }
+    rfa::Log("Upgrade shop opened (%u upgrades); the game paused", static_cast<unsigned>(g_shop.list.size()));
+}
+
+void CloseShop(const char* why) {
+    if (g_shop.open) rfa::Log("Upgrade shop closed (%s)", why);
+    g_shop.open = false;
+    g_shop.useDown = true;
+    if (g_shop.paused) {
+        UnpauseGame(1, 1);
+        g_shop.paused = false;
+    }
+}
+
+// The shop's keys, each HUD update while it's open.
+void StepShop() {
+    if (!GameFocused()) return;
+    const int notches = (g_wheelTotal - g_shop.lastWheel) / kWheelNotch;
+    g_shop.lastWheel += notches * kWheelNotch;
+    int move = -notches;
+    if (Pressed(VK_UP, g_shop.upDown)) move -= 1;
+    if (Pressed('W', g_shop.wDown)) move -= 1;
+    if (Pressed(VK_DOWN, g_shop.downDown)) move += 1;
+    if (Pressed('S', g_shop.sDown)) move += 1;
+    const int count = static_cast<int>(g_shop.list.size());
+    if (count > 0 && move != 0) {
+        g_shop.highlighted = (g_shop.highlighted + move) % count;
+        if (g_shop.highlighted < 0) g_shop.highlighted += count;
+    }
+    if (g_shop.highlighted < g_shop.top) g_shop.top = g_shop.highlighted;
+    if (g_shop.highlighted >= g_shop.top + kShopRows) g_shop.top = g_shop.highlighted - kShopRows + 1;
+    const bool use = ButtonHeld(UseAction(g_localPlayer), g_localPlayer);
+    const bool buy = use || HeldDown(VK_RETURN) || HeldDown(VK_SPACE);
+    const bool buyPressed = buy && !g_shop.buyDown;
+    g_shop.buyDown = buy;
+    if (buyPressed && count > 0 && g_player) {
+        const GuerrillaGearUpgrade& chosen = g_shop.list[g_shop.highlighted];
+        if (chosen.available) {
+            Gear().buyNow(g_player, g_shop.highlighted);
+            char status[256] = {};
+            Gear().status(status, sizeof(status));
+            g_shop.status = status;
+            g_shop.statusUntil = GetTickCount64() + kShopStatusMs;
+            RefreshShopList();
+        }
+    }
+    const bool close = HeldDown(VK_ESCAPE) || HeldDown(VK_TAB) || HeldDown(VK_BACK);
+    if (close && !g_shop.closeDown) {
+        g_full.swallowPauseUntil = GetTickCount64() + kSwallowPauseMs;
+        CloseShop("its key");
+    }
+    g_shop.closeDown = close;
+}
+
+// Each HUD update in our world: the station the player is at (on foot), and the use key there.
+void FollowSafehouses() {
+    if (g_shop.open) {
+        StepShop();
+        return;
+    }
+    g_shop.nearStation = -1;
+    BYTE* player = g_player;
+    if (!player || g_stations.empty()) return;
+    const DWORD vehicle = *reinterpret_cast<const DWORD*>(player + kHumanVehicle);
+    const float* position = reinterpret_cast<const float*>(player + 4);
+    if (vehicle == 0xFFFFFFFF || vehicle == 0)
+        for (size_t i = 0; i < g_stations.size(); ++i) {
+            const Station& station = g_stations[i];
+            if (!station.shop) continue;  // the weapon cabinets come later
+            const float dx = station.x - position[0], dy = station.y - position[1], dz = station.z - position[2];
+            if (dx * dx + dy * dy + dz * dz < kStationReachSquared) g_shop.nearStation = static_cast<int>(i);
+        }
+    const bool use = ButtonHeld(UseAction(g_localPlayer), g_localPlayer);
+    if (use && !g_shop.useDown && g_shop.nearStation >= 0 && !g_mapOpen && !MenusShown() && GameFocused() && GearReady()) OpenShop();
+    g_shop.useDown = use;
+}
+
+bool ShopIsOpen() { return g_shop.open; }
+
 // ---- What the documents' scripts ask (Lua, on the game's thread)
 
 using rfa::game::lua_State;
+
+// rfg_station_prompt() -> near, kind
+//   Whether the player is at one of Guerrilla's safehouse stations now (on foot, within reach): its kind,
+//   "shop" (or "cabinet", later). For Guerrilla's use prompt.
+int __cdecl LuaStationPrompt(lua_State* L) {
+    using namespace rfa::game;
+    const bool atStation = !g_shop.open && g_shop.nearStation >= 0;
+    lua_pushboolean(L, atStation);
+    lua_pushstring(L, atStation && g_stations[g_shop.nearStation].shop ? "shop" : "cabinet");
+    return 2;
+}
+
+// rfg_shop() -> open, count, highlighted, top, salvage, status
+//   The upgrade shop: whether it's open; how many upgrades it lists; the one picked and the first row
+//   shown (1 to the count); the player's salvage; the last purchase's outcome ("" after a while).
+int __cdecl LuaShop(lua_State* L) {
+    using namespace rfa::game;
+    int salvage = 0;
+    if (!GetSalvage(&salvage)) salvage = 0;
+    lua_pushboolean(L, g_shop.open);
+    lua_pushnumber(L, static_cast<double>(g_shop.list.size()));
+    lua_pushnumber(L, g_shop.highlighted + 1);
+    lua_pushnumber(L, g_shop.top + 1);
+    lua_pushnumber(L, salvage);
+    lua_pushstring(L, GetTickCount64() < g_shop.statusUntil ? g_shop.status.c_str() : "");
+    return 6;
+}
+
+// rfg_shop_item(i) -> name, shown, type, level_name, level_text, bought, levels, cost, available
+//   The i-th upgrade the shop lists (guerrilla_gear's): its name, as shown, its kind; its next level's
+//   name and description ("" when all are bought); levels bought and in all; the next one's cost; whether it
+//   can be bought now. Nothing for an i out of range.
+int __cdecl LuaShopItem(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_shop.list.size())) return 0;
+    const GuerrillaGearUpgrade& u = g_shop.list[index];
+    lua_pushstring(L, u.name);
+    lua_pushstring(L, u.shown);
+    lua_pushstring(L, u.type);
+    lua_pushstring(L, u.levelName);
+    lua_pushstring(L, u.levelText);
+    lua_pushnumber(L, u.bought);
+    lua_pushnumber(L, u.levels);
+    lua_pushnumber(L, u.cost);
+    lua_pushboolean(L, u.available != 0);
+    return 9;
+}
+
+// rfg_shop_text(what) -> Guerrilla's word for it on the upgrade screen (safehouses.txt): title, price,
+//   credits, select, back, locked, use; "" if unknown.
+int __cdecl LuaShopText(lua_State* L) {
+    using namespace rfa::game;
+    const char* what = lua_tolstring(L, 1, nullptr);
+    auto found = what ? g_shopTexts.find(what) : g_shopTexts.end();
+    lua_pushstring(L, found != g_shopTexts.end() ? found->second.c_str() : "");
+    return 1;
+}
 
 // rfg_map_view() -> active, map_x, map_y, heading, speed, column, row, district, map_open
 //   active: in Guerrilla's world, with a player; map_x, map_y: the player on Guerrilla's world map
@@ -834,11 +1491,92 @@ int __cdecl LuaMapTiles(lua_State* L) {
     return 1 + 2 * count;
 }
 
+// rfg_map_icon_count() -> how many icons and places map_icons.txt has.
+int __cdecl LuaMapIconCount(lua_State* L) {
+    rfa::game::lua_pushnumber(L, static_cast<double>(g_mapIcons.size()));
+    return 1;
+}
+
+// rfg_map_icon(i) -> kind, picture, map_x, map_y, caption, description, on_world_map
+//   The i-th line (1 to the count) of map_icons.txt: kind "icon" (its picture, rfg_ui_map_icon_...),
+//   "place" (a named place, its name in caption), "player" (the player's icon: its picture and texts)
+//   or "text" (a hint of the world map: what it is in caption, its text in description); where it is
+//   on Guerrilla's world map picture, in its pixels (as rfg_map_view's map_x, map_y); what the world
+//   map's highlight box says of it; whether the world map shows it (the minimap shows every icon).
+//   Nothing for an i out of range.
+int __cdecl LuaMapIcon(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_mapIcons.size())) return 0;
+    const MapIcon& icon = g_mapIcons[index];
+    lua_pushstring(L, icon.kind.c_str());
+    lua_pushstring(L, icon.picture.c_str());
+    lua_pushnumber(L, icon.mapX);
+    lua_pushnumber(L, icon.mapY);
+    lua_pushstring(L, icon.caption.c_str());
+    lua_pushstring(L, icon.description.c_str());
+    lua_pushboolean(L, icon.onWorldMap);
+    return 7;
+}
+
+// rfg_map_icon_shown(i) -> whether the i-th line of map_icons.txt is shown now: a M.O.A.B. ("bomb") once
+//   its radio tags are found, everything else always.
+int __cdecl LuaMapIconShown(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    bool shown = index >= 0 && index < static_cast<int>(g_mapIcons.size());
+    if (shown && g_mapIcons[index].kind == "bomb") shown = g_bombsShown.count(g_mapIcons[index].pair) != 0;
+    lua_pushboolean(L, shown);
+    return 1;
+}
+
 // rfg_map_close(): closes the world map (its script's own close).
 int __cdecl LuaMapClose(lua_State*) {
-    if (g_mapOpen) rfa::Log("World map closed");
-    g_mapOpen = false;
+    CloseMap("its script");
     return 0;
+}
+
+// rfg_map_full() -> open, centre_x, centre_y, view, zoom_pct, district
+//   The world map's view: open; the world map picture's pixel in the middle of the screen; how many of
+//   its pixels the screen's height shows; Guerrilla's zoom (0 to 1); the district's name under the
+//   middle ("" outside them). Steps the map's keys first (see StepFullMap).
+int __cdecl LuaMapFull(lua_State* L) {
+    using namespace rfa::game;
+    StepFullMap(true);
+    const int column = static_cast<int>(std::floor(g_full.centreX / kZonePixels)) + kFirstZone;
+    const int row = static_cast<int>(std::floor(g_full.centreY / kZonePixels)) + kFirstZone;
+    auto district = g_districts.find(ZoneKey(column, row));
+    lua_pushboolean(L, g_mapOpen);
+    lua_pushnumber(L, g_full.centreX);
+    lua_pushnumber(L, g_full.centreY);
+    lua_pushnumber(L, ViewPixels());
+    lua_pushnumber(L, ZoomPercent());
+    lua_pushstring(L, district != g_districts.end() ? district->second.c_str() : "");
+    return 6;
+}
+
+// rfg_map_full_tiles() -> count; rfg_map_full_tile(i) -> column, row
+//   The zones under the world map's view whose own pictures are loaded (rfg_terr01_<column>_<row>_map),
+//   when it is zoomed in far enough to want them: how many (at most kFullMapTiles), then each (1 to the
+//   count; a C function has room for 20 values only, so not all at once).
+std::vector<std::pair<int, int>> g_fullMapTiles;
+
+int __cdecl LuaMapFullTiles(lua_State* L) {
+    using namespace rfa::game;
+    g_fullMapTiles.clear();
+    for (const auto& zone : FullMapZones())
+        if (ZoneReady(zone.first, zone.second)) g_fullMapTiles.push_back(zone);
+    lua_pushnumber(L, static_cast<double>(g_fullMapTiles.size()));
+    return 1;
+}
+
+int __cdecl LuaMapFullTile(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_fullMapTiles.size())) return 0;
+    lua_pushnumber(L, g_fullMapTiles[index].first);
+    lua_pushnumber(L, g_fullMapTiles[index].second);
+    return 2;
 }
 
 // ---- Guerrilla's data items
@@ -981,6 +1719,16 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_map_view", LuaMapView);
     rfa::game::lua_register(L, "rfg_map_tiles", LuaMapTiles);
     rfa::game::lua_register(L, "rfg_map_close", LuaMapClose);
+    rfa::game::lua_register(L, "rfg_map_icon_count", LuaMapIconCount);
+    rfa::game::lua_register(L, "rfg_map_icon", LuaMapIcon);
+    rfa::game::lua_register(L, "rfg_map_icon_shown", LuaMapIconShown);
+    rfa::game::lua_register(L, "rfg_map_full", LuaMapFull);
+    rfa::game::lua_register(L, "rfg_map_full_tiles", LuaMapFullTiles);
+    rfa::game::lua_register(L, "rfg_map_full_tile", LuaMapFullTile);
+    rfa::game::lua_register(L, "rfg_station_prompt", LuaStationPrompt);
+    rfa::game::lua_register(L, "rfg_shop", LuaShop);
+    rfa::game::lua_register(L, "rfg_shop_item", LuaShopItem);
+    rfa::game::lua_register(L, "rfg_shop_text", LuaShopText);
     rfa::game::lua_register(L, "rfg_dataitem_make", LuaDataItemMake);
     rfa::game::lua_register(L, "rfg_dataitem_set", LuaDataItemSet);
     rfa::game::lua_register(L, "rfg_string_find", LuaStringFind);
@@ -1006,18 +1754,26 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         Document map{g_mapDocument};
         map.whileOpen = true;  // loaded with the HUD, so it opens at once; drawn only while open
         g_documents.push_back(map);
-        for (int column = kFirstZone; column < kFirstZone + kZonesAcross; ++column)
-            for (int row = kFirstZone; row < kFirstZone + kZonesAcross; ++row) {
-                // Listed to be drawn like the others (they draw nothing: one empty group). Unlisted
-                // and without a script, the game closed them as soon as they had loaded (2026-11-05).
-                Document tiles{ZoneDocument(column, row)};
-                tiles.zone = ZoneKey(column, row);
-                g_documents.push_back(tiles);
-            }
+        // Guerrilla's prompts (its use prompt at the safehouses' stations) and its upgrade screen, loaded with
+        // the HUD; the screen drawn only while a shop is open.
+        if (!FindDocument("rfg_ui_messages")) g_documents.push_back({"rfg_ui_messages"});
+        Document shop{"rfg_ui_upgrades"};
+        shop.whileShop = true;
+        g_documents.push_back(shop);
+        for (const char* set : kZoneSets) {
+            // Listed to be drawn like the others (they draw nothing: one empty group). Unlisted and
+            // without a script, the game closed such documents as soon as they had loaded (2026-11-05).
+            Document tiles{set};
+            tiles.zoneSet = true;
+            g_documents.push_back(tiles);
+        }
         const std::wstring key = rfa::IniString(L"GuerrillaHud", L"MapKey", L"Tab");
         g_mapKey = key.empty() ? 0 : KeyCode(key);
         if (!key.empty() && !g_mapKey) rfa::Log("[GuerrillaHud] MapKey=%ls isn't a key this mod knows (a letter, a digit, Tab, F1-F12)", key.c_str());
         ReadDistricts();
+        ReadMapIcons();
+        ReadRadioTags();
+        ReadSafehouses();
         EnlargeInterfacePool();
     }
     if (g_worlds.empty() || g_documents.empty()) {

@@ -837,19 +837,22 @@ opened and closed with `MapKey=`).
   driving. The district's name above it comes from Guerrilla's districts (`territories.xtbl`) and
   their names in its strings (`territories_us.le_strings`), written by the builder to
   `mods\guerrilla_hud\districts.txt`.
-- The zones' own pictures (13 MB in all) come as Guerrilla keeps them, each in a container of its
-  own: a document per zone that holds nothing but that texture (`rfg_ui_map_<col>_<row>`, 128 KB);
-  the mod loads a zone's while the player is within 250 m of it, and unloads it 20 s after.
+- The zones' own pictures (13 MB in all), each as Guerrilla made it, come in four documents by
+  quarter of the world (`rfg_ui_map_zones_nw`, `_ne`, `_sw`, `_se`), which the mod loads with the HUD
+  and keeps until the next level load. Guerrilla streamed each with its zone, but Armageddon's
+  interface keeps its documents' memory as a stack: unloading one out of order frees the ones loaded
+  after it while they're still shown, and the game freezes. A zone's picture is shown a second after
+  the game calls its document ready, once its texture is surely in.
 - **The interface's limits**, raised by the mod in plain C++ before the game starts: the project's
   documents (a fixed array of 128 records, `0x133A5F8`, made by `0x56A7C0`; the reader's cap at
-  `0x566BC6`) to 256 (Armageddon's 115 and ours 107); documents open at once (a pool of 10 records,
-  `0x566850`) to 40; the slots documents are loaded into (45, `0x28C3F48`; every document inside
+  `0x566BC6`) to 256 (Armageddon's 115 and ours 9); documents open at once (a pool of 10 records,
+  `0x566850`) to 64; the slots documents are loaded into (45, `0x28C3F48`; every document inside
   another takes one too, and with none free a menu page waits forever) to 120, by moving the array
   (its 14 references and its one-byte counts); the interface's lists of document handles (16 each,
   `0x133A1A0`) to 256; the pools every element comes from (one per type: bitmaps 1,300, tweens 820,
   ...; an element that doesn't fit is left out, and a menu page missing its parts can crash) to
   three times as many, with their memory pool "vint_perm" from 640 KB to 4 MB; and the interface's
-  memory (`0xA45600`: 10 MB) to 32 MB, which the game's own menus and loading screens share with
+  memory (`0xA45600`: 10 MB) to 48 MB, which the game's own menus and loading screens share with
   Guerrilla's map.
 - Script errors in the interface's Lua (which the game otherwise only keeps, so a broken menu just
   stays empty) are written to `logs\rfa_mods.log` by the loader ("Lua error: ...").
