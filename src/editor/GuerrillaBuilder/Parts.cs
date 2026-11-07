@@ -169,6 +169,11 @@ static class Parts
         log.Line($"Building:   {string.Join(", ", parts.Select(Name))}");
         var record = new Record(setup.WorldFolder);
         var clock = Stopwatch.StartNew();
+        // The vehicles' turrets name Guerrilla's turret weapons, which the weapons part makes; and the
+        // weapons part makes the turrets' part items from the list the vehicles part writes. So on a
+        // first build, where the vehicles run before there are any weapons, the vehicles get no
+        // turrets: the two are built once more at the end, now that each has what the other made.
+        bool weaponsBuiltBefore = IsBuilt(setup, Part.Weapons);
         int number = 0;
         foreach (var part in parts)
         {
@@ -178,6 +183,14 @@ static class Parts
             log.Line($"==== {Name(part)} ({number} of {parts.Count}) ====");
             if (!Run(setup, part, options, log, record)) return false;
         }
+        if (!weaponsBuiltBefore && parts.Contains(Part.Vehicles) && parts.Contains(Part.Weapons))
+            foreach (var part in new[] { Part.Vehicles, Part.Weapons })
+            {
+                log.Stage?.Invoke($"Building {Noun(part)} again, for the vehicles' turrets...");
+                log.Line("");
+                log.Line($"==== {Name(part)} again (a first build: the vehicles' turrets need the weapons, and the weapons the turrets' list) ====");
+                if (!Run(setup, part, options, log, record)) return false;
+            }
         // Every table written, checked as the game's reader will take it (see TableCheck).
         log.Stage?.Invoke("Checking the tables...");
         log.Line("");
