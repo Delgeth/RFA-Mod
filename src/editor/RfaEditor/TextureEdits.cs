@@ -37,7 +37,7 @@ static class TextureEdits
 
     /// <summary>Whether the game will use a replaced version of this texture pair.</summary>
     public static bool IsReplaced(Workspace workspace, PegLocation at) =>
-        workspace.OverrideFor(at.Archive, at.Container ?? at.DataName) != null;
+        workspace.IsChanged(at.Archive, at.Container ?? at.DataName);
 
     /// <summary>Replaces one texture's pixels (all mip levels). Returns what was written, for the status bar.</summary>
     public static string Replace(Workspace workspace, PegLocation at, PegTexture texture, byte[] newData)

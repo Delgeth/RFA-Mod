@@ -9,6 +9,7 @@
 #include "menus.h"
 #include <DbgHelp.h>
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <vector>
 
@@ -379,6 +380,7 @@ size_t g_overrideCount = 0;
 struct ArchiveFile {
     std::string name;
     DWORD size;
+    DWORD compressedSize;
 };
 
 // The files inside a .vpp_pc archive (format version 6), with their sizes. Layout: a 2 KB header
@@ -413,7 +415,7 @@ bool ReadArchiveDirectory(const std::wstring& archive, std::vector<ArchiveFile>&
     if (!ok) return false;
     for (const Entry& entry : directory) {
         if (entry.nameOffset >= names.size()) return false;
-        files.push_back({names.c_str() + entry.nameOffset, entry.size});
+        files.push_back({names.c_str() + entry.nameOffset, entry.size, entry.compressedSize});
     }
     return true;
 }
@@ -499,6 +501,91 @@ void FindOverrides(const std::wstring& root, const std::wstring& relative) {
         const std::wstring path = relative.empty() ? name : relative + L"\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) FindOverrides(root, path);
         else if (_wcsnicmp(name.c_str(), L"README", 6) != 0) AddOverride(root, path);
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+}
+
+// edits\ does for the archives the mod adds (new archives in overrides\, such as the Guerrilla
+// world's build\pc\cache\rfg_l1.vpp_pc, which the Guerrilla builder made) what overrides\ does for
+// the game's: edits\build\pc\cache\rfg_l1.vpp_pc\1h_c0312.str2_pc replaces that archive's copy of
+// 1h_c0312.str2_pc. (overrides\ can't hold them: the archive itself is a file there, with the name the
+// folder would have.) The editor writes its changes to those archives here, so the archives
+// themselves stay as they were built. Beside each, <file>.rfabase gives the size and compressed size
+// the archive's copy had when the change was made: if the archive was built again since and its copy
+// is different, the change is skipped (it was made to the old one).
+void AddEdit(const std::wstring& root, const std::wstring& relative) {
+    const std::string shown = "edits\\" + Narrow(relative);
+    const size_t slash = relative.find_last_of(L'\\');
+    const std::wstring archive = slash == std::wstring::npos ? L"" : relative.substr(0, slash);
+    const std::string name = Narrow(relative.substr(slash + 1));
+    if (name.size() > 8 && _stricmp(name.c_str() + name.size() - 8, ".rfabase") == 0) return;  // (read with its file)
+    if (archive.size() < 7 || _wcsicmp(archive.c_str() + archive.size() - 7, L".vpp_pc") != 0) {
+        rfa::Log("Edit %s skipped: it isn't in an archive's folder", shown.c_str());
+        return;
+    }
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    if (GetFileAttributesW((gameDir + L"\\" + archive).c_str()) != INVALID_FILE_ATTRIBUTES) {
+        rfa::Log("Edit %s skipped: %ls is the game's archive; its files are overridden in overrides\\", shown.c_str(), archive.c_str());
+        return;
+    }
+    std::vector<ArchiveFile> files;
+    if (!ReadArchiveDirectory(rfa::RootDir() + L"\\overrides\\" + archive, files)) {
+        rfa::Log("Edit %s skipped: there is no archive overrides\\%ls", shown.c_str(), archive.c_str());
+        return;
+    }
+    const std::string key = Lower(name);
+    auto original = std::find_if(files.begin(), files.end(), [&](const ArchiveFile& f) { return Lower(f.name) == key; });
+    if (original == files.end()) {
+        rfa::Log("Edit %s skipped: overrides\\%ls has no file named %s", shown.c_str(), archive.c_str(), name.c_str());
+        return;
+    }
+    const std::wstring path = root + L"\\" + relative;
+    // Made to the archive as it is now? (Its copy's sizes then, in <file>.rfabase.)
+    std::string base;
+    if (ReadWholeFile(path + L".rfabase", base)) {
+        unsigned long size = 0, compressed = 0;
+        if (sscanf_s(base.c_str(), "%lu %lu", &size, &compressed) == 2 && (size != original->size || compressed != original->compressedSize)) {
+            rfa::Log("Edit %s skipped: the archive was built again since this change was made (its %s is another now); "
+                     "make the change again in the editor", shown.c_str(), name.c_str());
+            return;
+        }
+    }
+    if (auto sameName = g_overrides.find(key); sameName != g_overrides.end()) {
+        for (const Override& other : sameName->second) {
+            if (other.archiveSize == original->size) {
+                rfa::Log("Edit %s skipped: %s already replaces the same %s", shown.c_str(), other.relative.c_str(), name.c_str());
+                return;
+            }
+        }
+    }
+    const std::string ansiPath = NarrowExact(path);
+    if (ansiPath.empty() || ansiPath.size() >= sizeof(rfa::game::FileFindResult::name)) {
+        rfa::Log("Edit %s skipped: the game can't open files at this path (it must be shorter than 256 "
+                 "characters, without letters outside your Windows language)", shown.c_str());
+        return;
+    }
+    Override& added = g_overrides[key].emplace_back();
+    added.path = path;
+    added.ansiPath = ansiPath;
+    added.relative = shown;
+    added.archiveSize = original->size;
+    ++g_overrideCount;
+    rfa::Log("Edit: %s", shown.c_str());
+}
+
+// Walks edits\ (and its subfolders), as FindOverrides does overrides\.
+void FindEdits(const std::wstring& root, const std::wstring& relative) {
+    WIN32_FIND_DATAW fd;
+    const std::wstring folder = relative.empty() ? root : root + L"\\" + relative;
+    HANDLE find = FindFirstFileW((folder + L"\\*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        const std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        const std::wstring path = relative.empty() ? name : relative + L"\\" + name;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) FindEdits(root, path);
+        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0) AddEdit(root, path);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
 }
@@ -786,6 +873,7 @@ void InstallOverrides() {
         return;
     }
     FindOverrides(rfa::RootDir() + L"\\overrides", L"");
+    FindEdits(rfa::RootDir() + L"\\edits", L"");  // changes to the archives the mod adds (the Guerrilla world's)
     g_logLookups = rfa::IniInt(L"Loader", L"LogLookups", 0) != 0;
     if (g_logLookups) {
         rfa::Log("Logging lookups of level files ([Loader] LogLookups=1)");

@@ -641,6 +641,128 @@ public sealed class TerrainSubzone
         return (output.ToArray(), roadData.ToArray());
     }
 
+    /// <summary>
+    /// A copy of a sub-zone (version 42) with its road decals moved up or down by how far the ground
+    /// moved under each of their vertices (<paramref name="by"/>: metres at a place x, z in the
+    /// world), and their submeshes' boxes widened to hold them. Both files keep their sizes. For the
+    /// level editor's terrain sculptor, so roads stay on the ground. Returns how many vertices moved.
+    /// </summary>
+    public static (byte[] Header, byte[] Data, int Moved) WithRoadsMoved(byte[] header, byte[] data, Func<float, float, float> by)
+    {
+        var subzone = new TerrainSubzone(header, data);
+        if (subzone.FormatVersion != Version || subzone.PatchCount == 0) return (header, data, 0);
+        int fields = (0x18 + BitConverter.ToInt32(header, 0x14) + 3) & ~3;
+        int block = Enumerable.Range((fields + 0x48) / 4, (header.Length - fields - 0x48) / 4).Select(i => i * 4)
+                              .First(a => ModelFile.IsMeshBlock(header, a));
+        byte[] h = (byte[])header.Clone(), d = (byte[])data.Clone();
+        int moved = 0;
+        foreach (RoadDecalSections road in Sections(header, fields, block, guerrilla: false).Decals)
+        {
+            var origin = new Vector3(F32(header, road.Record + 0x1C), F32(header, road.Record + 0x20), F32(header, road.Record + 0x24));
+            int at = road.Mesh;
+            int submeshes = (int)U32(header, at + 0x14), table = at + (int)U32(header, at + 0x18), count = (int)U32(header, at + 0x1C);
+            int size = header[at + 0x20], vertices = road.Data + (int)U32(header, at + 0x3C);
+            if (size < 12 || vertices + count * size > d.Length) continue;
+            float low = float.MaxValue, high = float.MinValue;
+            for (int v = 0; v < count; v++)
+            {
+                int p = vertices + v * size;
+                float x = origin.X + F32(d, p), y = F32(d, p + 4), z = origin.Z + F32(d, p + 8);
+                float up = by(x, z);
+                if (MathF.Abs(up) > 1e-4f)
+                {
+                    y += up;
+                    BitConverter.TryWriteBytes(d.AsSpan(p + 4), y);
+                    moved++;
+                }
+                low = MathF.Min(low, y);
+                high = MathF.Max(high, y);
+            }
+            // The submeshes' boxes (48 bytes each, from the record's position: lowest and highest at +16) to hold them.
+            for (int sm = 0; sm < submeshes && count > 0; sm++)
+            {
+                int box = table + sm * 48 + 16;
+                if (low < F32(h, box + 4)) BitConverter.TryWriteBytes(h.AsSpan(box + 4), low);
+                if (high > F32(h, box + 16)) BitConverter.TryWriteBytes(h.AsSpan(box + 16), high);
+            }
+        }
+        return (h, d, moved);
+    }
+
+    /// <summary>
+    /// A copy of a sub-zone (version 42, with ground) with its vertices at new heights and with new
+    /// normals (one each, in the vertices' order; their places on the grid, the triangles and all
+    /// else kept), and the boxes made to hold them as Write lays them out: the header's box, each patch's middle, box and bounding sphere, and each
+    /// submesh's box (the game culls the ground by them). Both files keep their sizes. For the level
+    /// editor's terrain sculptor.
+    /// </summary>
+    public static (byte[] Header, byte[] Data) WithGround(byte[] header, byte[] data, IReadOnlyList<float> heights, IReadOnlyList<Vector3> normals)
+    {
+        var subzone = new TerrainSubzone(header, data);
+        if (subzone.FormatVersion != Version || subzone.PatchCount == 0) throw new NotSupportedException("only Armageddon's sub-zones (version 42) with ground can be changed");
+        if (heights.Count != subzone.Positions.Length || normals.Count != subzone.Positions.Length)
+            throw new ArgumentException($"{heights.Count} heights for {subzone.Positions.Length} vertices");
+        int fields = (0x18 + BitConverter.ToInt32(header, 0x14) + 3) & ~3;
+        int block = Enumerable.Range((fields + 0x48) / 4, (header.Length - fields - 0x48) / 4).Select(i => i * 4)
+                              .First(a => ModelFile.IsMeshBlock(header, a));
+        int submeshCount = (int)U32(header, block + 0x14), submeshTable = block + (int)U32(header, block + 0x18);
+        int vertexCount = (int)U32(header, block + 0x1C), vertexOffset = (int)U32(header, block + 0x3C);
+        if (vertexCount != subzone.Positions.Length || vertexOffset + vertexCount * 8 > data.Length)
+            throw new InvalidDataException("the sub-zone's vertices aren't where its mesh block says");
+        byte[] h = (byte[])header.Clone(), d = (byte[])data.Clone();
+        var positions = new Vector3[vertexCount];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            int p = vertexOffset + v * 8;
+            short stored = (short)Math.Clamp(MathF.Round(heights[v] * 64), short.MinValue, short.MaxValue);
+            BitConverter.TryWriteBytes(d.AsSpan(p), stored);
+            Vector3 n = normals[v].LengthSquared() > 1e-12f ? Vector3.Normalize(normals[v]) : Vector3.UnitY;
+            d[p + 4] = NormalByte(n.X); d[p + 5] = NormalByte(n.Y); d[p + 6] = NormalByte(n.Z);
+            positions[v] = new Vector3(subzone.Positions[v].X, stored / 64f, subzone.Positions[v].Z);
+        }
+
+        // The boxes. The patches are the 96-byte records before the mesh block, the first with the
+        // identity rotation and number 0 (as Write finds it); each has its submesh (48 bytes, box at +16).
+        int firstPatch = Enumerable.Range((fields + 0x48) / 4, (block - fields - 0x48) / 4).Select(i => i * 4)
+                                   .FirstOrDefault(a => U32(header, a + 48) == 0 && F32(header, a + 12) == 1 && F32(header, a + 28) == 1 && F32(header, a + 44) == 1, -1);
+        Vector3 allMin = new(float.MaxValue), allMax = new(float.MinValue);
+        void Put(int at, float value) => BitConverter.TryWriteBytes(h.AsSpan(at), value);
+        for (int patch = 0; patch < subzone.PatchTriangles.Count; patch++)
+        {
+            int[] triangles = subzone.PatchTriangles[patch];
+            if (triangles.Length == 0) continue;
+            Vector3 min = new(float.MaxValue), max = new(float.MinValue);
+            foreach (int v in triangles)
+            {
+                min = Vector3.Min(min, positions[v]);
+                max = Vector3.Max(max, positions[v]);
+            }
+            allMin = Vector3.Min(allMin, min);
+            allMax = Vector3.Max(allMax, max);
+            Vector3 middle = (min + max) / 2, half = (max - min) / 2;
+            int record = firstPatch + patch * 96;
+            if (firstPatch >= 0 && record + 96 <= block && F32(header, record + 12) == 1 && F32(header, record + 28) == 1 && F32(header, record + 44) == 1)
+            {
+                Put(record, middle.X); Put(record + 4, middle.Y); Put(record + 8, middle.Z);
+                Put(record + 52, -half.X); Put(record + 56, -half.Y); Put(record + 60, -half.Z);
+                Put(record + 64, half.X); Put(record + 68, half.Y); Put(record + 72, half.Z);
+                Put(record + 76, 0); Put(record + 80, 0); Put(record + 84, 0); Put(record + 88, half.Length());
+            }
+            if (patch < submeshCount)
+            {
+                int submesh = submeshTable + patch * 48;
+                Put(submesh + 16, -half.X); Put(submesh + 20, -half.Y); Put(submesh + 24, -half.Z);
+                Put(submesh + 28, half.X); Put(submesh + 32, half.Y); Put(submesh + 36, half.Z);
+            }
+        }
+        if (allMin.X <= allMax.X)
+        {
+            float[] box = [allMin.X, allMin.Y, allMin.Z, allMax.X, allMax.Y, allMax.Z, (allMin.X + allMax.X) / 2, (allMin.Y + allMax.Y) / 2, (allMin.Z + allMax.Z) / 2];
+            for (int i = 0; i < box.Length; i++) Put(fields + 0x24 + i * 4, box[i]);
+        }
+        return (h, d);
+    }
+
     static byte NormalByte(float value) => (byte)Math.Clamp(MathF.Round((value + 1) * 127.5f), 0, 255);
 
     /// <summary>

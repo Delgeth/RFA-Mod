@@ -11,6 +11,21 @@ namespace RfaEditor;
 /// Overrides work as in the loader: overrides\&lt;archive path&gt;\&lt;file&gt; replaces that archive's
 /// copy of the file, and also any other archive's copy of the same size (identical copies, such as
 /// each table in both table.vpp_pc and misc.vpp_pc).
+///
+/// Archives that aren't the game's but ours (new ones in overrides\, such as the Guerrilla world's
+/// rfg_l1.vpp_pc, which the Guerrilla builder made) have their changes in edits\ instead (beside
+/// overrides\, laid out the same way: edits\build\pc\cache\rfg_l1.vpp_pc\1h_c0312.str2_pc), which
+/// the loader uses as it does overrides, so the archives stay as they were built. Beside each,
+/// &lt;file&gt;.rfabase notes the size and compressed size the archive's copy had: if the world is built
+/// again and its copy is different, the change was made to the old one, and the loader and the
+/// editor leave it out.
+///
+/// Older versions of the editor changed those archives themselves (see
+/// <see cref="Packfile.RewriteArchive"/>), keeping each file's copy from before in editor_originals\;
+/// those changes are still read and put back, and a file new to an archive (which an edit can't
+/// add) is still added that way. Building the Guerrilla world again writes the archives anew: then
+/// the kept copies are stale, and are forgotten (each archive's size and time are noted when the
+/// editor writes it).
 /// </summary>
 sealed class Workspace
 {
@@ -23,6 +38,25 @@ sealed class Workspace
     public string GameFolder { get; }
     public string ModFolder { get; }
     public string OverridesFolder => Path.Combine(ModFolder, "overrides");
+    /// <summary>Where the editor keeps our archives' own copies of the files it changed in them.</summary>
+    public string OriginalsFolder => Path.Combine(ModFolder, "editor_originals");
+    /// <summary>Where changes to our own archives go (see the class): edits\ beside overrides\.</summary>
+    public string EditsFolder => Path.Combine(ModFolder, "edits");
+    const string BaseSuffix = ".rfabase";  // beside an edit: the sizes of the archive's copy it was made to
+
+    string EditPath(string archive, string fileName) => Path.Combine(EditsFolder, archive, fileName);
+
+    /// <summary>The edit of a file of one of our archives, or null: none, or made to a copy the archive no longer has (built again since).</summary>
+    string? EditFor(string archive, string fileName)
+    {
+        string path = EditPath(archive, fileName);
+        if (!File.Exists(path)) return null;
+        string basePath = path + BaseSuffix;
+        if (!File.Exists(basePath)) return path;
+        PackfileEntry? now = Archive(archive).Find(fileName);
+        string[] sizes = File.ReadAllText(basePath).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return now != null && sizes.Length == 2 && sizes[0] == now.Size.ToString() && sizes[1] == now.CompressedSize.ToString() ? path : null;
+    }
 
     public Workspace(string gameFolder, string modFolder)
     {
@@ -63,8 +97,12 @@ sealed class Workspace
     public string ArchivePath(string archive) => IsNewArchive(archive) ? Path.Combine(OverridesFolder, archive) : Path.Combine(GameFolder, archive);
 
     /// <summary>True for an archive in overrides\ that the game hasn't.</summary>
-    public bool IsNewArchive(string archive) =>
-        !File.Exists(Path.Combine(GameFolder, archive)) && File.Exists(Path.Combine(OverridesFolder, archive));
+    public bool IsNewArchive(string archive)
+    {
+        if (isNew.TryGetValue(archive, out bool known)) return known;
+        return isNew[archive] = !File.Exists(Path.Combine(GameFolder, archive)) && File.Exists(Path.Combine(OverridesFolder, archive));
+    }
+    readonly Dictionary<string, bool> isNew = new(StringComparer.OrdinalIgnoreCase);
 
     IEnumerable<string> NewArchives()
     {
@@ -88,16 +126,28 @@ sealed class Workspace
         return pack;
     }
 
-    /// <summary>The game's own copy of a file in an archive (never the override).</summary>
+    /// <summary>The game's own copy of a file in an archive (never the override). For one of our archives, its copy from before the editor changed it.</summary>
     public byte[] ReadOriginal(string archive, string fileName)
     {
+        if (IsNewArchive(archive) && KeptOriginal(archive, fileName) is string kept)
+            return File.Exists(kept) ? File.ReadAllBytes(kept) : throw new FileNotFoundException($"{archive} had no {fileName} before the editor added it");
         Packfile pack = Archive(archive);
         return pack.Read(pack.Find(fileName) ?? throw new FileNotFoundException($"{archive} has no {fileName}"));
     }
 
     /// <summary>A file in an archive as the game will see it: the override if one applies, else the game's copy.</summary>
-    public byte[] Read(string archive, string fileName) =>
-        OverrideFor(archive, fileName) is string overridden ? File.ReadAllBytes(overridden) : ReadOriginal(archive, fileName);
+    public byte[] Read(string archive, string fileName)
+    {
+        if (IsNewArchive(archive))
+        {
+            if (pending.TryGetValue(archive, out var waiting) && waiting.TryGetValue(fileName, out byte[]? soon))
+                return soon ?? throw new FileNotFoundException($"{archive} has no {fileName}");
+            if (EditFor(archive, fileName) is string edit) return File.ReadAllBytes(edit);
+            Packfile own = Archive(archive);
+            return own.Read(own.Find(fileName) ?? throw new FileNotFoundException($"{archive} has no {fileName}"));
+        }
+        return OverrideFor(archive, fileName) is string overridden ? File.ReadAllBytes(overridden) : ReadOriginal(archive, fileName);
+    }
 
     /// <summary>A .str2_pc container in an archive, as the game will see it (your rebuilt one if you
     /// have one). The last one opened is kept.</summary>
@@ -143,6 +193,7 @@ sealed class Workspace
     /// </summary>
     public string? OverrideFor(string archive, string fileName)
     {
+        if (IsNewArchive(archive)) return null;  // ours: changed in place (see IsChanged)
         overrides ??= ScanOverrides();
         if (!overrides.TryGetValue(fileName, out List<string>? paths)) return null;
         string? own = paths.FirstOrDefault(p => ArchiveOf(p).Equals(archive, StringComparison.OrdinalIgnoreCase));
@@ -151,13 +202,35 @@ sealed class Workspace
         return paths.FirstOrDefault(p => TryArchiveSize(ArchiveOf(p), fileName) == size);
     }
 
-    /// <summary>Writes an override for this archive's copy of a file.</summary>
+    /// <summary>
+    /// Whether the game will see a changed copy of a file: an override of the game's, or a file the
+    /// editor changed in one of our archives.
+    /// </summary>
+    public bool IsChanged(string archive, string fileName) =>
+        IsNewArchive(archive) ? EditFor(archive, fileName) != null || KeptOriginal(archive, fileName) != null : OverrideFor(archive, fileName) != null;
+
+    /// <summary>
+    /// Writes an override for this archive's copy of a file. In one of our archives it goes to
+    /// edits\ instead, with the sizes of the archive's copy beside it (see the class); a file new to
+    /// one of our archives is added to the archive itself (an edit can only replace a file), and the
+    /// archive's path returned.
+    /// </summary>
     public string WriteOverride(string archive, string fileName, byte[] data)
     {
-        // The archive's own file is where its folder of overrides would go.
         if (IsNewArchive(archive))
-            throw new InvalidOperationException($"{Path.GetFileName(archive)} isn't the game's: it was added in {RelativeToMod(Path.GetDirectoryName(ArchivePath(archive))!)}, " +
-                                                $"so its files can't be overridden. Change what made it instead.");
+        {
+            if (Archive(archive).Find(fileName) is not { } own)
+            {
+                ChangeInOwnArchive(archive, fileName, data);
+                return ArchivePath(archive);
+            }
+            string edit = EditPath(archive, fileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(edit)!);
+            File.WriteAllBytes(edit, data);
+            File.WriteAllText(edit + BaseSuffix, $"{own.Size} {own.CompressedSize}");
+            Changed();
+            return edit;
+        }
         string path = OverridePath(archive, fileName);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, data);
@@ -168,7 +241,118 @@ sealed class Workspace
     /// <summary>Deletes the override the game would use for this archive's copy of a file, if any.</summary>
     public void DeleteOverride(string archive, string fileName)
     {
+        if (IsNewArchive(archive))
+        {
+            string edit = EditPath(archive, fileName);
+            if (File.Exists(edit) || File.Exists(edit + BaseSuffix))
+            {
+                File.Delete(edit);
+                File.Delete(edit + BaseSuffix);
+                Changed();
+            }
+            // A change made by an older version, in the archive itself: its copy from before back.
+            if (KeptOriginal(archive, fileName) is not string kept) return;
+            ChangeInOwnArchive(archive, fileName, File.Exists(kept) ? File.ReadAllBytes(kept) : null, putBack: true);
+            return;
+        }
         if (OverrideFor(archive, fileName) is string path) File.Delete(path);
+        Changed();
+    }
+
+    // ---- Our own archives (see the class) ------------------------------------------------------
+
+    readonly Dictionary<string, Dictionary<string, byte[]?>> pending = new(StringComparer.OrdinalIgnoreCase);  // archive -> file -> bytes (null: taken out)
+    readonly List<(string Archive, string File)> putBack = [];  // kept copies to forget once their archive is written
+    int batches;
+
+    /// <summary>
+    /// Holds back writing our archives until the returned scope ends, so a save that changes several
+    /// files in one archive (a container and its asset list) writes it once: they are big.
+    /// </summary>
+    public IDisposable Batch()
+    {
+        batches++;
+        return new BatchScope(this);
+    }
+
+    sealed class BatchScope(Workspace workspace) : IDisposable
+    {
+        bool done;
+        public void Dispose()
+        {
+            if (done) return;
+            done = true;
+            if (--workspace.batches == 0) workspace.WriteOwnArchives();
+        }
+    }
+
+    string OriginalsOf(string archive) => Path.Combine(OriginalsFolder, archive);
+    string StampOf(string archive) => Path.Combine(OriginalsOf(archive), ".written");
+    const string AbsentSuffix = ".absent";  // a file the editor added to the archive
+
+    /// <summary>The kept copy of a file of one of our archives (or a path ending .absent: it had none), or null if the editor hasn't changed it.</summary>
+    string? KeptOriginal(string archive, string fileName)
+    {
+        ForgetStaleOriginals(archive);
+        string kept = Path.Combine(OriginalsOf(archive), fileName);
+        return File.Exists(kept) ? kept : File.Exists(kept + AbsentSuffix) ? kept + AbsentSuffix : null;
+    }
+
+    /// <summary>The kept copies are of the archive as the editor last wrote it; if it was written since (built again), they are forgotten.</summary>
+    void ForgetStaleOriginals(string archive)
+    {
+        string folder = OriginalsOf(archive), stamp = StampOf(archive);
+        if (!Directory.Exists(folder)) return;
+        string path = ArchivePath(archive);
+        if (File.Exists(stamp) && File.Exists(path) && File.ReadAllText(stamp).Trim() == Stamp(path)) return;
+        if (File.Exists(stamp) || !File.Exists(path) || Directory.EnumerateFiles(folder).Any())
+            Directory.Delete(folder, recursive: true);
+    }
+
+    static string Stamp(string path)
+    {
+        var info = new FileInfo(path);
+        return $"{info.Length} {info.LastWriteTimeUtc.Ticks}";
+    }
+
+    void ChangeInOwnArchive(string archive, string fileName, byte[]? data, bool putBack = false)
+    {
+        if (!putBack && KeptOriginal(archive, fileName) == null)
+        {
+            // Keep the archive's own copy (as it is on disk) before the first change.
+            string kept = Path.Combine(OriginalsOf(archive), fileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(kept)!);
+            Packfile own = Archive(archive);
+            if (own.Find(fileName) is { } entry) File.WriteAllBytes(kept, own.Read(entry));
+            else File.WriteAllBytes(kept + AbsentSuffix, []);
+            if (!File.Exists(StampOf(archive))) File.WriteAllText(StampOf(archive), Stamp(ArchivePath(archive)));
+        }
+        if (!pending.TryGetValue(archive, out var files)) pending[archive] = files = new(StringComparer.OrdinalIgnoreCase);
+        files[fileName] = data;
+        if (putBack) this.putBack.Add((archive, fileName));
+        lastContainer = null;
+        if (batches == 0) WriteOwnArchives();
+    }
+
+    /// <summary>Writes the changes held back for our archives (see <see cref="Batch"/>).</summary>
+    void WriteOwnArchives()
+    {
+        foreach (var (archive, files) in pending)
+        {
+            string path = ArchivePath(archive);
+            archives.Remove(archive);  // its directory changes
+            Packfile.RewriteArchive(path, files);
+            Directory.CreateDirectory(OriginalsOf(archive));
+            File.WriteAllText(StampOf(archive), Stamp(path));
+        }
+        pending.Clear();
+        foreach (var (archive, file) in putBack)
+        {
+            string kept = Path.Combine(OriginalsOf(archive), file);
+            File.Delete(kept);
+            File.Delete(kept + AbsentSuffix);
+        }
+        putBack.Clear();
         Changed();
     }
 
@@ -177,6 +361,7 @@ sealed class Workspace
 
     void Changed()
     {
+        isNew.Clear();
         overrides = null;
         allArchives = null;
         lastContainer = null;

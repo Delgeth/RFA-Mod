@@ -215,14 +215,90 @@ the other. Lines keep the same width on the screen near and far. You can't edit 
 - **Show the whole zone** frames the zone's objects, leaving out the few far-off ones some zones
   have.
 
+### With an Xbox controller
+
+Any XInput controller (Xbox 360, One or Series; plugged in or wireless) works while the level
+editor's tab shows and its window is in front. The log lists the controls when one connects. A
+reticle in the middle of the view shows what the buttons act on, with its name below: white on
+nothing, blue on an object, grey on another file's object (which can't be moved from this one),
+orange and closed in while holding one.
+
+- **Left stick** moves, **right stick** looks around, **LB** / **RB** fly down and up, **LT** goes
+  faster (the harder you press), and the **right stick pressed** zooms in while held.
+- **A** grabs what the reticle is on, in one press, and **A** again lets go of it (one step to
+  undo). While held it stays where it is from the view as you move and look (Snap applies).
+- **Hold RT** while holding an object to work on it instead of moving the view: the **left stick**
+  pushes it away or pulls it nearer, and the **right stick** turns it (left / right about its
+  up axis, up / down about the view's side to side; in 15° steps with Snap on).
+- **B** while holding puts it back where you grabbed it. **D-pad left / right** turn the held object
+  (or the one the reticle is on) 15°.
+- **X** on an object duplicates it and puts the copy in your hand. **X** on nothing opens the
+  **Add** list: the **D-pad** or **left stick** scroll it, **LB** / **RB** a page at a time, **A** goes
+  into a folder of chunks or adds the choice in your hand, **B** goes back up (or closes it). (Finding a chunk by name still needs the keyboard.)
+- **Y** deletes the object the reticle is on (or the one held).
+- **B** (holding nothing) switches to the terrain sculptor, and back.
+- **D-pad up** turns Snap on and off, the **left stick pressed** turns Magnets on and off, **D-pad
+  down** looks at the object the reticle is on.
+- **View** (Back) undoes, **Menu** (Start) saves.
+- In the terrain sculptor: **RT** sculpts where the middle of the view is (as hard as you press),
+  **LT** does the opposite (lowers instead of raising), **A** changes the brush (raise, lower, smooth,
+  flatten), **D-pad left / right** its size, **up / down** its strength, the **left stick pressed**
+  goes faster, **B** goes back to moving objects.
+
+### Sculpting the ground
+
+**Sculpt** (T, or the mountain button in the toolbar) shapes the zone's ground. An orange ring shows
+the brush on the ground.
+
+- Hold the left mouse button and move it to sculpt. **Raise** and **Lower** push the ground up and
+  down (Shift does the opposite), **Smooth** evens it out, and **Flatten** levels it at the height
+  where the stroke began. Each stroke is one step to undo.
+- **[** and **]**, or the Radius slider, change the brush's size; Strength is how fast it works.
+- Strokes carry on across zones: the sculptor holds the ground of the zones around this one too,
+  so a stroke near an edge shapes both sides of it the same (Smooth evens out over the edge), and
+  you can sculpt the ground all round the zone.
+- Saving writes, for every zone you changed, its height field (`<zone>.cterrain_pc`, which the
+  game's collision and physics use), its **far-away ground** (the low-detail meshes the game draws
+  in the distance, kept in the terrain file and `<zone>.gterrain_pc`: each far vertex moves by as
+  much as the ground under it did, so it keeps its shape and how far it lies under the ground) and
+  the sub-zones you changed (`<zone>_N.ctmesh_pc` and its `.gtmesh_pc`, the ground you see), in
+  every copy of them. No file changes size.
+- Ground edits are always overrides, never changes to the game's files or the Guerrilla world's
+  archives: the containers that hold them are rebuilt into `overrides\` (the Guerrilla world's into
+  `edits\`), and a file sculpted back to its own shape stops being overridden. **Restore** puts this
+  zone's ground back too, with its objects (open a zone around it and Restore there to put its
+  ground back).
+- What stands on the ground moves with it:
+  - **Objects**: those on the ground (whose bottom is from 3 m in it to 2 m over it, so not a lamp
+    on a pole) keep their height over it, with what is attached to them (a building's pieces). This
+    zone's move as you sculpt, in the same undo step; its other files (its persistent zone, its
+    mission layers) and the zones around's are moved when you save, by as much as the ground moved
+    since the last save.
+  - **Roads**: their decal meshes in the sub-zones move by as much as the ground under them, when
+    you save.
+  - **Foliage**: the game grows it in the 1 m cubes of ground its terrain file marks, setting each
+    piece on the surface in its cube; the cubes near the ground move up or down with it when you
+    save. They stay in their 4 m cell, or move to the cell above or below where the zone has one; a
+    cube with nowhere to go grows nothing (the log says how many).
+  - Level geometry standing on the ground moves with it as objects do (it is saved in the stitch
+    list). Not moved: the zones around's level geometry, and the ground pieces (skirts) round it.
+- Where a sub-zone's mesh is coarser than the height field, small strokes show in the collision more
+  than on screen.
+
 ### Changing objects
 
-- **Pick** an object by clicking it, or in the outliner (which lists objects by class, with a Find
+- **Pick** an object by clicking it (or with a controller: see above), or in the outliner (which lists objects by class, with a Find
   box). **Q** is just picking.
 - **Move** (W): drag the arrows along X (red), Y (green) or Z (blue). **Rotate** (E): drag the rings
   to turn it. **Snap** moves in steps of the size you choose and turns in 15° steps. What is
   attached to the picked object (a tank on its base, a building's pieces and lights) moves and
   turns with it.
+- **Magnets** (M, or the magnet button beside the snap size; on to start with): a moved object
+  jumps to touch the models near it, corner to corner, edge to edge or face to face, so chunks line
+  up without gaps or overlaps. The points are the corners, the middles of the edges and the
+  middles of the faces of each model's box, turned with it; they hold within a reach that grows
+  with the object's size (a pink diamond marks where). Dragging an arrow, they only move it along
+  the arrow. Magnets come before Snap: where nothing is near, Snap applies.
 - The inspector's **Transform** shows the picked object's position (X, Y, Z in metres) and
   rotation (in degrees). Type a number, or drag a field's coloured letter left and right (Shift:
   faster; Snap applies). Moving or turning an object moves its bounding box (which the game uses)
@@ -254,6 +330,43 @@ the other. Lines keep the same width on the screen near and far. You can't edit 
   of the view points. Hover over the last line for the classes that can't be made this way and
   why (navpoints, roads and buildings need data Volition's tools made). A few classes, marked
   *unused*, are in none of the game's levels, so the game may do nothing with them.
+- **Any chunk from the game**: the Add list's **Browse the game's chunks** section sorts every
+  building and prop in the game's files (the Guerrilla world's too, once it is built), whatever level
+  it comes from, four ways:
+  - **By type**: props, structures, terrain pieces, physics pieces, ...
+  - **By category**: containers, lights, trash and debris, industrial, furniture, signs, walls,
+    highways, tunnels, ...
+  - **By setting**: common, city, surface, EDF, Marauder, ice, colonist, multiplayer, ...
+  - **By pack**: the archive that has it (and then the part of that archive), so you can take
+    everything one level uses.
+
+  These come from the chunks' names (`s_cm_cont_crate_med_a`: a prop, common, a container); "Other"
+  is where a name doesn't say. Pick a way, then a group, to go into it; inside a group you can
+  narrow it down by the other ways, and its chunks are listed below, under small headings. The bar
+  above the list shows where you are: **◂ Back** (or Backspace in an empty Find box, or **B** on a
+  controller) goes up a level, and the **✕** on a group takes it away. The Find box narrows what
+  is shown, and at the top level typing at least two letters finds a chunk by name anywhere.
+  Pick a chunk to add it where the middle of the view points:
+- If one of the game's levels places it, that object is copied, with its properties and the pieces
+    joined to it (a building with its loose parts, and the destruction links between them).
+  - Otherwise a new mover is made for it: an `rfg_mover` if it breaks into pieces, else a
+    `general_mover`, with the schema's defaults.
+  - Its model and textures go into the zone's container when you save (into every level's container
+    that has a copy of the zone; for a level that keeps its zone loose in its archive, into the
+    archive's level container), with entries in the asset lists (the zone's own group, and the chunk's own group, `<name>.rfgchunkx`, which is how the game
+    finds a model a zone names), unless the zone's world has the chunk already. The log says what was
+    brought in. The first time, the editor looks through every level for where the chunk is placed,
+    which takes a little while.
+- **Level geometry** (the stitch pieces the zone's stitch list places: rock walls, cliffs, cave
+  ceilings, ledges, roads, bridges) can be edited like objects: each piece is one, of the kind
+  *Level geometry* (its chip hides them; the outliner lists them under `level_geometry`). Pick one
+  and move it, turn it, type its numbers, carry it with the controller, snap it with magnets,
+  duplicate or delete it. **Add** lists every stitch piece in the game too, as the type *Level
+  geometry* in the chunk browser (by category, setting and pack, or by name): pick one to place it
+  where the middle of the view points. Saving writes them into the zone's stitch list (every copy),
+  with its decals as they were and a collision tree made again to reach every piece; pieces from
+  elsewhere have their model and textures brought into the list's container. They are never saved
+  in the zone file itself. Sculpting moves the pieces standing on the ground with it.
 - **Duplicate** (Ctrl+D) copies the picked object beside it (to the view's right, clear of it). A
   copy is a whole breakable object, as the game's own are: copying a loose piece (the tank of an
   explosive tanker) copies the part it hangs from too (the tanker's base), with everything
@@ -261,6 +374,10 @@ the other. Lines keep the same width on the screen near and far. You can't edit 
 - **Delete** (Del) removes the picked object with the objects attached to it (a building's lights).
   It's refused, saying why, while something else names one of them (another object's links, such
   as navpoints linked in a path, or an object in a mission layer).
+- **Delete all** (the bin marked *All*, beside Delete) deletes every chunk (building and prop), every
+  piece of level geometry, both, or every object of the picked one's class, with what is attached
+  to them, in one step to undo. Those something else names are kept, as Delete keeps them, and the
+  log says how many.
 - **Ctrl+Z** / **Ctrl+Y** undo and redo, one step per drag, edit, addition or deletion.
 
 ### Saving
@@ -268,6 +385,14 @@ the other. Lines keep the same width on the screen near and far. You can't edit 
 - **Save** writes the zone to `overrides\` (through a rebuilt container and updated asset lists,
   as for textures), with the zone's new size when it grew (objects added, longer text): the game
   sets memory aside by those sizes. Many zones are in the game twice; the editor saves every copy.
+- **The Guerrilla world** (`rfg_CC_RR` zones, in `zonescript_rfg.vpp_pc` and `rfg_l1.vpp_pc` under
+  `overrides\build\pc\cache\`) is ours, not the game's: its archives are new files in `overrides\`,
+  so its changes go to `edits\` instead (beside `overrides\`, laid out the same way:
+  `edits\build\pc\cache\rfg_l1.vpp_pc\1h_c0312.str2_pc`), which the loader uses as it does
+  overrides. The archives stay as the Guerrilla builder made them. If you build the world again, a
+  change made to a file the build changed is left out (the loader logs it): make it again in the
+  editor. (This needs the loader from this version; changes an older editor made to those archives
+  themselves are still put back by Restore, from `editor_originals\`.)
 - **Restore** puts the game's own zone back in every copy. Other changes in the same containers
   (such as replaced textures) stay.
 - **Adding objects is experimental.** It has been tried in the game: a new game with four copied
@@ -301,7 +426,6 @@ Start the game with `RFAModLauncher.exe` (the console mod links it to the editor
 - The ground's normal maps, and effects such as fire and smoke (and the sky's moving clouds).
 - Shadows of the few omni lamps that cast them.
 - Editing the level geometry, terrain or foliage.
-- Adding objects whose models aren't in the zone.
 - Making new navpoints, roads, splines, logic handlers and animation rigs from nothing (copy one
   instead).
 - Deleting objects that other objects' links name, and editing links between objects.

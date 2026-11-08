@@ -255,6 +255,78 @@ public static class FarGround
     }
 
     /// <summary>
+    /// Moves a zone's far meshes with its ground after the height field was changed (the terrain
+    /// sculptor): each far vertex goes up or down by as much as the ground under it moved
+    /// (<paramref name="before"/> to <paramref name="after"/>, heights at a place x, z in the world),
+    /// so it keeps the game's own shape and how far it lies under the ground, and where it moved its
+    /// normal is made again from the ground's slope. The far meshes' records and blocks (of
+    /// <paramref name="terrain"/>, changed in place) widen their boxes to hold it; the buffers keep
+    /// their sizes and checksums, so every file keeps its size. <paramref name="data"/> is the zone's
+    /// .gterrain_pc; returns it changed, and how many vertices moved. Throws if the blocks and buffers
+    /// aren't as described at the top.
+    /// </summary>
+    public static (byte[] Data, int Moved) Reheight(TerrainFile terrain, byte[] data, Func<float, float, float> before, Func<float, float, float> after)
+    {
+        if (terrain.FarRecords is not byte[] records || terrain.FarBlocks.Count != 9)
+            throw new InvalidDataException("the terrain file has no far meshes");
+        int I(byte[] d, int at) => BitConverter.ToInt32(d, at);
+        byte[] result = (byte[])data.Clone();
+        int g = 0, moved = 0;
+        for (int k = 0; k < 9; k++)
+        {
+            byte[] block = terrain.FarBlocks[k];
+            if (block.Length < 0xB0 || I(block, 0) != 9 || block[0x20] != 8)
+                throw new InvalidDataException($"far mesh block {k} isn't a version-9 block of 8-byte vertices");
+            uint checksum = BitConverter.ToUInt32(block, 4);
+            int size = I(block, 0x0C), vertices = I(block, 0x1C), vertexOffset = I(block, 0x3C);
+            // Its buffer: from where the last ended, else the next place (on 16) that carries its checksum at both ends.
+            bool Fits(int at) => at >= 0 && at + size <= result.Length && BitConverter.ToUInt32(result, at) == checksum && BitConverter.ToUInt32(result, at + size - 4) == checksum;
+            if (!Fits(g))
+            {
+                int found = -1;
+                for (int at = 0; at + size <= result.Length; at += 16)
+                    if (Fits(at)) { found = at; break; }
+                if (found < 0) throw new InvalidDataException($"far mesh block {k}'s buffer (checksum {checksum:X8}) isn't in the .gterrain_pc");
+                g = found;
+            }
+            if (vertexOffset + vertices * 8 > size) throw new InvalidDataException($"far mesh block {k}'s vertices run past its buffer");
+            float cornerX = BitConverter.ToSingle(records, k * 48 + 0x24), cornerZ = BitConverter.ToSingle(records, k * 48 + 0x2C);
+            float low = float.MaxValue, high = float.MinValue;
+            for (int v = 0; v < vertices; v++)
+            {
+                int at = g + vertexOffset + v * 8;
+                float x = cornerX + (BitConverter.ToInt16(result, at) + 32704) / 128f, z = cornerZ + (BitConverter.ToInt16(result, at + 4) + 32704) / 128f;
+                float by = after(x, z) - before(x, z);
+                float y = BitConverter.ToInt16(result, at + 2) / 64f;
+                if (MathF.Abs(by) > 1f / 128)
+                {
+                    y += by;
+                    BitConverter.TryWriteBytes(result.AsSpan(at + 2), (short)Math.Clamp(MathF.Round(y * 64), short.MinValue, short.MaxValue));
+                    var normal = Vector3.Normalize(new Vector3(after(x - 1, z) - after(x + 1, z), 2, after(x, z - 1) - after(x, z + 1)));
+                    result[at + 6] = (byte)Math.Clamp(MathF.Round((normal.X + 1) * 127.5f), 0, 255);
+                    result[at + 7] = (byte)((byte)Math.Clamp(MathF.Round((normal.Z + 1) * 127.5f), 0, 255) ^ 0x80);
+                    moved++;
+                }
+                low = MathF.Min(low, y);
+                high = MathF.Max(high, y);
+            }
+            if (vertices > 0)
+            {
+                // The boxes (the record's and the submesh's) widened to hold the vertices where they are now.
+                void Widen(byte[] d, int lowAt, int highAt)
+                {
+                    if (low < BitConverter.ToSingle(d, lowAt)) BitConverter.TryWriteBytes(d.AsSpan(lowAt), low);
+                    if (high > BitConverter.ToSingle(d, highAt)) BitConverter.TryWriteBytes(d.AsSpan(highAt), high);
+                }
+                Widen(records, k * 48 + 0x10, k * 48 + 0x1C);
+                Widen(block, 0x74, 0x80);
+            }
+            g += size;
+        }
+        return (result, moved);
+    }
+
+    /// <summary>
     /// A far mesh's version-9 mesh block (0xB0 bytes), as the game's: version 9, the checksum, the
     /// block's size, its buffer's size; 1 level, 1 submesh at 0x60, the vertex count; vertices of 8
     /// bytes in format 25 (no texture coordinates); six floats 1 1 1 0 0 0; the vertex offset, index

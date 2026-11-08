@@ -11,6 +11,8 @@ sealed class ObjectKind
 {
     public static readonly ObjectKind Models = new("Models", Icons.Model, Color.FromRgb(140, 170, 215),
         "Objects that place a model: buildings, props and other things that can be destroyed");
+    public static readonly ObjectKind Geometry = new("Level geometry", Icons.Model, Color.FromRgb(196, 160, 120),
+        "The zone's level geometry: the stitch pieces (rock walls, cliffs, ledges, roads, bridges) its stitch list places");
     public static readonly ObjectKind Lights = new("Lights", Icons.Light, Color.FromRgb(255, 225, 110), "Lights");
     public static readonly ObjectKind Paths = new("Paths", Icons.Path, Color.FromRgb(90, 160, 255),
         "Navigation points, leap nodes and road paths that characters and vehicles follow");
@@ -26,7 +28,7 @@ sealed class ObjectKind
     public static readonly ObjectKind Other = new("Other", Icons.Marker, Color.FromRgb(165, 168, 178), "Everything else");
 
     /// <summary>Every kind, in the order the editor lists them.</summary>
-    public static List<ObjectKind> All { get; } = [Models, Pickups, Lights, Paths, Starts, Regions, Effects, Spawns, Other];
+    public static List<ObjectKind> All { get; } = [Models, Geometry, Pickups, Lights, Paths, Starts, Regions, Effects, Spawns, Other];
 
     ObjectKind(string name, string icon, Color colour, string description)
     {
@@ -47,6 +49,7 @@ sealed class ObjectKind
     /// <summary>An object's kind, from its class (e.g. "obj_light") and whether it places a model of its own.</summary>
     public static ObjectKind Of(string className, bool placesModel) => className.ToLowerInvariant() switch
     {
+        "level_geometry" => Geometry,
         _ when placesModel => Models,
         "item" or "weapon" => Pickups,
         "obj_light" => Lights,
