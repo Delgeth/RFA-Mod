@@ -3,7 +3,8 @@
 --
 -- Adds Options > Experimentals (single player only): the Gameplay screen opened with
 -- Rfa_options_page set to "experimentals", which makes it show RFA-Mod's own settings (see
--- ui_options_gameplay.lua). Every line we added or changed is marked [RFA]; everything else is the
+-- ui_options_gameplay.lua). In the Guerrilla world, SAVE GAME saves the moment you're in (guerrilla_save's
+-- rfg_save_can_save, rfg_save_game and rfg_save_state). Every line we added or changed is marked [RFA]; everything else is the
 -- game's original script. Only the [RFA] lines are this project's (GNU GPL version 3 or later, see
 -- LICENSE); the rest belongs to the game's owners. To compare with the original, extract it with the
 -- editor.
@@ -24,6 +25,7 @@ local WC_RESTORE_MAP_ID			= 8
 local EXTRAS_ID					= 10
 local CHEATS_ID					= 11
 local PLAYER_STATS_ID			= 12
+local RFG_SAVE_GAME_ID			= 13 -- [RFA] SAVE GAME in the Guerrilla world (guerrilla_save)
 
 -- Options menu
 local OPTIONS_CONTROLS_ID		= 101
@@ -77,6 +79,10 @@ local MENU_INFOS = {
 	SAVE_ADDON = {	-- If you're in a profile and can save
 		{label = "MENU_SAVE_GAME",		id = SAVE_GAME_ID},
 	},
+
+	RFG_SAVE_ADDON = { -- [RFA] In the Guerrilla world: saves the moment you're in (guerrilla_save)
+		{label = "MENU_SAVE_GAME",		id = RFG_SAVE_GAME_ID}, -- [RFA]
+	}, -- [RFA]
 
 	LOAD_ADDON = { -- If you're in a profile and can load
 		{label = "MENU_LOAD_GAME",		id = LOAD_GAME_ID},
@@ -147,6 +153,7 @@ local Menu_first_time = true
 local Tween_done = true
 
 local Next_screen = nil
+local Rfg_save_asked = false -- [RFA] SAVE GAME in the Guerrilla world asked guerrilla_save for a save
 
 function ui_pause_menu_init()
 	DEMO_MODE = is_demo()
@@ -301,7 +308,15 @@ function ui_pause_menu_construct_top_menu_from_flags()
 			if is_signed_into_profile() then
 				-- Add save/load
 
-				if have_state_data_in_memory() and savegame_is_owned() then
+				-- [RFA] In the Guerrilla world rfg_save_can_save() says whether SAVE GAME can save the moment
+				-- [RFA] you're in (true) or not now (false); elsewhere, or without guerrilla_save, it gives nil
+				local rfg_save = nil -- [RFA]
+				if rfg_save_can_save ~= nil then -- [RFA]
+					rfg_save = rfg_save_can_save() -- [RFA]
+				end -- [RFA]
+				if rfg_save == true then -- [RFA]
+					tack_on_infos(MENU_INFOS.RFG_SAVE_ADDON) -- [RFA]
+				elseif rfg_save == nil and have_state_data_in_memory() and savegame_is_owned() then -- [RFA] (elseif, rfg_save == nil)
 					-- Only add save if we have something to save in memory and we're
 					-- allowed to save (own our save game)
 					tack_on_infos(MENU_INFOS.SAVE_ADDON)
@@ -491,6 +506,11 @@ function ui_pause_menu_button_a(event, acceleration)
 
 	elseif current_id == SAVE_GAME_ID then
 		set_next_screen(NEXT_SCREEN_SAVE_GAME, PAUSE_MENU_TIER)
+	elseif current_id == RFG_SAVE_GAME_ID then -- [RFA] asks the world for a save of the moment you're in
+		if rfg_save_game() then -- [RFA] (guerrilla_save), then goes to the save screen as SAVE GAME does,
+			Rfg_save_asked = true -- [RFA] once the save is made (ui_pause_menu_load_screen)
+			set_next_screen(NEXT_SCREEN_SAVE_GAME, PAUSE_MENU_TIER) -- [RFA]
+		end -- [RFA]
 
 	elseif current_id == LOAD_GAME_ID then
 		set_next_screen(NEXT_SCREEN_LOAD_GAME, PAUSE_MENU_TIER)
@@ -732,7 +752,10 @@ function ui_pause_menu_load_screen(tween_h, event_name)
 	Tween_done = true
 	if Next_screen then
 		-- Handle special codes
-		if Next_screen == NEXT_SCREEN_SAVE_GAME then
+		if Next_screen == NEXT_SCREEN_SAVE_GAME and Rfg_save_asked then -- [RFA] the Guerrilla world: first
+			Rfg_save_asked = false -- [RFA] wait for the save of the moment to be made
+			thread_new("ui_pause_menu_rfg_save_wait") -- [RFA]
+		elseif Next_screen == NEXT_SCREEN_SAVE_GAME then -- [RFA] (elseif)
 			-- Don't push the screen in script, we need to wait for the game state to change
 			rf4_saveload_start(false)
 		elseif Next_screen == NEXT_SCREEN_LOAD_GAME then
@@ -743,6 +766,21 @@ function ui_pause_menu_load_screen(tween_h, event_name)
 		end
 	end
 end
+
+-- [RFA] SAVE GAME in the Guerrilla world: waits while guerrilla_save's save of the moment is made (a few
+-- [RFA] frames; the world saves while the game is paused), then opens the save screen as SAVE GAME does.
+-- [RFA] If it couldn't be made, the menu closes (logs\rfa_mods.log says why).
+function ui_pause_menu_rfg_save_wait() -- [RFA]
+	while rfg_save_state() == "saving" do -- [RFA]
+		thread_yield() -- [RFA]
+	end -- [RFA]
+	if rfg_save_state() == "saved" then -- [RFA]
+		rf4_saveload_start(false) -- [RFA]
+	else -- [RFA]
+		pause_menu_reset_selections() -- [RFA]
+		rf4_pop_ui() -- [RFA]
+	end -- [RFA]
+end -- [RFA]
 
 function ui_pause_menu_reset_mask_size( list_num )
 	local list_w, list_h

@@ -38,6 +38,7 @@ cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%OUT%\m
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_hud\guerrilla_hud.cpp" /Fe"%OUT%\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\*.cpp" /Fe"%OUT%\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\guerrilla_people.cpp" /Fe"%OUT%\mods\guerrilla_people.dll" /link /IMPLIB:guerrilla_people.lib || goto :fail
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_save\guerrilla_save.cpp" /Fe"%OUT%\mods\guerrilla_save.dll" /link /IMPLIB:guerrilla_save.lib || goto :fail
 rem guerrilla_gear.dll: Guerrilla's weapons' room, hammer and movement, and its upgrades' F7 window (ImGui).
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_gear\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_gear.dll" /link /IMPLIB:guerrilla_gear.lib user32.lib || goto :fail
 rem guerrilla_hud's scripts, which editor\GuerrillaBuilder.exe packs with Guerrilla's HUD documents.
