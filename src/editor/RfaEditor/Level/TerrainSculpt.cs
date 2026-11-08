@@ -1,0 +1,425 @@
+using System.IO;
+using System.Numerics;
+using RfaFormats.Meshes;
+
+namespace RfaEditor;
+
+/// <summary>What a stroke of the terrain sculptor does to the ground under the brush.</summary>
+enum SculptMode { Raise, Lower, Smooth, Flatten }
+
+/// <summary>
+/// A zone's ground, held for sculpting: its collision height field (in the terrain file,
+/// &lt;zone&gt;.cterrain_pc: see <see cref="TerrainHeightField"/>) and the detailed ground the game
+/// draws (its nine sub-zones, &lt;zone&gt;_N.ctmesh_pc / .gtmesh_pc: see <see cref="TerrainSubzone"/>).
+///
+/// The height field is what a stroke changes (its samples lie on the same grid as the ground's
+/// vertices, one a grid step apart); the vertices under it then take the field's height where they
+/// stand, and their normals its slope, so what the player walks on and what is drawn stay the same.
+/// The vertices' places and the triangles don't change: where the game's ground is coarse (big
+/// flat triangles) a stroke smaller than them shows only in the collision. Saving writes the
+/// terrain file and the changed sub-zones (same sizes) wherever the game has them.
+///
+/// Not changed: the far-away ground (the terrain file's low-detail meshes), which still shows the
+/// old shape from a distance; the zones around (a stroke stops at the zone's edge); foliage and
+/// objects standing on the ground (they stay where they are).
+/// </summary>
+sealed class TerrainSculpt
+{
+    /// <summary>One sub-zone's ground: its files as read and its vertices' heights and normals now.</summary>
+    public sealed class Part
+    {
+        public required int Number { get; init; }
+        public required string HeaderName { get; init; }
+        public required string DataName { get; init; }
+        public required byte[] Header { get; init; }
+        public required byte[] Data { get; init; }
+        public required TerrainSubzone Subzone { get; init; }
+        public required float[] Heights { get; init; }
+        public required Vector3[] Normals { get; init; }
+        public bool Changed { get; set; }
+        internal Dictionary<(int, int), List<int>> Buckets { get; } = [];
+    }
+
+    const float BucketSize = 8;  // metres: vertices sorted into squares, to find those under the brush
+
+    public string Zone { get; }
+    public string FieldName { get; }
+    readonly byte[] fieldFile;
+    readonly TerrainHeightField field;
+    float[] samples;
+    readonly Vector2 corner;
+    readonly int columns, rows;
+    public float Step { get; }
+    public IReadOnlyList<Part> Parts { get; }
+    public bool FieldChanged { get; private set; }
+
+    /// <summary>Whether anything has been sculpted since it was read (or last saved).</summary>
+    public bool Changed => FieldChanged || Parts.Any(p => p.Changed);
+
+    // The far-away ground (the terrain file's low-detail meshes, their buffers in the .gterrain_pc),
+    // moved with the field when saved (see FarGround.Reheight): from the field as it was read.
+    public string FarName => Zone + ".gterrain_pc";
+    readonly byte[]? farFile;
+    readonly float[] readSamples;
+    /// <summary>Why the far-away ground can't follow (no .gterrain_pc, or its terrain file doesn't read back the same), or null.</summary>
+    public string? FarProblem { get; private set; }
+    /// <summary>How many far vertices, road vertices and foliage sub-cubes the last <see cref="Files"/> moved, and foliage sub-cubes it had to leave out.</summary>
+    public int FarMoved { get; private set; }
+    public int RoadsMoved { get; private set; }
+    public int FoliageMoved { get; private set; }
+    public int FoliageLost { get; private set; }
+    float[] savedSamples;  // the field as last saved (as read, at first): how far the ground moved since, for what stands on it
+
+    TerrainSculpt(string zone, string fieldName, byte[] fieldFile, TerrainHeightField field, Vector2 corner, List<Part> parts, byte[]? farFile)
+    {
+        Zone = zone;
+        FieldName = fieldName;
+        this.fieldFile = fieldFile;
+        this.field = field;
+        samples = field.Heights(fieldFile);
+        readSamples = (float[])samples.Clone();
+        savedSamples = (float[])samples.Clone();
+        this.farFile = farFile;
+        if (farFile == null) FarProblem = $"{FarName} isn't in the game's files";
+        else
+        {
+            try
+            {
+                TerrainFile read = TerrainFile.Read(fieldFile);
+                if (!read.Write().AsSpan().SequenceEqual(fieldFile)) FarProblem = $"{fieldName} doesn't write back the same";
+                else if (read.FarRecords == null || read.FarBlocks.Count != 9) FarProblem = $"{fieldName} has no far meshes";
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException)
+            {
+                FarProblem = $"{fieldName} couldn't be read whole ({ex.Message})";
+            }
+        }
+        this.corner = corner;
+        columns = field.XSamples;
+        rows = field.ZSamples;
+        Step = field.Step;
+        Parts = parts;
+        foreach (Part part in parts)
+            for (int v = 0; v < part.Subzone.Positions.Length; v++)
+            {
+                Vector3 p = part.Subzone.Positions[v];
+                var key = ((int)MathF.Floor(p.X / BucketSize), (int)MathF.Floor(p.Z / BucketSize));
+                if (!part.Buckets.TryGetValue(key, out List<int>? list)) part.Buckets[key] = list = [];
+                list.Add(v);
+            }
+    }
+
+    /// <summary>
+    /// The zone's ground for sculpting, or null with why: it needs the terrain file with a height
+    /// field, and sub-zones of Armageddon's format (the game's, or the Guerrilla world as built).
+    /// <paramref name="read"/> gives a file's bytes by name (from where the game reads it).
+    /// </summary>
+    public static TerrainSculpt? Load(string zone, Func<string, byte[]?> read, out string? why)
+    {
+        why = null;
+        string fieldName = zone + ".cterrain_pc";
+        if (read(fieldName) is not byte[] terrainFile)
+        {
+            why = $"{fieldName} isn't in the game's files";
+            return null;
+        }
+        if (TerrainHeightField.Find(terrainFile) is not TerrainHeightField heightField)
+        {
+            why = $"{fieldName} has no ground to sculpt (a cave zone?)";
+            return null;
+        }
+        var parts = new List<Part>();
+        for (int number = 0; number < 9; number++)
+        {
+            string headerName = TerrainSubzone.HeaderFileName(zone, number), dataName = TerrainSubzone.DataFileName(zone, number);
+            if (read(headerName) is not byte[] header || read(dataName) is not byte[] data) continue;
+            TerrainSubzone subzone;
+            try { subzone = TerrainSubzone.Read(header, data); }
+            catch (Exception ex) when (ex is System.IO.InvalidDataException or NotSupportedException) { continue; }
+            if (!subzone.HasGround) continue;
+            if (subzone.FormatVersion != TerrainSubzone.Version)
+            {
+                why = $"{headerName} is in Red Faction: Guerrilla's format, which is only read";
+                return null;
+            }
+            parts.Add(new Part
+            {
+                Number = number, HeaderName = headerName, DataName = dataName, Header = header, Data = data, Subzone = subzone,
+                Heights = subzone.Positions.Select(p => p.Y).ToArray(), Normals = (Vector3[])subzone.Normals.Clone(),
+            });
+        }
+        if (parts.Count == 0)
+        {
+            why = $"{zone} has no sub-zones with ground";
+            return null;
+        }
+        // The field's samples start at the zone's corner (its lowest x and z): the sub-zones' lowest origin, on the zone grid.
+        float width = parts[0].Subzone.ZoneWidth;
+        var corner = new Vector2(MathF.Floor(parts.Min(p => p.Subzone.Origin.X) / width) * width,
+                                 MathF.Floor(parts.Min(p => p.Subzone.Origin.Y) / width) * width);
+        return new TerrainSculpt(zone, fieldName, terrainFile, heightField, corner, parts, read(zone + ".gterrain_pc"));
+    }
+
+    /// <summary>Whether a place (x, z) is over the zone's ground.</summary>
+    public bool Covers(float x, float z)
+    {
+        float fx = (x - corner.X) / Step, fz = (z - corner.Y) / Step;
+        return fx >= 0 && fz >= 0 && fx <= columns - 1 && fz <= rows - 1;
+    }
+
+    /// <summary>The ground's height at a place (x, z), between the four samples round it (the zone's edge beyond it).</summary>
+    public float HeightAt(float x, float z) => HeightIn(samples, x, z);
+
+    /// <summary>A height between the four samples round a place, in a copy of the field's samples (the zone's edge beyond it).</summary>
+    float HeightIn(float[] heights, float x, float z)
+    {
+        float fx = Math.Clamp((x - corner.X) / Step, 0, columns - 1), fz = Math.Clamp((z - corner.Y) / Step, 0, rows - 1);
+        int x0 = Math.Min((int)fx, columns - 2), z0 = Math.Min((int)fz, rows - 2);
+        float tx = fx - x0, tz = fz - z0;
+        float a = heights[z0 * columns + x0], b = heights[z0 * columns + x0 + 1];
+        float c = heights[(z0 + 1) * columns + x0], d = heights[(z0 + 1) * columns + x0 + 1];
+        return (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
+    }
+
+    /// <summary>The ground's height at a place as it was when last saved (as read, before the first save).</summary>
+    public float SavedHeightAt(float x, float z) => HeightIn(savedSamples, x, z);
+
+    /// <summary>Whether a circle (x, z; radius) reaches over the zone.</summary>
+    public bool Reaches(Vector2 centre, float radius) =>
+        centre.X + radius >= corner.X && centre.Y + radius >= corner.Y &&
+        centre.X - radius <= corner.X + (columns - 1) * Step && centre.Y - radius <= corner.Y + (rows - 1) * Step;
+
+    /// <summary>
+    /// One step of a stroke over every zone it reaches (see <see cref="Apply"/>), so it carries on
+    /// across their edges: samples on a shared edge are at the same places in both zones, so they
+    /// move the same; Smooth evens each out with its neighbours wherever they are, in this zone or
+    /// the next. Returns each zone's parts that moved.
+    /// </summary>
+    public static List<(TerrainSculpt Zone, IReadOnlyList<Part> Parts)> ApplyAll(IReadOnlyList<TerrainSculpt> zones, Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0)
+    {
+        var reached = zones.Where(z => z.Reaches(centre, radius)).ToList();
+        Func<float, float, float?>? before = null;
+        if (mode == SculptMode.Smooth)
+        {
+            // Everyone's samples as they were before this step.
+            var copies = reached.Select(z => (Zone: z, Heights: (float[])z.samples.Clone())).ToList();
+            before = (x, z) => copies.FirstOrDefault(c => c.Zone.Covers(x, z)) is { Zone: not null } found ? (float?)found.Zone.HeightIn(found.Heights, x, z) : null;
+        }
+        var moved = new List<(TerrainSculpt, IReadOnlyList<Part>)>();
+        foreach (TerrainSculpt zone in reached)
+        {
+            IReadOnlyList<Part> parts = zone.Apply(centre, radius, mode, amount, flattenTo, before);
+            if (zone.lastApplyMoved) moved.Add((zone, parts));
+        }
+        return moved;
+    }
+
+    bool lastApplyMoved;
+
+    Vector3 NormalAt(float x, float z)
+    {
+        float s = Step;
+        float dx = (HeightAt(x + s, z) - HeightAt(x - s, z)) / (2 * s), dz = (HeightAt(x, z + s) - HeightAt(x, z - s)) / (2 * s);
+        return Vector3.Normalize(new Vector3(-dx, 1, -dz));
+    }
+
+    /// <summary>
+    /// Where a line (in the game's space) first meets the ground, within <paramref name="reach"/>
+    /// metres; null if it doesn't over the zone. Marched in half-metre steps, then narrowed down.
+    /// </summary>
+    public Vector3? Hit(Vector3 origin, Vector3 direction, float reach = 2000)
+    {
+        direction = Vector3.Normalize(direction);
+        float previous = 0;
+        bool wasAbove = origin.Y > HeightAt(origin.X, origin.Z) || !Covers(origin.X, origin.Z);
+        for (float t = 0.5f; t <= reach; t += t < 100 ? 0.5f : 2f)
+        {
+            Vector3 p = origin + direction * t;
+            if (!Covers(p.X, p.Z)) { wasAbove = true; previous = t; continue; }
+            bool above = p.Y > HeightAt(p.X, p.Z);
+            if (wasAbove && !above)
+            {
+                float low = previous, high = t;
+                for (int i = 0; i < 20; i++)
+                {
+                    float mid = (low + high) / 2;
+                    Vector3 m = origin + direction * mid;
+                    if (m.Y > HeightAt(m.X, m.Z)) low = mid; else high = mid;
+                }
+                Vector3 hit = origin + direction * high;
+                return new Vector3(hit.X, HeightAt(hit.X, hit.Z), hit.Z);
+            }
+            wasAbove = above;
+            previous = t;
+        }
+        return null;
+    }
+
+    /// <summary>The height field's samples now (a copy), for undoing a stroke.</summary>
+    public float[] Snapshot() => (float[])samples.Clone();
+
+    /// <summary>Puts the samples back as a snapshot had them, and the ground with them. Returns the parts that changed.</summary>
+    public IReadOnlyList<Part> Restore(float[] snapshot)
+    {
+        samples = (float[])snapshot.Clone();
+        FieldChanged = true;
+        foreach (Part part in Parts) Follow(part, null);
+        return Parts;
+    }
+
+    /// <summary>
+    /// One step of a stroke at <paramref name="centre"/> (x and z; the game's space): the samples
+    /// within <paramref name="radius"/> metres move by the mode, most in the middle and none at the
+    /// edge (a smooth fall-off). Raise and Lower move them <paramref name="amount"/> metres in the
+    /// middle; Smooth and Flatten take them that share of the way (0 to 1) to their neighbours'
+    /// average or to <paramref name="flattenTo"/>. Returns the parts whose vertices moved.
+    /// </summary>
+    public IReadOnlyList<Part> Apply(Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0, Func<float, float, float?>? smoothFrom = null)
+    {
+        lastApplyMoved = false;
+        if (radius <= 0 || amount <= 0) return [];
+        int xFrom = Math.Max(0, (int)MathF.Floor((centre.X - radius - corner.X) / Step)), xTo = Math.Min(columns - 1, (int)MathF.Ceiling((centre.X + radius - corner.X) / Step));
+        int zFrom = Math.Max(0, (int)MathF.Floor((centre.Y - radius - corner.Y) / Step)), zTo = Math.Min(rows - 1, (int)MathF.Ceiling((centre.Y + radius - corner.Y) / Step));
+        if (xFrom > xTo || zFrom > zTo) return [];
+        float[]? before = mode == SculptMode.Smooth ? (float[])samples.Clone() : null;
+        bool any = false;
+        for (int z = zFrom; z <= zTo; z++)
+            for (int x = xFrom; x <= xTo; x++)
+            {
+                float px = corner.X + x * Step, pz = corner.Y + z * Step;
+                float t = Vector2.Distance(new Vector2(px, pz), centre) / radius;
+                if (t >= 1) continue;
+                float weight = (1 - t * t) * (1 - t * t);
+                int i = z * columns + x;
+                float h = samples[i];
+                switch (mode)
+                {
+                    case SculptMode.Raise: h += amount * weight; break;
+                    case SculptMode.Lower: h -= amount * weight; break;
+                    case SculptMode.Flatten: h += (flattenTo - h) * Math.Clamp(amount * weight, 0, 1); break;
+                    case SculptMode.Smooth:
+                    {
+                        float sum = 0;
+                        int count = 0;
+                        for (int dz = -2; dz <= 2; dz++)
+                            for (int dx = -2; dx <= 2; dx++)
+                            {
+                                int sx = x + dx, sz = z + dz;
+                                if (sx < 0 || sz < 0 || sx >= columns || sz >= rows)
+                                {
+                                    // Past this zone's edge: the next zone's, if it is being sculpted too.
+                                    if (smoothFrom?.Invoke(px + dx * Step, pz + dz * Step) is float next) { sum += next; count++; }
+                                    continue;
+                                }
+                                sum += smoothFrom?.Invoke(px + dx * Step, pz + dz * Step) ?? before![sz * columns + sx];
+                                count++;
+                            }
+                        h += (sum / count - h) * Math.Clamp(amount * weight, 0, 1);
+                        break;
+                    }
+                }
+                // What the field can hold (its samples are u16 from its offset, by its scale).
+                h = Math.Clamp(h, field.Offset, field.Offset + field.Scale * ushort.MaxValue);
+                if (h != samples[i]) { samples[i] = h; any = true; }
+            }
+        if (!any) return [];
+        FieldChanged = true;
+        lastApplyMoved = true;
+        var area = (Min: new Vector2(corner.X + xFrom * Step, corner.Y + zFrom * Step) - new Vector2(Step), Max: new Vector2(corner.X + xTo * Step, corner.Y + zTo * Step) + new Vector2(Step));
+        var moved = new List<Part>();
+        foreach (Part part in Parts)
+            if (Follow(part, area)) moved.Add(part);
+        return moved;
+    }
+
+    /// <summary>The part's vertices (within an area, or all) take the field's height and slope where they stand. Returns whether any moved.</summary>
+    bool Follow(Part part, (Vector2 Min, Vector2 Max)? area)
+    {
+        bool any = false;
+        void Vertex(int v)
+        {
+            Vector3 p = part.Subzone.Positions[v];
+            if (area is { } box && (p.X < box.Min.X || p.X > box.Max.X || p.Z < box.Min.Y || p.Z > box.Max.Y)) return;
+            float h = HeightAt(p.X, p.Z);
+            if (MathF.Abs(h - part.Heights[v]) < 1e-4f && area != null) return;
+            part.Heights[v] = h;
+            part.Normals[v] = NormalAt(p.X, p.Z);
+            any = true;
+        }
+        if (area is { } region)
+        {
+            for (int bz = (int)MathF.Floor(region.Min.Y / BucketSize); bz <= (int)MathF.Floor(region.Max.Y / BucketSize); bz++)
+                for (int bx = (int)MathF.Floor(region.Min.X / BucketSize); bx <= (int)MathF.Floor(region.Max.X / BucketSize); bx++)
+                    if (part.Buckets.TryGetValue((bx, bz), out List<int>? list))
+                        foreach (int v in list) Vertex(v);
+        }
+        else
+            for (int v = 0; v < part.Heights.Length; v++) Vertex(v);
+        if (any) part.Changed = true;
+        return any;
+    }
+
+    /// <summary>The changed files, by name: the terrain file and the sub-zones sculpted.</summary>
+    public Dictionary<string, byte[]> Files()
+    {
+        var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        FarMoved = RoadsMoved = FoliageMoved = FoliageLost = 0;
+        // How far the ground moved at a place since it was read (the files below are as read).
+        float Moved(float x, float z) => HeightAt(x, z) - HeightIn(readSamples, x, z);
+        if (FieldChanged)
+        {
+            byte[] withHeights = field.WithHeights(fieldFile, samples);
+            files[FieldName] = withHeights;
+            // The far-away ground with it, from the far meshes as read moved by how far the field moved since.
+            if (FarProblem == null && farFile != null)
+            {
+                try
+                {
+                    TerrainFile terrain = TerrainFile.Read(withHeights);
+                    (byte[] far, int moved) = RfaFormats.Guerrilla.FarGround.Reheight(terrain, farFile, (x, z) => HeightIn(readSamples, x, z), HeightAt);
+                    byte[] written = terrain.Write();
+                    if (written.Length == withHeights.Length)
+                    {
+                        files[FieldName] = written;
+                        files[FarName] = far;
+                        FarMoved = moved;
+                    }
+                    else FarProblem = $"{FieldName} would change size with its far meshes";
+                }
+                catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException)
+                {
+                    FarProblem = ex.Message;
+                }
+            }
+            // The foliage with it (its sub-cubes near the ground, in place: the file keeps its size).
+            try
+            {
+                byte[] terrainFile = (byte[])files[FieldName].Clone();
+                (FoliageMoved, FoliageLost) = ZoneFoliage.Follow(terrainFile, Zone, (x, z) => HeightIn(readSamples, x, z), HeightAt);
+                if (FoliageMoved > 0 || FoliageLost > 0) files[FieldName] = terrainFile;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException)
+            {
+                FoliageMoved = FoliageLost = 0;
+            }
+        }
+        foreach (Part part in Parts.Where(p => p.Changed))
+        {
+            (byte[] header, byte[] data) = TerrainSubzone.WithGround(part.Header, part.Data, part.Heights, part.Normals);
+            // Its roads with it (both files keep their sizes).
+            (header, data, int roads) = TerrainSubzone.WithRoadsMoved(header, data, Moved);
+            RoadsMoved += roads;
+            files[part.HeaderName] = header;
+            files[part.DataName] = data;
+        }
+        return files;
+    }
+
+    /// <summary>After saving: what was written is what is on disk now (later strokes start from it).</summary>
+    public void Saved()
+    {
+        savedSamples = (float[])samples.Clone();
+        FieldChanged = false;
+        foreach (Part part in Parts) part.Changed = false;
+    }
+}

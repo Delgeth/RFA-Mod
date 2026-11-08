@@ -81,13 +81,19 @@ public partial class LevelEditor : UserControl, IEditorDocument
     List<Carried> carried = [];  // what is attached to it, moved and turned with it (see StartEdit)
     LevelTool tool = LevelTool.Move;
     bool unsaved, selectingFromView;
+    // Chunks brought in from elsewhere (another level, the Guerrilla world): their files go into the
+    // zone's container on saving, for those the zone's objects still name then.
+    readonly Dictionary<string, ChunkPackage> chunksToAdd = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A chunk to add, picked in the Add list.</summary>
+    sealed record ChunkChoice(string Chunk);
 
     /// <summary>
     /// One change, which can be undone and redone: an edit of one object (its bytes before and
     /// after, and those of the objects that moved with it, <paramref name="Others"/>), or objects
     /// added or deleted (<paramref name="AddsOrRemoves"/>).
     /// </summary>
-    sealed record Change(ZoneObject Object, string What, Action Undo, Action Redo, bool AddsOrRemoves = false,
+    sealed record Change(ZoneObject? Object, string What, Action Undo, Action Redo, bool AddsOrRemoves = false,
                          IReadOnlyList<ZoneObject>? Others = null);
 
     /// <summary>An object attached to the picked one, and its bytes when the change began and when it began turning.</summary>
@@ -99,7 +105,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     }
 
     // What the mouse is doing in the 3D view
-    enum Drag { None, Look, Slide, Circle, Handle }
+    enum Drag { None, Look, Slide, Circle, Handle, Sculpt }
     Drag drag;
     Point dragFrom;
     Point? pressedAt;
@@ -120,6 +126,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         names = context.Assets.ZoneNames;
         propertyRows = new ZonePropertyRows(names, context.Assets.ZoneSchema, context.Assets.Choices);
         zone = ZoneFile.Read(ReadZone());
+        NotePlacements();
         gameLink = new GameLink(Workspace.ModFolder);
         ViewArea.SizeChanged += (_, _) => UpdateCamera();  // the field of view depends on the view's shape while following the game
 
@@ -146,7 +153,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
         gizmoContent.Content = gizmo.Model;
         GizmoViewport.Children.Add(gizmoContent);
 
+        SceneViewport.Children.Add(brushVisual);
+        SceneViewport.Children.Add(magnetVisual);
         SetTool(LevelTool.Move);
+        CompositionTarget.Rendering += PadFrame;
         ShowSource();
         BuildObjectTree("");
         BuildGrid();
@@ -198,10 +208,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
     {
         TitleChanged?.Invoke();
         var places = context.Assets.IndexReady ? Copies() : [(archive, container)];
-        bool changed = places.Any(p => Workspace.OverrideFor(p.Archive, p.Container ?? zoneName) != null);
+        bool changed = places.Any(p => Workspace.IsChanged(p.Archive, p.Container ?? zoneName)) || TerrainChanged() || StitchChanged();
         SourceText.Text = (changed
             ? $"Editing your version of {zoneName} (in {Where})."
-            : $"The game's own {zoneName} (in {Where}). Saving puts your changes in overrides\\; the game's files are never changed.") +
+            : Workspace.IsNewArchive(archive)
+                ? $"{zoneName} as it was built (in {Where}, ours, not the game's). Saving puts your changes in edits\\ (the archive stays as built); if the world is built again, changes made to the old one are left out."
+                : $"The game's own {zoneName} (in {Where}). Saving puts your changes in overrides\\; the game's files are never changed.") +
             (places.Count > 1
                 ? $" The game has {places.Count} identical copies of this zone and may read any of them, so saving changes all of them."
                 : container != null ? " It is inside a container, so saving rebuilds the container and updates the asset lists." : "");
@@ -216,11 +228,17 @@ public partial class LevelEditor : UserControl, IEditorDocument
         SelectTool.IsChecked = tool == LevelTool.Select;
         MoveTool.IsChecked = tool == LevelTool.Move;
         RotateTool.IsChecked = tool == LevelTool.Rotate;
+        SculptTool.IsChecked = tool == LevelTool.Sculpt;
+        SculptPanel.Visibility = tool == LevelTool.Sculpt ? Visibility.Visible : Visibility.Collapsed;
+        ShowBrush();
         ShowGizmo();
     }
 
-    void OnToolClicked(object sender, RoutedEventArgs e) =>
+    void OnToolClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender == SculptTool) { ChooseSculpt(); return; }
         SetTool(sender == SelectTool ? LevelTool.Select : sender == RotateTool ? LevelTool.Rotate : LevelTool.Move);
+    }
 
     bool Snapping => SnapBox.IsChecked == true;
 
@@ -243,6 +261,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (e.Key == Key.Q) SetTool(LevelTool.Select);
         else if (e.Key == Key.W) SetTool(LevelTool.Move);
         else if (e.Key == Key.E) SetTool(LevelTool.Rotate);
+        else if (e.Key == Key.T) ChooseSculpt();
+        else if (e.Key == Key.M) ToggleMagnets();
+        else if (e.Key == Key.OemOpenBrackets && tool == LevelTool.Sculpt) ResizeBrush(1 / 1.25);
+        else if (e.Key == Key.OemCloseBrackets && tool == LevelTool.Sculpt) ResizeBrush(1.25);
         else if (e.Key == Key.F) FocusOnSelected();
         else if (e.Key == Key.Escape) Select(null, focus: false);
         else return;
@@ -758,6 +780,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         context.Assets.IndexBecameReady -= OnIndexReady;
         CompositionTarget.Rendering -= FollowFrame;
         CompositionTarget.Rendering -= DrawGpuView;
+        CompositionTarget.Rendering -= PadFrame;
+        CompositionTarget.Rendering -= SculptFrame;
         gpuScene?.Dispose();
         gpuView?.Dispose();
         settledTimer.Stop();
@@ -765,6 +789,85 @@ public partial class LevelEditor : UserControl, IEditorDocument
     }
 
     // ---- Adding and deleting objects -----------------------------------------------------------
+
+    (System.Numerics.Vector2 Corner, float Width)? zoneSquare;
+    bool zoneSquareKnown;
+    Dictionary<uint, Vector3>? placedAtOpen;  // where each object is in the game's own copy (see NotePlacements)
+
+    /// <summary>Whether an object was added or moved since the game's own copy (or the world as built).</summary>
+    bool AddedOrMoved(ZoneObject obj)
+    {
+        placedAtOpen ??= [];
+        return !placedAtOpen.TryGetValue(obj.Handle, out Vector3 was) || Vector3.DistanceSquared(was, obj.Placement.Position) > 1e-4f;
+    }
+
+    /// <summary>Notes where the objects of the game's own copy of the zone (or the Guerrilla world's as built) are: objects added or moved since are checked on saving.</summary>
+    void NotePlacements()
+    {
+        ZoneFile own = zone;
+        try { own = ZoneFile.Read(Original(archive, container)); }
+        catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException or NotSupportedException) { }
+        placedAtOpen = own.Objects.GroupBy(o => o.Handle).ToDictionary(g => g.Key, g => g.First().Placement.Position);
+    }
+
+    /// <summary>
+    /// The square of the map the zone covers (its lowest x and z, and its width), or null if it isn't
+    /// known (a cave zone without ground, before the index is ready). The Guerrilla world's zones are
+    /// on its 511 m grid by name (rfg_CC_RR); the game's by their ground's sub-zones.
+    /// </summary>
+    (System.Numerics.Vector2 Corner, float Width)? ZoneSquare()
+    {
+        if (zoneSquareKnown) return zoneSquare;
+        string name = LevelGeometry.ZoneNames(zoneName).Last();
+        if (name.StartsWith("p_", StringComparison.OrdinalIgnoreCase)) name = name[2..];
+        var grid = System.Text.RegularExpressions.Regex.Match(name, @"^rfg_(\d+)_(\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (grid.Success)
+        {
+            int col = int.Parse(grid.Groups[1].Value), row = int.Parse(grid.Groups[2].Value);
+            zoneSquare = (new System.Numerics.Vector2((col - 8) * GuerrillaZone, (7 - row) * GuerrillaZone), GuerrillaZone);
+        }
+        else
+        {
+            if (!context.Assets.IndexReady) return null;
+            List<TerrainSubzone> subzones = ReadSubzones(name);
+            if (subzones.Count > 0) zoneSquare = (LevelGeometry.ZoneCorner(subzones), subzones[0].ZoneWidth);
+        }
+        zoneSquareKnown = true;
+        return zoneSquare;
+    }
+
+    const float GuerrillaZone = 511f;  // the Guerrilla world's zones (RfaFormats.Guerrilla.GuerrillaWorld.ZoneWidth)
+
+    bool InZone(Vector3 p) => ZoneSquare() is not { } square ||
+        (p.X >= square.Corner.X && p.X < square.Corner.X + square.Width && p.Z >= square.Corner.Y && p.Z < square.Corner.Y + square.Width);
+
+    /// <summary>Which zone a place outside this one is in, in words (the Guerrilla world's by name).</summary>
+    string ZoneAt(Vector3 p)
+    {
+        if (ZoneSquare() is { } square && System.Math.Abs(square.Width - GuerrillaZone) < 0.5f && zoneName.Contains("rfg_", StringComparison.OrdinalIgnoreCase))
+        {
+            int col = (int)MathF.Floor(p.X / GuerrillaZone) + 8, row = 7 - (int)MathF.Floor(p.Z / GuerrillaZone);
+            return $"rfg_{col:00}_{row:00}";
+        }
+        return "another zone";
+    }
+
+    /// <summary>
+    /// Whether a new object may go at a place: inside this zone's square. The game drops a mover
+    /// outside its zone when the level loads ("Mover is physically located outside its zone", then
+    /// "Failed to create rfg_mover from stub"), with everything attached to it; so does the view
+    /// pointing at the zones around. Says why if not.
+    /// </summary>
+    bool CanPlaceAt(Vector3 p, string what)
+    {
+        if (InZone(p)) return true;
+        var square = ZoneSquare()!.Value;
+        MessageBox.Show($"{what} would be at {p.X:0.#}, {p.Y:0.#}, {p.Z:0.#}, which is in {ZoneAt(p)}, not in {System.IO.Path.GetFileNameWithoutExtension(zoneName)} " +
+                        $"(x {square.Corner.X:0} to {square.Corner.X + square.Width:0}, z {square.Corner.Y:0} to {square.Corner.Y + square.Width:0}). " +
+                        "The game drops objects placed outside their zone.\n\nPoint the middle of the view at this zone's own ground, or open the other zone to put it there.",
+                        "Level editor", MessageBoxButton.OK, MessageBoxImage.Information);
+        return false;
+    }
 
     void OnDuplicateClicked(object sender, RoutedEventArgs e) => DuplicateSelected();
     void OnDeleteClicked(object sender, RoutedEventArgs e) => DeleteSelected();
@@ -794,10 +897,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
         }
         CommitEdit();
         IReadOnlyList<ZoneObject> group = zone.PiecesWith(source);
+        Vector3 by = at is Vector3 position ? position - group[0].Placement.Position : Beside(group);
+        if (!CanPlaceAt(group[0].Placement.Position + by, $"A copy of {Label(source)}")) return;
         IReadOnlyList<ZoneObject> copies;
         try
         {
-            copies = zone.AddCopies(group, TakenHandles(), at is Vector3 position ? position - group[0].Placement.Position : Beside(group));
+            copies = zone.AddCopies(group, TakenHandles(), by);
         }
         catch (InvalidOperationException ex)
         {
@@ -926,6 +1031,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// </summary>
     void OnAddClicked(object sender, RoutedEventArgs e)
     {
+        if (context.Assets.IndexReady) _ = context.Assets.ChunkPlacements();  // (looked for in the background, for adding a chunk)
         AddFilterBox.Text = "";
         FillAddList("");
         AddPopup.IsOpen = true;
@@ -941,6 +1047,13 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void FillAddList(string filter)
     {
         AddList.Items.Clear();
+        ShowAddPath();
+        if (chunkPath.Count > 0)
+        {
+            // In the chunk browser: only chunks.
+            FillChunkBrowser(filter);
+            return;
+        }
         var kinds = zone.Objects
             .GroupBy(o => (Class: names.Class(o.ClassHash), Label: Label(o).StartsWith('#') ? "" : Label(o)))
             .Select(g => (g.Key.Class, g.Key.Label, Example: g.First(), Count: g.Count(), Kind: KindOf(g.First())))
@@ -952,6 +1065,9 @@ public partial class LevelEditor : UserControl, IEditorDocument
         foreach (var (className, label, example, count, kind) in kinds)
             AddList.Items.Add(AddListRow(kind, label.Length > 0 ? label : className, label.Length > 0 ? className : null, count.ToString("N0"),
                                          $"{className}: {count:N0} in this file. A copy of one is added where the middle of the view points.", example));
+
+        // Any chunk of the game's (or the Guerrilla world's): buildings and props from every level, to browse (see LevelEditor.ChunkBrowser.cs).
+        FillChunkBrowser(filter);
 
         if (context.Assets.ZoneSchema is not { } schema) return;
         bool Matches(SchemaClass type) => filter.Length == 0 || type.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
@@ -1013,6 +1129,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void OnAddListKey(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Enter && AddList.SelectedItem is ListBoxItem { Tag: { } chosen }) AddFromList(chosen);
+        else if (e.Key == Key.Back && (sender != AddFilterBox || AddFilterBox.Text.Length == 0) && chunkPath.Count > 0) ChunkFolderUp();
         else if (e.Key == Key.Down && sender == AddFilterBox && AddList.Items.Count > 0)
         {
             int first = AddList.Items.Cast<ListBoxItem>().ToList().FindIndex(item => item.IsEnabled);
@@ -1027,9 +1144,17 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// <summary>Adds what was picked in the Add list: a copy of one of the file's objects, or a new object of a schema class.</summary>
     void AddFromList(object chosen)
     {
+        if (chosen is ChunkFolder folder)
+        {
+            OpenChunkFolder(folder);  // a group of chunks: into it
+            return;
+        }
         AddPopup.IsOpen = false;
-        if (chosen is ZoneObject example) AddCopy(example, PointAhead(), "Add");
-        else if (chosen is SchemaClass type) AddNew(type, PointAhead());
+        Vector3 at = PointAhead();
+        if (chosen is ZoneObject example) AddCopy(example, at, "Add");
+        else if (chosen is SchemaClass type) { if (CanPlaceAt(at, $"The new {type.Name}")) AddNew(type, at); }
+        else if (chosen is ChunkChoice chunk) { if (CanPlaceAt(at, chunk.Chunk)) AddChunk(chunk.Chunk, at); }
+        else if (chosen is GeometryChoice piece) AddGeometry(piece.Piece, at);
         ViewArea.Focus();
     }
 
@@ -1068,6 +1193,193 @@ public partial class LevelEditor : UserControl, IEditorDocument
         PickInOutliner(obj);
         context.Log($"Add: a new {type.Name} (handle {obj.Handle:X8}) with the schema's defaults, where the view points, at {at.X:0.#}, {at.Y:0.#}, {at.Z:0.#}." +
                     (type.InTheGame ? "" : " None of the game's levels have one, so the game may do nothing with it."));
+    }
+
+    /// <summary>The container (in an archive) holding this zone, where chunks brought in go; null if the zone is in none.</summary>
+    (string Archive, string Container)? ChunkContainer() => ChunkContainers() is { Count: > 0 } all ? all[0] : null;
+
+    List<(string Archive, string Container)>? chunkContainers;
+
+    /// <summary>
+    /// Every container a chunk brought into this zone goes into, so each level that loads the zone
+    /// has it: the container of each copy of the zone, and for a copy loose in its archive (as in
+    /// some of the game's levels) the archive's own container with the most chunks in it (the
+    /// level's), else its first container.
+    /// </summary>
+    List<(string Archive, string Container)> ChunkContainers()
+    {
+        if (chunkContainers != null) return chunkContainers;
+        var found = new List<(string Archive, string Container)>();
+        var places = context.Assets.IndexReady ? Copies() : [(archive, container)];
+        foreach (var (a, c) in places)
+            if (c != null && !found.Contains((a, c))) found.Add((a, c));
+        // Only loose copies (a level that keeps its zone in its archive): the archive's level container.
+        if (found.Count == 0)
+            foreach (var (a, _) in places)
+                if (LevelContainer(a) is string level && !found.Contains((a, level))) found.Add((a, level));
+        return chunkContainers = found;
+    }
+
+    /// <summary>An archive's container with the most chunks (.cchk_pc) in it, else its first container; null if it has none.</summary>
+    string? LevelContainer(string inArchive)
+    {
+        var containers = Workspace.Archive(inArchive).Entries.Where(e => e.Extension == "str2_pc").Select(e => e.Name).ToList();
+        if (containers.Count == 0) return null;
+        string? best = null;
+        int most = -1;
+        foreach (string name in containers)
+        {
+            try
+            {
+                int chunks = Workspace.Container(inArchive, name).Entries.Count(e => e.Extension == "cchk_pc");
+                if (chunks > most) { most = chunks; best = name; }
+            }
+            catch (InvalidDataException) { }
+        }
+        return best ?? containers[0];
+    }
+
+    /// <summary>Whether a container, or its world, has a chunk already (so it needn't be brought in there).</summary>
+    bool HasChunk(string chunk, (string Archive, string Container) at) =>
+        context.Assets.WorldHasChunk(chunk, at.Archive) || Workspace.Container(at.Archive, at.Container).Find(chunk + ".cchk_pc") != null;
+
+    /// <summary>
+    /// Adds any chunk of the game's (a building or prop from another level, or from the Guerrilla
+    /// world) where the view points, and picks it. If the game's levels place it somewhere, that
+    /// object is copied (with its properties, and the pieces joined to it, with the destruction links
+    /// between them: see <see cref="ZoneFile.AddCopiesFrom"/>); else a new mover is made for it
+    /// (an rfg_mover if it breaks in pieces, else a general_mover; see
+    /// <see cref="RfaFormats.Guerrilla.GuerrillaMovers.NewMover"/>). The chunks it needs that this
+    /// zone's world doesn't have are noted, and their files (model and textures) go into the zone's
+    /// container, with the asset lists' entries, when it is saved.
+    /// </summary>
+    void AddChunk(string chunk, Vector3 at)
+    {
+        if (!context.Assets.IndexReady)
+        {
+            context.Log("The editor is still reading the game's files (to find the chunk and the handles the zone's other files use). Try again in a few seconds.");
+            return;
+        }
+        if (ChunkContainer() is not { } target)
+        {
+            MessageBox.Show($"{zoneName} isn't inside a container, and its archive has none, so there is nowhere to put {chunk}'s model for the game.",
+                            "Level editor", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var (targetArchive, targetContainer) = target;
+        CommitEdit();
+        Mouse.OverrideCursor = Cursors.Wait;
+        IReadOnlyList<ZoneObject> added;
+        string how;
+        var needs = new List<string>();
+        try
+        {
+            // Where the game's levels place it, if they do: copy that object (and its pieces).
+            ZoneFile? from = null;
+            ZoneObject? template = null;
+            ChunkPlacement? place = null;
+            var placements = context.Assets.ChunkPlacements();
+            if (!placements.IsCompleted)
+            {
+                context.Log($"Looking through the game's levels for where they place {chunk} (once)...");
+                placements.Wait(TimeSpan.FromSeconds(60));
+            }
+            if (placements.IsCompletedSuccessfully && placements.Result.TryGetValue(chunk, out ChunkPlacement? found))
+            {
+                place = found;
+                try
+                {
+                    Packfile pack = place.Container == null ? Workspace.Archive(place.Archive) : Workspace.Container(place.Archive, place.Container);
+                    if (pack.Find(place.Zone) is { } entry)
+                    {
+                        from = ZoneFile.Read(pack.Read(entry));
+                        template = from.Objects.FirstOrDefault(o => o.Handle == place.Handle);
+                    }
+                }
+                catch (InvalidDataException) { }
+            }
+
+            if (from != null && template != null)
+            {
+                IReadOnlyList<ZoneObject> group = from.PiecesWith(template);
+                added = zone.AddCopiesFrom(from, group, TakenHandles(), at - group[0].Placement.Position);
+                how = $"a copy of {place!.Zone}'s ({names.Class(template.ClassHash)}, handle {template.Handle:X8}" +
+                      (group.Count > 1 ? $", with the {group.Count - 1} object(s) joined to it" : "") + ")";
+            }
+            else
+            {
+                string modelName = chunk + ".cchk_pc";
+                byte[]? header = context.Assets.ReadAnywhere(modelName), data = context.Assets.ReadAnywhere(ModelFile.DataFileName(modelName));
+                if (header == null || data == null) throw new InvalidOperationException($"{modelName} isn't in the game's files");
+                if (context.Assets.ZoneSchema is not { } schema) throw new InvalidOperationException("the game's zone schema couldn't be read");
+                ModelFile model = ModelFile.Read(modelName, header, data);
+                IReadOnlyList<ChunkObject> parts = model.Objects?.Objects ?? [];
+                bool breaks = parts.Any(o => o.Breakable);
+                uint uid = parts.Count > 0 ? parts[0].Uid : 0;
+                uint checksum = header.Length >= 0x28 ? BitConverter.ToUInt32(header, 0x24) : 0;
+                (Vector3 min, Vector3 max) = ChunkBounds(model, parts.Count > 0 ? parts[0].Uid : null);
+                string className = breaks ? "rfg_mover" : "general_mover";
+                var properties = RfaFormats.Guerrilla.GuerrillaMovers.NewMover(schema, breaks, chunk, checksum, uid, at);
+                added = [zone.AddNew(NameHashes.ClassHash(className), properties, at + min, at + max, TakenHandles())];
+                how = $"a new {className} (no level of the game's places it to copy)";
+            }
+
+            // The chunks the new objects name that this zone's world doesn't have: brought in on saving.
+            foreach (string named in added.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
+                                          .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (chunksToAdd.ContainsKey(named) || ChunkContainers().All(c => HasChunk(named, c)))
+                    continue;
+                if (context.Assets.PackageOf(named, out string? why) is { } package)
+                {
+                    chunksToAdd[named] = package;
+                    needs.Add($"{named} ({package.Files.Count} files, {package.Files.Sum(f => (long)f.Data.Length) / 1024:N0} KB)");
+                }
+                else
+                    context.Log($"Add: {named}'s files can't be brought into {targetContainer}: {why}. The game will show its stand-in for it.");
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            MessageBox.Show($"Couldn't add {chunk}: {ex.Message}.", "Level editor", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        finally
+        {
+            Mouse.OverrideCursor = null;
+        }
+
+        foreach (ZoneObject obj in added) scene?.Add(obj);
+        RemovedObjects? removed = null;
+        var copies = added.ToList();
+        Record(new Change(added[0], "Add",
+            Undo: () => { removed = zone.Remove(copies); foreach (ZoneObject obj in copies) scene?.Remove(obj); },
+            Redo: () => { if (removed != null) zone.PutBack(removed); foreach (ZoneObject obj in copies) scene?.Add(obj); },
+            AddsOrRemoves: true));
+        ObjectsChanged();
+        PickInOutliner(added[0]);
+        context.Log($"Add: {chunk} where the view points, at {at.X:0.#}, {at.Y:0.#}, {at.Z:0.#}: {how}." +
+                    (needs.Count > 0 ? $" Brought in on saving, into {string.Join(", ", ChunkContainers().Select(c => c.Container))}: {string.Join(", ", needs)}." : " This zone's world has its model already."));
+    }
+
+    /// <summary>A chunk's box around its object (the parts of object <paramref name="uid"/>, or all), from its place; a metre each way if it has none.</summary>
+    static (Vector3 Min, Vector3 Max) ChunkBounds(ModelFile model, uint? uid)
+    {
+        Vector3 min = new(float.MaxValue), max = new(float.MinValue);
+        foreach (PlacedSubmesh placed in model.Intact(uid))
+            foreach (Vector3 corner in Corners(placed.Submesh.BoundsMin, placed.Submesh.BoundsMax))
+            {
+                Vector3 p = Vector3.Transform(corner, placed.Transform);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
+        return min.X <= max.X ? (min, max) : (new Vector3(-1), new Vector3(1));
+
+        static IEnumerable<Vector3> Corners(Vector3 a, Vector3 b)
+        {
+            for (int i = 0; i < 8; i++)
+                yield return new Vector3((i & 1) == 0 ? a.X : b.X, (i & 2) == 0 ? a.Y : b.Y, (i & 4) == 0 ? a.Z : b.Z);
+        }
     }
 
     /// <summary>Where the middle of the view points: the first thing drawn there (within 300 m), or 15 m ahead.</summary>
@@ -1170,7 +1482,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
                 ShowProperties();
             }
         }
-        else
+        else if (change.Object != null)
         {
             scene?.Place(change.Object);
             foreach (ZoneObject other in change.Others ?? []) scene?.Place(other);
@@ -1181,15 +1493,17 @@ public partial class LevelEditor : UserControl, IEditorDocument
         ShowSelection();
         MarkUnsaved();
         UpdateUndoButtons();
-        context.Log($"{done}: {change.What.ToLowerInvariant()} {Label(change.Object)}");
+        context.Log(change.Object != null ? $"{done}: {change.What.ToLowerInvariant()} {Label(change.Object)}" : $"{done}: {change.What.ToLowerInvariant()}");
     }
 
     void UpdateUndoButtons()
     {
         UndoButton.IsEnabled = undo.Count > 0;
         RedoButton.IsEnabled = redo.Count > 0;
-        UndoButton.ToolTip = undo.TryPeek(out Change? next) ? $"Undo: {next.What.ToLowerInvariant()} {Label(next.Object)} (Ctrl+Z)" : "Ctrl+Z";
-        RedoButton.ToolTip = redo.TryPeek(out Change? back) ? $"Redo: {back.What.ToLowerInvariant()} {Label(back.Object)} (Ctrl+Y)" : "Ctrl+Y";
+        UndoButton.ToolTip = undo.TryPeek(out Change? next) ? $"Undo: {Describe(next)} (Ctrl+Z)" : "Ctrl+Z";
+        RedoButton.ToolTip = redo.TryPeek(out Change? back) ? $"Redo: {Describe(back)} (Ctrl+Y)" : "Ctrl+Y";
+        // (A sculpting stroke changes no object.)
+        static string Describe(Change change) => change.Object != null ? $"{change.What.ToLowerInvariant()} {Label(change.Object)}" : change.What.ToLowerInvariant();
     }
 
     void OnUndoClicked(object sender, RoutedEventArgs e) => Undo();
@@ -1231,6 +1545,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
             }
             var objectModels = new ObjectModels(context.Assets, names, file => context.Assets.Model(file, archive, container));
             bool showModels = ShowModelsBox.IsChecked == true;
+            // The level geometry as objects (see LevelEditor.Geometry.cs), before the scene is made of them.
+            bool hadGeometry = geometryLoaded;
+            EnsureGeometryObjects();
+            if (geometryLoaded && !hadGeometry) BuildObjectTree(FilterBox.Text.Trim());
             scene = new LevelScene(zone, names, showModels, objectModels.Of, (file, uid) => ModelParts(file, archive, container, uid: uid));
             sceneContent.Content = scene.Root;
             foreach (RelatedFile file in RelatedFiles())
@@ -1291,7 +1609,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void UpdateCamera()
     {
         // While following the game, the same vertical field of view it draws with, whatever this view's shape.
-        camera.FieldOfView = gameFov is double vertical ? FlyCamera.SideToSide(vertical, ViewArea.RenderSize) : FlyCamera.DefaultFieldOfView;
+        camera.FieldOfView = (gameFov is double vertical ? FlyCamera.SideToSide(vertical, ViewArea.RenderSize) : FlyCamera.DefaultFieldOfView) * padZoom;  // (padZoom: zoomed with the controller)
         camera.Apply(sceneCamera);
         camera.Apply(gizmoCamera);
         ShowGizmo();
@@ -1317,8 +1635,13 @@ public partial class LevelEditor : UserControl, IEditorDocument
             try
             {
                 StitchList list = StitchList.Read(found.Data);
-                geometry = LevelGeometry.Build(list, piece => ModelParts(piece, found.Archive, found.Container), out geometryPieces, out int missing);
-                geometryContent.Content = showGeometry ? geometry : null;
+                int missing = 0;
+                if (geometryLoaded) geometryPieces = list.Pieces.Count;  // drawn as objects instead (see LevelEditor.Geometry.cs)
+                else
+                {
+                    geometry = LevelGeometry.Build(list, piece => ModelParts(piece, found.Archive, found.Container), out geometryPieces, out missing);
+                    geometryContent.Content = showGeometry ? geometry : null;
+                }
                 bool textures = ShowTexturesBox.IsChecked == true;
                 decals = LevelGeometry.BuildDecals(list, name => textures ? context.Assets.Texture(name, found.Archive, found.Container, 256, alpha: true) : null, out decalCount);
                 decalContent.Content = showDecals ? decals : null;
@@ -1351,10 +1674,11 @@ public partial class LevelEditor : UserControl, IEditorDocument
             static System.Numerics.Vector2 From(TerrainSubzone s) => new(s.BoundsMin.X, s.BoundsMin.Z);
             static System.Numerics.Vector2 To(TerrainSubzone s) => new(s.BoundsMax.X, s.BoundsMax.Z);
             var ground = LevelGeometry.BuildTerrain(subzones, subzone => painter?.Paint(From(subzone), To(subzone)),
-                inGameLight: painter == null ? null : subzone => () => painter.PaintAsInGame(From(subzone), To(subzone)));
+                inGameLight: painter == null ? null : subzone => () => painter.PaintAsInGame(From(subzone), To(subzone)), freeze: false);
             var roads = LevelGeometry.BuildRoads(subzones, RoadTexture);
             var both = new Model3DGroup { Children = { ground, roads } };
-            both.Freeze();
+            // (Not frozen: the sculptor gives the sub-zones new meshes; one model a sub-zone, in their order.)
+            NoteGround(zone, ground, subzones.Select(s => s.Number));
             terrain = both;
             terrainParts = subzones.Count;
             terrainContent.Content = showTerrain ? terrain : null;
@@ -1429,8 +1753,13 @@ public partial class LevelEditor : UserControl, IEditorDocument
                 {
                     found = true;
                     System.Windows.Media.Imaging.BitmapSource? colourMap = textures ? context.Assets.Texture(zone + "comb.tga", archive, container, 512) : null;
-                    drawn.Children.Add(LevelGeometry.BuildTerrain(subzones, colourMap, LevelGeometry.ZoneCorner(subzones)));
-                    drawn.Children.Add(LevelGeometry.BuildRoads(subzones, RoadTexture));
+                    // (Not frozen: the sculptor's strokes carry on into the zones around.)
+                    Model3DGroup ground = LevelGeometry.BuildTerrain(subzones, colourMap, LevelGeometry.ZoneCorner(subzones), freeze: false);
+                    drawn.Children.Add(ground);
+                    NoteGround(zone, ground, subzones.Select(s => s.Number));
+                    Model3DGroup roads = LevelGeometry.BuildRoads(subzones, RoadTexture);
+                    if (roads.CanFreeze) roads.Freeze();
+                    drawn.Children.Add(roads);
                 }
                 if (models && context.Assets.ReadFile(zone + ".rfgzone_pc", archive, container) is { } zoneFile)
                 {
@@ -1453,9 +1782,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
         }
         neighbourZones = drawnZones.Count;
         if (neighbourZones == 0) return;
-        drawn.Children.Add(joined.Build());
-        drawn.Freeze();
-        neighbours = drawn;
+        Model3D joinedModels = joined.Build();
+        if (joinedModels.CanFreeze) joinedModels.Freeze();
+        drawn.Children.Add(joinedModels);
+        neighbours = drawn;  // (not frozen: the zones' ground may be sculpted)
         neighbourContent.Content = showNeighbours ? neighbours : null;
         context.Log($"{zoneName}: the zones around it drawn too, {string.Join(", ", drawnZones)} ({geometryTriangles:N0} triangles of level geometry, " +
                     $"{joined.Triangles - geometryTriangles:N0} of objects' models), " +
@@ -1784,7 +2114,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// <summary>The handles on the picked object, sized to look the same however far away it is.</summary>
     void ShowGizmo()
     {
-        LevelTool shown = selected == null || !Editable(selected) || (tool == LevelTool.Rotate && !selected.CanTurn) ? LevelTool.Select : tool;
+        LevelTool shown = selected == null || !Editable(selected) || tool == LevelTool.Sculpt || (tool == LevelTool.Rotate && !selected.CanTurn) ? LevelTool.Select : tool;
         if (shown == LevelTool.Select)
         {
             gizmo.Hide();
@@ -1973,6 +2303,11 @@ public partial class LevelEditor : UserControl, IEditorDocument
         {
             drag = Drag.Slide;
         }
+        else if (e.ChangedButton == MouseButton.Left && tool == LevelTool.Sculpt && !Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
+        {
+            brushAt = point;
+            if (BeginStroke(fromPad: false)) drag = Drag.Sculpt;
+        }
         else if (e.ChangedButton == MouseButton.Left)
         {
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) drag = Drag.Circle;
@@ -2010,7 +2345,16 @@ public partial class LevelEditor : UserControl, IEditorDocument
             case Drag.Handle:
                 DragHandle(point);
                 break;
+            case Drag.Sculpt:
+                brushAt = point;
+                break;
             default:
+                if (tool == LevelTool.Sculpt)
+                {
+                    brushAt = point;
+                    ShowBrush();
+                    break;
+                }
                 Axis? hot = selected != null && Editable(selected) ? gizmo.HandleAt(GizmoViewport, point) : null;
                 if (hot != hotAxis)
                 {
@@ -2025,6 +2369,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void OnViewMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (drag == Drag.Handle) EndHandleDrag();
+        else if (drag == Drag.Sculpt) EndStroke();
         else if (e.ChangedButton == MouseButton.Left && pressedAt is Point down && (e.GetPosition(ViewArea) - down).Length < 4) PickAt(down);
         if (drag == Drag.Look) CompositionTarget.Rendering -= Fly;
         drag = Drag.None;
@@ -2118,8 +2463,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
         {
             if (AlongAxis(point, axis, dragStart.Position) is not double along) return;
             double by = along - dragStartParameter;
-            if (Snapping) by = Math.Round(by / GridSize) * GridSize;
-            MoveSelected(dragStart.Position + direction * (float)by, fromInspector: false);
+            // Magnets first (along the arrow), else Snap.
+            Vector3? magnet = Magnets ? MagnetSnap(selected, dragStart.Position + direction * (float)by, selected.Placement.Rotation, direction) : null;
+            if (magnet == null && Snapping) by = Math.Round(by / GridSize) * GridSize;
+            MoveSelected(magnet ?? dragStart.Position + direction * (float)by, fromInspector: false);
         }
         else
         {
@@ -2135,6 +2482,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void EndHandleDrag()
     {
         drag = Drag.None;
+        ShowMagnet(null);
         CommitEdit(tool == LevelTool.Move ? "Move" : "Turn");
     }
 
@@ -2179,16 +2527,23 @@ public partial class LevelEditor : UserControl, IEditorDocument
     }
 
     /// <summary>Puts the zone into one place: an override of the file, or a rebuilt container; back to the game's own if it is the same.</summary>
-    string Put(string inArchive, string? inContainer, byte[] bytes)
+    string Put(string inArchive, string? inContainer, byte[] bytes) => PutZoneFile(zoneName, inArchive, inContainer, bytes);
+
+    /// <summary>Puts a zone file into one place: an override of the file, or a rebuilt container; back to the game's own if it is the same.</summary>
+    string PutZoneFile(string name, string inArchive, string? inContainer, byte[] bytes)
     {
         if (inContainer != null)  // its sentence ends with a full stop; the places are listed with "; "
-            return ContainerEdits.Put(Workspace, inArchive, inContainer, new Dictionary<string, byte[]> { [zoneName] = bytes }).TrimEnd('.');
-        if (bytes.AsSpan().SequenceEqual(Workspace.ReadOriginal(inArchive, zoneName)))
+            return ContainerEdits.Put(Workspace, inArchive, inContainer, new Dictionary<string, byte[]> { [name] = bytes }).TrimEnd('.');
+        // Loose in its archive: the asset lists giving its size (the game sets memory aside by it) follow it.
+        int sizeBefore = Workspace.Read(inArchive, name).Length;
+        string sized = ContainerEdits.UpdateLooseSize(Workspace, name, sizeBefore, bytes.Length) is { Count: > 0 } lists
+            ? $" (its size updated in {string.Join(", ", lists)})" : "";
+        if (bytes.AsSpan().SequenceEqual(Workspace.ReadOriginal(inArchive, name)))
         {
-            Workspace.DeleteOverride(inArchive, zoneName);
-            return $"{zoneName} in {inArchive} is the game's own";
+            Workspace.DeleteOverride(inArchive, name);
+            return $"{name} in {inArchive} is the game's own" + sized;
         }
-        return "saved " + Workspace.RelativeToMod(Workspace.WriteOverride(inArchive, zoneName, bytes));
+        return "saved " + Workspace.RelativeToMod(Workspace.WriteOverride(inArchive, name, bytes)) + sized;
     }
 
     void OnSave(object sender, RoutedEventArgs e) => Save();
@@ -2203,11 +2558,46 @@ public partial class LevelEditor : UserControl, IEditorDocument
                             "Level editor", MessageBoxButton.OK, MessageBoxImage.Information);
             return false;
         }
+        // Objects with a model outside the zone's square: the game drops them (and what's attached to them).
+        var outside = zone.Objects.Where(o => o.Property("chunk_name") != null && !IsGeometry(o) && AddedOrMoved(o) && !InZone(o.Placement.Position)).ToList();
+        if (outside.Count > 0 &&
+            MessageBox.Show($"{outside.Count} object(s) with a model are outside this zone, where the game drops them when the level loads " +
+                            "(\"Mover is physically located outside its zone\"), with what is attached to them:\n\n" +
+                            string.Join("\n", outside.Take(8).Select(o => $"•  {Label(o)} at {o.Placement.Position.X:0}, {o.Placement.Position.Z:0} ({ZoneAt(o.Placement.Position)})")) +
+                            (outside.Count > 8 ? $"\n…and {outside.Count - 8} more" : "") +
+                            "\n\nMove them into the zone (or delete them) first? Choose No to save anyway.",
+                            "Level editor", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
+        {
+            PickInOutliner(outside[0]);
+            return false;
+        }
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            byte[] bytes = zone.ToBytes();
-            string message = "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
+            using IDisposable batch = Workspace.Batch();  // our own archives (the Guerrilla world's) written once each
+            string message = "";
+            // Chunks brought in (see AddChunk) that the zone's objects still name: into its container first.
+            var named = zone.Objects.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
+                            .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var bringing = chunksToAdd.Values.Where(p => named.Contains(p.Chunk)).ToList();
+            // ...into every level's container that loads the zone, where its world hasn't it.
+            foreach (var to in ChunkContainers())
+            {
+                var here = bringing.Where(p => !HasChunk(p.Chunk, to)).ToList();
+                if (here.Count == 0) continue;
+                message += "Brought " + string.Join(", ", here.Select(p => p.Chunk)) + $" into {to.Container}: " +
+                           ContainerEdits.AddFiles(Workspace, to.Archive, to.Container,
+                                                   here.SelectMany(p => p.Files).ToList(),
+                                                   here.SelectMany(p => p.Primitives).ToList(),
+                                                   here.Select(p => p.Group).ToList()).TrimEnd('.') + ". ";
+            }
+            byte[] bytes = ZoneBytesWithoutGeometry();  // (the level geometry goes into the stitch list: SaveGeometry)
+            message += "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
+            message += SaveGeometry();
+            if (SculptChanged) message += " " + SaveSculpt() + MoveWhatStandsOnGround();
+            batch.Dispose();
+            foreach (TerrainSculpt sculpted in sculptZones) sculpted.Saved();
+            chunksToAdd.Clear();
             unsaved = false;
             SaveButton.IsEnabled = false;
             ShowSource();
@@ -2229,19 +2619,31 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void OnRestore(object sender, RoutedEventArgs e)
     {
         if (!context.Assets.IndexReady) return;
-        if (MessageBox.Show($"Go back to the game's own {zoneName}? Your changes to it are undone (in every copy). " +
+        if (MessageBox.Show($"Go back to the game's own {zoneName}? Your changes to it, its objects and its ground, are undone (in every copy). " +
                             "Other changes in the same containers, such as replaced textures, stay.",
                             "Restore original", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
         try
         {
-            context.Log(string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, Original(p.Archive, p.Container)))) + ".");
+            using (Workspace.Batch())
+            {
+                context.Log(string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, Original(p.Archive, p.Container)))) + ".");
+                if (RestoreTerrain() is { Length: > 0 } ground) context.Log(ground);
+                if (RestoreGeometry() is { Length: > 0 } geometryBack) context.Log(geometryBack);
+            }
+            // The ground as the game has it again: sculpting starts afresh from it.
+            if (strokeBefore != null) EndStroke();
+            sculpt = null;
+            sculptZones = [];
+            if (tool == LevelTool.Sculpt) SetTool(LevelTool.Move);
+            chunksToAdd.Clear();
             unsaved = false;
             SaveButton.IsEnabled = false;
             undo.Clear();
             redo.Clear();
             UpdateUndoButtons();
             zone = ZoneFile.Read(ReadZone());
+            NotePlacements();
             selected = null;
             StartEdit();
             ShowProperties();

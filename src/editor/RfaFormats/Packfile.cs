@@ -309,6 +309,104 @@ public sealed class Packfile
         Write(output, NewHeader(compressed ? PackfileFlags.Compressed | (PackfileFlags)0x4800 : PackfileFlags.None), files, compressed);
     }
 
+    /// <summary>
+    /// Writes an archive on disk again with some files replaced, added (a name it hasn't) or taken
+    /// out (a null), by name, the rest kept in their order with their stored bytes copied as they
+    /// are: for archives this editor made or that a tool of ours made (the Guerrilla world's
+    /// rfg_l0.vpp_pc, rfg_l1.vpp_pc, zonescript_rfg.vpp_pc), which are too big to hold in memory
+    /// (rfg_l1 passes a GB). Only the layouts <see cref="Write(string, IReadOnlyList{ValueTuple{string, byte[]}}, bool)"/>
+    /// writes: uncompressed, or compressed file by file (its header and flags kept), each file on a
+    /// 2 KB boundary. Written beside it first, then put in its place, so a failure leaves it whole.
+    /// </summary>
+    public static void RewriteArchive(string path, IReadOnlyDictionary<string, byte[]?> changes)
+    {
+        Packfile pack = Open(path);
+        if (pack.FormatVersion != Version)
+            throw new NotSupportedException($"{pack.Name} is a Red Faction: Guerrilla packfile, which is only read");
+        if (pack.IsCondensed)
+            throw new NotSupportedException($"{pack.Name} is compressed as one stream, which can't be written in place");
+        bool compressed = pack.IsCompressed;
+        var lookup = new Dictionary<string, byte[]?>(changes, StringComparer.OrdinalIgnoreCase);
+
+        // The files as they will be: kept ones (their entry) or new bytes (stored: deflated if compressed).
+        var files = new List<(string Name, PackfileEntry? Kept, byte[]? Stored, uint Size)>();
+        foreach (PackfileEntry entry in pack.Entries)
+        {
+            if (!lookup.TryGetValue(entry.Name, out byte[]? replacement))
+                files.Add((entry.Name, entry, null, entry.Size));
+            else if (replacement != null)
+                files.Add((entry.Name, null, compressed ? Deflate(replacement) : replacement, (uint)replacement.Length));
+        }
+        foreach (var (name, data) in lookup)
+            if (data != null && pack.Find(name) == null)
+                files.Add((name, null, compressed ? Deflate(data) : data, (uint)data.Length));
+
+        var names = new MemoryStream();
+        var directory = new MemoryStream();
+        long dataLength = 0, storedLength = 0;
+        foreach (var (name, kept, stored, size) in files)
+        {
+            dataLength = Align(dataLength, 0x800);
+            uint storedSize = kept != null ? (compressed ? kept.CompressedSize : kept.Size) : (uint)stored!.Length;
+            directory.Write(BitConverter.GetBytes((uint)names.Length));
+            directory.Write(BitConverter.GetBytes(0u));
+            directory.Write(BitConverter.GetBytes((uint)dataLength));
+            directory.Write(BitConverter.GetBytes(size));
+            directory.Write(BitConverter.GetBytes(compressed ? storedSize : 0xFFFFFFFFu));
+            directory.Write(BitConverter.GetBytes(0u));
+            names.Write(Encoding.Latin1.GetBytes(name));
+            names.WriteByte(0);
+            dataLength += size;
+            if (compressed) storedLength = Align(storedLength, 0x800) + storedSize;
+        }
+        if (!compressed) storedLength = dataLength;
+        long namesStart = HeaderSize + Align(directory.Length, 0x800), dataStart = namesStart + Align(names.Length, 0x800);
+        if (dataStart + Math.Max(dataLength, storedLength) > uint.MaxValue)
+            throw new IOException($"a packfile can hold at most 4 GB; {pack.Name} would need {(dataStart + Math.Max(dataLength, storedLength)) / (1 << 20):N0} MB");
+        byte[] head = (byte[])pack.header.Clone();
+        BitConverter.TryWriteBytes(head.AsSpan(0x154), (uint)files.Count);
+        BitConverter.TryWriteBytes(head.AsSpan(0x158), (uint)(dataStart + storedLength));
+        BitConverter.TryWriteBytes(head.AsSpan(0x15C), (uint)directory.Length);
+        BitConverter.TryWriteBytes(head.AsSpan(0x160), (uint)names.Length);
+        BitConverter.TryWriteBytes(head.AsSpan(0x164), (uint)dataLength);
+        BitConverter.TryWriteBytes(head.AsSpan(0x168), compressed ? (uint)storedLength : 0xFFFFFFFFu);
+
+        string temporary = path + ".saving";
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+        {
+            output.Write(head);
+            output.Write(directory.ToArray());
+            output.Write(new byte[namesStart - HeaderSize - directory.Length]);
+            output.Write(names.ToArray());
+            output.Write(new byte[dataStart - namesStart - names.Length]);
+            var buffer = new byte[1 << 20];
+            long at = 0;
+            foreach (var (_, kept, stored, _) in files)
+            {
+                output.Write(new byte[Align(at, 0x800) - at]);
+                at = Align(at, 0x800);
+                if (stored != null)
+                {
+                    output.Write(stored);
+                    at += stored.Length;
+                    continue;
+                }
+                long length = compressed ? kept!.CompressedSize : kept!.Size;
+                input.Position = kept.StoredAt;
+                for (long left = length; left > 0;)
+                {
+                    int read = input.Read(buffer, 0, (int)Math.Min(left, buffer.Length));
+                    if (read <= 0) throw new InvalidDataException($"{pack.Name} ended inside {kept.Name}");
+                    output.Write(buffer, 0, read);
+                    left -= read;
+                }
+                at += length;
+            }
+        }
+        File.Move(temporary, path, overwrite: true);
+    }
+
     static byte[] Create(byte[] header, IReadOnlyList<(string Name, byte[] Data)> files)
     {
         var output = new MemoryStream();

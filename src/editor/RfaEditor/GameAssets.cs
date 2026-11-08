@@ -95,6 +95,262 @@ sealed class GameAssets
     /// <summary>Every file name in the game that matches (each once). Empty until the index is ready.</summary>
     public IEnumerable<string> NamesWhere(Func<string, bool> match) => files == null ? [] : files.Keys.Where(match);
 
+    // ---- Any chunk (the level editor's Add list) ------------------------------------------------
+
+    List<string>? chunkNames;
+    Dictionary<string, AsmContainer>? chunkGroups;       // "<chunk>" -> its group (<chunk>.rfgchunkx) in an asset list
+    Dictionary<string, AsmPrimitive>? primitiveKinds;    // a file's primitive as some asset list gives it (its type, allocator, ...)
+    Task<Dictionary<string, ChunkPlacement>>? placements;
+
+    /// <summary>Every chunk (model of a building or prop: a .cchk_pc) in the game's files and ours, by name without extension. Empty until the index is ready.</summary>
+    public IReadOnlyList<string> ChunkNames()
+    {
+        if (chunkNames != null) return chunkNames;
+        if (files == null) return [];
+        return chunkNames = files.Keys.Where(n => n.EndsWith(".cchk_pc", StringComparison.OrdinalIgnoreCase))
+                                     .Select(n => n[..^".cchk_pc".Length]).Distinct(StringComparer.OrdinalIgnoreCase)
+                                     .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    List<ChunkEntry>? chunkCatalog;
+
+    /// <summary>Every chunk sorted for the Add list's browser: its type, category and setting (from its name) and the packs that have it. Empty until the index is ready.</summary>
+    public IReadOnlyList<ChunkEntry> ChunkCatalog()
+    {
+        if (chunkCatalog != null) return chunkCatalog;
+        if (files == null || places == null) return [];
+        var entries = new List<ChunkEntry>();
+        void Add(string name, string extension, bool stitch)
+        {
+            (string type, string category, string setting) = RfaEditor.ChunkCatalog.Classify(name);
+            if (stitch) type = RfaEditor.ChunkCatalog.LevelGeometry;
+            var where = places[name + extension]
+                .Select(f => (Pack: RfaEditor.ChunkCatalog.PackName(f.Archive), Container: f.Container == null ? null : RfaEditor.ChunkCatalog.ContainerName(f.Container)))
+                .Distinct().ToList();
+            entries.Add(new ChunkEntry(name, type, category, setting, where, stitch));
+        }
+        foreach (string name in ChunkNames()) Add(name, ".cchk_pc", stitch: false);
+        // The stitch pieces (level geometry) too, as a type of their own.
+        foreach (string name in files.Keys.Where(n => n.EndsWith(".cstch_pc", StringComparison.OrdinalIgnoreCase)).Select(n => n[..^".cstch_pc".Length])
+                                     .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+            Add(name, ".cstch_pc", stitch: true);
+        return chunkCatalog = entries;
+    }
+
+    /// <summary>A file by name from wherever the index says it is, as the game sees it; null if none has it.</summary>
+    public byte[]? ReadAnywhere(string name)
+    {
+        if (files == null || !files.TryGetValue(name, out IndexedFile? found)) return null;
+        Packfile pack = Pack(found.Archive, found.Container);
+        return pack.Find(name) is { } entry ? pack.Read(entry) : null;
+    }
+
+    void ReadAssetLists()
+    {
+        if (chunkGroups != null) return;
+        var groups = new Dictionary<string, AsmContainer>(StringComparer.OrdinalIgnoreCase);
+        var kinds = new Dictionary<string, AsmPrimitive>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string archive, string list) in workspace.AssetLists())
+        {
+            AsmFile asm;
+            try { asm = AsmFile.Read(workspace.Read(archive, list)); }
+            catch (InvalidDataException) { continue; }
+            foreach (AsmContainer c in asm.Containers)
+            {
+                if (c.Sizes.Count == 0 && c.Name.EndsWith(".rfgchunkx", StringComparison.OrdinalIgnoreCase))
+                    groups.TryAdd(c.Name[..^".rfgchunkx".Length], c);
+                foreach (AsmPrimitive primitive in c.Primitives) kinds.TryAdd(primitive.Name, primitive);
+            }
+        }
+        chunkGroups = groups;
+        primitiveKinds = kinds;
+    }
+
+    /// <summary>Whether an asset list of this archive, or of the archives of its world beside it (rfg_l0 and rfg_l1), has the chunk's own group: the world finds the chunk without it being brought in.</summary>
+    public bool WorldHasChunk(string chunk, string archive)
+    {
+        string folder = Path.GetDirectoryName(archive) ?? "", world = WorldOf(archive);
+        foreach ((string other, string list) in workspace.AssetLists())
+        {
+            if (!(Path.GetDirectoryName(other) ?? "").Equals(folder, StringComparison.OrdinalIgnoreCase) ||
+                !WorldOf(other).Equals(world, StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                if (AsmFile.Read(workspace.Read(other, list)).Containers.Any(c => c.Name.Equals(chunk + ".rfgchunkx", StringComparison.OrdinalIgnoreCase)))
+                    return true;
+            }
+            catch (InvalidDataException) { }
+        }
+        return false;
+    }
+
+    /// <summary>An archive's world: its name without _l0, _l1 or _precache (rfg_l1.vpp_pc: rfg).</summary>
+    static string WorldOf(string archive)
+    {
+        string name = Path.GetFileNameWithoutExtension(archive);
+        var match = System.Text.RegularExpressions.Regex.Match(name, @"^(.*?)(_l\d+|_precache)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : name;
+    }
+
+    /// <summary>
+    /// What a zone needs to show a chunk from anywhere in the game: its files (the model, its g-file,
+    /// and its textures' files), a primitive for each header file and the chunk's own group for the
+    /// asset lists. The files are those the chunk's own group in an asset list names (as the game
+    /// streams it), else the model and the texture files holding the textures its materials name.
+    /// Null, with why, if they can't all be found.
+    /// </summary>
+    public ChunkPackage? PackageOf(string chunk, out string? why)
+    {
+        why = null;
+        ReadAssetLists();
+        var headers = new List<string>();
+        AsmContainer? own = chunkGroups!.GetValueOrDefault(chunk);
+        if (own != null && own.Primitives.Count > 0)
+            headers.AddRange(own.Primitives.Select(p => p.Name));
+        else
+        {
+            string modelName = chunk + ".cchk_pc";
+            byte[]? header = ReadAnywhere(modelName), data = ReadAnywhere(ModelFile.DataFileName(modelName));
+            if (header == null || data == null)
+            {
+                why = $"{modelName} or its g-file isn't in the game's files";
+                return null;
+            }
+            headers.Add(modelName);
+            try
+            {
+                ModelFile model = ModelFile.Read(modelName, header, data);
+                foreach (string texture in model.Materials.SelectMany(m => m.Textures.Select(t => t.Texture)).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (textures != null && textures.TryGetValue(texture, out TextureRef? at) && !headers.Contains(at.PegHeader, StringComparer.OrdinalIgnoreCase))
+                        headers.Add(at.PegHeader);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
+            {
+                why = $"{modelName} couldn't be read ({ex.Message})";
+                return null;
+            }
+        }
+
+        return Package(chunk, headers, own, out why);
+    }
+
+    /// <summary>
+    /// What a zone's level needs to show a stitch piece (level geometry) from anywhere in the game: its
+    /// model and g-file, the texture files holding the textures its materials name, and a primitive for
+    /// each header file for the asset lists (no group of its own: stitch pieces are named by the
+    /// stitch list). Null, with why, if they can't all be found.
+    /// </summary>
+    public ChunkPackage? StitchPackageOf(string piece, out string? why)
+    {
+        why = null;
+        ReadAssetLists();
+        string modelName = piece + ".cstch_pc";
+        byte[]? header = ReadAnywhere(modelName), data = ReadAnywhere(ModelFile.DataFileName(modelName));
+        if (header == null || data == null)
+        {
+            why = $"{modelName} or its g-file isn't in the game's files";
+            return null;
+        }
+        var headers = new List<string> { modelName };
+        try
+        {
+            ModelFile model = ModelFile.Read(modelName, header, data);
+            foreach (string texture in model.Materials.SelectMany(m => m.Textures.Select(t => t.Texture)).Distinct(StringComparer.OrdinalIgnoreCase))
+                if (textures != null && textures.TryGetValue(texture, out TextureRef? at) && !headers.Contains(at.PegHeader, StringComparer.OrdinalIgnoreCase))
+                    headers.Add(at.PegHeader);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
+        {
+            why = $"{modelName} couldn't be read ({ex.Message})";
+            return null;
+        }
+        return Package(piece, headers, null, out why);
+    }
+
+    /// <summary>The files, primitives and own group (see <see cref="PackageOf"/>) of a chunk or stitch piece, from its header files.</summary>
+    ChunkPackage? Package(string chunk, List<string> headers, AsmContainer? own, out string? why)
+    {
+        why = null;
+        var found = new List<(string Name, byte[] Data)>();
+        var primitives = new List<AsmPrimitive>();
+        foreach (string header in headers)
+        {
+            if (ReadAnywhere(header) is not byte[] bytes)
+            {
+                why = $"{header} isn't in the game's files";
+                return null;
+            }
+            found.Add((header, bytes));
+            string dataName = DataFileOf(header);
+            byte[]? data = dataName.Length > 0 ? ReadAnywhere(dataName) : null;
+            if (data != null) found.Add((dataName, data));
+            AsmPrimitive? kind = primitiveKinds!.GetValueOrDefault(header);
+            (byte type, byte allocator, byte flags, byte split) = kind != null ? (kind.Type, kind.Allocator, kind.Flags, kind.SplitIndex)
+                : Path.GetExtension(header).ToLowerInvariant() switch
+                {
+                    ".cchk_pc" or ".cstch_pc" => ((byte)2, (byte)1, (byte)6, (byte)0),
+                    ".cpeg_pc" or ".cvbm_pc" => ((byte)1, (byte)1, (byte)6, (byte)1),
+                    _ => ((byte)0, (byte)0, (byte)0, (byte)0),
+                };
+            if (type == 0 && kind == null)
+            {
+                why = $"the kind of {header} for the asset lists isn't known";
+                return null;
+            }
+            primitives.Add(new AsmPrimitive { Name = header, Type = type, Allocator = allocator, Flags = flags, SplitIndex = split,
+                                              HeaderSize = bytes.Length, DataSize = data?.Length ?? 0 });
+        }
+        var group = new AsmContainer { Name = chunk + ".rfgchunkx", Type = own?.Type ?? 14, Flags = own?.Flags ?? 0x300 };
+        group.Primitives.AddRange(primitives.Select(p => new AsmPrimitive
+        {
+            Name = p.Name, Type = p.Type, Allocator = p.Allocator, Flags = p.Flags, SplitIndex = p.SplitIndex, HeaderSize = p.HeaderSize, DataSize = p.DataSize,
+        }));
+        return new ChunkPackage(chunk, found, primitives, group);
+    }
+
+    static string DataFileOf(string file)
+    {
+        string extension = Path.GetExtension(file);
+        return extension.Length > 2 && extension[1] == 'c' ? Path.ChangeExtension(file, "g" + extension[2..]) : "";
+    }
+
+    /// <summary>
+    /// Where the game's levels (and the Guerrilla world) place each chunk: one object naming it, in a
+    /// zone file, for a copy with its properties (and the pieces joined to it). Found in the
+    /// background the first time it's asked for (every zone file is read), with an editor-side
+    /// copy of the workspace, so nothing here is touched from another thread.
+    /// </summary>
+    public Task<Dictionary<string, ChunkPlacement>> ChunkPlacements()
+    {
+        if (placements != null) return placements;
+        if (files == null) return Task.FromResult(new Dictionary<string, ChunkPlacement>(StringComparer.OrdinalIgnoreCase));
+        // Each zone and layer once, from an archive directly where it can be (a container is read whole).
+        var zones = places!.Where(g => g.Key.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase) || g.Key.EndsWith(".layer_pc", StringComparison.OrdinalIgnoreCase))
+                           .Where(g => !g.Key.StartsWith("p_", StringComparison.OrdinalIgnoreCase))
+                           .Select(g => g.OrderBy(f => f.Container == null ? 0 : 1).First())
+                           .OrderBy(f => f.Archive, StringComparer.OrdinalIgnoreCase).ThenBy(f => f.Container ?? "", StringComparer.OrdinalIgnoreCase)
+                           .ToList();
+        var own = new Workspace(workspace.GameFolder, workspace.ModFolder);
+        return placements = Task.Run(() =>
+        {
+            var found = new Dictionary<string, ChunkPlacement>(StringComparer.OrdinalIgnoreCase);
+            uint chunkName = NameHashes.PropertyHash("chunk_name");
+            foreach (IndexedFile file in zones)
+            {
+                try
+                {
+                    Packfile pack = file.Container == null ? own.Archive(file.Archive) : own.Container(file.Archive, file.Container);
+                    if (pack.Find(file.Name) is not { } entry) continue;
+                    foreach (ZoneObject obj in ZoneFile.Read(pack.Read(entry)).Objects)
+                        if (obj.Property(chunkName) is { Type: ZoneProperty.TextType } name)
+                            found.TryAdd(Path.GetFileNameWithoutExtension(name.Text), new ChunkPlacement(file.Archive, file.Container, file.Name, obj.Handle));
+                }
+                catch (Exception) { }  // (a file that can't be read gives no places)
+            }
+            return found;
+        });
+    }
+
     /// <summary>A model by its c-file name, or null if it can't be found or read.</summary>
     public ModelFile? Model(string name, string nearArchive, string? nearContainer)
     {
@@ -156,10 +412,11 @@ sealed class GameAssets
     {
         if (nearContainer != null && workspace.Container(nearArchive, nearContainer) is var container && container.Find(name) is { } inContainer)
             return (container.Read(inContainer), nearArchive, nearContainer);
-        if (workspace.Archive(nearArchive).Find(name) is { } inArchive)
-            return (workspace.Archive(nearArchive).Read(inArchive), nearArchive, null);
+        // (A file loose in an archive as the game sees it: its override, or edit, if it has one.)
+        if (workspace.Archive(nearArchive).Find(name) != null)
+            return (workspace.Read(nearArchive, name), nearArchive, null);
         if (files != null && files.TryGetValue(name, out IndexedFile? found) && Pack(found.Archive, found.Container).Find(name) is { } entry)
-            return (Pack(found.Archive, found.Container).Read(entry), found.Archive, found.Container);
+            return (found.Container == null ? workspace.Read(found.Archive, name) : Pack(found.Archive, found.Container).Read(entry), found.Archive, found.Container);
         return null;
     }
 
@@ -217,3 +474,9 @@ static class Bitmaps
         return bitmap;
     }
 }
+
+/// <summary>A chunk's files and asset list entries, to bring it into a zone (see <see cref="GameAssets.PackageOf"/>).</summary>
+sealed record ChunkPackage(string Chunk, List<(string Name, byte[] Data)> Files, List<AsmPrimitive> Primitives, AsmContainer Group);
+
+/// <summary>An object placing a chunk: in which zone file (where it is) and its handle.</summary>
+sealed record ChunkPlacement(string Archive, string? Container, string Zone, uint Handle);
