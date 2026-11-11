@@ -212,10 +212,12 @@ public partial class MainWindow : Window
         var progress = new Progress<string>(text => StatusText.Text = text);
         try
         {
-            searchIndex = await Task.Run(() => FileIndex.ArchiveFiles(archives));
+            searchIndex = await Task.Run(() => Native.InBackground(() => FileIndex.ArchiveFiles(archives)));
             StatusText.Text = $"{searchIndex.Count:N0} files in the archives. Reading the containers for search, models and textures...";
             var textures = new Dictionary<string, TextureRef>(StringComparer.OrdinalIgnoreCase);
-            List<IndexedFile> inContainers = await Task.Run(() => FileIndex.ContainerFiles(archives, progress, textures));
+            // Reading every container takes a minute of disk work: done at background priority, so a
+            // game starting meanwhile (the Game panel) gets the disk first and doesn't stall.
+            List<IndexedFile> inContainers = await Task.Run(() => Native.InBackground(() => FileIndex.ContainerFiles(archives, progress, textures)));
             searchIndex = [.. searchIndex, .. inContainers];
             context.Assets.SetIndex(searchIndex, textures);
             Log($"Ready: {searchIndex.Count:N0} files can be searched.");

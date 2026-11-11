@@ -171,6 +171,18 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI Hk_SetUnhandledExceptionFilter(LPTOP_LEVEL_E
 LONG CALLBACK NoteAccessViolation(EXCEPTION_POINTERS* exception) {
     static LONG noted = 0, dumped = 0;
     const EXCEPTION_RECORD* rec = exception->ExceptionRecord;
+    // A stack overflow (calls that never stop calling each other) can end the game without the crash
+    // filter ever running: report it here, from a fresh thread, as this one has no stack left.
+    static LONG overflowed = 0;
+    if (rec->ExceptionCode == EXCEPTION_STACK_OVERFLOW && InterlockedExchange(&overflowed, 1) == 0) {
+        static CrashJob job;
+        job = CrashJob{exception, GetCurrentThreadId(), L"-overflow"};
+        if (HANDLE thread = CreateThread(nullptr, 0, WriteCrashReport, &job, 0, nullptr)) {
+            WaitForSingleObject(thread, 30000);
+            CloseHandle(thread);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && InterlockedIncrement(&noted) <= 5) {
         char where[MAX_PATH + 16];
         DescribeAddress(reinterpret_cast<DWORD>(rec->ExceptionAddress), where, sizeof(where));

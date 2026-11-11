@@ -397,6 +397,27 @@ static class Native
                                         IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param) =>
         CreateWindowExNative(exStyle, className, title, unchecked((int)style), x, y, width, height, parent, menu, instance, param);
 
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentThread();
+    [DllImport("kernel32.dll")] static extern bool SetThreadPriority(IntPtr thread, int priority);
+
+    /// <summary>
+    /// Does long disk work at Windows' background priority (processor, disk and memory all give way
+    /// to everything else), so it doesn't slow down what the user is doing or a game that is starting.
+    /// </summary>
+    public static T InBackground<T>(Func<T> work)
+    {
+        const int THREAD_MODE_BACKGROUND_BEGIN = 0x00010000, THREAD_MODE_BACKGROUND_END = 0x00020000;
+        bool began = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        try
+        {
+            return work();
+        }
+        finally
+        {
+            if (began) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        }
+    }
+
     public static Saved Save(IntPtr window)
     {
         GetWindowRect(window, out RECT rect);
