@@ -170,9 +170,12 @@ export, if it has one, right after adding its own (`rfa::game::lua_register` in 
 **In-game menus** (`menus.cpp`): the loader hosts [Dear ImGui](https://github.com/ocornut/imgui)
 (`src\third_party\imgui`, built with `NDEBUG` so its checks never stop the game) on the game's own
 Direct3D 11 device. The game makes its swap chain with a DXGI factory, so the loader wraps the
-`CreateDXGIFactory` import and, on the factory, `CreateSwapChain` (slot 10 of its methods); on the
-swap chain, `Present` (8), where it draws the menus on the finished picture, and `ResizeBuffers`
-(13). It reads the game window's messages for ImGui by subclassing it. The menus are up while the
+`CreateDXGIFactory` import and, on the factory, `CreateSwapChain` (slot 10 of its methods), and
+hands the game a swap chain of its own (`ChainProxy`) that passes every call on to the real one:
+in `Present` it first draws the menus on the finished picture, and in `ResizeBuffers` it lets go of
+the picture. (The real swap chain's methods are not swapped: the Steam overlay swaps the same two,
+again on every display mode change, and the two hooks then called each other until the stack ran
+out.) It reads the game window's messages for ImGui by subclassing it. The menus are up while the
 console is open (`0x28FF1CA`), when the game has already stopped the player's controls and freed the
 mouse; ImGui draws its own cursor, as the game hides Windows'. The game reads its own input with
 DirectInput, so the window's messages go on to it untouched, and the console asks

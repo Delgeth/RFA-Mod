@@ -234,11 +234,13 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ACTIVATEAPP:
         RFA_LOG_FIRST(100, "WM_ACTIVATEAPP %s", wp ? "gained" : "lost");
         OnFocusChanged(wp != FALSE);
-        hide = HidingFocus() && !wp;
+        hide = (HidingFocus() || Docked()) && !wp;
         break;
     case WM_ACTIVATE:
         RFA_LOG_FIRST(100, "WM_ACTIVATE %u", LOWORD(wp));
-        hide = HidingFocus() && LOWORD(wp) == WA_INACTIVE;
+        // Docked, the game's window is never activated again (the editor's is), so it must not be
+        // told it was deactivated either: it would stop reading the controller for good.
+        hide = (HidingFocus() || Docked()) && LOWORD(wp) == WA_INACTIVE;
         break;
     case WM_SETFOCUS:
         if (Docked()) OnFocusChanged(true);
