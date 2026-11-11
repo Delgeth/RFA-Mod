@@ -12,8 +12,8 @@ namespace RfaEditor;
 
 /// <summary>
 /// The Game panel: the running game's window, docked inside the editor. The game keeps running on its
-/// own (it is its own process); its window is made a child of one of the editor's, sized to the panel
-/// with the game's shape kept (black bars around it). Click into it to play; Shift+F1 gives the mouse
+/// own (it is its own process); its window is made a child of one of the editor's, sized to fill the
+/// panel. Click into it to play; Shift+F1 gives the mouse
 /// and keys back to the editor. Undock or closing the editor gives the window back as it was. The
 /// panel docks like the others (drag its title), so the game can sit beside a level, below it, or in
 /// a window of its own.
@@ -39,7 +39,6 @@ sealed class GamePanel
 
     IntPtr game;            // the game's window while docked
     Native.Saved saved;     // how it was before it was docked
-    double aspect = 16.0 / 9.0;
     bool hotKeyRegistered;
     DateTime startedAt = DateTime.MinValue;
 
@@ -232,7 +231,6 @@ sealed class GamePanel
         }
         Native.GetClientRect(window, out Native.RECT client);
         int width = client.Right - client.Left, height = client.Bottom - client.Top;
-        if (width > 0 && height > 0) aspect = (double)width / height;
 
         // A child's style first, then its new parent (as Windows asks).
         Native.SetWindowLongPtr(window, Native.GWL_STYLE, (IntPtr)Native.ChildStyle(saved.Style));
@@ -267,22 +265,15 @@ sealed class GamePanel
         game = IntPtr.Zero;
     }
 
-    /// <summary>Sizes the game to the panel, keeping its shape.</summary>
+    /// <summary>Sizes the game to fill the panel, whatever the panel's shape.</summary>
     void Fit()
     {
         if (!Docked) return;
         Native.GetClientRect(host.Handle, out Native.RECT area);
-        int areaWidth = area.Right - area.Left, areaHeight = area.Bottom - area.Top;
-        if (areaWidth <= 0 || areaHeight <= 0) return;
-        int width = areaWidth, height = (int)Math.Round(areaWidth / aspect);
-        if (height > areaHeight)
-        {
-            height = areaHeight;
-            width = (int)Math.Round(areaHeight * aspect);
-        }
+        int width = area.Right - area.Left, height = area.Bottom - area.Top;
+        if (width <= 0 || height <= 0) return;
         // Asynchronously: a game busy loading a level must never hold up the editor.
-        Native.SetWindowPos(game, IntPtr.Zero, (areaWidth - width) / 2, (areaHeight - height) / 2, width, height,
-            Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_ASYNCWINDOWPOS);
+        Native.SetWindowPos(game, IntPtr.Zero, 0, 0, width, height, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_ASYNCWINDOWPOS);
     }
 
     /// <summary>Takes the mouse and keys away from the game, back to the editor.</summary>

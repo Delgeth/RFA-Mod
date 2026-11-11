@@ -437,8 +437,8 @@ top right, brings it forward):
   **Back to the editor** or Alt+Tab gives them back. The game keeps running while you work in the
   editor (it doesn't pause), and doesn't see your keys or mouse.
 - Drag the Game tab to a side of the documents to see a level and the game at once.
-- The game keeps its shape (black bars around it) and draws at its own resolution, stretched to
-  the space it has.
+- The game fills the panel, whatever its size or shape: it draws at its own resolution and is
+  stretched to the space it has.
 - **Undock** or closing the editor gives the game its own window back, as it was.
 
 ## Not yet
