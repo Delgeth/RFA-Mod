@@ -62,6 +62,11 @@ decltype(&ShowWindow) o_ShowWindow = ShowWindow;
 decltype(&ClipCursor) o_ClipCursor = ClipCursor;
 decltype(&SetCursorPos) o_SetCursorPos = SetCursorPos;
 decltype(&ShowCursor) o_ShowCursor = ShowCursor;
+decltype(&SetCapture) o_SetCapture = SetCapture;
+decltype(&ReleaseCapture) o_ReleaseCapture = ReleaseCapture;
+decltype(&SetFocus) o_SetFocus = SetFocus;
+decltype(&SetForegroundWindow) o_SetForegroundWindow = SetForegroundWindow;
+decltype(&SetActiveWindow) o_SetActiveWindow = SetActiveWindow;
 decltype(&GetForegroundWindow) o_GetForegroundWindow = GetForegroundWindow;
 decltype(&IsIconic) o_IsIconic = IsIconic;
 decltype(&GetAsyncKeyState) o_GetAsyncKeyState = GetAsyncKeyState;
@@ -196,6 +201,31 @@ int WINAPI Hk_ShowCursor(BOOL show) {
     return show ? 0 : -1;
 }
 
+// Docked, the game must not take the mouse while you work in the editor. Every frame the game holds
+// the mouse for its window (SetCapture, in 0x4E4070: with a controller in use, or in windowed play),
+// and docked that takes it from the editor too, as they share their input: no click reached the
+// editor any more. So while the pointer is the editor's the game's capture is only noted, and given
+// when you click back into the game; and the game can't make its window the active or focused one
+// itself (only your click does).
+bool g_gameCapture = false;  // the game holds the mouse, as far as it knows
+
+HWND WINAPI Hk_SetCapture(HWND hwnd) {
+    if (hwnd != g_hwnd) return o_SetCapture(hwnd);
+    g_gameCapture = true;
+    if (Docked() && g_inBackground) return nullptr;
+    return o_SetCapture(hwnd);
+}
+
+BOOL WINAPI Hk_ReleaseCapture() {
+    g_gameCapture = false;
+    if (Docked() && g_inBackground) return TRUE;  // it has none to give up (the editor may be dragging)
+    return o_ReleaseCapture();
+}
+
+HWND WINAPI Hk_SetFocus(HWND hwnd) { return Docked() ? GetFocus() : o_SetFocus(hwnd); }
+BOOL WINAPI Hk_SetForegroundWindow(HWND hwnd) { return Docked() ? TRUE : o_SetForegroundWindow(hwnd); }
+HWND WINAPI Hk_SetActiveWindow(HWND hwnd) { return Docked() ? GetActiveWindow() : o_SetActiveWindow(hwnd); }
+
 void OnFocusChanged(bool active) {
     if (g_inBackground == !active) return;
     g_inBackground = !active;
@@ -205,7 +235,14 @@ void OnFocusChanged(bool active) {
     if (!active) o_ClipCursor(nullptr);  // never leave the cursor trapped while you're in another app
     else if (g_gameClipSet) o_ClipCursor(&g_gameClip);
     if (!docked) RequestPauseMenu(!active);  // docked, it keeps running while you edit
-    else GivePointerToEditor(!active || !g_mouseInside);
+    else {
+        GivePointerToEditor(!active || !g_mouseInside);
+        if (!active) {
+            if (GetCapture() == g_hwnd) o_ReleaseCapture();
+        } else if (g_gameCapture) {
+            o_SetCapture(g_hwnd);
+        }
+    }
 }
 
 // Sits in front of the game's window procedure. Logs focus/size events and, with
@@ -221,6 +258,7 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             rfa::Log(docked ? "The editor docked the game's window" : "The game's window is its own again");
             if (docked) {
                 bool focused = GetFocus() == hwnd;
+                if (!focused && GetCapture() == hwnd) o_ReleaseCapture();
                 g_mouseInside = false;
                 g_inBackground = !focused;
                 if (!focused) o_ClipCursor(nullptr);
@@ -554,6 +592,11 @@ void borderless::Init() {
         {"USER32.dll", "ShowWindow", rfa::HookImport(game, "USER32.dll", "ShowWindow", &Hk_ShowWindow, &o_ShowWindow)},
         {"USER32.dll", "ClipCursor", rfa::HookImport(game, "USER32.dll", "ClipCursor", &Hk_ClipCursor, &o_ClipCursor)},
         {"USER32.dll", "ShowCursor", rfa::HookImport(game, "USER32.dll", "ShowCursor", &Hk_ShowCursor, &o_ShowCursor)},
+        {"USER32.dll", "SetCapture", rfa::HookImport(game, "USER32.dll", "SetCapture", &Hk_SetCapture, &o_SetCapture)},
+        {"USER32.dll", "ReleaseCapture", rfa::HookImport(game, "USER32.dll", "ReleaseCapture", &Hk_ReleaseCapture, &o_ReleaseCapture)},
+        {"USER32.dll", "SetFocus", rfa::HookImport(game, "USER32.dll", "SetFocus", &Hk_SetFocus, &o_SetFocus)},
+        {"USER32.dll", "SetForegroundWindow", rfa::HookImport(game, "USER32.dll", "SetForegroundWindow", &Hk_SetForegroundWindow, &o_SetForegroundWindow)},
+        {"USER32.dll", "SetActiveWindow", rfa::HookImport(game, "USER32.dll", "SetActiveWindow", &Hk_SetActiveWindow, &o_SetActiveWindow)},
         {"USER32.dll", "SetCursorPos", rfa::HookImport(game, "USER32.dll", "SetCursorPos", &Hk_SetCursorPos, &o_SetCursorPos)},
         {"USER32.dll", "GetForegroundWindow", rfa::HookImport(game, "USER32.dll", "GetForegroundWindow", &Hk_GetForegroundWindow, &o_GetForegroundWindow)},
         {"USER32.dll", "IsIconic", rfa::HookImport(game, "USER32.dll", "IsIconic", &Hk_IsIconic, &o_IsIconic)},
