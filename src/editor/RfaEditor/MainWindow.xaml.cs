@@ -50,7 +50,7 @@ public partial class MainWindow : Window
         DockManager.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
         DockManager.DocumentClosing += OnDocumentClosing;
         DockManager.DocumentClosed += OnDocumentClosed;
-        gamePanel = new GamePanel(context);
+        gamePanel = new GamePanel(context, PlaceGame);
         GameHostPanel.Content = gamePanel.View;
     }
 
@@ -75,7 +75,7 @@ public partial class MainWindow : Window
             if (tab.IsSelected) ShowParts(document);
         };
         documents[key] = (document, tab);
-        DocumentPane.Children.Add(tab);
+        Documents().Children.Add(tab);
         Select(tab);
         ShowParts(document);
     }
@@ -115,7 +115,53 @@ public partial class MainWindow : Window
 
     void ShowPreview() => Select(documents["preview"].Tab);
 
+    /// <summary>The pane the documents are tabs of (panels can be dragged about, so it is looked up).</summary>
+    LayoutDocumentPane Documents() =>
+        documents.Values.Select(d => d.Tab.Parent).OfType<LayoutDocumentPane>().FirstOrDefault()
+        ?? DockManager.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault()
+        ?? DocumentPane;
+
     // ---- The game, docked ----------------------------------------------------------------------
+
+    /// <summary>Puts the Game panel where its Place button says (dragging it by its title does the same by hand).</summary>
+    void PlaceGame(GamePanel.Place place)
+    {
+        Try(() =>
+        {
+            switch (place)
+            {
+                case GamePanel.Place.Window:
+                    GameAnchorable.Float();
+                    return;
+                case GamePanel.Place.Tab:
+                    GameAnchorable.Parent?.RemoveChild(GameAnchorable);
+                    Documents().Children.Add(GameAnchorable);
+                    break;
+                default:
+                    // A pane of its own, under or beside the documents: in the row or column the
+                    // documents are in if it runs that way, else in a new one that takes their place.
+                    Orientation way = place == GamePanel.Place.Below ? Orientation.Vertical : Orientation.Horizontal;
+                    GameAnchorable.Parent?.RemoveChild(GameAnchorable);
+                    var pane = new LayoutAnchorablePane(GameAnchorable);
+                    ILayoutElement middle = Documents();
+                    while (middle.Parent is LayoutDocumentPaneGroup group) middle = group;
+                    if (middle.Parent is LayoutPanel row && row.Orientation == way)
+                    {
+                        row.InsertChildAt(row.IndexOfChild(middle) + 1, pane);
+                    }
+                    else if (middle.Parent is ILayoutContainer container)
+                    {
+                        var split = new LayoutPanel { Orientation = way };
+                        container.ReplaceChild(middle, split);
+                        split.Children.Add((ILayoutPanelElement)middle);
+                        split.Children.Add(pane);
+                    }
+                    break;
+            }
+            GameAnchorable.IsSelected = true;
+            GameAnchorable.IsActive = true;
+        });
+    }
 
     /// <summary>Brings the Game panel forward.</summary>
     void OnShowGame(object sender, RoutedEventArgs e)

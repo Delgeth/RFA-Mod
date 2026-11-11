@@ -43,12 +43,33 @@ sealed class GamePanel
     DateTime startedAt = DateTime.MinValue;
 
 
-    public GamePanel(EditorContext context)
+    /// <summary>Where the panel can be put with its Place button (it can also be dragged anywhere by its title).</summary>
+    public enum Place { Tab, Below, Beside, Window }
+
+    public GamePanel(EditorContext context, Action<Place> place)
     {
         this.context = context;
         startButton = ToolbarButton(Icons.Start, "Start the game", "Starts the game through RFAModLauncher (Steam must be running)", OnStart);
         dockButton = ToolbarButton(Icons.Game, "Dock", "Takes the running game's window into this panel", OnDockOrUndock);
         backButton = ToolbarButton(Icons.Select, "Back to the editor", "Gives the mouse and keys back to the editor (Shift+F1 does too)", (_, _) => BackToEditor());
+        Button placeButton = ToolbarButton(Icons.Display, "Place", "Where this panel sits. You can also drag it by its title onto any side of any panel.", (_, _) => { });
+        var places = new ContextMenu();
+        foreach ((string text, Place where) in new[]
+                 {
+                     ("Under the documents (below the level view)", Place.Below), ("Beside the documents", Place.Beside),
+                     ("As a tab with the documents", Place.Tab), ("In a window of its own", Place.Window),
+                 })
+        {
+            var item = new MenuItem { Header = text };
+            item.Click += (_, _) => place(where);
+            places.Items.Add(item);
+        }
+        placeButton.Click += (_, _) =>
+        {
+            places.PlacementTarget = placeButton;
+            places.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+            places.IsOpen = true;
+        };
         autoDockBox = new CheckBox
         {
             Content = "Dock automatically", IsChecked = true, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 10, 0),
@@ -59,6 +80,7 @@ sealed class GamePanel
         tools.Children.Add(startButton);
         tools.Children.Add(dockButton);
         tools.Children.Add(backButton);
+        tools.Children.Add(placeButton);
         tools.Children.Add(autoDockBox);
         var bar = new DockPanel();
         DockPanel.SetDock(tools, System.Windows.Controls.Dock.Left);
