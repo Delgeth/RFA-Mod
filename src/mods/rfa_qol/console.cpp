@@ -1610,6 +1610,7 @@ struct GameObject {
 //       forward) with the object's own "set position and rotation" (slot 10 of its functions, at
 //       +0x28: thiscall, the position, the rotation, 1), as the mission scripts' object_set_position
 //       (0x9203B0) does;
+//   editor_rescan                              has the loader look for new files in overrides\ and edits\;
 //   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
 //   editor_create <handle>                     makes an object the game hasn't, from its block as a
 //       zone file holds it (header, then properties), which the editor put in
@@ -1664,6 +1665,15 @@ void MakeEditorObject(DWORD handle) {
 }
 
 bool RunEditorEdit(const std::string& line) {
+    if (line == "editor_rescan") {
+        // The loader looks through overrides\ and edits\ again, for files the editor saved for the
+        // first time since the game started (before it has the game reload a level or a table).
+        using RescanFn = int(__cdecl*)();
+        if (auto rescan = reinterpret_cast<RescanFn>(GetProcAddress(GetModuleHandleW(L"rfa_loader.dll"), "RFALoader_RescanOverrides")))
+            rescan();
+        else rfa::Log("Editor link: this loader can't look through the overrides again (an older rfa_loader.dll)");
+        return true;
+    }
     if (line.rfind("editor_create ", 0) == 0) {
         MakeEditorObject(static_cast<DWORD>(strtoul(line.c_str() + 14, nullptr, 0)));
         return true;

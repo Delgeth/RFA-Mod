@@ -12,6 +12,8 @@ namespace RfaEditor;
 ///   an object moved or turned here is moved and turned there, as you drag it (the game's own "set
 ///     position" for the object, which its mission scripts use);
 ///   an object deleted here is removed there;
+///   an object whose properties you change here (the picked one: a light's colour, a flag) is made
+///     again there with them: removed, and a moment later made from its zone data;
 ///   an object added here (a duplicate, a new chunk, a delete undone) is made there from its zone
 ///     data, as the game makes a level's objects, if the game has its model loaded: that is taken
 ///     to be so when an object with the same chunk was in the zone when Live went on.
@@ -26,6 +28,9 @@ public partial class LevelEditor
     readonly DispatcherTimer liveTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveSent = [];  // what the game was last sent (or had)
     readonly HashSet<uint> liveNotInGame = [];  // added here since, and not made there: the game has no such object
+    readonly Dictionary<uint, int> liveContent = [];  // the properties (but where it is) of objects that were picked, as the game has them
+    readonly Dictionary<uint, int> liveHold = [];      // removed there to be made again: not before this tick
+    int liveTicks;
     readonly HashSet<string> liveChunks = new(StringComparer.OrdinalIgnoreCase);  // the chunks the game has loaded for this zone
     bool liveHooked;
     int liveMoves, liveRemoves, liveCreates;
@@ -60,6 +65,8 @@ public partial class LevelEditor
         liveSent.Clear();
         liveNotInGame.Clear();
         liveChunks.Clear();
+        liveContent.Clear();
+        liveHold.Clear();
         foreach (ZoneObject obj in zone.Objects.Where(LiveKind))
         {
             liveSent[obj.Handle] = obj.Placement;
@@ -74,6 +81,22 @@ public partial class LevelEditor
     /// </summary>
     bool LiveCanMake(ZoneObject obj) => obj.Property("chunk_name")?.Text is not string chunk || liveChunks.Contains(chunk);
 
+    static readonly uint PlaceHash = NameHashes.PropertyHash("oP"), JustPosHash = NameHashes.PropertyHash("just_pos");
+
+    /// <summary>An object's properties, but where it is and how it is turned, as one number: it changes when they do.</summary>
+    static int LiveContent(ZoneObject obj)
+    {
+        var hash = new HashCode();
+        foreach (ZoneProperty property in obj.Properties)
+        {
+            if (property.NameHash == PlaceHash || property.NameHash == JustPosHash) continue;
+            hash.Add(property.NameHash);
+            hash.Add(property.Type);
+            hash.AddBytes(property.Value);
+        }
+        return hash.ToHashCode();
+    }
+
     /// <summary>Objects the game has as objects of its own (level geometry pieces are parts of one mesh there).</summary>
     static bool LiveKind(ZoneObject obj) => !IsGeometry(obj);
 
@@ -84,10 +107,31 @@ public partial class LevelEditor
         var moved = new List<ZoneObject>();
         var made = new List<ZoneObject>();
         var here = new HashSet<uint>();
+        liveTicks++;
+        // The picked object's properties changed (not just where it is): the game makes objects from
+        // their properties, so it is removed there now and made again in a moment (it then counts as
+        // one the game hasn't, below). An object is taken to match the game when it is first picked.
+        if (selected is { } picked && LiveKind(picked) && zone.Objects.Contains(picked) && liveSent.ContainsKey(picked.Handle))
+        {
+            int content = LiveContent(picked);
+            if (!liveContent.TryGetValue(picked.Handle, out int had)) liveContent[picked.Handle] = content;
+            else if (had != content && LiveCanMake(picked) && !gameLink.Waiting && gameLink.TrySend([GameLink.RemoveCommand(picked.Handle)]))
+            {
+                liveContent[picked.Handle] = content;
+                liveSent.Remove(picked.Handle);
+                liveHold[picked.Handle] = liveTicks + 3;
+                return;
+            }
+        }
         foreach (ZoneObject obj in zone.Objects)
         {
             if (!LiveKind(obj)) continue;
             here.Add(obj.Handle);
+            if (liveHold.TryGetValue(obj.Handle, out int until))
+            {
+                if (liveTicks < until) continue;
+                liveHold.Remove(obj.Handle);
+            }
             if (!liveSent.TryGetValue(obj.Handle, out var sent))
             {
                 // Added here since Live went on (or put back by undo): made in the game too, if it can be.
@@ -145,9 +189,9 @@ public partial class LevelEditor
             context.Log("Save and reload: saved. The game isn't running with the console mod, so there was nothing to reload.");
             return;
         }
-        gameLink.Send(["reload_level"]);
+        gameLink.Send(["editor_rescan", "reload_level"]);
         // The game has every object where the saved zone puts it again.
         if (LiveBox.IsChecked == true) NoteLiveObjects();
-        context.Log("Save and reload: saved, and the game is loading the level again. (A zone saved for the first time while the game runs is only used from the game's next start.)");
+        context.Log("Save and reload: saved, and the game is loading the level again.");
     }
 }

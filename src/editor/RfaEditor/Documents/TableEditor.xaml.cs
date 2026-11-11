@@ -352,6 +352,33 @@ public partial class TableEditor : UserControl, IEditorDocument
 
     void OnSave(object sender, RoutedEventArgs e) => Save();
 
+    /// <summary>
+    /// The game's console commands that read a table again while it runs. Other tables are read once,
+    /// when the game starts or a level loads.
+    /// </summary>
+    static readonly Dictionary<string, string> ReloadCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ai_properties.xtbl"] = "reload_ai_properties", ["leap_properties.xtbl"] = "reload_leap_properties",
+        ["explosions.xtbl"] = "reload_explosions", ["camera_shake.xtbl"] = "reload_camera_shakes", ["camera.xtbl"] = "reload_camera_view",
+        ["effects.xtbl"] = "reload_effects_table", ["difficulty.xtbl"] = "reload_difficulty", ["squads.xtbl"] = "reload_squads",
+        ["game_audio.xtbl"] = "reload_game_audio", ["game_audio_constants.xtbl"] = "reload_game_audio_constants",
+        ["audio_bink_volumes.xtbl"] = "reload_audio_bink_volumes", ["tweak_table.xtbl"] = "reload_tweak_table",
+    };
+
+    /// <summary>Has the running game read the saved table again, if it has a command for this table. The command, or null.</summary>
+    string? ReloadInGame()
+    {
+        if (!ReloadCommands.TryGetValue(fileName, out string? command)) return null;
+        try
+        {
+            using var link = new GameLink(context.Workspace.ModFolder);
+            if (!GameLink.IsRecent(link.Read())) return null;  // the game isn't running (with the console mod)
+            link.Send(["editor_rescan", command]);
+            return command;
+        }
+        catch (IOException) { return null; }
+    }
+
     bool Save()
     {
         if (!unsaved) return true;
@@ -366,9 +393,12 @@ public partial class TableEditor : UserControl, IEditorDocument
             SaveButton.IsEnabled = false;
             Workspace.RefreshOverrides();
             ShowSource();
-            context.Log(first
-                ? $"Saved {fileName} as a new override, {Workspace.RelativeToMod(target)}. The game uses it from its next start through RFAModLauncher."
-                : $"Saved {Workspace.RelativeToMod(target)}.");
+            string? reloaded = ReloadInGame();
+            context.Log((first
+                ? $"Saved {fileName} as a new override, {Workspace.RelativeToMod(target)}."
+                : $"Saved {Workspace.RelativeToMod(target)}.") +
+                (reloaded != null ? $" The running game was told to read it again ({reloaded})."
+                    : first ? " The game uses it from its next start through RFAModLauncher." : ""));
             context.OverridesChanged();
             return true;
         }

@@ -10,7 +10,9 @@
 #include <DbgHelp.h>
 #include <algorithm>
 #include <cstdio>
+#include <deque>
 #include <map>
+#include <set>
 #include <vector>
 
 #pragma comment(linker, "/EXPORT:RFALoader_Init=_RFALoader_Init@4")
@@ -386,8 +388,21 @@ struct Override {
     DWORD archiveSize = 0;   // size of the file it replaces, in its archive
     LONG used = 0;           // set the first time the game reads it, so the log says so only once
 };
-std::map<std::string, std::vector<Override>> g_overrides;  // lower-case file name -> replacements
+// (A deque: adding to it leaves the replacements already there where they are, so the file hooks can
+// keep one they found while more are added: see RFALoader_RescanOverrides.)
+std::map<std::string, std::deque<Override>> g_overrides;  // lower-case file name -> replacements
 size_t g_overrideCount = 0;
+
+// The game looks files up on several threads, and the editor can ask for overrides\ and edits\ to be
+// looked through again while the game runs (RFALoader_RescanOverrides): the hooks hold this shared
+// while they search g_overrides and g_newFiles (never while they call the game), a rescan alone
+// while it adds to them. Nothing is ever taken out, so what a hook found stays good.
+SRWLOCK g_filesLock = SRWLOCK_INIT;
+struct SharedFiles {
+    SharedFiles() { AcquireSRWLockShared(&g_filesLock); }
+    ~SharedFiles() { ReleaseSRWLockShared(&g_filesLock); }
+};
+std::set<std::wstring> g_seenFiles;  // every file of overrides\ and edits\ looked at, so a rescan only looks at new ones
 
 struct ArchiveFile {
     std::string name;
@@ -512,7 +527,7 @@ void FindOverrides(const std::wstring& root, const std::wstring& relative) {
         if (name == L"." || name == L"..") continue;
         const std::wstring path = relative.empty() ? name : relative + L"\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) FindOverrides(root, path);
-        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0) AddOverride(root, path);
+        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0 && g_seenFiles.insert(L"overrides\\" + path).second) AddOverride(root, path);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
 }
@@ -597,7 +612,7 @@ void FindEdits(const std::wstring& root, const std::wstring& relative) {
         if (name == L"." || name == L"..") continue;
         const std::wstring path = relative.empty() ? name : relative + L"\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) FindEdits(root, path);
-        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0) AddEdit(root, path);
+        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0 && g_seenFiles.insert(L"edits\\" + path).second) AddEdit(root, path);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
 }
@@ -630,10 +645,15 @@ int __cdecl LoadBufferHook(lua_State* L, const char* buffer, size_t size, const 
     const std::string name = ScriptFileName(chunkName);
     if (!name.empty()) {
         RFA_LOG_FIRST(60, "Lua script loaded: %s", chunkName);
-        auto found = g_overrides.find(Lower(name));
+        const Override* replacement = nullptr;
+        {
+            SharedFiles shared;
+            auto found = g_overrides.find(Lower(name));
+            if (found != g_overrides.end()) replacement = &found->second.front();
+        }
         std::string text;
-        if (found != g_overrides.end() && ReadWholeFile(found->second.front().path, text)) {
-            rfa::Log("Using override %s", found->second.front().relative.c_str());
+        if (replacement && ReadWholeFile(replacement->path, text)) {
+            rfa::Log("Using override %s", replacement->relative.c_str());
             return g_loadBuffer(L, text.data(), text.size(), chunkName);
         }
     }
@@ -652,27 +672,32 @@ bool FindNewFile(FileFindResult* result, const char* name) {
     std::string key = Lower(name);
     std::replace(key.begin(), key.end(), '/', '\\');
     if (key.rfind(".\\", 0) == 0) key.erase(0, 2);
-    auto file = g_newFiles.find(key);
-    if (file == g_newFiles.end()) file = g_newFiles.find(key.substr(key.find_last_of('\\') + 1));
-    if (file == g_newFiles.end()) {
-        for (const auto& [newKey, newFile] : g_newFiles) {
-            const std::string stem = newKey.substr(newKey.find_last_of('\\') + 1, newKey.find_last_of('.') - newKey.find_last_of('\\') - 1);
-            if (stem.size() >= 3 && key.find(stem) != std::string::npos) {
-                RFA_LOG_FIRST(100, "The game looked for %s and found it nowhere (no new file is called that)", name);
-                break;
+    NewFile* file = nullptr;
+    {
+        SharedFiles shared;
+        auto found = g_newFiles.find(key);
+        if (found == g_newFiles.end()) found = g_newFiles.find(key.substr(key.find_last_of('\\') + 1));
+        if (found == g_newFiles.end()) {
+            for (const auto& [newKey, newFile] : g_newFiles) {
+                const std::string stem = newKey.substr(newKey.find_last_of('\\') + 1, newKey.find_last_of('.') - newKey.find_last_of('\\') - 1);
+                if (stem.size() >= 3 && key.find(stem) != std::string::npos) {
+                    RFA_LOG_FIRST(100, "The game looked for %s and found it nowhere (no new file is called that)", name);
+                    break;
+                }
             }
+            return false;
         }
-        return false;
+        file = &found->second;
     }
     result->source = -1;
     result->pathType = -1;
     result->name[0] = '\0';
     result->size = 0;
     result->archiveEntry = nullptr;
-    const bool ok = rfa::game::FindLooseFile(result, file->second.ansiPath.c_str(), 0);
-    if (InterlockedExchange(&file->second.used, 1) == 0)
+    const bool ok = rfa::game::FindLooseFile(result, file->ansiPath.c_str(), 0);
+    if (InterlockedExchange(&file->used, 1) == 0)
         rfa::Log(ok ? "Using new file %s (the game asked for %s)" : "New file %s could not be opened (the game asked for %s)",
-                 file->second.relative.c_str(), name);
+                 file->relative.c_str(), name);
     return ok;
 }
 
@@ -782,17 +807,22 @@ bool __cdecl FindFileHook(FileFindResult* result, const char* name, bool flag) {
                       : result->source == 0 ? "loose file"
                                              : "found",
                       found ? result->size : 0ul);
-    if (!found && name && !g_newFiles.empty()) return FindNewFile(result, name);
+    if (!found && name) return FindNewFile(result, name);
     if (!found || result->source != 1 || !name) return found;  // not found, or not inside an archive
 
-    auto overrides = g_overrides.find(Lower(name));
-    if (overrides == g_overrides.end() || IsLuaScript(overrides->first)) return found;
-    auto o = std::find_if(overrides->second.begin(), overrides->second.end(),
-                          [&](const Override& candidate) { return candidate.archiveSize == result->size; });
-    if (o == overrides->second.end()) {
-        RFA_LOG_FIRST(20, "Override %s not used here: the game loaded another archive's %s (%lu bytes)",
-                      overrides->second.front().relative.c_str(), name, result->size);
-        return found;
+    Override* o = nullptr;
+    {
+        SharedFiles shared;
+        auto overrides = g_overrides.find(Lower(name));
+        if (overrides == g_overrides.end() || IsLuaScript(overrides->first)) return found;
+        auto match = std::find_if(overrides->second.begin(), overrides->second.end(),
+                                  [&](const Override& candidate) { return candidate.archiveSize == result->size; });
+        if (match == overrides->second.end()) {
+            RFA_LOG_FIRST(20, "Override %s not used here: the game loaded another archive's %s (%lu bytes)",
+                          overrides->second.front().relative.c_str(), name, result->size);
+            return found;
+        }
+        o = &*match;
     }
 
     // Start the result again the way the game's FindFile does, then let the game's own loose-file
@@ -877,6 +907,23 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
         }
 }
 
+// Looks through overrides\ and edits\ again for files added since the game started (the editor asks
+// for this before it has the game load a level again or reload a table, so a zone or table saved
+// for the first time while the game runs is used at once). How many new files it saw. A file
+// already known is read from the disk each time the game opens it, so a changed one needs no rescan.
+bool g_overridesOn = false;
+extern "C" __declspec(dllexport) int __cdecl RFALoader_RescanOverrides() {
+    if (!g_overridesOn) return 0;
+    AcquireSRWLockExclusive(&g_filesLock);
+    const size_t before = g_seenFiles.size();
+    FindOverrides(rfa::RootDir() + L"\\overrides", L"");
+    FindEdits(rfa::RootDir() + L"\\edits", L"");
+    const int added = static_cast<int>(g_seenFiles.size() - before);
+    ReleaseSRWLockExclusive(&g_filesLock);
+    if (added) rfa::Log("Overrides looked through again: %d new file(s)", added);
+    return added;
+}
+
 void InstallOverrides() {
     using namespace rfa::game;
     // "ScriptOverrides" is the setting's old name, from when only Lua scripts could be overridden.
@@ -884,6 +931,7 @@ void InstallOverrides() {
         rfa::Log("Overrides: off ([Loader] Overrides=0)");
         return;
     }
+    g_overridesOn = true;
     FindOverrides(rfa::RootDir() + L"\\overrides", L"");
     FindEdits(rfa::RootDir() + L"\\edits", L"");  // changes to the archives the mod adds (the Guerrilla world's)
     g_logLookups = rfa::IniInt(L"Loader", L"LogLookups", 0) != 0;

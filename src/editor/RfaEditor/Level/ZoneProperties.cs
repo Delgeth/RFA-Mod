@@ -336,7 +336,8 @@ sealed class ZonePropertyRows
             {
                 Width = 44, Height = 20, CornerRadius = new CornerRadius(4), BorderBrush = Theme.Brush("StrongBorderBrush"), BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
-                ToolTip = "The colour as the screen can show it: values above 1 are brighter still",
+                ToolTip = "The colour as the screen can show it: values above 1 are brighter still. Click to pick it on a colour wheel",
+                Cursor = System.Windows.Input.Cursors.Hand,
             };
             void ShowSwatch()
             {
@@ -345,6 +346,40 @@ sealed class ZonePropertyRows
                 swatch.Background = new SolidColorBrush(Color.FromRgb(Channel(c[0]), Channel(c[1]), Channel(c[2])));
             }
             ShowSwatch();
+            // A click on the swatch opens a colour wheel: picking changes the colour as you drag (so a
+            // light shows it in the view, and with Live in the game); the numbers show it once it closes.
+            swatch.MouseLeftButtonUp += (_, _) =>
+            {
+                float[] now = property.Floats();
+                var wheel = new ColorWheel(now[0], now[1], now[2]);
+                var popup = new Popup
+                {
+                    PlacementTarget = swatch, Placement = PlacementMode.Bottom, StaysOpen = false, AllowsTransparency = true,
+                    Child = new Border
+                    {
+                        Background = Theme.Brush("PanelBrush"), BorderBrush = Theme.Brush("StrongBorderBrush"), BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(6), Child = wheel,
+                    },
+                };
+                bool picked = false;
+                wheel.Picked += (red, green, blue) =>
+                {
+                    byte[] value = property.Value;
+                    BitConverter.TryWriteBytes(value.AsSpan(0), red);
+                    BitConverter.TryWriteBytes(value.AsSpan(4), green);
+                    BitConverter.TryWriteBytes(value.AsSpan(8), blue);
+                    property.SetValue(value);
+                    ShowSwatch();
+                    picked = true;
+                    changed();
+                };
+                wheel.Done += committed;
+                popup.Closed += (_, _) =>
+                {
+                    if (picked) relaidOut();  // the numbers beside the swatch, shown again
+                };
+                popup.IsOpen = true;
+            };
             return (swatch, NumbersEditor(property, [("R", "AxisXBrush"), ("G", "AxisYBrush"), ("B", "AxisZBrush"), ("A", "DimTextBrush")], 0.01, afterEach: ShowSwatch));
         }
 
