@@ -476,6 +476,7 @@ public partial class LevelEditor
         float seconds = (float)Math.Min(0.1, (now - lastPadFrame).TotalSeconds);
         lastPadFrame = now;
         if (!IsVisible || Window.GetWindow(this)?.IsActive != true) return;
+        if (GamePanel.GameHasInput) return;  // you are playing the docked game: the controller is its
         if (!pad.Read(out PadState state, out PadButtons pressed))
         {
             if (padWasConnected)

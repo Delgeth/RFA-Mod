@@ -43,12 +43,22 @@ sealed class GamePanel
     DateTime startedAt = DateTime.MinValue;
 
 
+    static GamePanel? current;
+
+    /// <summary>
+    /// Whether the docked game has the keyboard (you clicked into it). The controller is then the
+    /// game's: the level editor leaves it alone (both read the same controller, and one stick would
+    /// otherwise fly the editor's camera and walk the player at once).
+    /// </summary>
+    public static bool GameHasInput => current?.InGame() == true;
+
     /// <summary>Where the panel can be put with its Place button (it can also be dragged anywhere by its title).</summary>
     public enum Place { Tab, Below, Beside, Window }
 
     public GamePanel(EditorContext context, Action<Place> place)
     {
         this.context = context;
+        current = this;
         startButton = ToolbarButton(Icons.Start, "Start the game", "Starts the game through RFAModLauncher (Steam must be running)", OnStart);
         dockButton = ToolbarButton(Icons.Game, "Dock", "Takes the running game's window into this panel", OnDockOrUndock);
         backButton = ToolbarButton(Icons.Select, "Back to the editor", "Gives the mouse and keys back to the editor (Shift+F1 does too)", (_, _) => BackToEditor());
