@@ -171,6 +171,14 @@ sealed class GamePanel
             context.Log("The game closed.");
             ForgetGame();
         }
+        else if (Docked && Native.GetAncestor(game, Native.GA_PARENT) != host.Handle)
+        {
+            // The borderless mod takes the window back while the game changes its display mode
+            // (video settings): docked, that crashed the game.
+            context.Log("The game took its window back to change its display mode. It is docked again in a moment.");
+            ForgetGame();
+            startedAt = DateTime.Now;  // give it a few seconds to finish, as when it starts
+        }
         IntPtr found = Docked ? game : FindGameWindow();
         if (!Docked && found != IntPtr.Zero && autoDockBox.IsChecked == true && host.Handle != IntPtr.Zero && View.IsVisible)
         {
@@ -330,7 +338,7 @@ sealed class GameHost : HwndHost
 static class Native
 {
     public const int GWL_STYLE = -16, GWL_EXSTYLE = -20;
-    public const uint GW_OWNER = 4;
+    public const uint GW_OWNER = 4, GA_PARENT = 1;
     public const int WM_SIZE = 0x0005, WM_HOTKEY = 0x0312;
     public const uint MOD_SHIFT = 0x4, MOD_NOREPEAT = 0x4000;
     public const long WS_CHILD = 0x40000000, WS_POPUP = 0x80000000, WS_VISIBLE = 0x10000000, WS_CLIPCHILDREN = 0x02000000,
@@ -367,6 +375,7 @@ static class Native
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetParent(IntPtr child, IntPtr parent);

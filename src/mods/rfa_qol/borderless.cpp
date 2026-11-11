@@ -16,7 +16,8 @@
 //
 // The editor's Game tab can dock the game's window inside the editor (it makes the window a child of
 // one of its own). While docked, the editor decides where the window is and how big: the game's own
-// moves and styles leave it a borderless child. Clicking into it gives the game the mouse and keys;
+// moves leave it where it is (to change its display mode it takes its window back; the editor docks
+// it again after). Clicking into it gives the game the mouse and keys;
 // clicking or switching away (Shift+F1 in the editor) frees the cursor and mutes the game's input, and
 // the game keeps running without pausing, so you can watch your edits in it.
 //
@@ -322,15 +323,16 @@ HWND WINAPI Hk_CreateWindowExW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style
 LONG FilterWindowLong(HWND hwnd, int index, LONG value) {
     if (hwnd != g_hwnd || (index != GWL_STYLE && index != GWL_EXSTYLE)) return value;
     if (Docked()) {
-        // The editor holds it: stay a borderless child whatever mode the game switches to.
-        LONG kept = index == GWL_STYLE
-            ? (value & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_MAXIMIZE |
-                         WS_MINIMIZE)) | WS_CHILD | WS_VISIBLE
-            : BorderlessExStyle(value) & ~WS_EX_APPWINDOW;
-        RFA_LOG_FIRST(20, "SetWindowLong(%s, %08lX) -> %08lX (docked in the editor)", index == GWL_STYLE ? "STYLE" : "EXSTYLE",
-                      value, kept);
-        return kept;
+        // The game is changing its display mode (video settings). Docked, that crashed it, so it gets
+        // its own window back first and changes mode as it always does; the editor sees the window
+        // gone from its panel and docks it again a moment later.
+        rfa::Log("The game is changing its display mode: taking its window out of the editor for that");
+        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+        o_SetWindowLongW(hwnd, GWL_STYLE, (style & ~WS_CHILD) | WS_POPUP);
+        SetParent(hwnd, nullptr);
     }
+    // The game builds the new style from the one the window has, which while docked says "child".
+    if (index == GWL_STYLE) value &= ~static_cast<LONG>(WS_CHILD);
     if (index == GWL_STYLE) NoteGameMode(value);
     LONG filtered = value;
     if (Borderless()) filtered = index == GWL_STYLE ? BorderlessStyle(value) : BorderlessExStyle(value);
@@ -352,6 +354,7 @@ BOOL WINAPI Hk_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy,
         if (Docked()) {
             // Where it sits and how big is the editor's to say.
             flags |= SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
+            flags &= ~SWP_FRAMECHANGED;
         } else if (Borderless() && !IsIconic(hwnd)) {
             RECT r = TargetRect();
             x = r.left;
