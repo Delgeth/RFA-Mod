@@ -36,6 +36,7 @@ public partial class LevelEditor
     int liveTicks;
     DateTime? liveReloadWanted;  // when a change was last made that the game only shows after the level is loaded again
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveGeometry = [];  // the level geometry's pieces, as the game has them
+    readonly Dictionary<uint, (int List, int Index, string Name)> liveGeometryAt = [];      // where each piece is in the game's stitch list
     readonly HashSet<string> liveChunks = new(StringComparer.OrdinalIgnoreCase);  // the chunks the game has loaded for this zone
     readonly Dictionary<string, (string Container, int Since)> liveChunkLoads = new(StringComparer.OrdinalIgnoreCase);  // asked of the game, not answered yet
     readonly HashSet<string> liveChunksFailed = new(StringComparer.OrdinalIgnoreCase);  // the game couldn't load them: they need a reload
@@ -79,7 +80,19 @@ public partial class LevelEditor
         liveChunkLoads.Clear();
         liveChunksFailed.Clear();
         liveGeometry.Clear();
-        foreach (ZoneObject piece in zone.Objects.Where(IsGeometry)) liveGeometry[piece.Handle] = piece.Placement;
+        liveGeometryAt.Clear();
+        // The pieces were made objects in their stitch list's order (list by list), with rising handles:
+        // a piece's place in the game's list is its place among its list's pieces, by handle.
+        var perList = new Dictionary<int, int>();
+        foreach (ZoneObject piece in zone.Objects.Where(IsGeometry).OrderBy(p => p.Handle))
+        {
+            liveGeometry[piece.Handle] = piece.Placement;
+            if ((piece.Handle & 0xFFFF0000) != ZoneFile.EditorOnlyHandles) continue;  // added here: the game hasn't it
+            int list = ListOf(piece);
+            int index = perList.GetValueOrDefault(list);
+            perList[list] = index + 1;
+            liveGeometryAt[piece.Handle] = (list, index, PieceOf(piece));
+        }
         foreach (ZoneObject obj in zone.Objects.Where(LiveKind))
         {
             liveSent[obj.Handle] = obj.Placement;
@@ -205,21 +218,36 @@ public partial class LevelEditor
     }
 
     /// <summary>Notes changes to the level geometry's pieces (moved, added, deleted): the game has them as one mesh, made when the level loads.</summary>
+    /// <summary>
+    /// The level geometry's pieces: one the game has that was moved or turned here is moved there at
+    /// once (editor_stitch: where it draws it; its collision stays where the level loaded it until the
+    /// level loads again). Pieces added or deleted here need the level loaded again.
+    /// </summary>
     void WatchLiveGeometry()
     {
         var pieces = zone.Objects.Where(IsGeometry).ToList();
-        bool changed = pieces.Count != liveGeometry.Count;
+        bool addedOrRemoved = pieces.Count != liveGeometry.Count || pieces.Any(p => !liveGeometry.ContainsKey(p.Handle));
+        var lines = new List<string>();
+        var moved = new List<ZoneObject>();
         foreach (ZoneObject piece in pieces)
         {
             var now = piece.Placement;
-            if (liveGeometry.TryGetValue(piece.Handle, out var had) && had.Position == now.Position && had.Rotation == now.Rotation) continue;
-            changed = true;
+            if (!liveGeometry.TryGetValue(piece.Handle, out var had) || had.Position == now.Position && had.Rotation == now.Rotation) continue;
+            moved.Add(piece);
+            if (liveGeometryAt.TryGetValue(piece.Handle, out var at) && stitchListName != null)
+                lines.Add(StitchCommand(Path.GetFileNameWithoutExtension(stitchListName) + ".cterrain_pc", at.List, at.Index, at.Name, now.Position, now.Rotation));
+            else addedOrRemoved = true;
         }
-        if (!changed) return;
+        if (lines.Count > 0 && !gameLink.TrySend(lines)) return;  // the link is busy: next time
+        foreach (ZoneObject piece in moved) liveGeometry[piece.Handle] = piece.Placement;
+        if (!addedOrRemoved) return;
         liveGeometry.Clear();
         foreach (ZoneObject piece in pieces) liveGeometry[piece.Handle] = piece.Placement;
         LiveNeedsReload();
     }
+
+    static string StitchCommand(string cterrain, int list, int index, string name, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
+        $"editor_stitch {cterrain} {list} {index} {name} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
 
     /// <summary>Saves and has the game load the level again, if Auto reload is on and it is two seconds since the last change that needs it.</summary>
     bool LiveAutoReload()

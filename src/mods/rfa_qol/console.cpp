@@ -1731,14 +1731,49 @@ auto const FindContainer = reinterpret_cast<void*(__cdecl*)(const char* name)>(0
 auto const LoadContainerNow = reinterpret_cast<bool(__cdecl*)(void* container)>(0x908FC0);
 constexpr DWORD kChunkTempPool = 0x26AF908, kChunkPool = 0x26AEE78;
 
-void LoadEditorChunk(const std::string& assetList, const std::string& container) {
-    void* found = FindContainer(container.c_str());
-    if (!found) {
-        const bool read = ReadAssetList(assetList.c_str(), reinterpret_cast<void*>(kChunkTempPool), reinterpret_cast<void*>(kChunkPool), 0, 0, 0);
-        found = FindContainer(container.c_str());
-        if (!found) rfa::Log("Editor link: the asset list %s was %s, but has no container %s", assetList.c_str(), read ? "read" : "not read", container.c_str());
+// Each step on its own, guarded: a fault in the game's code is logged with the step, not a crash
+// (unless another mod's exception handler gets to it first).
+int GuardedReadAssetList(const char* name) {
+    __try {
+        return ReadAssetList(name, reinterpret_cast<void*>(kChunkTempPool), reinterpret_cast<void*>(kChunkPool), 0, 0, 0) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
     }
-    const bool loaded = found && LoadContainerNow(found);
+}
+void* GuardedFindContainer(const char* name, bool* faulted) {
+    __try {
+        return FindContainer(name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *faulted = true;
+        return nullptr;
+    }
+}
+int GuardedLoadContainer(void* container) {
+    __try {
+        return LoadContainerNow(container) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
+    }
+}
+
+void LoadEditorChunk(const std::string& assetList, const std::string& container) {
+    bool faulted = false;
+    rfa::Log("Editor link: chunk container %s: looking it up", container.c_str());
+    void* found = GuardedFindContainer(container.c_str(), &faulted);
+    if (!found && !faulted) {
+        rfa::Log("Editor link: chunk container %s: reading the asset list %s", container.c_str(), assetList.c_str());
+        const int read = GuardedReadAssetList(assetList.c_str());
+        if (read < 0) rfa::Log("Editor link: reading the asset list FAULTED (exception %08X)", static_cast<unsigned>(-read) | 0x80000000u);
+        found = read < 0 ? nullptr : GuardedFindContainer(container.c_str(), &faulted);
+        if (!found) rfa::Log("Editor link: the asset list %s was %s, but has no container %s", assetList.c_str(), read > 0 ? "read" : "not read", container.c_str());
+    }
+    int load = 0;
+    if (found) {
+        rfa::Log("Editor link: chunk container %s: loading it (container record %p)", container.c_str(), found);
+        load = GuardedLoadContainer(found);
+        if (load < 0) rfa::Log("Editor link: loading the container FAULTED (exception %08X)", static_cast<unsigned>(-load) | 0x80000000u);
+    }
+    const bool loaded = load > 0;
     rfa::Log("Editor link: chunk container %s %s", container.c_str(), loaded ? "loaded" : "NOT loaded");
     const std::wstring answer = LinkFolder() + L"\\chunk_" + std::wstring(container.begin(), container.end()) + L".txt";
     FILE* file = nullptr;
@@ -1748,7 +1783,67 @@ void LoadEditorChunk(const std::string& assetList, const std::string& container)
     }
 }
 
+// editor_stitch <zone>.cterrain_pc <list> <index> <piece name> x y z <9 rotation numbers>: moves one of
+// the level geometry's pieces where the game has it. A zone's stitch list stays in memory as it was
+// read (the loader, 0x6B8710, only turns its offsets into addresses); its terrain record (0x6BBA90,
+// by the zone's .cterrain_pc name) points at its header (+4), whose first 9 words are each list's
+// pieces (100 bytes each: name +0, position +4, rotation +0x10) and next 9 the lists' counts. The
+// piece is checked by its name before it is changed. Whether the game draws it moved depends on
+// whether it reads the piece each frame; its collision stays where it was until the level loads again.
+auto const TerrainRecord = reinterpret_cast<BYTE*(__cdecl*)(const char* cterrainName)>(0x6BBA90);
+
+int GuardedMoveStitchPiece(const char* cterrain, int list, int index, const char* name, const float* numbers) {
+    __try {
+        BYTE* record = TerrainRecord(cterrain);
+        if (!record) return -1;
+        BYTE* header = *reinterpret_cast<BYTE**>(record + 4);
+        if (!header || list < 0 || list >= 9) return -2;
+        BYTE* pieces = *reinterpret_cast<BYTE**>(header + list * 4);
+        const int count = *reinterpret_cast<int*>(header + 0x24 + list * 4);
+        if (!pieces || index < 0 || index >= count) return -3;
+        BYTE* piece = pieces + index * 100;
+        const char* pieceName = *reinterpret_cast<const char**>(piece);
+        if (!pieceName || _stricmp(pieceName, name) != 0) return -4;
+        memcpy(piece + 4, numbers, 12 * sizeof(float));
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+void MoveEditorStitchPiece(const std::string& line) {
+    char cterrain[96] = {}, name[96] = {};
+    int list = -1, index = -1, used = 0;
+    if (sscanf_s(line.c_str() + 14, "%95s %d %d %95s%n", cterrain, static_cast<unsigned>(sizeof(cterrain)), &list, &index, name,
+                 static_cast<unsigned>(sizeof(name)), &used) != 4) {
+        rfa::Log("Editor link: editor_stitch needs a terrain name, list, index, piece name and 12 numbers");
+        return;
+    }
+    const char* rest = line.c_str() + 14 + used;
+    float numbers[12];
+    for (float& number : numbers) {
+        char* next = nullptr;
+        number = strtof(rest, &next);
+        if (next == rest) return;
+        rest = next;
+    }
+    static int moved = 0, problems = 0;
+    const int result = GuardedMoveStitchPiece(cterrain, list, index, name, numbers);
+    static const char* const why[] = {"", "the game has no terrain record of that name", "no such list", "no such piece",
+                                      "the piece there has another name (the stitch list changed since the level loaded)",
+                                      "reading the game's stitch list faulted"};
+    if (result > 0) {
+        if (++moved <= 5) rfa::Log("Editor link: moved level geometry piece %s (%s list %d #%d)", name, cterrain, list, index);
+    } else if (++problems <= 10) {
+        rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) not moved: %s", name, cterrain, list, index, why[-result]);
+    }
+}
+
 bool RunEditorEdit(const std::string& line) {
+    if (line.rfind("editor_stitch ", 0) == 0) {
+        MoveEditorStitchPiece(line);
+        return true;
+    }
     if (line.rfind("editor_chunk ", 0) == 0) {
         char assetList[128] = {}, container[128] = {};
         if (sscanf_s(line.c_str() + 13, "%127s %127s", assetList, static_cast<unsigned>(sizeof(assetList)), container,
