@@ -75,6 +75,8 @@
 #include "rfa_game.h"
 #include <intrin.h>
 #include <malloc.h>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -476,6 +478,106 @@ DWORD __fastcall NodeSpawn(BYTE* node, void* edx, DWORD a, DWORD b) {
                  ObjectHandle(node, nullptr), squadHandle, boxHandle);
     }
     return squadHandle;
+}
+
+// ---- A guard post's squad asks for no way out of its post (the user's test of 2026-11-10: "Failed pathfind" still came)
+//
+// Armageddon's leash doesn't hold a squad in. Its one check (0x42E5B0, in each member's AI update: the squad's 0x810710
+// on the member's own place) only marks a member that is already outside, to walk it back. A member inside still asks
+// for a way to its target, and over the Dust safehouse that walk is 500-730 m round the hill, past the search's limit:
+// every request ran a whole search that failed and reported "Failed pathfind, probably bad navmesh in the area" (from
+// inside the box to the player on the base floor). The squad stayed at its post only because the search gave up.
+// So, still as the stand-in for Guerrilla's guard post AI: in our worlds a member of a squad leashed to a box (type 4,
+// which only NodeSpawn above gives) gets no path to a place outside that box. The human's path query (0x5C0B90: cdecl,
+// the human, start, goal, two of its path's fields, the 64-bit flags, a bool; the path or null; reached from
+// human_pathfind_to 0x854EE0 -> 0x892D80 -> 0x892E10, which takes null as any search that found nothing) answers null
+// without searching. The goal is tested with the game's own leash check at the box's own height, since only the ground
+// plan counts (a member's feet are on the box's floor, and a goal can lie just under it).
+constexpr DWORD kHumanPath = 0x5C0B90;
+constexpr size_t kHumanPathPrologue = 9;  // push ebp / mov ebp,esp / sub esp,84h
+constexpr DWORD kNpcAi = 0x174C;          // an NPC's AI (the game's getter 0x426250)
+constexpr DWORD kAiSquad = 0x7D4;         // the AI's squad's handle (0x4310E0)
+constexpr DWORD kSquadLeashAnchor = 0x144, kSquadLeashType = 0x148;
+constexpr DWORD kObjectPlace = 4;         // an object's position (x, y, z)
+using HumanPathFn = void*(__cdecl*)(BYTE* human, const float* start, const float* goal, DWORD pathA, DWORD pathB, DWORD flagsLow, DWORD flagsHigh, bool flag);
+using AsNpcFn = BYTE*(__fastcall*)(void* world, void*, BYTE* object);
+using SquadOfFn = BYTE*(__fastcall*)(void* world, void*, DWORD handle);
+using OutsideLeashFn = bool(__fastcall*)(BYTE* squad, void*, const float* place);
+auto const AsNpc = reinterpret_cast<AsNpcFn>(0x476ED0);                // world::object_cast<npc>
+auto const SquadOf = reinterpret_cast<SquadOfFn>(0xA35A10);            // the squad of a handle, or null
+auto const OutsideLeash = reinterpret_cast<OutsideLeashFn>(0x810710);  // whether a place is outside the squad's leash
+HumanPathFn g_humanPath = nullptr;
+int g_pathsTurnedDown = 0;
+
+// The squad an NPC belongs to, or null (also for the player and anything that isn't an NPC).
+BYTE* SquadOfNpc(BYTE* human) {
+    void* world = reinterpret_cast<void*>(kWorld);
+    if (!human || !AsNpc(world, nullptr, human)) return nullptr;
+    const BYTE* ai = *reinterpret_cast<BYTE* const*>(human + kNpcAi);
+    if (!ai) return nullptr;
+    return SquadOf(world, nullptr, *reinterpret_cast<const DWORD*>(ai + kAiSquad));
+}
+
+void* __cdecl HumanPath(BYTE* human, const float* start, const float* goal, DWORD pathA, DWORD pathB, DWORD flagsLow, DWORD flagsHigh, bool flag) {
+    if (!human || !goal || !InOurWorld()) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    BYTE* squad = SquadOfNpc(human);
+    if (!squad || *reinterpret_cast<const int*>(squad + kSquadLeashType) != kBoxLeash)
+        return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    const DWORD boxHandle = *reinterpret_cast<const DWORD*>(squad + kSquadLeashAnchor);
+    const BYTE* box = boxHandle == kNoHandle ? nullptr : WorldObject(reinterpret_cast<void*>(kWorld), nullptr, boxHandle);
+    if (!box) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    const float* boxPlace = reinterpret_cast<const float*>(box + kObjectPlace);
+    const float goalAtBoxHeight[3] = {goal[0], boxPlace[1], goal[2]};
+    if (!OutsideLeash(squad, nullptr, goalAtBoxHeight)) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    ++g_pathsTurnedDown;
+    if (g_pathsTurnedDown <= 16 || g_pathsTurnedDown % 200 == 0) {
+        const float* from = reinterpret_cast<const float*>(human + kObjectPlace);
+        rfa::Log("Guard posts: a guard of squad 0x%08X at (%.1f, %.1f, %.1f) asked for a way to (%.1f, %.1f, %.1f), outside its post's box 0x%08X; "
+                 "none given, it holds its post (%d so far)",
+                 ObjectHandle(squad, nullptr), from[0], from[1], from[2], goal[0], goal[1], goal[2], boxHandle, g_pathsTurnedDown);
+    }
+    return nullptr;
+}
+
+// ---- Who falls out of the world (the user's test of 2026-11-10: "An NPC 0x8AFF00AA fell out of the world and died")
+//
+// Under each loaded zone's ground lies a box that ends whatever enters it (made per zone by 0x815570, its top 10 m
+// under the zone's lowest ground; its callback 0x78D660 puts the player back on the ground and hands everything else
+// to 0x78D2E0, cdecl, the object: a living human is reported and killed). So the report means a living person went
+// through the ground. The zones stream as Guerrilla's (3 x 3 zones, 5 x 5 sub-zones) and the ground's collision is the
+// zone's own height field, so what the log must tell is who it was and whether there was ground: this writes, before
+// the game's report, the person's squad and its spawn node (the human's +0x1590, the report's "Spawn"), the ground's
+// height at that spot (0x7748E0: false where no ground is loaded) and how far the player was.
+constexpr DWORD kLeftTheWorld = 0x78D2E0;
+constexpr size_t kLeftTheWorldPrologue = 6;  // push ebp / mov ebp,esp / sub esp,24h
+constexpr DWORD kObjectType = 0x7A;          // an object's type (the game's getter 0x422AD0): 0 a human
+constexpr DWORD kHumanSpawnNode = 0x1590;
+using LeftTheWorldFn = void(__cdecl*)(BYTE* object);
+using GroundHeightFn = bool(__cdecl*)(float* height, float x, float z, float* normal, bool flag);
+auto const GroundHeight = reinterpret_cast<GroundHeightFn>(0x7748E0);
+auto& g_localPlayer = *reinterpret_cast<BYTE**>(0x2271490);
+LeftTheWorldFn g_leftTheWorld = nullptr;
+
+void __cdecl LeftTheWorld(BYTE* object) {
+    if (object && InOurWorld() && static_cast<signed char>(object[kObjectType]) == 0) {
+        const float* at = reinterpret_cast<const float*>(object + kObjectPlace);
+        float ground = 0;
+        const bool loaded = GroundHeight(&ground, at[0], at[2], nullptr, false);
+        BYTE* squad = SquadOfNpc(object);
+        float away = -1;
+        if (g_localPlayer) {
+            const float* player = reinterpret_cast<const float*>(g_localPlayer + kObjectPlace);
+            away = sqrtf((player[0] - at[0]) * (player[0] - at[0]) + (player[2] - at[2]) * (player[2] - at[2]));
+        }
+        char groundText[64];
+        if (loaded) sprintf_s(groundText, "ground loaded there at %.1f (%.1f m above)", ground, ground - at[1]);
+        else strcpy_s(groundText, "NO ground loaded there");
+        RFA_LOG_FIRST(64, "Falls: %s 0x%08X went under the world at (%.1f, %.1f, %.1f): %s; squad 0x%08X (leash type %d), spawn node 0x%08X; the player %.0f m away",
+                      object == g_localPlayer ? "the player" : AsNpc(reinterpret_cast<void*>(kWorld), nullptr, object) ? "NPC" : "a human",
+                      ObjectHandle(object, nullptr), at[0], at[1], at[2], groundText, squad ? ObjectHandle(squad, nullptr) : kNoHandle,
+                      squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0, *reinterpret_cast<const DWORD*>(object + kHumanSpawnNode), away);
+    }
+    g_leftTheWorld(object);
 }
 
 bool __cdecl SquadStaticSpawn(BYTE* spawn) {
@@ -1004,6 +1106,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_squadStaticSpawn) rfa::Log("Squads: could not hook the static spawn; a standing squad of several with no spawn points under its node doesn't spawn");
     g_nodeSpawn = reinterpret_cast<NodeSpawnFn>(rfa::HookFunction(kNodeSpawn, kNodeSpawnPrologue, reinterpret_cast<void*>(&NodeSpawn)));
     if (!g_nodeSpawn) rfa::Log("Squads: could not hook the squad nodes' spawn; Guerrilla's guard posts' squads aren't leashed to their boxes (they chase the player)");
+    g_humanPath = reinterpret_cast<HumanPathFn>(rfa::HookFunction(kHumanPath, kHumanPathPrologue, reinterpret_cast<void*>(&HumanPath)));
+    if (!g_humanPath) rfa::Log("Guard posts: could not hook the people's path query; a guard post's squad still asks for ways out of its post (\"Failed pathfind\" where the way is too long)");
+    g_leftTheWorld = reinterpret_cast<LeftTheWorldFn>(rfa::HookFunction(kLeftTheWorld, kLeftTheWorldPrologue, reinterpret_cast<void*>(&LeftTheWorld)));
+    if (!g_leftTheWorld) rfa::Log("Falls: could not hook the game's handling of what leaves the world; who falls out isn't written here");
     rfa::Log("Guerrilla's people in world(s) %ls: %u character(s) made by editor\\GuerrillaBuilder.exe", rfa::IniString(L"GuerrillaPeople", L"Worlds", L"rfg").c_str(),
              static_cast<unsigned>(g_people.size()));
 }

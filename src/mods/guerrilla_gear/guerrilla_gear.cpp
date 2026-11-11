@@ -153,6 +153,38 @@
 // bought (upgrades.cpp), that one is the hammer he is given: one he carries that is lesser is dropped
 // (the game's own drop of an inventory record, 0x8A2DB0: cdecl, the human, the record; from his hands
 // or his slots) and the better given into its slot.
+//
+// A carried thing thrown (Guerrilla's propane tank). Guerrilla's Mason picks a tank up, throws it, and
+// it is gone from his hands: its weapon is "non-inventory", and what flies is the weapon's projectile,
+// which goes off where it hits. Armageddon kept Guerrilla's throw (a weapon whose shot is "Thrown": the
+// player's attack 0x8BAAF0 -> 0x8A3FC0, the throw's animation; the thing is let go at the animation's
+// "impact start" trigger, 0x8A1E50 -> the weapon's launch, 0x7323C0: thiscall, position, orientation,
+// velocity, whether it is placed) but its launch has two ways: a weapon in the inventory throws its
+// projectile and keeps the weapon; a "non-inventory" one (weapon entry +0xA, 0x10) throws no
+// projectile: it is unequipped (0x85D3C0), the carried weapon itself let fly, its record taken out of
+// the inventory (0x85C260) and the player's last weapon equipped (0x8BB420); it lies where it lands to
+// be picked up again. For Guerrilla's the launch is wrapped, and for one of its carried weapons whose
+// shot names a projectile it runs both ways: first with the entry's flag lifted for the call (the
+// projectile), then as it is (the carried one out of the hands and the inventory, the last weapon
+// back: the game's own way, so the hands, the inventory and the animation group change together), and
+// the weapon let fly is destroyed at once, as Guerrilla deletes it (human_delete_item_from_inventory):
+// the game's own destroy (0x6D5450, the world's: thiscall, the object, true; the script function
+// sf_of_delete_object's way; it marks the object and takes its body away, the world deletes it later).
+// Destroying the carried weapon WITHOUT the second way (the first try, 2026-11-10) left its record in
+// the inventory and in his hands with no weapon behind it: he stood carrying nothing, and setting it
+// down (0x8BA7C0, from the controls 0x4E1478 and again from the equip 0x85D287) read through the empty
+// hand (the user's crash at 0x8BA7D7). Should the game find no last weapon to go back to, the heading
+// step gives him his sledgehammer (Guerrilla's player_equip_sledgehammer) or the first weapon in his slots.
+
+// Materials the game draws red (a diagnostic). The game's shader library (0x6F2660 gives it) keeps each
+// shader under its name with a version for each kind of mesh and variant, a 4 by 4 table filled from the
+// shader files' endings (0x11234D8: kind 1 still _s, 2 skinned _c, 3 terrain _t; variant bit 0 "b", bit 1
+// "m": _bs, _ms, _bms, _bc, _mc, _bmc, _ts). Binding a material's shader for a draw (0xD4D7D0, thiscall:
+// the shader's number, two more) asks for the version of the mesh being drawn (the renderer's 0xD4E060 and
+// 0xD4E0B0; 0xD4D650 says whether there is one), and with none, or with no shader at all (-1), draws with
+// rl_debug_highlight instead: flat bright red. The binding is wrapped only to write to the log, once
+// each, which shader was asked for which kind when that happens ("Red: a material on gw_standard1 is
+// drawn as a mesh of the kind _c, and there is no gw_standard1_c"); what the game draws is unchanged.
 
 #define RFA_MOD_NAME "guerrilla_gear"
 #include "rfa_mod.h"
@@ -165,8 +197,10 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -779,6 +813,7 @@ void GiveCameraLookat(BYTE* entry) {
 }
 
 void KeepHammer(BYTE* player);  // (Mason's sledgehammer, below)
+void AfterCarriedThrow(BYTE* player);  // (a carried thing thrown, below)
 void LogItemPreload();          // (room for the preloaded items, below)
 void LogNameRoom();             // (room in the tables' name pools, below)
 bool g_itemPreloadLogged = false;
@@ -794,6 +829,7 @@ void __cdecl HeadingStep(BYTE* human) {
         LogItemPreload();
         LogNameRoom();
     }
+    AfterCarriedThrow(player);
     upgrades::Step(player);
     backpacks::Step(player);
     KeepHammer(player);
@@ -930,6 +966,191 @@ void KeepHammer(BYTE* player) {
     const BYTE* given = GiveByInventoryItem(player, give, 0, slot, false, false, false);
     rfa::Log("Hammer: Mason %s; given %s %s, slot %d", lesser ? "had a lesser hammer" : "had no sledgehammer", given ? "him" : "nothing (the game refused)",
              kHammers[best], slot);
+}
+
+// ---- A carried thing thrown (see the top)
+
+constexpr DWORD kLaunchThrown = 0x7323C0;
+constexpr size_t kLaunchThrownPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0F8h
+using LaunchThrownFn = BYTE*(__fastcall*)(BYTE* weapon, void* unused, const float* position, const float* orientation,
+                                          const float* velocity, bool placed);
+LaunchThrownFn g_launchThrown;
+
+constexpr DWORD kWeaponFlagsB = 0xA;          // a weapon entry's second byte of flags
+constexpr BYTE kNonInventory = 0x10;          // "non-inventory": carried in both hands, in no slot
+constexpr int kThrownShot = 4;                // a firing mode's Shot_Type (its +0): "Thrown"
+constexpr DWORD kShotProjectile = 0x3C;       // and the projectile its shot names
+constexpr DWORD kWeaponItem = 0x14;           // a weapon entry -> its items_3d entry (whose +0 is its name)
+constexpr ULONGLONG kHandsWatchMs = 5000;     // how long after a carried throw his hands are watched
+constexpr ULONGLONG kHandsSettleMs = 300;     // the game's own equip gets this long first, and between tries
+auto const DestroyObject = reinterpret_cast<bool(__fastcall*)(void* world, void* unused, BYTE* object, bool flag)>(0x6D5450);
+// The record in a hand (0: the main one) and the one on its way there (thiscall: the human, the hand),
+// and the player's equip (cdecl: the player, the record or null, the hand, two flags).
+auto const RecordEquipped = reinterpret_cast<BYTE*(__fastcall*)(BYTE* human, void* unused, int hand)>(0x84E840);
+auto const RecordWanted = reinterpret_cast<BYTE*(__fastcall*)(BYTE* human, void* unused, int hand)>(0x84E860);
+auto const PlayerEquip = reinterpret_cast<bool(__cdecl*)(BYTE* player, BYTE* record, int hand, bool first, bool second)>(0x8BB420);
+
+ULONGLONG g_carriedThrownAt;  // when the player last threw a carried weapon (0: his hands aren't watched)
+ULONGLONG g_nextHandsCheck;
+
+const char* RecordName(const BYTE* record) {
+    const char* name = WeaponName(RecordWeapon(record));
+    return name ? name : (record ? "a weapon that is gone" : "nothing");
+}
+
+BYTE* __fastcall LaunchThrown(BYTE* weapon, void* unused, const float* position, const float* orientation,
+                              const float* velocity, bool placed) {
+    BYTE* info = weapon ? *reinterpret_cast<BYTE**>(weapon + kWeaponInfo) : nullptr;
+    const BYTE* mode = info && (info[kWeaponFlagsB] & kNonInventory) && IsGuerrillaGun(info)
+                           ? FiringModeInfo(weapon + kFiringModeSlot, nullptr) : nullptr;
+    if (!mode || *reinterpret_cast<const int*>(mode) != kThrownShot || !*reinterpret_cast<void* const*>(mode + kShotProjectile))
+        return g_launchThrown(weapon, unused, position, orientation, velocity, placed);
+    // Only for the player with this very weapon in his hands (the game's way below takes the record in
+    // his hand for the carried weapon's); anyone else throws as the game has it.
+    BYTE* player = LocalPlayer();
+    const BYTE* inHand = player ? RecordEquipped(player, nullptr, 0) : nullptr;
+    if (!inHand || ObjectFromHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(inHand + kInventoryInfo)) != weapon)
+        return g_launchThrown(weapon, unused, position, orientation, velocity, placed);
+    // Its projectile, as a weapon in the inventory throws its own.
+    info[kWeaponFlagsB] &= static_cast<BYTE>(~kNonInventory);
+    BYTE* projectile = g_launchThrown(weapon, unused, position, orientation, velocity, placed);
+    info[kWeaponFlagsB] |= kNonInventory;
+    if (!projectile) {
+        rfa::Log("Thrown: %s not thrown (the game made no projectile); it stays in his hands", WeaponName(info));
+        return nullptr;
+    }
+    // The one he carried, the game's own way for a carried weapon: out of his hands and his inventory,
+    // his last weapon back. That lets the weapon itself fly; Guerrilla deletes it, so it is destroyed at
+    // once (it is nobody's by now, and its body gone before it can touch the projectile).
+    g_launchThrown(weapon, unused, position, orientation, velocity, placed);
+    DestroyObject(kWorld, nullptr, weapon, true);
+    // (Its item's name is logged for the tank drawn red, 2026-11-11: which items_3d entry the game drew.)
+    const BYTE* item = *reinterpret_cast<const BYTE* const*>(info + kWeaponItem);
+    rfa::Log("Thrown: %s (its item: %s) thrown as its projectile; the one carried is out of his hands (in them now: %s; on its way: %s)",
+             WeaponName(info), item && *reinterpret_cast<const char* const*>(item) ? *reinterpret_cast<const char* const*>(item) : "none",
+             RecordName(RecordEquipped(player, nullptr, 0)), RecordName(RecordWanted(player, nullptr, 0)));
+    g_carriedThrownAt = GetTickCount64();
+    g_nextHandsCheck = g_carriedThrownAt + kHandsSettleMs;
+    return projectile;
+}
+
+// From the player's heading step, for a few seconds after he threw what he carried: if the game's own
+// equip left his hands empty with nothing on its way (no last weapon to go back to), he takes his
+// sledgehammer, as Guerrilla has it (human_delete_item_from_inventory: player_equip_sledgehammer), or
+// else the first weapon in his slots. Armageddon's player code takes a weapon in the hands for granted.
+void AfterCarriedThrow(BYTE* player) {
+    if (!g_carriedThrownAt) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_nextHandsCheck) return;
+    BYTE* held = RecordEquipped(player, nullptr, 0);
+    BYTE* wanted = RecordWanted(player, nullptr, 0);
+    if (held || wanted) {
+        rfa::Log("Thrown: after the throw he holds %s (on its way: %s)", RecordName(held), RecordName(wanted));
+        g_carriedThrownAt = 0;
+        return;
+    }
+    if (now - g_carriedThrownAt > kHandsWatchMs) {
+        rfa::Log("Thrown: his hands are still empty %llu ms after the throw; no weapon of his could be equipped", now - g_carriedThrownAt);
+        g_carriedThrownAt = 0;
+        return;
+    }
+    g_nextHandsCheck = now + kHandsSettleMs;
+    BYTE* record = RecordInSlot(player, kHammerSlot);
+    for (int slot = 0; !record && slot < kRadialSlots; ++slot) record = RecordInSlot(player, slot);
+    if (!record) return;
+    const bool taken = PlayerEquip(player, record, 0, false, false);
+    rfa::Log("Thrown: his hands were empty after the throw; %s %s", RecordName(record), taken ? "equipped" : "not equipped (the game refused; trying again)");
+}
+
+void ThrownCarried() {
+    g_launchThrown = reinterpret_cast<LaunchThrownFn>(
+        rfa::HookFunction(kLaunchThrown, kLaunchThrownPrologue, reinterpret_cast<void*>(&LaunchThrown)));
+    if (!g_launchThrown) rfa::Log("Thrown: could not wrap the weapons' launch; a thrown tank stays in the hands");
+    else rfa::Log("Thrown: a carried weapon (Guerrilla's propane tank) is thrown as its projectile and leaves the hands");
+}
+
+// ---- Materials the game draws red (see the top)
+
+constexpr DWORD kBindShader = 0xD4D7D0;
+constexpr size_t kBindShaderPrologue = 6;  // push ebp / mov ebp,esp / sub esp,10h
+using BindShaderFn = bool(__fastcall*)(void* library, void* unused, DWORD shader, DWORD second, DWORD third);
+BindShaderFn g_bindShader;
+auto const Renderer = reinterpret_cast<void*(__cdecl*)()>(0x4C1730);
+auto const MeshKind = reinterpret_cast<int(__fastcall*)(void* renderer, void* unused)>(0xD4E060);
+auto const MeshVariant = reinterpret_cast<int(__fastcall*)(void* renderer, void* unused)>(0xD4E0B0);
+auto const ShaderHasVersion = reinterpret_cast<bool(__fastcall*)(void* library, void* unused, DWORD shader, int kind, int variant)>(0xD4D650);
+auto const ShaderNamed = reinterpret_cast<DWORD(__fastcall*)(void* library, void* unused, const char* name)>(0xD4D5C0);
+constexpr DWORD kNoShader = 0xFFFFFFFF;
+constexpr size_t kRedLines = 48;  // no more lines than this a run
+
+std::mutex g_redLock;
+std::vector<unsigned long long> g_redSeen;                // the shader, kind and variant of each line logged
+std::vector<std::pair<std::string, DWORD>> g_redShaders;  // Guerrilla's shaders by name, and their numbers in the library
+bool g_redShadersRead;
+
+// The ending of a shader's file for a kind of mesh and its variant, as the game's own table has them (0x11234D8).
+const char* ShaderEnding(int kind, int variant) {
+    static const char* const endings[4][4] = {
+        {"(no ending)", "?", "?", "?"}, {"_s", "_bs", "_ms", "_bms"}, {"_c", "_bc", "_mc", "_bmc"}, {"_t", "?", "_ts", "?"}};
+    return kind >= 0 && kind < 4 && variant >= 0 && variant < 4 ? endings[kind][variant] : "?";
+}
+
+// Guerrilla's shaders' names (the gw_ effect files in overrides\build\pc\cache\, without their endings) and numbers.
+void ReadRedShaders(void* library) {
+    g_redShadersRead = true;
+    WIN32_FIND_DATAW found;
+    const std::wstring pattern = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\gw_*.fxo_pc_dx11";
+    HANDLE search = FindFirstFileW(pattern.c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        std::string name;
+        for (const wchar_t* c = found.cFileName; *c && *c != L'.'; ++c) name += static_cast<char>(*c);
+        const size_t ending = name.rfind('_');
+        if (ending == std::string::npos || ending == 0) continue;
+        name.resize(ending);
+        bool known = false;
+        for (const auto& shader : g_redShaders) known = known || shader.first == name;
+        if (known) continue;
+        const DWORD number = ShaderNamed(library, nullptr, name.c_str());
+        if (number != kNoShader) g_redShaders.emplace_back(name, number);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
+void NoteRed(void* library, DWORD shader, int kind, int variant) {
+    const unsigned long long key = (static_cast<unsigned long long>(shader) << 8) | (static_cast<unsigned>(kind) << 4) | static_cast<unsigned>(variant);
+    std::lock_guard<std::mutex> lock(g_redLock);
+    if (g_redSeen.size() >= kRedLines || std::find(g_redSeen.begin(), g_redSeen.end(), key) != g_redSeen.end()) return;
+    g_redSeen.push_back(key);
+    if (!g_redShadersRead) ReadRedShaders(library);
+    if (shader == kNoShader) {
+        rfa::Log("Red: a material with no shader at all is drawn (its mesh's kind %s): its shader's name wasn't in the library when it loaded",
+                 ShaderEnding(kind, variant));
+        return;
+    }
+    const char* name = nullptr;
+    for (const auto& known : g_redShaders)
+        if (known.second == shader) name = known.first.c_str();
+    if (name) rfa::Log("Red: a material on %s is drawn as a mesh of the kind %s, and there is no %s%s", name, ShaderEnding(kind, variant), name, ShaderEnding(kind, variant));
+    else rfa::Log("Red: a material on the library's shader %lu (none of Guerrilla's) is drawn as a mesh of the kind %s, which it has no version for", shader, ShaderEnding(kind, variant));
+}
+
+// The game's shader binding, watched: what it is about to draw red is written to the log, once each.
+bool __fastcall BindShader(void* library, void* unused, DWORD shader, DWORD second, DWORD third) {
+    void* renderer = Renderer();
+    const int kind = renderer ? MeshKind(renderer, nullptr) : -1;
+    if (kind >= 0) {
+        const int variant = MeshVariant(renderer, nullptr);
+        if (shader == kNoShader || !ShaderHasVersion(library, nullptr, shader, kind, variant)) NoteRed(library, shader, kind, variant);
+    }
+    return g_bindShader(library, unused, shader, second, third);
+}
+
+void RedMaterials() {
+    g_bindShader = reinterpret_cast<BindShaderFn>(
+        rfa::HookFunction(kBindShader, kBindShaderPrologue, reinterpret_cast<void*>(&BindShader)));
+    if (!g_bindShader) rfa::Log("Red: could not watch the game's shader binding; materials drawn red aren't named in the log");
+    else rfa::Log("Red: a material the game draws red (no shader for it, or none for its mesh's kind) is named here, once each");
 }
 
 }  // namespace
@@ -1376,6 +1597,110 @@ void LogMeleeHits() {
     else rfa::Log("Melee hits: the player's are logged (\"Melee hit:\" lines)");
 }
 
+// ---- The held weapon sounds' starts and stops, logged (the user, 2026-11-10: a turret gun held sounds once, then is silent)
+//
+// A diagnostic for that report, to keep or take out once its cause is known: it changes nothing in the game. A
+// weapon whose sound goes on while it fires has a looping event, which the game starts once and stops when the
+// firing ends (the builder's GuerrillaSoundBanks.WeaponSound; its loop events are the "pair" lines of
+// mods\guerrilla_world\weapons_sound_banks.txt). The game uses the same event for a dry fire, an overheat and a
+// turning turret, saying which with the switch WEAPON_SOUND_TYPE. Its audio functions, all cdecl: 0xB855E0 sets a
+// switch on a sound object (group, value, object), 0xB846E0 plays an event on one (object, event, where the
+// handle goes, unused, a delay), 0xB85110 stops a sound (where its handle is), 0xB84D20 gives a handle's game
+// object (0 once the sound has ended). The wraps call them and write, for the held events: each start with the
+// switch last set on that object, and each stop with how long the sound had played and whether it was still playing.
+constexpr DWORD kSetSwitch = 0xB855E0, kPlaySound = 0xB846E0, kStopSound = 0xB85110;
+constexpr size_t kAudioPrologue = 10;  // push ebp / mov ebp,esp / push -1 / push <its handler>: the same for all three
+using SetSwitchFn = void(__cdecl*)(DWORD group, DWORD value, DWORD soundObject);
+using PlaySoundFn = int(__cdecl*)(DWORD soundObject, DWORD eventId, DWORD* handle, int unused, int delayMs);
+using StopSoundFn = int(__cdecl*)(DWORD* handle);
+auto const SoundGameObject = reinterpret_cast<DWORD(__cdecl*)(DWORD handle)>(0xB84D20);
+SetSwitchFn g_setSwitch = nullptr;
+PlaySoundFn g_playSound = nullptr;
+StopSoundFn g_stopSound = nullptr;
+
+// Wwise's id of a name: FNV-1 (32 bits) of its lower-case letters.
+constexpr DWORD SoundId(const char* name) {
+    DWORD h = 2166136261u;
+    for (; *name; ++name) h = (h * 16777619u) ^ static_cast<BYTE>(*name >= 'A' && *name <= 'Z' ? *name + 32 : *name);
+    return h;
+}
+constexpr DWORD kWeaponSoundType = SoundId("WEAPON_SOUND_TYPE");
+
+const char* WeaponSoundTypeName(DWORD value) {
+    if (value == SoundId("primary_fire")) return "a shot";
+    if (value == SoundId("no_ammo")) return "a dry fire";
+    if (value == SoundId("overheat")) return "an overheat";
+    if (value == SoundId("turret_turn")) return "a turning turret";
+    return value ? "another use" : "no use set";
+}
+
+std::vector<DWORD> g_heldEvents;  // the held weapon sounds' events, sorted
+struct ObjectSwitch {
+    DWORD soundObject, value;
+};
+std::vector<ObjectSwitch> g_weaponSoundTypes;  // the WEAPON_SOUND_TYPE last set on each sound object (the latest 64)
+struct HeldSound {
+    DWORD handle, eventId, startedAt;
+};
+std::vector<HeldSound> g_heldSounds;  // the held sounds started and not yet stopped (the latest 64)
+
+void __cdecl SetSwitchLogged(DWORD group, DWORD value, DWORD soundObject) {
+    if (group == kWeaponSoundType) {
+        auto found = std::find_if(g_weaponSoundTypes.begin(), g_weaponSoundTypes.end(), [&](const ObjectSwitch& s) { return s.soundObject == soundObject; });
+        if (found != g_weaponSoundTypes.end()) found->value = value;
+        else {
+            if (g_weaponSoundTypes.size() >= 64) g_weaponSoundTypes.erase(g_weaponSoundTypes.begin());
+            g_weaponSoundTypes.push_back({soundObject, value});
+        }
+    }
+    g_setSwitch(group, value, soundObject);
+}
+
+int __cdecl PlaySoundLogged(DWORD soundObject, DWORD eventId, DWORD* handle, int unused, int delayMs) {
+    const int result = g_playSound(soundObject, eventId, handle, unused, delayMs);
+    if (std::binary_search(g_heldEvents.begin(), g_heldEvents.end(), eventId)) {
+        const DWORD started = handle ? *handle : 0;
+        auto use = std::find_if(g_weaponSoundTypes.begin(), g_weaponSoundTypes.end(), [&](const ObjectSwitch& s) { return s.soundObject == soundObject; });
+        if (g_heldSounds.size() >= 64) g_heldSounds.erase(g_heldSounds.begin());
+        g_heldSounds.push_back({started, eventId, GetTickCount()});
+        RFA_LOG_FIRST(400, "Held sounds: event %lu started for %s (sound object 0x%08lX, handle %lu, result %d)", eventId,
+                      WeaponSoundTypeName(use != g_weaponSoundTypes.end() ? use->value : 0), soundObject, started, result);
+    }
+    return result;
+}
+
+int __cdecl StopSoundLogged(DWORD* handle) {
+    const DWORD stopped = handle ? *handle : 0;
+    auto found = std::find_if(g_heldSounds.begin(), g_heldSounds.end(), [&](const HeldSound& s) { return s.handle == stopped; });
+    if (stopped && found != g_heldSounds.end()) {
+        RFA_LOG_FIRST(400, "Held sounds: event %lu (handle %lu) stopped by the game after %lu ms; %s", found->eventId, stopped,
+                      GetTickCount() - found->startedAt, SoundGameObject(stopped) ? "it was still playing" : "it had already ended by itself");
+        g_heldSounds.erase(found);
+    }
+    return g_stopSound(handle);
+}
+
+void LogHeldSounds() {
+    std::ifstream list(rfa::RootDir() + L"\\mods\\guerrilla_world\\weapons_sound_banks.txt");
+    for (std::string word; list >> word;) {
+        unsigned long loopEvent = 0, stopEvent = 0;
+        if (word == "pair" && list >> loopEvent >> stopEvent) g_heldEvents.push_back(loopEvent);
+    }
+    std::sort(g_heldEvents.begin(), g_heldEvents.end());
+    if (g_heldEvents.empty()) return;  // no weapons built: nothing to log
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68};
+    for (DWORD function : {kSetSwitch, kPlaySound, kStopSound})
+        if (memcmp(reinterpret_cast<const void*>(function), opening, sizeof(opening)) != 0) {
+            rfa::Log("Held sounds: the game's audio code isn't as expected; they aren't logged");
+            return;
+        }
+    g_setSwitch = reinterpret_cast<SetSwitchFn>(rfa::HookFunction(kSetSwitch, kAudioPrologue, reinterpret_cast<void*>(&SetSwitchLogged)));
+    g_playSound = reinterpret_cast<PlaySoundFn>(rfa::HookFunction(kPlaySound, kAudioPrologue, reinterpret_cast<void*>(&PlaySoundLogged)));
+    g_stopSound = reinterpret_cast<StopSoundFn>(rfa::HookFunction(kStopSound, kAudioPrologue, reinterpret_cast<void*>(&StopSoundLogged)));
+    if (!g_setSwitch || !g_playSound || !g_stopSound) rfa::Log("Held sounds: could not wrap the game's audio functions; they aren't all logged");
+    else rfa::Log("Held sounds: %u held weapon sounds' starts and stops are logged (\"Held sounds:\" lines)", static_cast<unsigned>(g_heldEvents.size()));
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -1391,9 +1716,12 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreTriggerRoom();
     PlayerAnimations();
     DroppedGuns();
+    ThrownCarried();
+    RedMaterials();
     PlayerMovement();
     MasonsHammer();
     LogMeleeHits();
+    LogHeldSounds();
     // The upgrades' purchases happen in the heading step: without it the window stays shut.
     if (g_headingStep) {
         upgrades::Init();

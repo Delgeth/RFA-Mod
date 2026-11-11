@@ -1026,7 +1026,9 @@ skeletons, and their dents.
   player's own vehicle's stereo engine in 2D and the others' mono ones in 3D. The mod replaces that
   function with one that also eases the load and sets `RFG_PLAYER_IN_VEHICLE` (1 on the vehicle the
   player is in, the game's own check, `0x605550`), on which the two sets of engine sounds fade.
-  Armageddon's own engines read neither.
+  Armageddon's own engines read neither. The game keeps the handle of an engine sound that has ended by
+  itself and goes on setting its values; the mod writes that in the log ("Engine sounds: an engine's
+  sound ended by itself ..."), since the engine then stays silent until it starts again.
 - **Lights**: Armageddon turns a vehicle's lights on and off by its own rules (`0x61BA60` each frame,
   acting only when the headlights or the half-second blink change): headlights by the driver, tail lights
   off while braking, running lights steady. The mod wraps it: a vehicle with Guerrilla's light rows gets
@@ -1800,9 +1802,24 @@ Guerrilla (Guerrilla's `weapons.xtbl` names: `m16`, `enforcer`, `autoblaster`, `
   from the game's own damage pick (`0x878780`), whose figure is kept as it is.
 - **Sounds.** Each weapon's shot, the player's and an NPC's, is Guerrilla's own cue as a sound of
   Armageddon's kind (`GuerrillaSoundBanks`, shared with the vehicles: banks `rfgw_<Guerrilla's bank>`,
-  their rows in `audio_banks_patch.xtbl`), on Armageddon's weapons' bus. An automatic gun's is a loop
-  with a stop event, paired in the game's loop list as Armageddon's own automatic guns' are, so it plays
-  while the trigger is held. The player's animations carry Guerrilla's sounds where those are weapons'
+  their rows in `audio_banks_patch.xtbl`), on one of Armageddon's weapons' buses. Armageddon's buses
+  limit how many sounds play on them at once (its engines' bus 10, its shared weapon sounds' 4), ending
+  the oldest for the next; the limits fit its own sounds, not Guerrilla's layered engines or every gun at
+  once. So Guerrilla's guns play on a weapons' bus that shares the weapons' 30, and its engines on the
+  vehicle effects' bus, which has no limit, turned down to the engines' bus's level; an engine's loop too
+  quiet to hear goes virtual and takes no voice. The game posts a weapon's one event for four things,
+  saying which with the switch `WEAPON_SOUND_TYPE` (a shot, a trigger pull with no ammunition, an
+  overheated gun, a turret turning fast), so each event plays a switch container, as Armageddon's own
+  do: Guerrilla's cue for a shot, its dry-fire cue with no ammunition, nothing for the other two. A
+  weapon with Guerrilla's flag "looping effects" (Armageddon's "looping fire effects": the m16, the
+  machine-gun turrets, the arc welder) gets its event posted once when the firing starts and stopped
+  when it ends, with a stop event paired in the game's loop list as Armageddon's own automatic guns'
+  are. A cue that loops by itself (the m16's) is then a loop. A cue that doesn't is a single shot with
+  its tail (the machine-gun turrets'), which Guerrilla plays for every shot: it is played again at the
+  weapon's time between shots by a container laid out as Armageddon's automatic guns' (continuous,
+  "trigger rate"), and the stop event's Break lets the last shot play out. Any other weapon's event
+  is posted for every shot and plays once. The
+  player's own gun plays in 2D, an NPC's in 3D at the gun. The player's animations carry Guerrilla's sounds where those are weapons'
   sounds (a swing's whoosh, the charge's click), in the same banks; one another part's banks already
   play is named, not made twice. Their movement sounds (reloads, cloth) wait for their bank.
 - **Items Guerrilla's people carry**, built with the weapons under Guerrilla's names: the riot shield,

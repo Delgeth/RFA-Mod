@@ -18,7 +18,11 @@ namespace RfaFormats.Guerrilla;
 /// at the vehicle (Guerrilla's NPC engine distances, 3-100 m). In Wwise: two layer containers (the player's,
 /// 2D; the others', 3D), their loops each with curves on the game parameters the game sets on the engine's
 /// sound every frame (RPM, ENGINE_LOAD, DAMAGE) and the mod's RFG_PLAYER_IN_VEHICLE (guerrilla_vehicles: 1
-/// while the player is in that vehicle; the two containers fade on it).
+/// while the player is in that vehicle; the two containers fade on it). A loop too quiet to hear (a layer out
+/// of its range, the damage loop of a sound vehicle, the container not heard) goes virtual: it takes no voice,
+/// and starts from its beginning when it's heard again, as Guerrilla stops such a layer and starts it again.
+/// The containers play on Armageddon's bus for its walkers' and flyers' sounds, which has no limit, turned
+/// down to its engines' bus's level (<see cref="WwiseBankWriter.EngineBusDifference"/>).
 ///
 /// The vehicle's events: Armageddon's Foley Engine_Start (posted when the engine starts, stopped when it
 /// stops) is the vehicle's engine event: Guerrilla's starter sound (its Engine_Start cue), then the
@@ -30,8 +34,7 @@ namespace RfaFormats.Guerrilla;
 ///
 /// Not as Guerrilla: Armageddon's RPM is its own (eased differently, no gears); its DAMAGE is 0 or 1 (the
 /// damage loop is off or at its full volume); Guerrilla starts only the IDLE layer late, here the whole
-/// engine starts after the delay; a layer out of its range keeps playing silently (Guerrilla stops it and
-/// starts it again from the top); Guerrilla's gains are straight lines between points, Wwise's curves
+/// engine starts after the delay; Guerrilla's gains are straight lines between points, Wwise's curves
 /// straight lines of dB (sampled finely).
 /// </summary>
 public static class GuerrillaVehicleSounds
@@ -54,7 +57,7 @@ public static class GuerrillaVehicleSounds
     sealed record Layer(int Slot, string Sound, string? Mono, float MinRpm, float MaxRpm, float MinVolume, float MaxVolume, float MinPitch, float MaxPitch);
 
     /// <summary>An engine made: its bank, its two layer containers and its start delay.</summary>
-    sealed record Engine(WwiseBankWriter Bank, uint Player, uint Others, int StartDelay);
+    sealed record Engine(WwiseBankWriter Bank, uint Sets, int StartDelay);
 
     /// <summary>
     /// Builds the sounds of <paramref name="entries"/> (Guerrilla's vehicles.xtbl entries) into
@@ -88,10 +91,9 @@ public static class GuerrillaVehicleSounds
                     var bank = engine.Bank;
                     string eventName = $"RFG_{vehicle.ToUpperInvariant()}_ENGINE", stopName = eventName + "_STOP";
                     var start = new List<uint>();
-                    var stop = new List<uint> { bank.Stop($"{vehicle}:player", engine.Player, 200), bank.Stop($"{vehicle}:others", engine.Others, 200) };
+                    var stop = new List<uint> { bank.Stop($"{vehicle}:engine", engine.Sets, 200) };
                     if (Cue("Engine_Start") is { } startCue && OneShotIn(sounds, bank, startCue) is { } starter) start.Add(bank.Play($"{vehicle}:start", starter));
-                    start.Add(bank.Play($"{vehicle}:player", engine.Player, engine.StartDelay, 200));
-                    start.Add(bank.Play($"{vehicle}:others", engine.Others, engine.StartDelay, 200));
+                    start.Add(bank.Play($"{vehicle}:engine", engine.Sets, engine.StartDelay, 200));
                     if (Cue("Engine_Off") is { } offCue && OneShotIn(sounds, bank, offCue) is { } stopper) stop.Add(bank.Play($"{vehicle}:stop", stopper));
                     bank.Event(eventName, [.. start]);
                     bank.Event(stopName, [.. stop]);
@@ -102,19 +104,46 @@ public static class GuerrillaVehicleSounds
             }
             // Its other sounds, once each.
             foreach (string field in OneShotFields)
-                if (Cue(field) is { } cue && sounds.OneShot(cue) is { } eventName)
+                if (Cue(field) is { } cue && !(field == "Horn" && sounds.SetOf(cue) != null) && sounds.OneShot(cue) is { } eventName)
                 {
                     fields[field] = eventName;
                     oneShots.Add(cue);
                 }
-            if (fields.ContainsKey("Horn")) fields["Horn_Is_One_Shot"] = "True";
+            // The horn: Guerrilla's is an attack-loop-release set (it sounds for as long as it is pressed, and the
+            // release ends it): then the game is told it isn't one shot, so it stops the sound at the let-go, which
+            // plays the release. A horn cue that is no set's plays once a press.
+            if (Cue("Horn") is { } horn && sounds.SetOf(horn) != null && sounds.Loop(horn) is { } hornEvent)
+            {
+                fields["Horn"] = hornEvent;
+                fields["Horn_Is_One_Shot"] = "False";
+            }
+            else if (fields.ContainsKey("Horn")) fields["Horn_Is_One_Shot"] = "True";
             foreach (string field in NoField)
                 if (Cue(field) is { } cue) log.Add($"{vehicle}: {field} ({cue}): Armageddon's vehicles have no such sound");
             if (fields.Count > 0) foley[vehicle] = fields;
         }
         log.Add($"Engines: {engines.Values.Count(e => e != null)} of Guerrilla's ({engineEvents} vehicles' engine events with their stop events); " +
                 $"{oneShots.Count} other cues played once ({string.Join(", ", oneShots)})");
+        // The tyres' sounds on each kind of ground (rolling, braking, braking lightly). Both games' wheel table
+        // (vehicle_wheel_surface_effects.xtbl) names them by Guerrilla's cue names, Armageddon's own still, though
+        // none of its banks has such an event: on Guerrilla's gravel the game asked for one all the time and Wwise
+        // found none ("Event ID not found", a hundred times in a drive). So each is made under the name the game
+        // asks by, as it is: a cue that loops with its stop event, the others played once.
+        var tyres = new List<string>();
+        foreach (string cue in TyreCues(guerrillaTables))
+            if (sounds.Sounds.FindCue(cue) is { } found && (found.LoopCount != 0 ? sounds.Loop(cue, named: cue) : sounds.OneShot(cue, named: cue)) != null)
+                tyres.Add(cue);
+        log.Add($"Tyres: {tyres.Count} of Guerrilla's cues under the names the game's wheel table asks by ({string.Join(", ", tyres)})");
         return foley;
+    }
+
+    /// <summary>The cues Guerrilla's wheel table names (its fields ending in "foley": Tire_motion_foley, Brake_foley, Brake_light_foley).</summary>
+    static IEnumerable<string> TyreCues(Packfile guerrillaTables)
+    {
+        if (guerrillaTables.Find("vehicle_wheel_surface_effects.xtbl") is not { } table) return [];
+        string text = System.Text.Encoding.Latin1.GetString(guerrillaTables.Read(table));
+        return System.Text.RegularExpressions.Regex.Matches(text, @"<(\w*foley)>\s*([^<\s]+)\s*</\1>", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            .Select(m => m.Groups[2].Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>A cue played once at the vehicle (3D, its distances), made in <paramref name="bank"/> (the engine's events play it from there).</summary>
@@ -136,6 +165,7 @@ public static class GuerrillaVehicleSounds
         var offEnvelope = Envelope(engine.Element("Offload_Envelope"));
         int delay = int.TryParse(engine.ValueOf("Idle_time_start_offset")?.Trim(), out int d) ? d : 250;
 
+        uint sets = bank.ObjectId($"switch:{name}:engine");
         uint player = bank.ObjectId($"layer:{name}:player"), others = bank.ObjectId($"layer:{name}:others");
         var playerLoops = new List<uint>();
         var otherLoops = new List<uint>();
@@ -157,33 +187,49 @@ public static class GuerrillaVehicleSounds
             [(0, WwiseBankWriter.Silent), (0.5f, WwiseBankWriter.Silent), (0.51f, GuerrillaSoundBanks.Db(scalar)), (1, GuerrillaSoundBanks.Db(scalar))]);
         // (Guerrilla sets its volume itself, the scalar × the damage, in place of the cue's.)
         WwiseBankWriter.Settings DamageLoop(string cue) =>
-            new() { Curves = [damageCurve], Volume = -GuerrillaSoundBanks.Db(sounds.Sounds.FindCue(cue)?.Volume ?? 1) };
+            new() { Curves = [damageCurve], Volume = -GuerrillaSoundBanks.Db(sounds.Sounds.FindCue(cue)?.Volume ?? 1), VirtualWhenQuiet = true };
         if (damage?.ValueOf("Foley")?.Trim() is { Length: > 0 } damageCue && scalar > 0 &&
             sounds.CueObject(bank, damageCue, $"{name}:damage:player", loops: true, DamageLoop(damageCue), player) is { } dp) playerLoops.Add(dp);
         if ((damage?.ValueOf("Mono_Foley")?.Trim() is { Length: > 0 } m ? m : damage?.ValueOf("Foley")?.Trim()) is { Length: > 0 } monoDamage && scalar > 0 &&
             sounds.CueObject(bank, monoDamage, $"{name}:damage:others", loops: true, DamageLoop(monoDamage), others) is { } dn) otherLoops.Add(dn);
 
-        // The player's 2D, the others' 3D, each heard on its side of RFG_PLAYER_IN_VEHICLE.
+        // The player's 2D, the others' 3D; only one of the two plays, chosen by the switch RFG_ENGINE_LISTENER, which
+        // the guerrilla_vehicles mod sets on each engine's sound object (the others' while it isn't set). Both played
+        // at once before, each heard on its side of a game parameter and the unheard one virtual: ten or eleven
+        // sounds a vehicle, which count against the game's limit of sounds silent or not (ten vehicles nearly filled
+        // it). The container goes on looking at the switch while it plays: when the player gets into a vehicle whose
+        // engine runs, the others' set fades out and the player's fades in, and back when he gets out.
+        // Both as loud as on Armageddon's engines' bus. Their priorities are loops' (an engine ended at the
+        // game's limit of sounds stays silent, so no one-shot may end one), by Guerrilla's own ranks: the player's
+        // engine 10, other vehicles' 4. (The others' had 40, under everything: with a dozen vehicles about, the first
+        // new sound ended one for good, the run of 2026-11-11 00:43.)
         var playerSettings = new WwiseBankWriter.Settings
         {
-            Curves = [new(WwiseBankWriter.PlayerInVehicle, WwiseBankWriter.Property.Volume, [(0, WwiseBankWriter.Silent), (1, 0)])],
+            Volume = WwiseBankWriter.EngineBusDifference,
+            VirtualWhenQuiet = true,
+            Priority = GuerrillaSoundBanks.Priority(10, true), OwnPriority = true,
         };
         var otherSettings = new WwiseBankWriter.Settings
         {
-            Curves = [new(WwiseBankWriter.PlayerInVehicle, WwiseBankWriter.Property.Volume, [(0, 0), (1, WwiseBankWriter.Silent)])],
+            Volume = WwiseBankWriter.EngineBusDifference,
+            VirtualWhenQuiet = true,
+            Priority = GuerrillaSoundBanks.Priority(4, true), OwnPriority = true,
         };
-        bank.Layer($"{name}:player", playerLoops, playerSettings, 0, new(WwiseBankWriter.EngineBus, 0, false));
-        bank.Layer($"{name}:others", otherLoops, otherSettings, 0, new(WwiseBankWriter.EngineBus, sounds.Attenuation(bank, otherDistances), true));
-        return new Engine(bank, player, others, delay);
+        bank.Layer($"{name}:player", playerLoops, playerSettings, sets, new(WwiseBankWriter.VehicleEffectsBus, 0, false));
+        bank.Layer($"{name}:others", otherLoops, otherSettings, sets, new(WwiseBankWriter.VehicleEffectsBus, sounds.Attenuation(bank, otherDistances), true));
+        bank.Switch($"{name}:engine", WwiseBankWriter.EngineListener, [(WwiseBankWriter.ListenerPlayer, player), (WwiseBankWriter.ListenerOther, others)],
+                    new WwiseBankWriter.Settings { Priority = GuerrillaSoundBanks.Priority(4, true) }, 0, new(WwiseBankWriter.VehicleEffectsBus, 0, false),
+                    defaultValue: WwiseBankWriter.ListenerOther, followsChanges: true, fadeMs: 300);
+        return new Engine(bank, sets, delay);
     }
 
-    // An engine's loops (and its damage loop and layer containers) keep playing while quiet, as every one of
-    // Armageddon's own engine loops does (its vehicles.bnk_pc: the below-threshold byte 0). Set to go virtual (2),
-    // the game's Wwise ended a loop once its curves made it silent, and the whole engine sound once every loop was
-    // at the same moment (Round 2: the Kitsune's, whose RPM1 layer is silent below 1,008 rpm and off-load layer at
-    // full load, went silent for good three seconds into a drive, as the RPM left its idle layer's range; the sound's
-    // game object 0 from then on). The quiet loops play on unheard, as Armageddon's engines' do.
-    static WwiseBankWriter.Settings Loop(List<WwiseBankWriter.Curve> curves) => new() { Curves = curves };
+    // An engine's loop too quiet to hear goes virtual: it takes none of the game's voices, and starts from its
+    // beginning when it's heard again (as Guerrilla stops a layer out of its range and starts it again). One engine
+    // is five or six loops twice over, most of them silent at any moment; playing on unheard, each took a voice.
+    // (The engines first played on Armageddon's engines' bus, which lets 10 sounds play and ends the oldest for
+    // the next: an engine went silent for good a second or two after another vehicle's started. That, and the
+    // loops' missing loop points, were why the engines stopped; going virtual was wrongly blamed for it once.)
+    static WwiseBankWriter.Settings Loop(List<WwiseBankWriter.Curve> curves) => new() { Curves = curves, VirtualWhenQuiet = true };
 
     /// <summary>A range list's layers by slot (from the sound's name: IDLE 0, RPM1 1, RPM2 2, RPM3 3, as Guerrilla's parser).</summary>
     static Dictionary<int, Layer> Layers(XtblElement? list)

@@ -110,30 +110,26 @@ public static class GuerrillaPlayerAnimations
     /// </summary>
     /// <summary>
     /// Names a group of Guerrilla's means otherwise, checked before its own name. Guerrilla throws its thrown
-    /// weapons with "throw item" (and "move throw ...", "crouch throw"), and in those groups its "fire" is something
-    /// else: in "remote charge" (the remote charges, the mines, the singularity bomb) the press of the detonator, in
-    /// "2HCarry" (the propane tank) a swing with what he carries. Ours throw with the game's firing (its "fire"
-    /// names), so those take Guerrilla's throws; the charges go off with the second firing mode or reload (its
-    /// "fire alt" and "reload" names), which take Guerrilla's detonator press. (Without this the charge's throw
-    /// played the detonator and the tank's a swing: the user's Round 1, 2026-11-06.)
+    /// weapons with "throw item" (and "move throw ..."), and in those groups its "fire" is something else: in
+    /// "remote charge" (the remote charges, the mines, the singularity bomb) the press of the detonator, in
+    /// "2HCarry" (the propane tank) a swing with what he carries. Ours are thrown by the game's own throw (the
+    /// weapons' "Thrown" shot, see <see cref="ThrowActions"/>), which asks for Guerrilla's throw names themselves;
+    /// the charges go off with the second firing mode or reload (its "fire", "fire alt" and "reload" names), which
+    /// take Guerrilla's detonator press, its "stand fire".
     /// </summary>
     static readonly Dictionary<string, Dictionary<string, string[]>> GroupAliases = new(StringComparer.OrdinalIgnoreCase)
     {
         ["remote charge"] = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["fire"] = ["throw item"], ["stand fire"] = ["throw item"],
-            ["walk fire"] = ["move throw forward"], ["run fire"] = ["move throw forward"],
-            ["walk fire back"] = ["move throw back"], ["run fire back"] = ["move throw back"],
-            ["walk fire left"] = ["move throw left"], ["run fire left"] = ["move throw left"],
-            ["walk fire right"] = ["move throw right"], ["run fire right"] = ["move throw right"],
-            ["crouch fire"] = ["crouch throw"], ["crouch walk fire"] = ["crouch throw"], ["crouch walk fire back"] = ["crouch throw"],
-            ["crouch walk fire left"] = ["crouch throw"], ["crouch walk fire right"] = ["crouch throw"],
-            ["stand fire alt"] = ["stand fire"], ["walk fire alt"] = ["walk fire"], ["run fire alt"] = ["run fire"],
-            ["fine aim fire alt"] = ["stand fire"], ["fine aim fire walk alt"] = ["walk fire"],
-            ["crouch fire alt"] = ["crouch fire"], ["crouch walk fire alt"] = ["crouch fire"],
-            ["fine aim crouch fire alt"] = ["crouch fire"], ["fine aim crouch fire walk alt"] = ["crouch fire"],
-            ["reload"] = ["stand fire"], ["walk reload"] = ["walk fire"], ["run reload"] = ["run fire"],
-            ["crouch reload"] = ["crouch fire"], ["crouch walk reload"] = ["crouch fire"],
+            ["stand fire alt"] = ["stand fire"], ["walk fire alt"] = ["stand fire"], ["run fire alt"] = ["stand fire"],
+            ["fine aim fire alt"] = ["stand fire"], ["fine aim fire walk alt"] = ["stand fire"],
+            ["crouch fire alt"] = ["stand fire"], ["crouch walk fire alt"] = ["stand fire"],
+            ["fine aim crouch fire alt"] = ["stand fire"], ["fine aim crouch fire walk alt"] = ["stand fire"],
+            ["reload"] = ["stand fire"], ["walk reload"] = ["stand fire"], ["run reload"] = ["stand fire"],
+            ["crouch reload"] = ["stand fire"], ["crouch walk reload"] = ["stand fire"],
+            // The game's throw asks for "plant bomb" with a singularity bomb in hand; Guerrilla's Mason throws it as he
+            // throws a charge (its group has no such name).
+            ["plant bomb"] = ["throw item"],
             // Guerrilla's Mason never aims a charge: he holds it ready. Armageddon's player is in its aim names
             // whenever he holds a gun, and Armageddon's own "remote charge" group is its charge launcher's (its
             // charge_placer shares the group's name): without these the launcher's poses (pc_rcl_aim_*, moved onto
@@ -154,10 +150,23 @@ public static class GuerrillaPlayerAnimations
         },
         ["2HCarry"] = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["fire"] = ["throw item"], ["stand fire"] = ["throw item"], ["walk fire"] = ["throw item"], ["run fire"] = ["throw item"],
-            ["crouch fire"] = ["throw item"],
+            // Guerrilla has one throw for what Mason carries in both hands, standing or on the move.
+            ["move throw forward"] = ["throw item"], ["move throw back"] = ["throw item"],
+            ["move throw left"] = ["throw item"], ["move throw right"] = ["throw item"],
         },
     };
+
+    /// <summary>
+    /// The actions the game's own throw asks for by name, kept in Armageddon's code from Guerrilla's (the player's
+    /// attack 0x8BAAF0 takes a weapon whose shot is "Thrown" to 0x8A3FC0, which picks the action in 0x8A3DB0:
+    /// "throw item" standing, "move throw ..." on the move, "grenade throw" for the class thrown_grenade, "plant
+    /// bomb" for singularity_bomb, "place item" for a shot of the type "Place on Ground"; the thrown thing leaves
+    /// the hand at the action's "impact start" trigger, 0x8A1E50). No weapon of Armageddon's own is thrown that
+    /// way, so neither its player's blend tree nor Darius's set names them: without them here a thrown weapon's
+    /// throw finds no animation and nothing is thrown.
+    /// </summary>
+    static readonly string[] ThrowActions =
+        ["throw item", "place item", "plant bomb", "move throw forward", "move throw back", "move throw left", "move throw right", "grenade throw"];
 
     static readonly Dictionary<string, string[]> Aliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -723,7 +732,7 @@ public static class GuerrillaPlayerAnimations
         return AnimationWriter.Write(animation.AsSpan(0, 0x30), source.Frames, keep, tracks, root);
     }
 
-    /// <summary>The names Armageddon's player asks for: its blend tree's (new_pc.blend_treex, the tree "player") and every one Darius's set has, states and actions.</summary>
+    /// <summary>The names Armageddon's player asks for: its blend tree's (new_pc.blend_treex, the tree "player"), every one Darius's set has, states and actions, and its throw's (<see cref="ThrowActions"/>).</summary>
     static (List<string> States, List<string> Actions) Asked(Packfile gameTables, XtblFile dariusSet)
     {
         var states = new List<string>();
@@ -744,6 +753,7 @@ public static class GuerrillaPlayerAnimations
             foreach (var s in Descendants(skeletonSet, "State")) Add(states, s.ValueOf("ID"));
             foreach (var a in Descendants(skeletonSet, "Action")) Add(actions, a.ValueOf("ID"));
         }
+        foreach (string thrown in ThrowActions) Add(actions, thrown);
         return (states, actions);
     }
 

@@ -236,6 +236,8 @@ static class Parts
                     foreach (string line in GuerrillaPeople.Build(guerrilla, game, setup.Overrides, setup.WorldFolder, setup.PeopleFolder,
                                                                   options.Characters ?? [.. GuerrillaPeople.DefaultCharacters]))
                         log.Line(line);
+                    // What the EDF answers the player's alert level by: Guerrilla's tables for the campaign's systems.
+                    foreach (string line in GuerrillaCampaign.Build(guerrilla, setup.CampaignFolder)) log.Line(line);
                     usedOptions = options.Characters is { } characters ? string.Join(",", characters) : "";
                     break;
             }
@@ -311,7 +313,8 @@ static class Parts
                     Part.Hud => GuerrillaHud.Remove(setup.Overrides, setup.HudFolder),
                     Part.Vehicles => GuerrillaArsenal.Remove(setup.Game!, setup.Overrides, setup.WorldFolder),
                     Part.Weapons => GuerrillaWeapons.Remove(setup.Game!, setup.Overrides, setup.WorldFolder),
-                    Part.People => GuerrillaPeople.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, setup.PeopleFolder),
+                    Part.People => GuerrillaPeople.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, setup.PeopleFolder)
+                        .Concat(GuerrillaCampaign.Remove(setup.CampaignFolder)),
                     _ => [],
                 };
                 int count = 0;
@@ -365,7 +368,7 @@ static class Parts
             files.AddRange(Directory.EnumerateFiles(cache, "gw_*.fxo_pc_dx11"));
         }
         foreach (string table in new[] { "gameplay_properties.xtbl", "lod_properties.xtbl", "glass.xtbl", "vfx.xtbl", "effects.xtbl",
-                                         "level_objects.xtbl", "explosions.xtbl", "clouds.bin", "stars.bin", "corona.bin", GuerrillaWorld.StampFile,
+                                         "level_objects.xtbl", "explosions.xtbl", GuerrillaMaterialEvents.FileName, "clouds.bin", "stars.bin", "corona.bin", GuerrillaWorld.StampFile,
                                          GuerrillaSquads.PlacedList })
             files.Add(Path.Combine(setup.WorldFolder, table));
         if (Directory.Exists(setup.WorldFolder))
@@ -375,6 +378,8 @@ static class Parts
             File.Delete(file);
             yield return $"Deleted {file}";
         }
+        // Its effects' sounds: their banks, table rows and stop events.
+        foreach (string line in GuerrillaSoundBanks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, GuerrillaWorld.EffectSoundPart)) yield return line;
     }
 
     /// <summary>

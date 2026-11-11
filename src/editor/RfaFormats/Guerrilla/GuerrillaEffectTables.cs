@@ -24,8 +24,8 @@ namespace RfaFormats.Guerrilla;
 /// explosion they die in, as many as the game has room for (<see cref="ExplosionLimit"/>), the most
 /// placed objects' first: Armageddon plays its own explosion of the name with its own effects, which
 /// it loads only with its own levels, so ours went off unseen; each effect they name (an explosion's
-/// too) that has a visual (sound left out: Guerrilla's are
-/// XACT cues, which Armageddon's Wwise doesn't know); each visual, Environmental, its file the
+/// too) that has a visual or a sound (the sound an event made of Guerrilla's cue: see
+/// <see cref="GuerrillaSoundBanks.EffectSound"/>; many of Guerrilla's effects are a sound alone); each visual, Environmental, its file the
 /// converted effect "rfg_&lt;file&gt;" (see <see cref="GuerrillaEffects"/>), which the world's
 /// containers hold. Every added entry is fitted to the shape of Armageddon's own (see <see cref="Fit"/>:
 /// the fields Armageddon's all have added, the lists left without what they must hold gone).
@@ -92,7 +92,13 @@ public static class GuerrillaEffectTables
     public sealed record Tables(byte[] Visuals, byte[] Effects, byte[] LevelObjects, byte[] Explosions, IReadOnlyDictionary<string, string> PropsOf,
                                 IReadOnlyDictionary<string, IReadOnlyList<string>> FilesOf, IReadOnlyList<string> Files, IReadOnlyList<string> WorldFiles,
                                 int VisualsAdded, int EffectsAdded, int ExplosionsAdded, IReadOnlyList<string> VisualsLeft, IReadOnlyList<string> ExplosionsWaiting,
-                                IReadOnlyList<string> ExplosionsLeft);
+                                IReadOnlyList<string> ExplosionsLeft)
+    {
+        /// <summary>How many of the added effects have a sound; how many have a sound alone; the cues of added effects that couldn't be had.</summary>
+        public int SoundsAdded { get; init; }
+        public int SoundOnly { get; init; }
+        public IReadOnlyList<string> SoundsLeft { get; init; } = [];
+    }
 
     /// <summary>Guerrilla's explosion fields under the names Armageddon's table gives them.</summary>
     static readonly (string Guerrilla, string Armageddon)[] ExplosionFieldNames = [("Impulse", "Mover_Impulse"), ("Structural_Damage", "StructuralDamage")];
@@ -114,7 +120,8 @@ public static class GuerrillaEffectTables
     /// any object's, with their effects as the world's own.
     /// </summary>
     public static Tables Build(Packfile armageddonMisc, Packfile guerrillaMisc, IReadOnlyDictionary<string, int> used, Func<string, bool> hasFile,
-                               IReadOnlyCollection<string> worldEffects, int dlcExplosions, IReadOnlyCollection<string>? worldExplosions = null)
+                               IReadOnlyCollection<string> worldEffects, int dlcExplosions, IReadOnlyCollection<string>? worldExplosions = null,
+                               Func<string, bool, Sound?>? soundOf = null)
     {
         string Text(Packfile archive, string table) =>
             Encoding.Latin1.GetString(archive.Read(archive.Find(table) ?? throw new InvalidDataException($"no {table} in {archive.Name}")));
@@ -189,26 +196,46 @@ public static class GuerrillaEffectTables
         var addedExplosions = rankedExplosions.Take(explosionRoom).ToHashSet(StringComparer.OrdinalIgnoreCase);
         IEnumerable<string> ExplosionEffects(string explosion) => Leaves(theirExplosions[explosion], "Element");
 
+        // Each effect's sound (Guerrilla's cue, made an event by soundOf: once a cue), told whether one of the
+        // added explosions plays that cue.
+        var explosionCues = addedExplosions.SelectMany(ExplosionEffects).Where(effects.ContainsKey).Select(e => Field(effects[e], "sound")).OfType<string>()
+                                           .Where(c => c.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sounds = new Dictionary<string, Sound?>(StringComparer.OrdinalIgnoreCase);
+        Sound? SoundOf(string effect)
+        {
+            if (soundOf == null || !effects.TryGetValue(effect, out string? entry)) return null;
+            // Its cue, or with none its attack-loop-release set (sound_alr: a thruster, a generator), asked for by the set's name.
+            string? cue = Field(entry, "sound") is { Length: > 0 } named ? named
+                        : Field(entry, "sound_alr") is { Length: > 0 } set ? GuerrillaSoundBanks.AlrPrefix + set : null;
+            if (cue == null) return null;
+            if (!sounds.TryGetValue(cue, out var sound)) sounds[cue] = sound = soundOf(cue, explosionCues.Contains(cue));
+            return sound;
+        }
+
+        // An effect is added for what it shows or for what it sounds (many of Guerrilla's have a sound alone).
         var effectsOf = used.Keys.Where(objects.ContainsKey).ToDictionary(p => p,
             p => EffectFields.SelectMany(f => Leaves(objects[p], f))
                              .Concat(explosionsOf[p].Where(addedExplosions.Contains).SelectMany(ExplosionEffects))
-                             .Where(n => VisualOf(n) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                             .Where(n => VisualOf(n) != null || SoundOf(n) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             StringComparer.OrdinalIgnoreCase);
 
         // The visuals the most placed objects show, as many as the game has room for (the world's own
         // effects' first: shown everywhere).
         var placed = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var (p, list) in effectsOf)
-            foreach (string v in list.Select(e => VisualOf(e)!).Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (string v in list.Select(VisualOf).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
                 placed[v] = placed.GetValueOrDefault(v) + used[p];
         var everywhere = worldEffects.Concat((worldExplosions ?? []).Where(addedExplosions.Contains).SelectMany(ExplosionEffects))
-                                     .Where(e => VisualOf(e) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        foreach (string e in everywhere) placed[VisualOf(e)!] = int.MaxValue;
+                                     .Where(e => VisualOf(e) != null || SoundOf(e) != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (string e in everywhere)
+            if (VisualOf(e) is { } v) placed[v] = int.MaxValue;
         // (The entries of its <Table>: the two in <TableTemplates> are the editor's.)
         int visualRoom = Math.Max(0, VisualLimit - Count(ourVisuals, "Effect"));
         var ranked = placed.OrderByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.OrdinalIgnoreCase).Select(p => p.Key).ToList();
         var addedVisuals = ranked.Take(visualRoom).Where(v => !takenVisuals.Contains(Added(v))).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var addedEffects = everywhere.Concat(effectsOf.Values.SelectMany(l => l)).Where(e => addedVisuals.Contains(VisualOf(e)!) && !takenEffects.Contains(Added(e)))
+        // Whether an effect's visual is added (one past the game's room isn't: the effect then only sounds).
+        bool Shown(string effect) => VisualOf(effect) is { } v && addedVisuals.Contains(v);
+        var addedEffects = everywhere.Concat(effectsOf.Values.SelectMany(l => l)).Where(e => (Shown(e) || SoundOf(e) != null) && !takenEffects.Contains(Added(e)))
                                      .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         int effectRoom = EffectLimit - Count(ourEffects, "Effect");
         if (addedEffects.Count > effectRoom) throw new InvalidDataException($"{addedEffects.Count} effects to add; the game has room for {effectRoom}");
@@ -235,8 +262,15 @@ public static class GuerrillaEffectTables
         foreach (string e in addedEffects)
         {
             string body = Rename(effects[e], Added(e));
-            body = Replace(body, "visual", Added(VisualOf(e)!));
-            body = Regex.Replace(body, @"\s*<sound>[^<]*</sound>", "");
+            body = Shown(e) ? Replace(body, "visual", Added(VisualOf(e)!)) : Regex.Replace(body, @"\s*<visual>[^<]*</visual>", "");
+            // Its sound: the event made of Guerrilla's cue (left out only where the cue can't be had). A looping
+            // one is heard as far as Guerrilla's cue is (Armageddon starts and stops an effect's loop at a
+            // distance: 30 m unless the effect names its own).
+            var sound = SoundOf(e);
+            body = sound == null ? Regex.Replace(body, @"\s*<sound>[^<]*</sound>", "")
+                 : Field(body, "sound") != null ? Replace(body, "sound", sound.Event) : body + $"<sound>{sound.Event}</sound>";
+            if (sound?.HeardTo is { } far)
+                body += $"<Max_Sound_Play_Distance_Override_Meters>{Math.Round(far).ToString(CultureInfo.InvariantCulture)}</Max_Sound_Play_Distance_Override_Meters>";
             effectText.Append($"\t<Effect>{Fit(body, "Effect", effectShape)}</Effect>\n");
         }
         var objectShape = new Shape(ourObjects, "Level_Object", Text(guerrillaMisc, "level_objects.xtbl"));
@@ -267,7 +301,7 @@ public static class GuerrillaEffectTables
             });
             objectText.Append($"\t<Level_Object>{Fit(body, "Level_Object", objectShape)}</Level_Object>\n");
             propsOf[p] = name;
-            filesOf[p] = effectsOf[p].Where(effectSet.Contains).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            filesOf[p] = effectsOf[p].Where(e => effectSet.Contains(e) && Shown(e)).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
         // The explosions: Guerrilla's settings in Armageddon's fields (see ExplosionEntry), new unique
         // numbers after Armageddon's own.
@@ -290,11 +324,23 @@ public static class GuerrillaEffectTables
         }
 
         var files = addedVisuals.Select(v => FileOf(visuals[v])).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
-        var worldFiles = everywhere.Where(effectSet.Contains).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var worldFiles = everywhere.Where(e => effectSet.Contains(e) && Shown(e)).Select(e => FileOf(visuals[VisualOf(e)!])).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         return new Tables(Append(ourVisuals, visualText), Append(ourEffects, effectText), Append(ourObjects, objectText), Append(ourExplosionText, explosionText),
                           propsOf, filesOf, files, worldFiles, addedVisuals.Count, addedEffects.Count, addedExplosions.Count, ranked.Skip(visualRoom).ToList(),
-                          rankedExplosions.Skip(explosionRoom).ToList(), [.. explosionsLeft]);
+                          rankedExplosions.Skip(explosionRoom).ToList(), [.. explosionsLeft])
+        {
+            SoundsAdded = addedEffects.Count(e => SoundOf(e) != null),
+            SoundOnly = addedEffects.Count(e => !Shown(e)),
+            SoundsLeft = [.. addedEffects.Select(e => Field(effects[e], "sound")).OfType<string>().Where(c => c.Length > 0 && sounds.GetValueOrDefault(c) == null)
+                                         .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)],
+        };
     }
+
+    /// <summary>
+    /// An effect's sound as Armageddon's table names it: the event's name, and for a looping one how far off (m)
+    /// it is heard (the effect's Max_Sound_Play_Distance_Override_Meters).
+    /// </summary>
+    public sealed record Sound(string Event, float? HeardTo);
 
     /// <summary>
     /// One of Guerrilla's explosions as an Armageddon entry named <paramref name="name"/>: Guerrilla's

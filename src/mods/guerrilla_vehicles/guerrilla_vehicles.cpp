@@ -1180,15 +1180,57 @@ constexpr DWORD WwiseId(const char* name) {
     return h;
 }
 constexpr DWORD kPlayerInVehicleId = WwiseId("RFG_PLAYER_IN_VEHICLE");  // the banks' (GuerrillaVehicleSounds)
+// Which of an engine's two sets of loops plays (the banks' switch container, GuerrillaVehicleSounds): the player's
+// own vehicle's (2D, stereo) or another's (3D, mono). Only one plays at a time, where both played before, one of
+// them unheard: every sound playing, heard or not, counts against the game's limit of sounds at once, and an
+// engine was ten or eleven of them. The game's own function sets a switch on a sound object (0xB855E0: the group,
+// the value, the object); the container goes on looking at it, so setting it while the engine runs changes the set.
+constexpr DWORD kEngineListenerId = WwiseId("RFG_ENGINE_LISTENER"), kListenerPlayerId = WwiseId("player"), kListenerOtherId = WwiseId("other");
+auto const SetSwitch = reinterpret_cast<void(__cdecl*)(DWORD group, DWORD value, DWORD soundObject)>(0xB855E0);
+// [GuerrillaVehicles] EngineSets=0 (for a test: every engine is left on the set the banks play unset, the others'
+// 3D one, the player's own vehicle's too; nothing is ever switched while an engine runs).
+bool g_engineSets = true;
 
 EngineFrameFn g_engineFrame;
 bool g_playerInThisVehicle;  // while the game does a vehicle's sounds
 
 struct EasedEngine {
     float load;
-    LONGLONG at;  // when it was last set (performance counter)
+    LONGLONG at;   // when it was last set (performance counter)
+    bool players;  // which set it was last told to play: the player's own vehicle's
 };
 std::vector<std::pair<DWORD, EasedEngine>> g_easedEngines;  // by the engine sound's game object
+
+// The engine sounds seen playing, and for how many calls each has since had no game object. The game keeps
+// the handle of a sound that has ended by itself (its game object reads 0 from then on) and goes on setting
+// its values: an engine gone silent while its vehicle runs. That is written in the log, once a sound. (An
+// engine's loops never end by themselves; where one did, something ended them: too many sounds on their bus.)
+struct PlayingEngine {
+    int sound;
+    int callsWithoutObject;
+};
+std::vector<PlayingEngine> g_playingEngines;
+constexpr int kCallsBeforeEndedIsLogged = 60;  // about a second: a sound the game stops itself isn't set for that long
+constexpr size_t kMostPlayingEngines = 64;
+
+// Notes whether this engine sound still has its game object; writes it in the log once it has had none for a second.
+void WatchEngineSound(int sound, DWORD object) {
+    auto found = std::find_if(g_playingEngines.begin(), g_playingEngines.end(), [&](const PlayingEngine& e) { return e.sound == sound; });
+    if (object) {
+        if (found != g_playingEngines.end()) {
+            found->callsWithoutObject = 0;
+            return;
+        }
+        if (g_playingEngines.size() >= kMostPlayingEngines) g_playingEngines.erase(g_playingEngines.begin());
+        g_playingEngines.push_back({sound, 0});
+        return;
+    }
+    if (found == g_playingEngines.end()) return;
+    if (++found->callsWithoutObject < kCallsBeforeEndedIsLogged) return;
+    g_playingEngines.erase(found);
+    RFA_LOG_FIRST(100, "Engine sounds: an engine's sound ended by itself while its vehicle runs (sound %d%s); it stays silent until the engine starts again",
+                  sound, g_playerInThisVehicle ? ", the player's vehicle" : ", another vehicle");
+}
 
 void __cdecl EngineFrame(void* vehicle) {
     g_playerInThisVehicle = vehicle && PlayerInVehicle(vehicle);
@@ -1200,26 +1242,38 @@ void __cdecl EngineFrame(void* vehicle) {
 // game's, 0.12 of the way each 10 ms (Guerrilla's audio thread's), and RFG_PLAYER_IN_VEHICLE.
 void __cdecl SetEngineValues(int sound, float speed, float rpm, float load, float damage) {
     const DWORD object = SoundObject(sound);
+    WatchEngineSound(sound, object);
     LARGE_INTEGER now, frequency;
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&frequency);
-    auto found = std::find_if(g_easedEngines.begin(), g_easedEngines.end(), [&](const auto& e) { return e.first == object; });
     float eased = load;
-    if (found != g_easedEngines.end()) {
-        const double ms = static_cast<double>(now.QuadPart - found->second.at) * 1000.0 / static_cast<double>(frequency.QuadPart);
-        if (ms < 1000) eased = found->second.load + (load - found->second.load) * static_cast<float>(1 - std::pow(0.88, ms / 10));
-        found->second = {eased, now.QuadPart};
-    } else {
-        // Forget engines not heard of for 10 s (their vehicles gone).
-        g_easedEngines.erase(std::remove_if(g_easedEngines.begin(), g_easedEngines.end(), [&](const auto& e) {
-                                 return (now.QuadPart - e.second.at) > 10 * frequency.QuadPart; }), g_easedEngines.end());
-        g_easedEngines.push_back({object, {load, now.QuadPart}});
+    bool tellSet = false;
+    // A sound that has ended has no game object: there is nothing to set the values on (and nothing to ease).
+    if (object) {
+        auto found = std::find_if(g_easedEngines.begin(), g_easedEngines.end(), [&](const auto& e) { return e.first == object; });
+        if (found != g_easedEngines.end()) {
+            const double ms = static_cast<double>(now.QuadPart - found->second.at) * 1000.0 / static_cast<double>(frequency.QuadPart);
+            if (ms < 1000) eased = found->second.load + (load - found->second.load) * static_cast<float>(1 - std::pow(0.88, ms / 10));
+            tellSet = found->second.players != g_playerInThisVehicle;  // the player got in or out while it runs
+            found->second = {eased, now.QuadPart, g_playerInThisVehicle};
+        } else {
+            // Forget engines not heard of for 10 s (their vehicles gone).
+            g_easedEngines.erase(std::remove_if(g_easedEngines.begin(), g_easedEngines.end(), [&](const auto& e) {
+                                     return (now.QuadPart - e.second.at) > 10 * frequency.QuadPart; }), g_easedEngines.end());
+            g_easedEngines.push_back({object, {load, now.QuadPart, g_playerInThisVehicle}});
+            tellSet = true;  // an engine first heard of (its event starts after a delay: the set is told before it sounds)
+        }
+        if (tellSet && g_engineSets) {
+            SetSwitch(kEngineListenerId, g_playerInThisVehicle ? kListenerPlayerId : kListenerOtherId, object);
+            RFA_LOG_FIRST(300, "Engine sounds: sound %d (object 0x%08lX) plays %s", sound, object,
+                          g_playerInThisVehicle ? "the player's set (2D, stereo)" : "the others' set (3D)");
+        }
+        SetGameParameter(*reinterpret_cast<const DWORD*>(kRpmId), rpm, object);
+        SetGameParameter(*reinterpret_cast<const DWORD*>(kLoadId), eased, object);
+        SetGameParameter(*reinterpret_cast<const DWORD*>(kSpeedId), speed, object);
+        SetGameParameter(*reinterpret_cast<const DWORD*>(kDamageId), damage, object);
+        SetGameParameter(kPlayerInVehicleId, g_playerInThisVehicle ? 1.0f : 0.0f, object);
     }
-    SetGameParameter(*reinterpret_cast<const DWORD*>(kRpmId), rpm, object);
-    SetGameParameter(*reinterpret_cast<const DWORD*>(kLoadId), eased, object);
-    SetGameParameter(*reinterpret_cast<const DWORD*>(kSpeedId), speed, object);
-    SetGameParameter(*reinterpret_cast<const DWORD*>(kDamageId), damage, object);
-    SetGameParameter(kPlayerInVehicleId, g_playerInThisVehicle ? 1.0f : 0.0f, object);
     // What the game feeds the player's own vehicle's engine sound, once a second (at most 600 lines): for Round 1's
     // "engine silent" in the Kitsune, whose bank, events, loops and volumes are all as built.
     if (g_playerInThisVehicle) {
@@ -1245,7 +1299,10 @@ void HookEngineSounds() {
         rfa::Log("Engine sounds: could not hook the vehicles' sounds; Guerrilla's engines play as the game sets them");
         return;
     }
-    rfa::Log("Engine sounds: the load eased as Guerrilla's, and RFG_PLAYER_IN_VEHICLE set on each vehicle's engine (1 for the player's own)");
+    g_engineSets = rfa::IniInt(L"GuerrillaVehicles", L"EngineSets", 1) != 0;
+    rfa::Log(g_engineSets ? "Engine sounds: the load eased as Guerrilla's, and each engine told which of its two sets to play "
+                            "(RFG_ENGINE_LISTENER: the player's own vehicle's, or another's)"
+                          : "Engine sounds: the load eased as Guerrilla's; no engine is told which set to play (EngineSets=0): each plays the others' 3D set");
 }
 
 // ---- A log of the turrets' item parts as the game makes them
@@ -1526,6 +1583,7 @@ void ReadSkeletonList() {
 
 void StartTraffic();  // traffic.cpp (with convoys.cpp, edf.cpp, crews.cpp on its frame)
 namespace gv { void StartFlyers(); }  // flyers.cpp
+namespace gv { void StartTurrets(); }  // turrets.cpp
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!rfa::game::IsSupportedBuild()) {
@@ -1548,6 +1606,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReserveWantedVehicles();
     HookEngineSounds();
     HookTurretParts();
+    gv::StartTurrets();
     HookLights();
     StartTraffic();
     gv::StartFlyers();

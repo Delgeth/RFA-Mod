@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <set>
 #include <string>
@@ -457,7 +458,7 @@ constexpr double kZonePixels = kMapPixels / kZonesAcross;
 // north): loaded with the HUD and kept until the next level load. Not streamed zone by zone, as
 // Guerrilla's were: the interface's memory for documents is a stack, and unloading one out of order
 // freed the zones loaded after it while they were on screen; the next one loaded over them, and
-// drawing them crashed the render thread (2026-11-07, three freezes: game-notes).
+// drawing them crashed the render thread (2026-11-07, three freezes).
 std::string ZoneSetDocument(int column, int row) {
     return std::string("rfg_ui_map_zones_") + (row < 8 ? "n" : "s") + (column < 8 ? "w" : "e");
 }
@@ -1383,6 +1384,48 @@ void FollowSafehouses() {
 
 bool ShopIsOpen() { return g_shop.open; }
 
+// ---- Guerrilla's use prompt at its ammo boxes
+//
+// Armageddon kept Guerrilla's ammo box action: near an item flagged is_ammo_box (Guerrilla's ammo_box, which the
+// world places), the use key is the player's "use ammo box" action (type 9, as Guerrilla's
+// GENERAL_ACTION_USE_AMMO_BOX), and it refills the player's ammo. The search that finds it (0x8B29F0; Guerrilla's
+// player_process_usable_items, RM 0xADDF30) fills in the action's handle, type and function but no text: Guerrilla's
+// actions had none (its prompt is a picture, a hand, beside the key's), and Armageddon, which added a text to each
+// action for its own prompt, never used this one. So its prompt showed whatever was last in that memory:
+// "[E] {Symbol not found!}". Here that action's text is emptied (Armageddon's prompt stays away for an empty one),
+// and the script shows Guerrilla's own prompt (rfg_ui_messages, use_info) while that action is the player's.
+struct UseActionRecord {  // the game's (Guerrilla's t_usable_object, with Armageddon's text after it)
+    DWORD handle;
+    int type;
+    int icon;
+    float dot;
+    float distanceSquared;
+    void* function;
+    wchar_t text[0x100];
+};
+constexpr DWORD kUsableItems = 0x8B29F0;
+constexpr size_t kUsableItemsPrologue = 9;  // push ebp / mov ebp,esp / sub esp,29Ch
+constexpr DWORD kUsableItemsCode = 0x029CEC81;  // that sub's first four bytes, at kUsableItems + 3
+constexpr int kActionUseAmmoBox = 9;
+constexpr DWORD kPlayerUseAction = 0x1540;  // the player's use action now (a UseActionRecord)
+using UsableItemsFn = bool(__cdecl*)(BYTE* player, UseActionRecord* action);
+UsableItemsFn g_usableItems = nullptr;
+
+bool __cdecl UsableItems(BYTE* player, UseActionRecord* action) {
+    const bool found = g_usableItems(player, action);
+    if (found && action && action->type == kActionUseAmmoBox) action->text[0] = L'\0';
+    return found;
+}
+
+void HookUsableItems() {
+    if (rfa::CodeValue(kUsableItems + 3) != kUsableItemsCode) {
+        rfa::Log("Ammo boxes: the game's code at 0x%08lX isn't as expected; its use prompt stays as it is", kUsableItems);
+        return;
+    }
+    g_usableItems = reinterpret_cast<UsableItemsFn>(rfa::HookFunction(kUsableItems, kUsableItemsPrologue, reinterpret_cast<void*>(&UsableItems)));
+    if (!g_usableItems) rfa::Log("Ammo boxes: could not hook the game's search for usable items; its use prompt stays as it is");
+}
+
 // ---- What the documents' scripts ask (Lua, on the game's thread)
 
 using rfa::game::lua_State;
@@ -1396,6 +1439,20 @@ int __cdecl LuaStationPrompt(lua_State* L) {
     lua_pushboolean(L, atStation);
     lua_pushstring(L, atStation && g_stations[g_shop.nearStation].shop ? "shop" : "cabinet");
     return 2;
+}
+
+// rfg_ammo_box_prompt() -> near
+//   Whether the player's use action now is one of Guerrilla's ammo boxes (see "Guerrilla's use prompt at its
+//   ammo boxes" above). For Guerrilla's use prompt.
+int __cdecl LuaAmmoBoxPrompt(lua_State* L) {
+    using namespace rfa::game;
+    bool atBox = false;
+    if (g_usableItems && g_player && InOurWorld() && !g_shop.open) {
+        const auto* action = reinterpret_cast<const UseActionRecord*>(g_player + kPlayerUseAction);
+        atBox = action->type == kActionUseAmmoBox && action->function != nullptr;
+    }
+    lua_pushboolean(L, atBox);
+    return 1;
 }
 
 // rfg_shop() -> open, count, highlighted, top, salvage, status
@@ -1713,6 +1770,219 @@ int __cdecl LuaScreenDim(lua_State* L) {
     return 2;
 }
 
+// ---- Guerrilla's minimap blips: people and vehicles
+//
+// Guerrilla's cartographer collects the people and vehicles within its minimap's reach every frame and draws
+// each as a blip (collect_humans RM 0x86D140, collect_vehicles 0x86D590, render_humans 0x86D710,
+// render_vehicles 0x86DED0). Its rules, as kept here:
+//   People: never the player, the dead, or anyone in a vehicle (the vehicle is the blip). Then by how the
+//   player's side takes theirs:
+//     hostile: only while in combat, or once the player owns the Personnel Detector upgrade ("locate enemy
+//       EDF on your minimap"); red, the Marauders purple;
+//     allied (the Red Faction): only while the alert level is above green; yellow;
+//     anyone else (civilians among them): never.
+//   Vehicles: every one but the player's own and wrecks, coloured by who is in it (its driver, else another
+//     occupant): yellow the Red Faction's, red a hostile's (purple the Marauders'), grey the others and the
+//     empty ones.
+// The colours are Guerrilla's (get_human_color RM 0x862400, get_vehicle_color 0x862680); the script has them.
+// "In combat" is Guerrilla's npc::is_in_combat (its AI has a target); here the person's combat target
+// (0x880B70). Not here yet: Guerrilla's flags that nothing of ours sets (always_show_on_minimap,
+// activity_related, the zone files' minimap_flags, a house arrest's hostages, hidden people), the player's
+// squad (never shown), and its radar sweep (a line moving down the minimap that lights each blip as it passes).
+void* const kWorldLists = reinterpret_cast<void*>(0x1870630);
+using ListCountFn = int(__thiscall*)(void* world);
+using ListAtFn = BYTE*(__thiscall*)(void* world, int index);
+auto const HumanCount = reinterpret_cast<ListCountFn>(0x43A860);
+auto const HumanAt = reinterpret_cast<ListAtFn>(0x43A8B0);
+auto const VehicleCount = reinterpret_cast<ListCountFn>(0x477090);
+auto const VehicleAt = reinterpret_cast<ListAtFn>(0x4770E0);
+auto const HumanDisposition = reinterpret_cast<int(__cdecl*)(BYTE* human, BYTE* other)>(0x8A04D0);
+auto const TeamDisposition = reinterpret_cast<int(__cdecl*)(int team, int other)>(0x8A0460);
+auto const CombatTarget = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human)>(0x880B70);
+auto const Driving = reinterpret_cast<bool(__cdecl*)(BYTE* human)>(0x8695D0);
+constexpr DWORD kObjectOrientation = 0x10, kObjectHandle = 0x68, kHumanTeam = 0x13B4, kVehicleFlags = 0x4FB0;
+constexpr DWORD kVehicleWreck = 1u << 10;  // Guerrilla's vehicle_flags m_corpse
+constexpr DWORD kNoHandle = 0xFFFFFFFF;
+constexpr int kTeamGuerrillas = 0, kTeamMarauders = 3;  // both games' numbers
+constexpr int kDispositionHostile = 0, kDispositionUnfriendly = 1, kDispositionFriendly = 3, kDispositionAllied = 4;
+constexpr int kBlipGrey = 0, kBlipYellow = 1, kBlipRed = 2, kBlipPurple = 3;  // the script's BLIP_COLOURS
+constexpr size_t kMostBlips = 40;                                            // the script's BLIPS
+
+struct Blip {
+    bool vehicle = false;
+    double mapX = 0, mapY = 0;  // on Guerrilla's world map picture, in its pixels
+    double facing = 0;          // a vehicle's (radians, 0 north, π/2 east)
+    int colour = kBlipGrey;
+    double distanceSquared = 0;
+};
+std::vector<Blip> g_blips;
+
+// Dead, as the game's objects answer it (the fifth virtual function, in both games).
+bool ObjectIsDead(BYTE* object) {
+    using IsDeadFn = bool(__thiscall*)(void* object);
+    void** functions = *reinterpret_cast<void***>(object);
+    return reinterpret_cast<IsDeadFn>(functions[4])(object);
+}
+
+// Guerrilla's alert level from the guerrilla_campaign mod: 0 green to 3 red; -1 while nothing runs it.
+int AlertLevelNow() {
+    using AlertFn = int(__cdecl*)(float* meter);
+    static AlertFn alert = nullptr;
+    if (!alert)
+        if (HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll"))
+            alert = reinterpret_cast<AlertFn>(GetProcAddress(campaign, "GuerrillaCampaign_Alert"));
+    float meter = 0.0f;
+    return alert ? alert(&meter) : -1;
+}
+
+// Whether the player has bought Guerrilla's Personnel Detector (guerrilla_gear's upgrade "personnel"); asked
+// once a second.
+bool OwnsPersonnelDetector() {
+    static ULONGLONG askedAt = 0;
+    static bool owned = false;
+    const ULONGLONG now = GetTickCount64();
+    if (askedAt != 0 && now - askedAt < 1000) return owned;
+    askedAt = now;
+    owned = false;
+    if (!GearReady()) return false;
+    GearApi& api = Gear();
+    const int count = api.count();
+    for (int i = 0; i < count; ++i) {
+        GuerrillaGearUpgrade upgrade{};
+        upgrade.size = sizeof(upgrade);
+        if (api.upgrade(i, &upgrade) && strcmp(upgrade.name, "personnel") == 0) {
+            owned = upgrade.bought > 0;
+            break;
+        }
+    }
+    return owned;
+}
+
+// The people and vehicles the minimap shows now, within reachMetres of the player (see above).
+void CollectBlips(double reachMetres) {
+    g_blips.clear();
+    BYTE* player = g_player;
+    if (!player || !InOurWorld()) return;
+    const float* centre = reinterpret_cast<const float*>(player + 4);
+    const double reachSquared = reachMetres * reachMetres;
+    const int playerTeam = *reinterpret_cast<const int*>(player + kHumanTeam);
+    const DWORD ownVehicle = *reinterpret_cast<const DWORD*>(player + kHumanVehicle);
+    const bool detector = OwnsPersonnelDetector();
+    const bool alerted = AlertLevelNow() > 0;
+
+    auto add = [&](const BYTE* object, bool vehicle, int colour) {
+        const float* position = reinterpret_cast<const float*>(object + 4);
+        const double dx = position[0] - centre[0], dz = position[2] - centre[2];
+        Blip blip;
+        blip.distanceSquared = dx * dx + dz * dz;
+        if (blip.distanceSquared > reachSquared) return;
+        blip.vehicle = vehicle;
+        blip.colour = colour;
+        MapPixels(position[0], position[2], blip.mapX, blip.mapY);
+        if (vehicle) {
+            const float* forward = reinterpret_cast<const float*>(object + kObjectOrientation + 24);
+            blip.facing = std::atan2(static_cast<double>(forward[0]), static_cast<double>(forward[2]));
+        }
+        g_blips.push_back(blip);
+    };
+
+    std::map<DWORD, int> teamIn;  // a vehicle's handle -> the team of who is in it
+    std::set<DWORD> driven;       // the vehicles whose driver gave that team
+    const int humans = HumanCount(kWorldLists);
+    for (int i = 0; i < humans; ++i) {
+        BYTE* human = HumanAt(kWorldLists, i);
+        if (!human || human == player || ObjectIsDead(human)) continue;
+        const int team = *reinterpret_cast<const int*>(human + kHumanTeam);
+        const DWORD vehicle = *reinterpret_cast<const DWORD*>(human + kHumanVehicle);
+        if (vehicle != kNoHandle && vehicle != 0) {
+            if (Driving(human)) {
+                teamIn[vehicle] = team;
+                driven.insert(vehicle);
+            } else if (!driven.count(vehicle)) {
+                teamIn.emplace(vehicle, team);
+            }
+            continue;
+        }
+        const int disposition = HumanDisposition(player, human);
+        if (disposition == kDispositionHostile) {
+            if (detector || CombatTarget(human)) add(human, false, team == kTeamMarauders ? kBlipPurple : kBlipRed);
+        } else if (disposition == kDispositionAllied) {
+            if (alerted) add(human, false, kBlipYellow);
+        }
+    }
+
+    const int vehicles = VehicleCount(kWorldLists);
+    for (int i = 0; i < vehicles; ++i) {
+        BYTE* vehicle = VehicleAt(kWorldLists, i);
+        if (!vehicle || ObjectIsDead(vehicle)) continue;
+        if (*reinterpret_cast<const DWORD*>(vehicle + kVehicleFlags) & kVehicleWreck) continue;
+        const DWORD handle = *reinterpret_cast<const DWORD*>(vehicle + kObjectHandle);
+        if (handle == ownVehicle) continue;
+        int colour = kBlipGrey;
+        const auto inIt = teamIn.find(handle);
+        if (inIt != teamIn.end()) {
+            const int team = inIt->second;
+            const int disposition = TeamDisposition(playerTeam, team);
+            if (disposition >= kDispositionFriendly) {
+                if (team == kTeamGuerrillas) colour = kBlipYellow;
+            } else if (disposition <= kDispositionUnfriendly) {
+                colour = team == kTeamMarauders ? kBlipPurple : kBlipRed;
+            }
+        }
+        add(vehicle, true, colour);
+    }
+
+    // More than the script can show: the nearest stay.
+    if (g_blips.size() > kMostBlips) {
+        std::sort(g_blips.begin(), g_blips.end(), [](const Blip& a, const Blip& b) { return a.distanceSquared < b.distanceSquared; });
+        g_blips.resize(kMostBlips);
+    }
+}
+
+// rfg_map_blips(reach) -> count
+//   Collects the people and vehicles Guerrilla's minimap shows within `reach` metres of the player (its
+//   rules: see "Guerrilla's minimap blips" above), for rfg_map_blip.
+int __cdecl LuaMapBlips(lua_State* L) {
+    using namespace rfa::game;
+    CollectBlips(lua_tonumber(L, 1));
+    lua_pushnumber(L, static_cast<double>(g_blips.size()));
+    return 1;
+}
+
+// rfg_map_blip(i) -> vehicle, map_x, map_y, colour, facing
+//   The i-th of them (from 1): whether it's a vehicle (else a person); where it is on Guerrilla's world map
+//   picture, in its pixels; its colour (0 grey, 1 yellow, 2 red, 3 purple); a vehicle's facing (radians, 0
+//   north, π/2 east). Nothing for an i out of range.
+int __cdecl LuaMapBlip(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_blips.size())) return 0;
+    const Blip& blip = g_blips[index];
+    lua_pushboolean(L, blip.vehicle);
+    lua_pushnumber(L, blip.mapX);
+    lua_pushnumber(L, blip.mapY);
+    lua_pushnumber(L, blip.colour);
+    lua_pushnumber(L, blip.facing);
+    return 5;
+}
+
+// rfg_alert() -> whether Guerrilla's alert level is running (the guerrilla_campaign mod runs it in this
+// world), and what Guerrilla's HUD shows of it: 0 to 25 green, to 50 yellow, to 75 orange, above red
+// (its AlertLevel data item's alert_level_value).
+int __cdecl LuaAlert(lua_State* L) {
+    using namespace rfa::game;
+    using AlertFn = int(__cdecl*)(float* meter);
+    static AlertFn alert = nullptr;
+    if (!alert)
+        if (HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll"))
+            alert = reinterpret_cast<AlertFn>(GetProcAddress(campaign, "GuerrillaCampaign_Alert"));
+    float meter = 0.0f;
+    const int level = alert ? alert(&meter) : -1;
+    lua_pushboolean(L, level >= 0);
+    lua_pushnumber(L, meter);
+    return 2;
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
@@ -1726,6 +1996,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_map_full_tiles", LuaMapFullTiles);
     rfa::game::lua_register(L, "rfg_map_full_tile", LuaMapFullTile);
     rfa::game::lua_register(L, "rfg_station_prompt", LuaStationPrompt);
+    rfa::game::lua_register(L, "rfg_ammo_box_prompt", LuaAmmoBoxPrompt);
     rfa::game::lua_register(L, "rfg_shop", LuaShop);
     rfa::game::lua_register(L, "rfg_shop_item", LuaShopItem);
     rfa::game::lua_register(L, "rfg_shop_text", LuaShopText);
@@ -1733,6 +2004,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_dataitem_set", LuaDataItemSet);
     rfa::game::lua_register(L, "rfg_string_find", LuaStringFind);
     rfa::game::lua_register(L, "rfg_get_screen_dim", LuaScreenDim);
+    rfa::game::lua_register(L, "rfg_alert", LuaAlert);
+    rfa::game::lua_register(L, "rfg_map_blips", LuaMapBlips);
+    rfa::game::lua_register(L, "rfg_map_blip", LuaMapBlip);
 }
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -1789,6 +2063,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_drawPass) rfa::Log("Could not hook the interface's draw pass; Guerrilla's HUD may stay up on loading screens and menus");
     g_loadStart = reinterpret_cast<LoadStartFn>(rfa::HookFunction(kLoadStart, kLoadStartPrologue, reinterpret_cast<void*>(&LoadStart)));
     if (!g_loadStart) rfa::Log("Could not hook the start of level loads; a reload may crash when the HUD unloads a map picture after it");
+    HookUsableItems();
     std::string documents, worlds;
     for (const Document& doc : g_documents) documents += (documents.empty() ? "" : ", ") + doc.name;
     for (const std::string& world : g_worlds) worlds += (worlds.empty() ? "" : ", ") + world;
