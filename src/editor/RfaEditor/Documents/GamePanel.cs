@@ -45,12 +45,38 @@ sealed class GamePanel
 
     static GamePanel? current;
 
+    static bool controllerToGame;
+
     /// <summary>
-    /// Whether the docked game has the keyboard (you clicked into it). The controller is then the
-    /// game's: the level editor leaves it alone (both read the same controller, and one stick would
-    /// otherwise fly the editor's camera and walk the player at once).
+    /// Whether the controller is the docked game's now, not the level editor's. Both read the same
+    /// controller (one stick would fly the editor's camera and walk the player at once), so it is
+    /// one's or the other's: swapped with the Controller button in either view, or by pressing both
+    /// sticks in. The game is told through a property on its window, which the borderless mod reads.
     /// </summary>
-    public static bool GameHasInput => current?.InGame() == true;
+    public static bool ControllerToGame => controllerToGame && current?.Docked == true;
+
+    /// <summary>Raised when the controller changes hands (or the game is docked or undocked).</summary>
+    public static event Action? ControllerChanged;
+
+    public static void SwapController()
+    {
+        controllerToGame = !controllerToGame;
+        current?.TellGameController();
+        current?.context.Log(current.Docked
+            ? (controllerToGame ? "Controller: the game's now." : "Controller: the editor's now.")
+            : "Controller: the editor's (the game isn't docked). It goes to the game once it is docked, if set to.");
+        ControllerChanged?.Invoke();
+    }
+
+    /// <summary>The text for a Controller button.</summary>
+    public static string ControllerLabel => ControllerToGame ? "Controller: Game" : "Controller: Editor";
+
+    void TellGameController()
+    {
+        if (Docked) Native.SetProp(game, ControllerProperty, controllerToGame ? 1 : 2);
+    }
+
+    const string ControllerProperty = "RFAModController";
 
     /// <summary>Where the panel can be put with its Place button (it can also be dragged anywhere by its title).</summary>
     public enum Place { Tab, Below, Beside, Window }
@@ -62,6 +88,9 @@ sealed class GamePanel
         startButton = ToolbarButton(Icons.Start, "Start the game", "Starts the game through RFAModLauncher (Steam must be running)", OnStart);
         dockButton = ToolbarButton(Icons.Game, "Dock", "Takes the running game's window into this panel", OnDockOrUndock);
         backButton = ToolbarButton(Icons.Select, "Back to the editor", "Gives the mouse and keys back to the editor (Shift+F1 does too)", (_, _) => BackToEditor());
+        Button controllerButton = ToolbarButton(Icons.Game, ControllerLabel,
+            "Whose the controller is: the docked game's or the level editor's. Click to swap (or press both sticks in).", (_, _) => SwapController());
+        ControllerChanged += () => SetLabel(controllerButton, ControllerLabel);
         Button placeButton = ToolbarButton(Icons.Display, "Place", "Where this panel sits. You can also drag it by its title onto any side of any panel.", (_, _) => { });
         var places = new ContextMenu();
         foreach ((string text, Place where) in new[]
@@ -90,6 +119,7 @@ sealed class GamePanel
         tools.Children.Add(startButton);
         tools.Children.Add(dockButton);
         tools.Children.Add(backButton);
+        tools.Children.Add(controllerButton);
         tools.Children.Add(placeButton);
         tools.Children.Add(autoDockBox);
         var bar = new DockPanel();
@@ -283,6 +313,8 @@ sealed class GamePanel
             return;
         }
         game = window;
+        TellGameController();
+        ControllerChanged?.Invoke();
         Fit();
         Native.SetWindowPos(game, IntPtr.Zero, 0, 0, 0, 0,
             Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_FRAMECHANGED | Native.SWP_SHOWWINDOW | Native.SWP_ASYNCWINDOWPOS);
@@ -294,6 +326,7 @@ sealed class GamePanel
     {
         if (!Docked) return;
         IntPtr window = game;
+        if (Native.IsWindow(window)) Native.RemoveProp(window, ControllerProperty);
         ForgetGame();
         if (Native.IsWindow(window)) Native.Restore(window, saved);
     }
@@ -303,6 +336,7 @@ sealed class GamePanel
         if (hotKeyRegistered) Native.UnregisterHotKey(host.Handle, HotKeyId);
         hotKeyRegistered = false;
         game = IntPtr.Zero;
+        ControllerChanged?.Invoke();
     }
 
     /// <summary>Sizes the game to fill the panel, whatever the panel's shape.</summary>
@@ -408,6 +442,8 @@ static class Native
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SetPropW")] public static extern bool SetProp(IntPtr hwnd, string name, IntPtr value);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "RemovePropW")] public static extern IntPtr RemoveProp(IntPtr hwnd, string name);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetParent(IntPtr child, IntPtr parent);

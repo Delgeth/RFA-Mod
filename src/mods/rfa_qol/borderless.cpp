@@ -439,9 +439,19 @@ SHORT WINAPI Hk_GetAsyncKeyState(int key) {
     return Muting() ? 0 : o_GetAsyncKeyState(key);
 }
 
+// Docked, the editor says whose the controller is (its level view reads the same one): the window
+// property "RFAModController" it sets on the game's window is 1 for the game's, wherever the
+// keyboard is, and 2 for the editor's. Without it the controller goes with the keyboard.
 DWORD WINAPI Hk_XInputGetState(DWORD user, XINPUT_STATE* state) {
     DWORD result = o_XInputGetState(user, state);
-    if (result == ERROR_SUCCESS && state && Muting()) ZeroMemory(&state->Gamepad, sizeof(state->Gamepad));
+    if (result != ERROR_SUCCESS || !state) return result;
+    bool mute = Muting();
+    if (Docked()) {
+        const auto owner = reinterpret_cast<INT_PTR>(GetPropW(g_hwnd, L"RFAModController"));
+        if (owner == 1) mute = false;
+        else if (owner == 2) mute = true;
+    }
+    if (mute) ZeroMemory(&state->Gamepad, sizeof(state->Gamepad));
     return result;
 }
 

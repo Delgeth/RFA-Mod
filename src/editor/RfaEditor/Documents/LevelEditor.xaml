@@ -89,6 +89,13 @@
                                       ToolTip="Magnets (M): a moved object jumps to touch the corners, edges and faces of the models near it, so chunks line up">
                             <TextBlock Text="🧲" FontFamily="Segoe UI Emoji" FontSize="14" VerticalAlignment="Center" />
                         </ToggleButton>
+                        <Button x:Name="ControllerButton" Click="OnSwapController" Margin="6,0,0,0"
+                                ToolTip="Whose the controller is: this view's or the docked game's (the Game panel). Click to swap, or press both sticks in.">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                                <TextBlock x:Name="ControllerButtonText" Text="Controller: Editor" />
+                            </StackPanel>
+                        </Button>
 
                         <Rectangle Style="{StaticResource ToolbarSeparator}" />
                         <Button x:Name="UndoButton" Style="{StaticResource ToolButton}" Click="OnUndoClicked" IsEnabled="False" ToolTip="Undo (Ctrl+Z)">

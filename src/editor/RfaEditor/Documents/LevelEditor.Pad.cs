@@ -470,14 +470,26 @@ public partial class LevelEditor
     enum ReticleLook { Off, Free, OnObject, OnLocked, Holding }
     ReticleLook reticleShown = ReticleLook.Off;
 
+    void OnSwapController(object sender, RoutedEventArgs e) => GamePanel.SwapController();
+
+    void ShowControllerOwner() => ControllerButtonText.Text = GamePanel.ControllerLabel;
+
     void PadFrame(object? sender, EventArgs e)
     {
         DateTime now = DateTime.Now;
         float seconds = (float)Math.Min(0.1, (now - lastPadFrame).TotalSeconds);
         lastPadFrame = now;
         if (!IsVisible || Window.GetWindow(this)?.IsActive != true) return;
-        if (GamePanel.GameHasInput) return;  // you are playing the docked game: the controller is its
-        if (!pad.Read(out PadState state, out PadButtons pressed))
+        bool read = pad.Read(out PadState state, out PadButtons pressed);
+        // Both sticks pressed in: the controller changes hands, between this view and the docked game.
+        if (read && state.Holds(PadButtons.LeftStick) && state.Holds(PadButtons.RightStick) &&
+            (pressed & (PadButtons.LeftStick | PadButtons.RightStick)) != 0)
+        {
+            GamePanel.SwapController();
+            return;
+        }
+        if (GamePanel.ControllerToGame) return;  // the controller is the docked game's
+        if (!read)
         {
             if (padWasConnected)
             {

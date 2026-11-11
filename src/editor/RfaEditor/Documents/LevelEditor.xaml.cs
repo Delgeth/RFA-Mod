@@ -157,6 +157,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         SceneViewport.Children.Add(magnetVisual);
         SetTool(LevelTool.Move);
         CompositionTarget.Rendering += PadFrame;
+        GamePanel.ControllerChanged += ShowControllerOwner;
+        ShowControllerOwner();
         ShowSource();
         BuildObjectTree("");
         BuildGrid();
@@ -781,6 +783,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         CompositionTarget.Rendering -= FollowFrame;
         CompositionTarget.Rendering -= DrawGpuView;
         CompositionTarget.Rendering -= PadFrame;
+        GamePanel.ControllerChanged -= ShowControllerOwner;
         CompositionTarget.Rendering -= SculptFrame;
         gpuScene?.Dispose();
         gpuView?.Dispose();
