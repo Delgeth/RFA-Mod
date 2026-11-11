@@ -18,7 +18,7 @@ namespace RfaEditor;
 ///   an object added here (a duplicate, a new chunk, a delete undone) is made there from its zone
 ///     data, as the game makes a level's objects. The game needs its chunk loaded: a chunk no object
 ///     of the zone had when Live went on is loaded first (see LoadLiveChunk), then the object made.
-/// Ten times a second the zone's objects are compared with what the game was last sent, so whatever
+/// About 30 times a second the zone's objects are compared with what the game was last sent, so whatever
 /// changed them (the gizmo, the inspector, the controller, magnets, undo and redo) is sent alike.
 /// What the game can't be shown this way needs the zone saved and the level loaded again (Save and
 /// reload): objects whose model the level hasn't loaded, the ground and level geometry. With Auto
@@ -28,7 +28,7 @@ namespace RfaEditor;
 /// </summary>
 public partial class LevelEditor
 {
-    readonly DispatcherTimer liveTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    readonly DispatcherTimer liveTimer = new(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(30) };
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveSent = [];  // what the game was last sent (or had)
     readonly HashSet<uint> liveNotInGame = [];  // added here since, and not made there: the game has no such object
     readonly Dictionary<uint, int> liveContent = [];  // the properties (but where it is) of objects that were picked, as the game has them
@@ -106,7 +106,9 @@ public partial class LevelEditor
     {
         if (liveChunkLoads.ContainsKey(chunk)) return true;
         if (liveChunksFailed.Contains(chunk)) return false;
-        if (context.Assets.PackageOf(chunk, out string? why) is not ChunkPackage package)
+        // (Objects name their chunk with its model's file name: chunk.cchk_pc.)
+        string bare = chunk.EndsWith(".cchk_pc", StringComparison.OrdinalIgnoreCase) ? chunk[..^8] : chunk;
+        if (context.Assets.PackageOf(bare, out string? why) is not ChunkPackage package)
         {
             context.Log($"Live: the chunk {chunk} can't be loaded in the game as it runs ({why}).");
             liveChunksFailed.Add(chunk);
@@ -291,6 +293,9 @@ public partial class LevelEditor
             lines.Add(GameLink.MoveCommand(obj.Handle, now.Position, now.Rotation));
             moved.Add(obj);
         }
+        // Objects added and deleted here that the game never had: forgotten, so a new object given the
+        // same handle later is made.
+        liveNotInGame.RemoveWhere(handle => !here.Contains(handle) && !liveSent.ContainsKey(handle));
         List<uint> removed = liveSent.Keys.Where(handle => !here.Contains(handle)).ToList();
         foreach (uint handle in removed)
             if (!liveNotInGame.Contains(handle)) lines.Add(GameLink.RemoveCommand(handle));

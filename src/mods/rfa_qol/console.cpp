@@ -1959,13 +1959,20 @@ void __cdecl FrameUpdate() {
     g_frameUpdate();
     ShowEditor();
     if (g_drawsConsole && g_settings.gameLog) ReadReports();
+    // The editor's commands are looked for every frame (Live sends them as you drag), the rest ten times a second.
+    static int linkFolderChecks = 0;
+    static bool linkFolderThere = false;
+    if (linkFolderChecks-- <= 0) {
+        linkFolderThere = GetFileAttributesW(LinkFolder().c_str()) != INVALID_FILE_ATTRIBUTES;
+        linkFolderChecks = 60;
+    }
+    if (linkFolderThere) RunEditorCommands();
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastCheck < kCheckEveryMs) return;
     g_lastCheck = now;
     if (g_drawsConsole && g_settings.modLog) ReadModLog();
-    if (GetFileAttributesW(LinkFolder().c_str()) == INVALID_FILE_ATTRIBUTES) return;  // the editor's link isn't set up
+    if (!linkFolderThere) return;  // the editor's link isn't set up
     ContinueEditorReload();
-    RunEditorCommands();
     AnswerWhereWanted();
     AnswerLightingWanted();
 }
