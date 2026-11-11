@@ -15,8 +15,8 @@ namespace RfaEditor;
 ///   an object whose properties you change here (the picked one: a light's colour, a flag) is made
 ///     again there with them: removed, and a moment later made from its zone data;
 ///   an object added here (a duplicate, a new chunk, a delete undone) is made there from its zone
-///     data, as the game makes a level's objects, if the game has its model loaded: that is taken
-///     to be so when an object with the same chunk was in the zone when Live went on.
+///     data, as the game makes a level's objects. The game needs its chunk loaded: a chunk no object
+///     of the zone had when Live went on is loaded first (see LoadLiveChunk), then the object made.
 /// Ten times a second the zone's objects are compared with what the game was last sent, so whatever
 /// changed them (the gizmo, the inspector, the controller, magnets, undo and redo) is sent alike.
 /// What the game can't be shown this way needs the zone saved and the level loaded again (Save and
@@ -36,6 +36,9 @@ public partial class LevelEditor
     DateTime? liveReloadWanted;  // when a change was last made that the game only shows after the level is loaded again
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveGeometry = [];  // the level geometry's pieces, as the game has them
     readonly HashSet<string> liveChunks = new(StringComparer.OrdinalIgnoreCase);  // the chunks the game has loaded for this zone
+    readonly Dictionary<string, (string Container, int Since)> liveChunkLoads = new(StringComparer.OrdinalIgnoreCase);  // asked of the game, not answered yet
+    readonly HashSet<string> liveChunksFailed = new(StringComparer.OrdinalIgnoreCase);  // the game couldn't load them: they need a reload
+    static int liveChunkNumber;
     bool liveHooked;
     int liveMoves, liveRemoves, liveCreates;
 
@@ -72,6 +75,8 @@ public partial class LevelEditor
         liveContent.Clear();
         liveHold.Clear();
         liveReloadWanted = null;
+        liveChunkLoads.Clear();
+        liveChunksFailed.Clear();
         liveGeometry.Clear();
         foreach (ZoneObject piece in zone.Objects.Where(IsGeometry)) liveGeometry[piece.Handle] = piece.Placement;
         foreach (ZoneObject obj in zone.Objects.Where(LiveKind))
@@ -87,6 +92,85 @@ public partial class LevelEditor
     /// without would fail, or crash the game).
     /// </summary>
     bool LiveCanMake(ZoneObject obj) => obj.Property("chunk_name")?.Text is not string chunk || liveChunks.Contains(chunk);
+
+    /// <summary>
+    /// Has the running game load a chunk the level hasn't, so objects of it can be made live: a
+    /// container holding the chunk's model and textures (as the zone's save adds them to the level's
+    /// containers) and an asset list naming only that container are put in overrides\live\, and the
+    /// game told to read the list and load the container at once (editor_chunk), as it loads its
+    /// preload chunks. Its answer comes back a moment later (see LiveTick). False if the chunk's files
+    /// can't all be found (then only a reload shows the object).
+    /// </summary>
+    bool LoadLiveChunk(string chunk)
+    {
+        if (liveChunkLoads.ContainsKey(chunk)) return true;
+        if (liveChunksFailed.Contains(chunk)) return false;
+        if (context.Assets.PackageOf(chunk, out string? why) is not ChunkPackage package)
+        {
+            context.Log($"Live: the chunk {chunk} can't be loaded in the game as it runs ({why}).");
+            liveChunksFailed.Add(chunk);
+            return false;
+        }
+        try
+        {
+            // Names new to the game every time: the streaming system keeps a container it was given for good.
+            // (Short: the game keeps names of up to 63 characters.)
+            int session = Environment.ProcessId % 10000;
+            string container = $"rflive{session}_{++liveChunkNumber}.rfgchunkx";
+            string assetList = $"rflive{session}_{liveChunkNumber}.asm_pc";
+            var files = package.Files;
+            byte[] bytes = RfaFormats.Packfile.CreateContainer(files);
+            var packed = RfaFormats.Packfile.FromBytes(container + ".str2_pc", bytes);
+            // As the game lists its preload chunks (chunk_containers.asm_pc): type 15, flags 0x80, the files
+            // in the chunk preload allocator (2).
+            var entry = new RfaFormats.AsmContainer
+            {
+                Name = container, Type = 15, Flags = 0x80, DataOffset = (uint)packed.DataStart, CompressedSize = packed.CompressedDataSize,
+            };
+            entry.Sizes.AddRange(files.Select(f => f.Data.Length));
+            entry.Primitives.AddRange(package.Primitives.Select(p => new RfaFormats.AsmPrimitive
+            {
+                Name = p.Name, Type = p.Type, Allocator = 2, Flags = p.Flags, SplitIndex = p.SplitIndex, HeaderSize = p.HeaderSize, DataSize = p.DataSize,
+            }));
+            var list = new RfaFormats.AsmFile();
+            list.Containers.Add(entry);
+            string folder = Path.Combine(context.Workspace.OverridesFolder, "live");
+            Directory.CreateDirectory(folder);
+            File.WriteAllBytes(Path.Combine(folder, container + ".str2_pc"), bytes);
+            File.WriteAllBytes(Path.Combine(folder, assetList), list.ToBytes());
+            if (!gameLink.TrySend(["editor_rescan", $"editor_chunk {assetList} {container}"])) return true;  // the link is busy: asked again next time
+            liveChunkLoads[chunk] = (container, liveTicks);
+            context.Log($"Live: loading the chunk {chunk} in the game ({files.Sum(f => (long)f.Data.Length) / 1024:N0} KB).");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
+        {
+            context.Log($"Live: the chunk {chunk} couldn't be prepared for the game ({ex.Message}).");
+            liveChunksFailed.Add(chunk);
+            return false;
+        }
+    }
+
+    /// <summary>Takes the game's answers about chunks it was asked to load.</summary>
+    void TakeLiveChunkAnswers()
+    {
+        foreach (var (chunk, (container, since)) in liveChunkLoads.ToList())
+        {
+            string? answer = gameLink.ChunkAnswer(container);
+            if (answer == null && liveTicks - since < 300) continue;  // (30 seconds)
+            liveChunkLoads.Remove(chunk);
+            if (answer == "loaded")
+            {
+                liveChunks.Add(chunk);
+                context.Log($"Live: the chunk {chunk} is loaded in the game.");
+            }
+            else
+            {
+                liveChunksFailed.Add(chunk);
+                context.Log($"Live: the game couldn't load the chunk {chunk} as it runs{(answer == null ? " (no answer)" : "")}; objects of it show after Save and reload.");
+            }
+        }
+    }
 
     static readonly uint PlaceHash = NameHashes.PropertyHash("oP"), JustPosHash = NameHashes.PropertyHash("just_pos");
 
@@ -157,6 +241,7 @@ public partial class LevelEditor
     {
         if (!GameLink.IsRecent(gameLink.Read())) return;  // the game isn't running: it is told when it is
         WatchLiveGeometry();
+        TakeLiveChunkAnswers();
         if (LiveAutoReload()) return;
         var lines = new List<string>();
         var moved = new List<ZoneObject>();
@@ -192,6 +277,7 @@ public partial class LevelEditor
                 // Added here since Live went on (or put back by undo): made in the game too, if it can be.
                 if (liveNotInGame.Contains(obj.Handle)) continue;
                 if (LiveCanMake(obj)) made.Add(obj);
+                else if (obj.Property("chunk_name")?.Text is string chunk && LoadLiveChunk(chunk)) continue;  // made once it is loaded
                 else if (liveNotInGame.Add(obj.Handle))
                 {
                     context.Log($"Live: {Label(obj)} was added here, but the level hasn't its model loaded; the game shows it after Save and reload.");

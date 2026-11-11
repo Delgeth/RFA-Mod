@@ -1610,6 +1610,7 @@ struct GameObject {
 //       forward) with the object's own "set position and rotation" (slot 10 of its functions, at
 //       +0x28: thiscall, the position, the rotation, 1), as the mission scripts' object_set_position
 //       (0x9203B0) does;
+//   editor_chunk <asset list> <container>      loads a chunk the level hasn't (below);
 //   editor_reload                              loads the level again and puts the player back (below);
 //   editor_rescan                              has the loader look for new files in overrides\ and edits\;
 //   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
@@ -1716,7 +1717,45 @@ void ContinueEditorReload() {
     RunConsoleCommand("warp %.3f %.3f %.3f", r.position[0], r.position[1], r.position[2]);
 }
 
+// editor_chunk <asset list> <container>: loads a chunk the level hasn't, so objects of it can be made
+// at once (Live). The editor put a container holding the chunk's model and textures, and an asset
+// list naming just that container, in overrides\live\ (new files, found by the loader once it has
+// looked again: editor_rescan comes first). The asset list is read as the chunk system reads
+// chunk_containers.asm_pc at the game's start (0x90A3A0, with the chunk system's pools, see 0x6AA9F0),
+// which registers the container with the streaming system; then it is found by name (0x90A290) and
+// loaded at once, as the game loads its preload chunks (0x908FC0: true once loaded). Loading the
+// container's model makes the chunk known to the game (the chunk primitive type does that), so
+// objects of it can be made. The result goes to link\chunk_<container>.txt for the editor.
+auto const ReadAssetList = reinterpret_cast<bool(__cdecl*)(const char* name, void* tempPool, void* pool, int, int, int)>(0x90A3A0);
+auto const FindContainer = reinterpret_cast<void*(__cdecl*)(const char* name)>(0x90A290);
+auto const LoadContainerNow = reinterpret_cast<bool(__cdecl*)(void* container)>(0x908FC0);
+constexpr DWORD kChunkTempPool = 0x26AF908, kChunkPool = 0x26AEE78;
+
+void LoadEditorChunk(const std::string& assetList, const std::string& container) {
+    void* found = FindContainer(container.c_str());
+    if (!found) {
+        const bool read = ReadAssetList(assetList.c_str(), reinterpret_cast<void*>(kChunkTempPool), reinterpret_cast<void*>(kChunkPool), 0, 0, 0);
+        found = FindContainer(container.c_str());
+        if (!found) rfa::Log("Editor link: the asset list %s was %s, but has no container %s", assetList.c_str(), read ? "read" : "not read", container.c_str());
+    }
+    const bool loaded = found && LoadContainerNow(found);
+    rfa::Log("Editor link: chunk container %s %s", container.c_str(), loaded ? "loaded" : "NOT loaded");
+    const std::wstring answer = LinkFolder() + L"\\chunk_" + std::wstring(container.begin(), container.end()) + L".txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, answer.c_str(), L"w") == 0 && file) {
+        fputs(loaded ? "loaded" : "failed", file);
+        fclose(file);
+    }
+}
+
 bool RunEditorEdit(const std::string& line) {
+    if (line.rfind("editor_chunk ", 0) == 0) {
+        char assetList[128] = {}, container[128] = {};
+        if (sscanf_s(line.c_str() + 13, "%127s %127s", assetList, static_cast<unsigned>(sizeof(assetList)), container,
+                     static_cast<unsigned>(sizeof(container))) == 2)
+            LoadEditorChunk(assetList, container);
+        return true;
+    }
     if (line == "editor_reload") {
         StartEditorReload();
         return true;

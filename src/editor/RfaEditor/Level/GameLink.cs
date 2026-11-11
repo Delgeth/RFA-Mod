@@ -118,6 +118,20 @@ sealed class GameLink : IDisposable
         catch (IOException) { return false; }
     }
 
+    /// <summary>What the game answered about a chunk container it was asked to load (editor_chunk): "loaded", "failed", or null (not yet).</summary>
+    public string? ChunkAnswer(string container)
+    {
+        string path = Path.Combine(folder, $"chunk_{container}.txt");
+        try
+        {
+            if (!File.Exists(path)) return null;
+            string answer = File.ReadAllText(path).Trim();
+            File.Delete(path);
+            return answer;
+        }
+        catch (IOException) { return null; }
+    }
+
     /// <summary>Whether lines handed to the game are still waiting for it to take them.</summary>
     public bool Waiting => File.Exists(Path.Combine(folder, "to_game.txt"));
 
