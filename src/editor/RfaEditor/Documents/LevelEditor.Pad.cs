@@ -201,6 +201,7 @@ public partial class LevelEditor
         bool wasPad = strokeFromPad;
         strokeFromPad = false;
         if (sculpt == null || strokeBefore is not { } before) return;
+        LiveNeedsReload();  // the game shows the ground as sculpted once the level is loaded again
         strokeBefore = null;
         standing = null;
         var changed = new List<(TerrainSculpt Zone, float[] Before, float[] After)>();

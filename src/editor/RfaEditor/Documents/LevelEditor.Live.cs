@@ -20,8 +20,10 @@ namespace RfaEditor;
 /// Ten times a second the zone's objects are compared with what the game was last sent, so whatever
 /// changed them (the gizmo, the inspector, the controller, magnets, undo and redo) is sent alike.
 /// What the game can't be shown this way needs the zone saved and the level loaded again (Save and
-/// reload): objects whose model the level hasn't loaded, property changes, the ground and level
-/// geometry. Nothing is saved by Live itself.
+/// reload): objects whose model the level hasn't loaded, the ground and level geometry. With Auto
+/// reload on as well, that is done for you: two seconds after the last such change the zone is
+/// saved and the game loads the level again, the player put back where they stood. Without it,
+/// nothing is saved by Live itself.
 /// </summary>
 public partial class LevelEditor
 {
@@ -31,6 +33,8 @@ public partial class LevelEditor
     readonly Dictionary<uint, int> liveContent = [];  // the properties (but where it is) of objects that were picked, as the game has them
     readonly Dictionary<uint, int> liveHold = [];      // removed there to be made again: not before this tick
     int liveTicks;
+    DateTime? liveReloadWanted;  // when a change was last made that the game only shows after the level is loaded again
+    readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveGeometry = [];  // the level geometry's pieces, as the game has them
     readonly HashSet<string> liveChunks = new(StringComparer.OrdinalIgnoreCase);  // the chunks the game has loaded for this zone
     bool liveHooked;
     int liveMoves, liveRemoves, liveCreates;
@@ -67,6 +71,9 @@ public partial class LevelEditor
         liveChunks.Clear();
         liveContent.Clear();
         liveHold.Clear();
+        liveReloadWanted = null;
+        liveGeometry.Clear();
+        foreach (ZoneObject piece in zone.Objects.Where(IsGeometry)) liveGeometry[piece.Handle] = piece.Placement;
         foreach (ZoneObject obj in zone.Objects.Where(LiveKind))
         {
             liveSent[obj.Handle] = obj.Placement;
@@ -100,9 +107,57 @@ public partial class LevelEditor
     /// <summary>Objects the game has as objects of its own (level geometry pieces are parts of one mesh there).</summary>
     static bool LiveKind(ZoneObject obj) => !IsGeometry(obj);
 
+    /// <summary>
+    /// A change was made that the game only shows once the level is loaded again (the ground was
+    /// sculpted, level geometry changed, an object needs a model the level hasn't loaded). With Auto
+    /// reload on, the zone is saved and the level loaded again two seconds after the last of them.
+    /// </summary>
+    void LiveNeedsReload()
+    {
+        if (LiveBox.IsChecked == true) liveReloadWanted = DateTime.Now;
+    }
+
+    /// <summary>Notes changes to the level geometry's pieces (moved, added, deleted): the game has them as one mesh, made when the level loads.</summary>
+    void WatchLiveGeometry()
+    {
+        var pieces = zone.Objects.Where(IsGeometry).ToList();
+        bool changed = pieces.Count != liveGeometry.Count;
+        foreach (ZoneObject piece in pieces)
+        {
+            var now = piece.Placement;
+            if (liveGeometry.TryGetValue(piece.Handle, out var had) && had.Position == now.Position && had.Rotation == now.Rotation) continue;
+            changed = true;
+        }
+        if (!changed) return;
+        liveGeometry.Clear();
+        foreach (ZoneObject piece in pieces) liveGeometry[piece.Handle] = piece.Placement;
+        LiveNeedsReload();
+    }
+
+    /// <summary>Saves and has the game load the level again, if Auto reload is on and it is two seconds since the last change that needs it.</summary>
+    bool LiveAutoReload()
+    {
+        if (liveReloadWanted is not DateTime wanted || AutoReloadBox.IsChecked != true) return false;
+        if ((DateTime.Now - wanted).TotalSeconds < 2 || sculpt != null && strokeBefore != null || carrying ||
+            System.Windows.Input.Mouse.LeftButton == System.Windows.Input.MouseButtonState.Pressed) return false;
+        liveReloadWanted = null;
+        context.Log("Live: saving and loading the level again in the game, for the changes it can't show otherwise.");
+        if (!Save())
+        {
+            AutoReloadBox.IsChecked = false;
+            context.Log("Live: the zone couldn't be saved, so Auto reload is off. Save it yourself, then turn it on again.");
+            return true;
+        }
+        gameLink.Send(["editor_rescan", "editor_reload"]);
+        NoteLiveObjects();
+        return true;
+    }
+
     void LiveTick()
     {
         if (!GameLink.IsRecent(gameLink.Read())) return;  // the game isn't running: it is told when it is
+        WatchLiveGeometry();
+        if (LiveAutoReload()) return;
         var lines = new List<string>();
         var moved = new List<ZoneObject>();
         var made = new List<ZoneObject>();
@@ -138,7 +193,10 @@ public partial class LevelEditor
                 if (liveNotInGame.Contains(obj.Handle)) continue;
                 if (LiveCanMake(obj)) made.Add(obj);
                 else if (liveNotInGame.Add(obj.Handle))
+                {
                     context.Log($"Live: {Label(obj)} was added here, but the level hasn't its model loaded; the game shows it after Save and reload.");
+                    LiveNeedsReload();
+                }
                 continue;
             }
             var now = obj.Placement;
@@ -189,7 +247,7 @@ public partial class LevelEditor
             context.Log("Save and reload: saved. The game isn't running with the console mod, so there was nothing to reload.");
             return;
         }
-        gameLink.Send(["editor_rescan", "reload_level"]);
+        gameLink.Send(["editor_rescan", "editor_reload"]);
         // The game has every object where the saved zone puts it again.
         if (LiveBox.IsChecked == true) NoteLiveObjects();
         context.Log("Save and reload: saved, and the game is loading the level again.");

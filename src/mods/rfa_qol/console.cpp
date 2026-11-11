@@ -1610,6 +1610,7 @@ struct GameObject {
 //       forward) with the object's own "set position and rotation" (slot 10 of its functions, at
 //       +0x28: thiscall, the position, the rotation, 1), as the mission scripts' object_set_position
 //       (0x9203B0) does;
+//   editor_reload                              loads the level again and puts the player back (below);
 //   editor_rescan                              has the loader look for new files in overrides\ and edits\;
 //   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
 //   editor_create <handle>                     makes an object the game hasn't, from its block as a
@@ -1664,7 +1665,62 @@ void MakeEditorObject(DWORD handle) {
              static_cast<unsigned>(handle));
 }
 
+// editor_reload: the level is loaded again (the console's reload_level), and the player then put
+// back where they stood (warp x y z), so a change that needs the level loaded again (new models,
+// the ground, level geometry) doesn't also send you back to the level's start. The player (0x8B92D0)
+// is gone or another while the level loads; once there is one again that has stayed put for a
+// second, the level is taken to be up.
+auto const ThePlayer = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
+struct ReloadReturn {
+    bool waiting = false;
+    float position[3]{};
+    BYTE* playerThen = nullptr;
+    bool sawLoading = false;
+    int checks = 0, steady = 0;
+    float last[3]{};
+} g_reloadReturn;
+
+void StartEditorReload() {
+    BYTE* player = ThePlayer();
+    g_reloadReturn = ReloadReturn{};
+    if (player) {
+        memcpy(g_reloadReturn.position, player + 4, sizeof(g_reloadReturn.position));
+        g_reloadReturn.playerThen = player;
+        g_reloadReturn.waiting = true;
+    }
+    rfa::Log("Editor link: loading the level again%s", player ? "; the player goes back to where they stand" : "");
+    RunConsoleCommand("reload_level");
+}
+
+// Ten times a second while a reload's return is waiting.
+void ContinueEditorReload() {
+    ReloadReturn& r = g_reloadReturn;
+    if (!r.waiting) return;
+    if (++r.checks > 1200) {  // two minutes: given up
+        r.waiting = false;
+        return;
+    }
+    BYTE* player = ThePlayer();
+    if (!player || player != r.playerThen) r.sawLoading = true;
+    if (!player || (!r.sawLoading && r.checks < 50)) {  // (no sign of loading after 5 seconds: it was quick)
+        r.steady = 0;
+        return;
+    }
+    float now[3];
+    memcpy(now, player + 4, sizeof(now));
+    r.steady = memcmp(now, r.last, sizeof(now)) == 0 || r.steady == 0 ? r.steady + 1 : 1;
+    memcpy(r.last, now, sizeof(now));
+    if (r.steady < 10) return;
+    r.waiting = false;
+    rfa::Log("Editor link: the level is up again; the player goes back to %.1f, %.1f, %.1f", r.position[0], r.position[1], r.position[2]);
+    RunConsoleCommand("warp %.3f %.3f %.3f", r.position[0], r.position[1], r.position[2]);
+}
+
 bool RunEditorEdit(const std::string& line) {
+    if (line == "editor_reload") {
+        StartEditorReload();
+        return true;
+    }
     if (line == "editor_rescan") {
         // The loader looks through overrides\ and edits\ again, for files the editor saved for the
         // first time since the game started (before it has the game reload a level or a table).
@@ -1869,6 +1925,7 @@ void __cdecl FrameUpdate() {
     g_lastCheck = now;
     if (g_drawsConsole && g_settings.modLog) ReadModLog();
     if (GetFileAttributesW(LinkFolder().c_str()) == INVALID_FILE_ATTRIBUTES) return;  // the editor's link isn't set up
+    ContinueEditorReload();
     RunEditorCommands();
     AnswerWhereWanted();
     AnswerLightingWanted();

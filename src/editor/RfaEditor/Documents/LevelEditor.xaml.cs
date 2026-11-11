@@ -1492,6 +1492,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             foreach (ZoneObject other in change.Others ?? []) scene?.Place(other);
             LinksChanged();
         }
+        if (change.Object == null) LiveNeedsReload();  // a change to no one object (the ground, many objects): the game may need the level again
         StartEdit();  // the picked object, or what is attached to it, may be as it was
         if (selected != null && (change.Object == selected || change.Others?.Contains(selected) == true)) ShowProperties();
         ShowSelection();

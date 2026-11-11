@@ -180,6 +180,10 @@
                                 <TextBlock Text="Live" VerticalAlignment="Center" />
                             </StackPanel>
                         </ToggleButton>
+                        <ToggleButton x:Name="AutoReloadBox"
+                                      ToolTip="Auto reload (with Live): what the game can't be shown as you do it (the ground sculpted, level geometry changed, a chunk the level hasn't loaded) is shown two seconds after: the zone is saved and the game loads the level again, the player put back where they stood">
+                            <TextBlock Text="Auto reload" VerticalAlignment="Center" />
+                        </ToggleButton>
                         <ToggleButton x:Name="SettledBox" Checked="OnSettledChanged" Unchecked="OnSettledChanged"
                                       ToolTip="Props as in the running game: clutter (debris, barrels, crates) falls and settles when the level starts, so the game has it elsewhere than the zone file; while this is on, it is drawn where the game has it now. Only how it is drawn: the zone isn't changed">
                             <TextBlock Text="{x:Static local:Icons.Settled}" Style="{StaticResource Icon}" />
