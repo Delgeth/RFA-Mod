@@ -585,6 +585,9 @@ public sealed class ZoneObject
     internal byte[] Bytes => bytes;
     internal int Size => bytes.Length;
 
+    /// <summary>A copy of the object as the zone file holds it (its header, then its properties): what the game makes it from.</summary>
+    public byte[] ToBlock() => (byte[])bytes.Clone();
+
     public ZoneProperty? Property(uint nameHash) => Properties.FirstOrDefault(p => p.NameHash == nameHash);
     public ZoneProperty? Property(string name) => Property(NameHashes.PropertyHash(name));
 

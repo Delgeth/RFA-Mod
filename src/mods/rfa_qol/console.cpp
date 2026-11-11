@@ -1611,11 +1611,63 @@ struct GameObject {
 //       +0x28: thiscall, the position, the rotation, 1), as the mission scripts' object_set_position
 //       (0x9203B0) does;
 //   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
+//   editor_create <handle>                     makes an object the game hasn't, from its block as a
+//       zone file holds it (header, then properties), which the editor put in
+//       bin\link\create_<HANDLE>.bin: as the game's own layer loader (0x6D5D30) makes a layer's
+//       objects, first a stub for it (0x6D56E0, thiscall on the world: where the block's address
+//       is), then the object from stub and block (0x6D5770, thiscall on the world: how many, the
+//       stubs, the blocks). The block is kept: the game may point into it.
 // An object the game hasn't now (not loaded, broken up, or only in the editor yet) is passed over.
 using SetPlaceFn = void(__fastcall*)(void* object, void* unused, const float* position, const float* rotation, int now);
 auto const RemoveObject = reinterpret_cast<int(__fastcall*)(void* world, void* unused, DWORD handle, int flag)>(0x6D56A0);
 
+auto const MakeStub = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, BYTE** block)>(0x6D56E0);
+auto const MakeFromStubs = reinterpret_cast<void(__fastcall*)(void* world, void* unused, int count, BYTE** stubs, BYTE** blocks)>(0x6D5770);
+constexpr DWORD kStubNumber = 0x74;  // a stub's place in the lists it is made from (a short)
+constexpr size_t kBlockHeader = 0x38, kBlockHandle = 4;
+
+void MakeEditorObject(DWORD handle) {
+    void* world = reinterpret_cast<void*>(kObjectList);
+    wchar_t name[40];
+    swprintf_s(name, L"\\create_%08X.bin", static_cast<unsigned>(handle));
+    const std::wstring path = LinkFolder() + name;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file) {
+        rfa::Log("Editor link: no block for object 0x%08X (%ls)", static_cast<unsigned>(handle), path.c_str());
+        return;
+    }
+    fseek(file, 0, SEEK_END);
+    const long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    BYTE* block = size >= static_cast<long>(kBlockHeader) && size <= 0xFFFF ? static_cast<BYTE*>(_aligned_malloc(size + 16, 16)) : nullptr;
+    const bool read = block && fread(block, 1, size, file) == static_cast<size_t>(size);
+    fclose(file);
+    DeleteFileW(path.c_str());
+    if (!read || *reinterpret_cast<DWORD*>(block + kBlockHandle) != handle) {
+        rfa::Log("Editor link: the block for object 0x%08X isn't one (%ld bytes)", static_cast<unsigned>(handle), size);
+        return;
+    }
+    if (FindObject(world, nullptr, handle)) {
+        rfa::Log("Editor link: the game already has an object 0x%08X; not made again", static_cast<unsigned>(handle));
+        return;
+    }
+    BYTE* blocks[1] = {block};
+    BYTE* stubs[1] = {MakeStub(world, nullptr, &blocks[0])};
+    if (!stubs[0]) {
+        rfa::Log("Editor link: the game made no stub for object 0x%08X (a class it doesn't make from zones?)", static_cast<unsigned>(handle));
+        return;
+    }
+    *reinterpret_cast<WORD*>(stubs[0] + kStubNumber) = 0;
+    MakeFromStubs(world, nullptr, 1, stubs, blocks);
+    rfa::Log(stubs[0] && FindObject(world, nullptr, handle) ? "Editor link: made object 0x%08X" : "Editor link: the game couldn't make object 0x%08X from its block",
+             static_cast<unsigned>(handle));
+}
+
 bool RunEditorEdit(const std::string& line) {
+    if (line.rfind("editor_create ", 0) == 0) {
+        MakeEditorObject(static_cast<DWORD>(strtoul(line.c_str() + 14, nullptr, 0)));
+        return true;
+    }
     const bool move = line.rfind("editor_move ", 0) == 0, remove = line.rfind("editor_remove ", 0) == 0;
     if (!move && !remove) return false;
     static int moved = 0, removed = 0, missing = 0;

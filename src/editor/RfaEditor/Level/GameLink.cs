@@ -118,9 +118,22 @@ sealed class GameLink : IDisposable
         catch (IOException) { return false; }
     }
 
+    /// <summary>Whether lines handed to the game are still waiting for it to take them.</summary>
+    public bool Waiting => File.Exists(Path.Combine(folder, "to_game.txt"));
+
     /// <summary>The line that moves and turns an object in the game (rotation rows right, up, forward), by its handle.</summary>
     public static string MoveCommand(uint handle, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
         $"editor_move 0x{handle:X8} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
+
+    /// <summary>
+    /// Has the game make an object it hasn't: its block (as the zone file holds it) is put in
+    /// bin\link\create_HANDLE.bin, and the line returned tells the game to make it from that.
+    /// </summary>
+    public string CreateCommand(uint handle, byte[] block)
+    {
+        File.WriteAllBytes(Path.Combine(folder, $"create_{handle:X8}.bin"), block);
+        return $"editor_create 0x{handle:X8}";
+    }
 
     /// <summary>The line that removes an object from the game, by its handle.</summary>
     public static string RemoveCommand(uint handle) => $"editor_remove 0x{handle:X8}";
