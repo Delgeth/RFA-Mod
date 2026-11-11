@@ -102,6 +102,30 @@ sealed class GameLink : IDisposable
     }
 
     /// <summary>
+    /// Hands the game lines as <see cref="Send"/> does, unless it hasn't taken the last ones yet
+    /// (then nothing is sent, and false returned: send again later). For Live, which sends often.
+    /// </summary>
+    public bool TrySend(IReadOnlyList<string> lines)
+    {
+        string path = Path.Combine(folder, "to_game.txt"), temporary = path + ".live.tmp";
+        try
+        {
+            if (File.Exists(path)) return false;
+            File.WriteAllLines(temporary, lines);
+            File.Move(temporary, path, overwrite: false);
+            return true;
+        }
+        catch (IOException) { return false; }
+    }
+
+    /// <summary>The line that moves and turns an object in the game (rotation rows right, up, forward), by its handle.</summary>
+    public static string MoveCommand(uint handle, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
+        $"editor_move 0x{handle:X8} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
+
+    /// <summary>The line that removes an object from the game, by its handle.</summary>
+    public static string RemoveCommand(uint handle) => $"editor_remove 0x{handle:X8}";
+
+    /// <summary>
     /// Asks the game where objects are now (it answers within a tenth of a second; see
     /// <see cref="ReadWhere"/>): physics moves clutter, which falls and settles when the level starts.
     /// </summary>

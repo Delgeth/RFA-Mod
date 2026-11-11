@@ -788,6 +788,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         gpuScene?.Dispose();
         gpuView?.Dispose();
         settledTimer.Stop();
+        liveTimer.Stop();
         gameLink.Dispose();
     }
 

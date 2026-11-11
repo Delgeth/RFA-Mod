@@ -33,6 +33,13 @@
                                 <TextBlock Text="Restore" />
                             </StackPanel>
                         </Button>
+                        <Button Click="OnSaveAndReload" Margin="0,0,6,0"
+                                ToolTip="Save the zone, then have the running game load the level again, so it shows every change (added objects, properties, the ground)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Restore}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                                <TextBlock Text="Save and reload" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="SaveButton" Click="OnSave" IsEnabled="False" Style="{StaticResource PrimaryButton}" Margin="0"
                                 ToolTip="Write the zone to overrides\, where the game uses it instead of its own (Ctrl+S)">
                             <StackPanel Orientation="Horizontal">
@@ -165,6 +172,13 @@
                         <ToggleButton x:Name="FollowGameBox" Checked="OnFollowGameChanged" Unchecked="OnFollowGameChanged"
                                       ToolTip="Follow the running game: this view moves with its camera, and what you pick there (Q in slew mode) is picked here">
                             <TextBlock Text="{x:Static local:Icons.Link}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="LiveBox" Checked="OnLiveChanged" Unchecked="OnLiveChanged"
+                                      ToolTip="Live: objects you move, turn or delete here are moved, turned and removed in the running game as you do it. Objects you add and other changes show there after Save and reload">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" Margin="0,0,5,0" />
+                                <TextBlock Text="Live" VerticalAlignment="Center" />
+                            </StackPanel>
                         </ToggleButton>
                         <ToggleButton x:Name="SettledBox" Checked="OnSettledChanged" Unchecked="OnSettledChanged"
                                       ToolTip="Props as in the running game: clutter (debris, barrels, crates) falls and settles when the level starts, so the game has it elsewhere than the zone file; while this is on, it is drawn where the game has it now. Only how it is drawn: the zone isn't changed">

@@ -1538,6 +1538,8 @@ void ShowEditor() {
     }
 }
 
+bool RunEditorEdit(const std::string& line);  // the editor's live edits (below)
+
 // Runs the commands the editor sent, if any, and deletes them.
 void RunEditorCommands() {
     const std::wstring path = LinkFolder() + L"\\to_game.txt";
@@ -1566,6 +1568,7 @@ void RunEditorCommands() {
     }
     for (const std::string& line : lines) {
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (RunEditorEdit(line)) continue;
         if (line.size() > kMaxCommandLength) {
             rfa::Log("Editor link: a command longer than %u characters was skipped", static_cast<unsigned>(kMaxCommandLength));
             continue;
@@ -1601,6 +1604,49 @@ struct GameObject {
     float position[3];
     float rotation[9];
 };
+
+// The editor's live edits (its Live button): lines among its commands that aren't the console's.
+//   editor_move <handle> <x y z> <9 numbers>   moves and turns the object (rotation rows right, up,
+//       forward) with the object's own "set position and rotation" (slot 10 of its functions, at
+//       +0x28: thiscall, the position, the rotation, 1), as the mission scripts' object_set_position
+//       (0x9203B0) does;
+//   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
+// An object the game hasn't now (not loaded, broken up, or only in the editor yet) is passed over.
+using SetPlaceFn = void(__fastcall*)(void* object, void* unused, const float* position, const float* rotation, int now);
+auto const RemoveObject = reinterpret_cast<int(__fastcall*)(void* world, void* unused, DWORD handle, int flag)>(0x6D56A0);
+
+bool RunEditorEdit(const std::string& line) {
+    const bool move = line.rfind("editor_move ", 0) == 0, remove = line.rfind("editor_remove ", 0) == 0;
+    if (!move && !remove) return false;
+    static int moved = 0, removed = 0, missing = 0;
+    const char* text = line.c_str() + (move ? 12 : 14);
+    char* rest = nullptr;
+    const DWORD handle = static_cast<DWORD>(strtoul(text, &rest, 0));
+    void* object = FindObject(reinterpret_cast<void*>(kObjectList), nullptr, handle);
+    if (!object) {
+        if (++missing <= 10) rfa::Log("Editor link: the game has no object 0x%08X now (%s skipped)", static_cast<unsigned>(handle), move ? "move" : "removal");
+        return true;
+    }
+    if (remove) {
+        RemoveObject(reinterpret_cast<void*>(kObjectList), nullptr, handle, 0);
+        if (++removed <= 10) rfa::Log("Editor link: removed object 0x%08X", static_cast<unsigned>(handle));
+        return true;
+    }
+    float numbers[12];
+    for (float& number : numbers) {
+        char* next = nullptr;
+        number = strtof(rest, &next);
+        if (next == rest) {
+            rfa::Log("Editor link: editor_move needs a handle and 12 numbers");
+            return true;
+        }
+        rest = next;
+    }
+    const auto setPlace = reinterpret_cast<SetPlaceFn>((*static_cast<void***>(object))[10]);
+    setPlace(object, nullptr, numbers, numbers + 3, 1);
+    if (++moved <= 5) rfa::Log("Editor link: moved object 0x%08X to %.2f, %.2f, %.2f", static_cast<unsigned>(handle), numbers[0], numbers[1], numbers[2]);
+    return true;
+}
 
 void AnswerWhereWanted() {
     const std::wstring wanted = LinkFolder() + L"\\where_wanted.txt";
