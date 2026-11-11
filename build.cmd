@@ -47,8 +47,13 @@ if not "%STAGE%"=="" set "OBJ=%ROOT%build\stage-%STAGENAME%"
 cd /d %ROOT%
 
 rem vcvarsall x86 in a cmd of its own; its settings (set) into a file, then into this one.
+rem What vcvarsall says goes to a file of its own first, and it is told not to start its usage
+rem report: that helper keeps running with the file it was writing to still open, and the log must
+rem stay free for the compilers below.
+set "VSCMD_SKIP_SENDTELEMETRY=1"
 set "ENVFILE=%LOGDIR%\vcvars-env.txt"
-cmd /d /c ""%VCVARS%" x86 >> "%LOG%" 2>&1 && set > "%ENVFILE%""
+cmd /d /c ""%VCVARS%" x86 > "%LOGDIR%\vcvars.log" 2>&1 && set > "%ENVFILE%""
+type "%LOGDIR%\vcvars.log" >> "%LOG%" 2>nul
 if not exist "%ENVFILE%" (echo vcvarsall failed >> "%LOG%" & goto :fail_unmapped)
 for /f "usebackq tokens=1* delims==" %%a in ("%ENVFILE%") do set "%%a=%%b"
 del "%ENVFILE%" >nul 2>&1

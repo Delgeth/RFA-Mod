@@ -47,6 +47,10 @@ single-player.
   as in Guerrilla), and Guerrilla's own player animations for them: you stand, walk, run, aim, fire
   and reload with them as Mason did, and Armageddon's own guns keep Darius's. You give yourself one from the Spawn menu. You build them from your own copy of
   Guerrilla too.
+- **Guerrilla's alert level** (`guerrilla_campaign`, beta): in the Guerrilla world the EDF's alert
+  rises while they see you, when you kill their people, wreck their vehicles or damage their
+  buildings, and falls again once you get away. The light by the minimap shows it: green, yellow,
+  orange, red.
 - **In-game menus** (`rfa_loader`, drawn with [Dear ImGui](https://github.com/ocornut/imgui)):
   press F7 (or open the console) and a bar along the bottom of the screen holds RFA-Mod's menus
   (another key: `MenuKey=` under `[Loader]`). Its first
