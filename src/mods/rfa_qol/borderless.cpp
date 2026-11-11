@@ -14,6 +14,12 @@
 // open its pause menu, as if you had pressed the pause key: switching away always pauses the game,
 // as it does when the game sees the switch itself.
 //
+// The editor's Game tab can dock the game's window inside the editor (it makes the window a child of
+// one of its own). While docked, the editor decides where the window is and how big: the game's own
+// moves and styles leave it a borderless child. Clicking into it gives the game the mouse and keys;
+// clicking or switching away (Shift+F1 in the editor) frees the cursor and mutes the game's input, and
+// the game keeps running without pausing, so you can watch your edits in it.
+//
 // With [Borderless] Enabled=0 every hook stays installed but only logs.
 #define RFA_MOD_NAME "borderless"
 #include "rfa_mod.h"
@@ -61,8 +67,12 @@ decltype(&RegisterRawInputDevices) o_RegisterRawInputDevices = RegisterRawInputD
 decltype(&SetWindowsHookExA) o_SetWindowsHookExA = SetWindowsHookExA;
 XInputGetStateFn o_XInputGetState;
 
-bool Borderless() { return g_enabled && g_gameWindowed; }
+// The editor has docked the game's window inside its own (see the top).
+bool Docked() { return g_hwnd && (GetWindowLongW(g_hwnd, GWL_STYLE) & WS_CHILD) != 0; }
+bool Borderless() { return g_enabled && g_gameWindowed && !Docked(); }
 bool HidingFocus() { return Borderless() && g_ignoreFocusLoss; }
+// Input is muted while the game is in the background, if focus loss is hidden from it or it is docked.
+bool Muting() { return g_inBackground && (HidingFocus() || Docked()); }
 
 // ---------------------------------------------------------------------------------------------
 // Window
@@ -158,11 +168,12 @@ void RequestPauseMenu(bool away) {
 void OnFocusChanged(bool active) {
     if (g_inBackground == !active) return;
     g_inBackground = !active;
-    if (!HidingFocus()) return;
-    rfa::Log("You %s the game", active ? "returned to" : "switched away from");
+    bool docked = Docked();
+    if (!HidingFocus() && !docked) return;
+    rfa::Log("You %s the game%s", active ? "returned to" : "switched away from", docked ? " (docked in the editor)" : "");
     if (!active) o_ClipCursor(nullptr);  // never leave the cursor trapped while you're in another app
     else if (g_gameClipSet) o_ClipCursor(&g_gameClip);
-    RequestPauseMenu(!active);
+    if (!docked) RequestPauseMenu(!active);  // docked, it keeps running while you edit
 }
 
 // Sits in front of the game's window procedure. Logs focus/size events and, with
@@ -179,8 +190,27 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RFA_LOG_FIRST(100, "WM_ACTIVATE %u", LOWORD(wp));
         hide = HidingFocus() && LOWORD(wp) == WA_INACTIVE;
         break;
+    case WM_SETFOCUS:
+        if (Docked()) OnFocusChanged(true);
+        break;
     case WM_KILLFOCUS:
-        hide = HidingFocus();
+        // Docked, the window gets no activation messages of its own: focus is what says you left.
+        if (Docked()) OnFocusChanged(false);
+        hide = HidingFocus() || Docked();
+        break;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        // Docked, a click into the game doesn't give it the keyboard by itself (the editor's window is
+        // the one activated). The click that takes you back into the game is only that, not a shot.
+        if (Docked() && GetFocus() != hwnd) {
+            SetFocus(hwnd);
+            return 0;
+        }
+        break;
+    case WM_INPUT:
+        // Docked, the mouse and keys would still reach the game while you work in the editor.
+        if (Docked() && g_inBackground) return DefWindowProcW(hwnd, msg, wp, lp);
         break;
     case WM_SIZE:
         RFA_LOG_FIRST(100, "WM_SIZE type %u, %ux%u", static_cast<unsigned>(wp), LOWORD(lp), HIWORD(lp));
@@ -230,6 +260,16 @@ HWND WINAPI Hk_CreateWindowExW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style
 // style, then the position, so the style tells us which mode it is heading into.
 LONG FilterWindowLong(HWND hwnd, int index, LONG value) {
     if (hwnd != g_hwnd || (index != GWL_STYLE && index != GWL_EXSTYLE)) return value;
+    if (Docked()) {
+        // The editor holds it: stay a borderless child whatever mode the game switches to.
+        LONG kept = index == GWL_STYLE
+            ? (value & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_MAXIMIZE |
+                         WS_MINIMIZE)) | WS_CHILD | WS_VISIBLE
+            : BorderlessExStyle(value) & ~WS_EX_APPWINDOW;
+        RFA_LOG_FIRST(20, "SetWindowLong(%s, %08lX) -> %08lX (docked in the editor)", index == GWL_STYLE ? "STYLE" : "EXSTYLE",
+                      value, kept);
+        return kept;
+    }
     if (index == GWL_STYLE) NoteGameMode(value);
     LONG filtered = value;
     if (Borderless()) filtered = index == GWL_STYLE ? BorderlessStyle(value) : BorderlessExStyle(value);
@@ -248,7 +288,10 @@ LONG WINAPI Hk_SetWindowLongW(HWND hwnd, int index, LONG value) {
 BOOL WINAPI Hk_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy, UINT flags) {
     if (hwnd == g_hwnd) {
         RFA_LOG_FIRST(20, "SetWindowPos(%dx%d at %d,%d, flags %X, after %p)", cx, cy, x, y, flags, after);
-        if (Borderless() && !IsIconic(hwnd)) {
+        if (Docked()) {
+            // Where it sits and how big is the editor's to say.
+            flags |= SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
+        } else if (Borderless() && !IsIconic(hwnd)) {
             RECT r = TargetRect();
             x = r.left;
             y = r.top;
@@ -264,7 +307,8 @@ BOOL WINAPI Hk_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy,
 BOOL WINAPI Hk_ShowWindow(HWND hwnd, int cmd) {
     if (hwnd == g_hwnd) {
         RFA_LOG_FIRST(20, "ShowWindow(%d)", cmd);
-        if (Borderless() && cmd == SW_SHOWMAXIMIZED) cmd = SW_SHOW;
+        if ((Borderless() || Docked()) && cmd == SW_SHOWMAXIMIZED) cmd = SW_SHOW;
+        if (Docked() && (cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED || cmd == SW_SHOWMINNOACTIVE)) return TRUE;
     }
     return o_ShowWindow(hwnd, cmd);
 }
@@ -274,14 +318,14 @@ BOOL WINAPI Hk_ClipCursor(const RECT* rect) {
     else RFA_LOG_FIRST(10, "ClipCursor(NULL)");
     g_gameClipSet = rect != nullptr;
     if (rect) g_gameClip = *rect;
-    if (HidingFocus() && g_inBackground) return TRUE;  // applied once you are back in the game
+    if (Muting()) return TRUE;  // applied once you are back in the game
     return o_ClipCursor(rect);
 }
 
 // For mouse-look the game snaps the cursor back to the middle of the screen every frame. It would
 // keep doing that while you're in another app (it isn't told you left), so those calls are dropped.
 BOOL WINAPI Hk_SetCursorPos(int x, int y) {
-    if (HidingFocus() && g_inBackground) {
+    if (Muting()) {
         RFA_LOG_FIRST(3, "Ignored the game moving the cursor to %d,%d while you're in another app", x, y);
         return TRUE;
     }
@@ -300,21 +344,22 @@ HWND WINAPI Hk_GetForegroundWindow() {
         wasGame = isGame;
         RFA_LOG_FIRST(50, "GetForegroundWindow: %s (%p)", isGame ? "the game" : "another window", fg);
     }
-    return HidingFocus() && g_hwnd ? g_hwnd : fg;
+    // Docked, the foreground window is the editor's: the game is told it is itself, so it doesn't suspend.
+    return (HidingFocus() || Docked()) && g_hwnd ? g_hwnd : fg;
 }
 
 BOOL WINAPI Hk_IsIconic(HWND hwnd) {
-    return HidingFocus() && hwnd == g_hwnd ? FALSE : o_IsIconic(hwnd);
+    return (HidingFocus() || Docked()) && hwnd == g_hwnd ? FALSE : o_IsIconic(hwnd);
 }
 
 // Input the game would otherwise still receive while you are in another app.
 SHORT WINAPI Hk_GetAsyncKeyState(int key) {
-    return HidingFocus() && g_inBackground ? 0 : o_GetAsyncKeyState(key);
+    return Muting() ? 0 : o_GetAsyncKeyState(key);
 }
 
 DWORD WINAPI Hk_XInputGetState(DWORD user, XINPUT_STATE* state) {
     DWORD result = o_XInputGetState(user, state);
-    if (result == ERROR_SUCCESS && state && HidingFocus() && g_inBackground) ZeroMemory(&state->Gamepad, sizeof(state->Gamepad));
+    if (result == ERROR_SUCCESS && state && Muting()) ZeroMemory(&state->Gamepad, sizeof(state->Gamepad));
     return result;
 }
 
@@ -331,7 +376,8 @@ LRESULT CALLBACK KeyboardHookFilter(int code, WPARAM wp, LPARAM lp) {
         RFA_LOG_FIRST(5, "Let the Windows key through to Windows");
         return CallNextHookEx(nullptr, code, wp, lp);
     }
-    if (HidingFocus()) {
+    if (Docked() && g_inBackground) return CallNextHookEx(nullptr, code, wp, lp);  // you're typing in the editor
+    if (HidingFocus() || Docked()) {
         bool alt = (key->flags & LLKHF_ALTDOWN) != 0;
         bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         if ((alt && (vk == VK_TAB || vk == VK_ESCAPE || vk == VK_DELETE)) || (ctrl && vk == VK_ESCAPE)) {

@@ -20,6 +20,13 @@
                         <TextBlock Text="Overrides folder" />
                     </StackPanel>
                 </Button>
+                <Button DockPanel.Dock="Right" Click="OnOpenGame" Margin="0,0,8,0"
+                        ToolTip="The running game, docked in the editor: start it, play it, and see your edits in it">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Game" />
+                    </StackPanel>
+                </Button>
                 <TextBlock x:Name="GameFolderText" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
             </DockPanel>
@@ -108,8 +115,17 @@
 
                 <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" />
 
-                <!-- Documents: the preview, open tables and levels -->
-                <TabControl x:Name="Documents" Grid.Column="2" SelectionChanged="OnDocumentChosen" />
+                <!-- Documents: the preview, open tables and levels; the game beside them, when it is put there -->
+                <Grid Grid.Column="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" MinWidth="200" />
+                        <ColumnDefinition x:Name="GameSplitterColumn" Width="0" />
+                        <ColumnDefinition x:Name="GameColumn" Width="0" />
+                    </Grid.ColumnDefinitions>
+                    <TabControl x:Name="Documents" Grid.Column="0" SelectionChanged="OnDocumentChosen" />
+                    <GridSplitter x:Name="GameSplitter" Grid.Column="1" HorizontalAlignment="Stretch" Visibility="Collapsed" />
+                    <ContentControl x:Name="GameBeside" Grid.Column="2" />
+                </Grid>
 
                 <GridSplitter Grid.Column="3" HorizontalAlignment="Stretch" />
 

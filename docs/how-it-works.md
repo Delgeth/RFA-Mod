@@ -263,6 +263,16 @@ asks the game to open its pause menu, as if you had pressed the pause key (the r
 cutscene or another menu is up, `0x57B774`). So switching away always pauses the game, as it does
 when the game sees the switch itself.
 
+The editor's Game tab can dock the game's window in the editor: it gives the window a child's
+style and makes it a child of one of its own (a plain window created with mixed DPI hosting, as the
+mod makes the game per-monitor DPI aware). The mod sees `WS_CHILD` on the game's window and then
+leaves its position, size and style to the editor (the game's own `SetWindowLong`/`SetWindowPos`
+keep it a borderless child), and, as a child gets no activation messages, takes keyboard focus as
+what says you are in the game: on `WM_KILLFOCUS` it frees the cursor and mutes the game's input
+(`WM_INPUT` included) without asking for the pause menu, so the game keeps running; a mouse click
+into the window gives it focus and is not passed on. `GetForegroundWindow` answers with the game's
+window while docked, so the game doesn't suspend.
+
 The game normally blocks the Windows key system-wide while it runs; with `AllowWindowsKey=1` it
 works in the game too. With `Enabled=0` every hook stays installed but only logs.
 

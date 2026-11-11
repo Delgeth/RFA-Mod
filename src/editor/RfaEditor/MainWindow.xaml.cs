@@ -86,8 +86,54 @@ public partial class MainWindow : Window
     void CloseDocument(string key)
     {
         if (!documents.TryGetValue(key, out var open) || !open.Document.ConfirmClose()) return;
+        if (open.Document == gameDocument)
+        {
+            PlaceGameBeside(false);
+            gameDocument = null;
+        }
         Documents.Items.Remove(open.Tab);
         documents.Remove(key);
+    }
+
+    // ---- The game, docked ----------------------------------------------------------------------
+
+    GameDocument? gameDocument;
+
+    void OnOpenGame(object sender, RoutedEventArgs e)
+    {
+        if (gameDocument != null)
+        {
+            if (GameBeside.Content == null) Documents.SelectedItem = documents["game"].Tab;
+            return;
+        }
+        gameDocument = new GameDocument(context, PlaceGameBeside);
+        AddDocument("game", gameDocument);
+    }
+
+    /// <summary>Shows the game beside the documents, or back in its own tab.</summary>
+    void PlaceGameBeside(bool beside)
+    {
+        if (gameDocument == null || !documents.TryGetValue("game", out var open)) return;
+        FrameworkElement view = gameDocument.View;
+        if (beside)
+        {
+            open.Tab.Content = null;
+            GameBeside.Content = view;
+            open.Tab.Content = Hint("The game is beside the documents. Its In a tab button brings it back here.");
+            GameSplitterColumn.Width = new GridLength(3);
+            GameColumn.Width = new GridLength(1, GridUnitType.Star);
+            GameSplitter.Visibility = Visibility.Visible;
+            if (Documents.SelectedItem == open.Tab) Documents.SelectedIndex = 0;
+        }
+        else
+        {
+            GameBeside.Content = null;
+            open.Tab.Content = view;
+            GameSplitterColumn.Width = new GridLength(0);
+            GameColumn.Width = new GridLength(0);
+            GameSplitter.Visibility = Visibility.Collapsed;
+            Documents.SelectedItem = open.Tab;
+        }
     }
 
     /// <summary>Shows the chosen document's outliner and inspector on the right.</summary>
