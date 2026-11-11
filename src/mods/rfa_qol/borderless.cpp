@@ -60,6 +60,7 @@ decltype(&SetWindowPos) o_SetWindowPos = SetWindowPos;
 decltype(&ShowWindow) o_ShowWindow = ShowWindow;
 decltype(&ClipCursor) o_ClipCursor = ClipCursor;
 decltype(&SetCursorPos) o_SetCursorPos = SetCursorPos;
+decltype(&ShowCursor) o_ShowCursor = ShowCursor;
 decltype(&GetForegroundWindow) o_GetForegroundWindow = GetForegroundWindow;
 decltype(&IsIconic) o_IsIconic = IsIconic;
 decltype(&GetAsyncKeyState) o_GetAsyncKeyState = GetAsyncKeyState;
@@ -165,6 +166,35 @@ void RequestPauseMenu(bool away) {
     }
 }
 
+// Docked, the game's window and the editor's share one mouse pointer (Windows joins the input of a
+// child window's thread to its parent's), so the pointer the game hides is hidden over the editor
+// too. While the pointer belongs to the editor (you are working there, or it has left the game's
+// window), it is shown: raised as often as it takes, lowered again when it goes back to the game.
+// What the game asks for meanwhile (ShowCursor) is kept and done then. On the game's thread only.
+int g_cursorRaised = 0;    // how often we raised the show count
+int g_cursorDeferred = 0;  // the game's own ShowCursor calls while raised: shows minus hides
+bool g_mouseInside = false;
+
+void GivePointerToEditor(bool editor) {
+    if (editor && g_cursorRaised == 0) {
+        int count;
+        do {
+            count = o_ShowCursor(TRUE);
+            ++g_cursorRaised;
+        } while (count < 0 && g_cursorRaised < 64);
+    } else if (!editor && g_cursorRaised > 0) {
+        for (; g_cursorRaised > 0; --g_cursorRaised) o_ShowCursor(FALSE);
+        for (; g_cursorDeferred > 0; --g_cursorDeferred) o_ShowCursor(TRUE);
+        for (; g_cursorDeferred < 0; ++g_cursorDeferred) o_ShowCursor(FALSE);
+    }
+}
+
+int WINAPI Hk_ShowCursor(BOOL show) {
+    if (g_cursorRaised == 0) return o_ShowCursor(show);
+    g_cursorDeferred += show ? 1 : -1;
+    return show ? 0 : -1;
+}
+
 void OnFocusChanged(bool active) {
     if (g_inBackground == !active) return;
     g_inBackground = !active;
@@ -174,12 +204,31 @@ void OnFocusChanged(bool active) {
     if (!active) o_ClipCursor(nullptr);  // never leave the cursor trapped while you're in another app
     else if (g_gameClipSet) o_ClipCursor(&g_gameClip);
     if (!docked) RequestPauseMenu(!active);  // docked, it keeps running while you edit
+    else GivePointerToEditor(!active || !g_mouseInside);
 }
 
 // Sits in front of the game's window procedure. Logs focus/size events and, with
 // IgnoreFocusLoss, swallows the ones that would tell the game it lost focus.
 LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     bool hide = false;
+    if (hwnd == g_hwnd) {
+        // Docked or undocked just now (the editor does it, from its own process).
+        static bool wasDocked = false;
+        bool docked = Docked();
+        if (docked != wasDocked) {
+            wasDocked = docked;
+            rfa::Log(docked ? "The editor docked the game's window" : "The game's window is its own again");
+            if (docked) {
+                bool focused = GetFocus() == hwnd;
+                g_mouseInside = false;
+                g_inBackground = !focused;
+                if (!focused) o_ClipCursor(nullptr);
+                GivePointerToEditor(true);  // until the mouse is over the game and you have clicked into it
+            } else {
+                GivePointerToEditor(false);
+            }
+        }
+    }
     switch (msg) {
     case WM_ACTIVATEAPP:
         RFA_LOG_FIRST(100, "WM_ACTIVATEAPP %s", wp ? "gained" : "lost");
@@ -197,6 +246,18 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Docked, the window gets no activation messages of its own: focus is what says you left.
         if (Docked()) OnFocusChanged(false);
         hide = HidingFocus() || Docked();
+        break;
+    case WM_MOUSEMOVE:
+        if (Docked() && !g_mouseInside) {
+            g_mouseInside = true;
+            TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&track);  // tells us once, when it leaves (WM_MOUSELEAVE)
+            if (!g_inBackground) GivePointerToEditor(false);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        g_mouseInside = false;
+        if (Docked()) GivePointerToEditor(true);
         break;
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
@@ -455,6 +516,7 @@ void borderless::Init() {
         {"USER32.dll", "SetWindowPos", rfa::HookImport(game, "USER32.dll", "SetWindowPos", &Hk_SetWindowPos, &o_SetWindowPos)},
         {"USER32.dll", "ShowWindow", rfa::HookImport(game, "USER32.dll", "ShowWindow", &Hk_ShowWindow, &o_ShowWindow)},
         {"USER32.dll", "ClipCursor", rfa::HookImport(game, "USER32.dll", "ClipCursor", &Hk_ClipCursor, &o_ClipCursor)},
+        {"USER32.dll", "ShowCursor", rfa::HookImport(game, "USER32.dll", "ShowCursor", &Hk_ShowCursor, &o_ShowCursor)},
         {"USER32.dll", "SetCursorPos", rfa::HookImport(game, "USER32.dll", "SetCursorPos", &Hk_SetCursorPos, &o_SetCursorPos)},
         {"USER32.dll", "GetForegroundWindow", rfa::HookImport(game, "USER32.dll", "GetForegroundWindow", &Hk_GetForegroundWindow, &o_GetForegroundWindow)},
         {"USER32.dll", "IsIconic", rfa::HookImport(game, "USER32.dll", "IsIconic", &Hk_IsIconic, &o_IsIconic)},

@@ -11,12 +11,12 @@ using System.Windows.Threading;
 namespace RfaEditor;
 
 /// <summary>
-/// The Game tab: the running game's window, docked inside the editor. The game keeps running on its
-/// own (it is its own process); its window is made a child of one of the editor's, sized to the tab
+/// The Game panel: the running game's window, docked inside the editor. The game keeps running on its
+/// own (it is its own process); its window is made a child of one of the editor's, sized to the panel
 /// with the game's shape kept (black bars around it). Click into it to play; Shift+F1 gives the mouse
-/// and keys back to the editor. Undock, closing the tab or closing the editor gives the window back
-/// as it was. It can also sit beside the documents (Beside), so a level and the game are seen
-/// together.
+/// and keys back to the editor. Undock or closing the editor gives the window back as it was. The
+/// panel docks like the others (drag its title), so the game can sit beside a level, below it, or in
+/// a window of its own.
 ///
 /// The game has to be in Windowed mode (Options > Display; with rfa_qol's borderless mod that is
 /// borderless fullscreen): its exclusive Fullscreen mode owns the screen and can't be docked. The
@@ -24,25 +24,16 @@ namespace RfaEditor;
 /// its size to the editor, keeps the game running when you click away (no pause menu) and mutes the
 /// game's input while you work in the editor.
 /// </summary>
-sealed class GameDocument : IEditorDocument
+sealed class GamePanel
 {
-    public string Title => "Game";
-    public string Icon => Icons.Game;
     public FrameworkElement View { get; }
-    public FrameworkElement? Outliner => null;
-    public FrameworkElement? Inspector => null;
-#pragma warning disable CS0067  // the title never changes
-    public event Action? TitleChanged;
-#pragma warning restore CS0067
 
     const int HotKeyId = 0x5246;  // Shift+F1: back to the editor
 
     readonly EditorContext context;
     readonly GameHost host = new();
     readonly TextBlock status = new() { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
-    readonly Button startButton, dockButton, backButton, besideButton;
-    readonly Action<bool> placeBeside;  // the window shows the view beside the documents (true) or in its tab
-    bool beside;
+    readonly Button startButton, dockButton, backButton;
     readonly CheckBox autoDockBox;
     readonly DispatcherTimer watch = new() { Interval = TimeSpan.FromMilliseconds(500) };
 
@@ -52,36 +43,26 @@ sealed class GameDocument : IEditorDocument
     bool hotKeyRegistered;
     DateTime startedAt = DateTime.MinValue;
 
-    static readonly List<GameDocument> open = [];
-    static bool watchingExit;
 
-    public GameDocument(EditorContext context, Action<bool> placeBeside)
+    public GamePanel(EditorContext context)
     {
         this.context = context;
-        this.placeBeside = placeBeside;
         startButton = ToolbarButton(Icons.Start, "Start the game", "Starts the game through RFAModLauncher (Steam must be running)", OnStart);
-        dockButton = ToolbarButton(Icons.Game, "Dock", "Takes the running game's window into this tab", OnDockOrUndock);
+        dockButton = ToolbarButton(Icons.Game, "Dock", "Takes the running game's window into this panel", OnDockOrUndock);
         backButton = ToolbarButton(Icons.Select, "Back to the editor", "Gives the mouse and keys back to the editor (Shift+F1 does too)", (_, _) => BackToEditor());
-        besideButton = ToolbarButton(Icons.Display, "Beside", "Shows the game beside the documents, so you see it while you edit a level", (_, _) =>
-        {
-            beside = !beside;
-            SetLabel(besideButton, beside ? "In a tab" : "Beside");
-            placeBeside(beside);
-        });
         autoDockBox = new CheckBox
         {
             Content = "Dock automatically", IsChecked = true, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 10, 0),
-            ToolTip = "Docks the game here as soon as its window is up, while this tab is open",
+            ToolTip = "Docks the game here as soon as its window is up, while this panel is showing",
         };
 
         var tools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         tools.Children.Add(startButton);
         tools.Children.Add(dockButton);
         tools.Children.Add(backButton);
-        tools.Children.Add(besideButton);
         tools.Children.Add(autoDockBox);
         var bar = new DockPanel();
-        DockPanel.SetDock(tools, Dock.Left);
+        DockPanel.SetDock(tools, System.Windows.Controls.Dock.Left);
         bar.Children.Add(tools);
         bar.Children.Add(status);
         var toolbar = new Border
@@ -91,7 +72,7 @@ sealed class GameDocument : IEditorDocument
             BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(6, 4, 6, 4), Child = bar,
         };
         var view = new DockPanel { Background = Brushes.Black };
-        DockPanel.SetDock(toolbar, Dock.Top);
+        DockPanel.SetDock(toolbar, System.Windows.Controls.Dock.Top);
         view.Children.Add(toolbar);
         view.Children.Add(host);
         View = view;
@@ -101,29 +82,18 @@ sealed class GameDocument : IEditorDocument
         host.Destroying += Undock;  // a child window dies with its parent: never take the game with it
         watch.Tick += (_, _) => Watch();
         watch.Start();
-        open.Add(this);
-        if (!watchingExit)
-        {
-            watchingExit = true;
-            // The editor going away for any reason gives the game its window back first.
-            AppDomain.CurrentDomain.ProcessExit += (_, _) => UndockAll();
-            AppDomain.CurrentDomain.UnhandledException += (_, _) => UndockAll();
-            Application.Current.Exit += (_, _) => UndockAll();
-        }
+        // The editor going away for any reason gives the game its window back first.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Release();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => Release();
+        Application.Current.Exit += (_, _) => Release();
         Watch();
     }
 
-    static void UndockAll()
-    {
-        foreach (GameDocument document in open.ToList()) document.Undock();
-    }
-
-    public bool ConfirmClose()
+    /// <summary>Gives the game its own window back (the editor is closing).</summary>
+    public void Release()
     {
         Undock();
         watch.Stop();
-        open.Remove(this);
-        return true;
     }
 
     Button ToolbarButton(string icon, string text, string tip, RoutedEventHandler click)
@@ -156,7 +126,7 @@ sealed class GameDocument : IEditorDocument
             Process.Start(new ProcessStartInfo(launcher) { UseShellExecute = true, WorkingDirectory = context.Workspace.ModFolder });
             startedAt = DateTime.Now;
             autoDockBox.IsChecked = true;
-            context.Log("Starting the game. It is docked in the Game tab once its window is up; set Options > Display to Windowed if it isn't.");
+            context.Log("Starting the game. It is docked in the Game panel once its window is up; set Options > Display to Windowed if it isn't.");
         }
         catch (Exception ex)
         {
@@ -218,7 +188,7 @@ sealed class GameDocument : IEditorDocument
             ? (InGame() ? "Playing: Shift+F1 or Alt+Tab gives the mouse and keys back to the editor."
                         : "Click the game to play. It keeps running while you work in the editor.")
             : running
-                ? "The game is running in its own window. Dock brings it into this tab (it has to be in Windowed mode)."
+                ? "The game is running in its own window. Dock brings it into this panel (it has to be in Windowed mode)."
                 : (DateTime.Now - startedAt).TotalSeconds < 60 ? "Starting the game ..." : "The game isn't running. Start it here, or with RFAModLauncher.";
     }
 
@@ -297,7 +267,7 @@ sealed class GameDocument : IEditorDocument
         game = IntPtr.Zero;
     }
 
-    /// <summary>Sizes the game to the tab, keeping its shape.</summary>
+    /// <summary>Sizes the game to the panel, keeping its shape.</summary>
     void Fit()
     {
         if (!Docked) return;

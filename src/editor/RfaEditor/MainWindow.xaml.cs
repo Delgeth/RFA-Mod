@@ -4,6 +4,8 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using AvalonDock;
+using AvalonDock.Layout;
 using RfaFormats;
 
 namespace RfaEditor;
@@ -12,14 +14,17 @@ namespace RfaEditor;
 /// The editor's window, laid out like other game editors (Nanoforge among them): the explorer of
 /// the game's archives on the left, open documents as tabs in the middle (the preview of the picked
 /// file, tables, levels), the chosen document's outliner and inspector on the right, and a log at
-/// the bottom. The game folder is only ever read.
+/// the bottom, with the running game beside it (the Game panel). Every panel can be dragged by its
+/// title to dock it elsewhere, floated as a window of its own, or pinned to a side (AvalonDock). The
+/// game folder is only ever read.
 /// </summary>
 public partial class MainWindow : Window
 {
     readonly Workspace workspace;
     readonly EditorContext context;
     readonly FilePreview preview;
-    readonly Dictionary<string, (IEditorDocument Document, TabItem Tab)> documents = new(StringComparer.OrdinalIgnoreCase);
+    readonly GamePanel gamePanel;
+    readonly Dictionary<string, (IEditorDocument Document, LayoutDocument Tab)> documents = new(StringComparer.OrdinalIgnoreCase);
     List<IndexedFile> searchIndex = [];
     GameFile? selectedFile;  // the file picked in the explorer, if a file is
 
@@ -41,6 +46,12 @@ public partial class MainWindow : Window
         AddDocument("preview", preview, closable: false);
         BuildTree();
         _ = BuildSearchIndexAsync();
+
+        DockManager.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
+        DockManager.DocumentClosing += OnDocumentClosing;
+        DockManager.DocumentClosed += OnDocumentClosed;
+        gamePanel = new GamePanel(context);
+        GameHostPanel.Content = gamePanel.View;
     }
 
     // ---- Log -----------------------------------------------------------------------------------
@@ -57,90 +68,41 @@ public partial class MainWindow : Window
 
     void AddDocument(string key, IEditorDocument document, bool closable = true)
     {
-        var icon = new TextBlock { Text = document.Icon, Style = (Style)FindResource("Icon"), FontSize = 12, Margin = new Thickness(0, 0, 7, 0) };
-        var title = new TextBlock { Text = document.Title, VerticalAlignment = VerticalAlignment.Center };
-        var header = new StackPanel { Orientation = Orientation.Horizontal };
-        header.Children.Add(icon);
-        header.Children.Add(title);
-        var tab = new TabItem { Header = header, Content = document.View };
-        if (closable)
+        var tab = new LayoutDocument { ContentId = key, Title = document.Title, Content = document.View, CanClose = closable, CanFloat = true };
+        document.TitleChanged += () => tab.Title = document.Title;
+        tab.IsSelectedChanged += (_, _) =>
         {
-            var close = new Button
-            {
-                Content = new TextBlock { Text = Icons.Close, Style = (Style)FindResource("Icon"), FontSize = 9 },
-                Style = (Style)FindResource("ToolButton"), Width = 20, Height = 20, Margin = new Thickness(8, 0, 0, 0), ToolTip = "Close",
-            };
-            close.Click += (_, _) => CloseDocument(key);
-            header.Children.Add(close);
-        }
-        else
-        {
-            header.Margin = new Thickness(0, 0, 6, 0);
-        }
-        document.TitleChanged += () => title.Text = document.Title;
+            if (tab.IsSelected) ShowParts(document);
+        };
         documents[key] = (document, tab);
-        Documents.Items.Add(tab);
-        Documents.SelectedItem = tab;
+        DocumentPane.Children.Add(tab);
+        Select(tab);
+        ShowParts(document);
     }
 
-    void CloseDocument(string key)
+    static void Select(LayoutDocument tab)
     {
-        if (!documents.TryGetValue(key, out var open) || !open.Document.ConfirmClose()) return;
-        if (open.Document == gameDocument)
-        {
-            PlaceGameBeside(false);
-            gameDocument = null;
-        }
-        Documents.Items.Remove(open.Tab);
-        documents.Remove(key);
+        tab.IsSelected = true;
+        tab.IsActive = true;
     }
 
-    // ---- The game, docked ----------------------------------------------------------------------
-
-    GameDocument? gameDocument;
-
-    void OnOpenGame(object sender, RoutedEventArgs e)
+    /// <summary>Asks the document to save first when its tab's close button is used.</summary>
+    void OnDocumentClosing(object? sender, DocumentClosingEventArgs e)
     {
-        if (gameDocument != null)
-        {
-            if (GameBeside.Content == null) Documents.SelectedItem = documents["game"].Tab;
-            return;
-        }
-        gameDocument = new GameDocument(context, PlaceGameBeside);
-        AddDocument("game", gameDocument);
+        var open = documents.FirstOrDefault(d => d.Value.Tab == e.Document);
+        if (open.Key != null && !open.Value.Document.ConfirmClose()) e.Cancel = true;
     }
 
-    /// <summary>Shows the game beside the documents, or back in its own tab.</summary>
-    void PlaceGameBeside(bool beside)
+    void OnDocumentClosed(object? sender, DocumentClosedEventArgs e)
     {
-        if (gameDocument == null || !documents.TryGetValue("game", out var open)) return;
-        FrameworkElement view = gameDocument.View;
-        if (beside)
-        {
-            open.Tab.Content = null;
-            GameBeside.Content = view;
-            open.Tab.Content = Hint("The game is beside the documents. Its In a tab button brings it back here.");
-            GameSplitterColumn.Width = new GridLength(3);
-            GameColumn.Width = new GridLength(1, GridUnitType.Star);
-            GameSplitter.Visibility = Visibility.Visible;
-            if (Documents.SelectedItem == open.Tab) Documents.SelectedIndex = 0;
-        }
-        else
-        {
-            GameBeside.Content = null;
-            open.Tab.Content = view;
-            GameSplitterColumn.Width = new GridLength(0);
-            GameColumn.Width = new GridLength(0);
-            GameSplitter.Visibility = Visibility.Collapsed;
-            Documents.SelectedItem = open.Tab;
-        }
+        string? key = documents.FirstOrDefault(d => d.Value.Tab == e.Document).Key;
+        if (key != null) documents.Remove(key);
+        if (!documents.Values.Any(d => d.Tab.IsSelected)) ShowParts(null);
     }
 
     /// <summary>Shows the chosen document's outliner and inspector on the right.</summary>
-    void OnDocumentChosen(object sender, SelectionChangedEventArgs e)
+    void ShowParts(IEditorDocument? document)
     {
-        if (e.Source != Documents) return;  // a selection change inside a document bubbling up
-        IEditorDocument? document = documents.Values.FirstOrDefault(d => d.Tab == Documents.SelectedItem).Document;
         OutlinerHost.Content = document?.Outliner ?? Hint("Open a level or a table to see what is in it here.");
         InspectorHost.Content = document?.Inspector;
     }
@@ -151,7 +113,16 @@ public partial class MainWindow : Window
         Foreground = (System.Windows.Media.Brush)Application.Current.Resources["DimTextBrush"],
     };
 
-    void ShowPreview() => Documents.SelectedItem = documents["preview"].Tab;
+    void ShowPreview() => Select(documents["preview"].Tab);
+
+    // ---- The game, docked ----------------------------------------------------------------------
+
+    /// <summary>Brings the Game panel forward.</summary>
+    void OnShowGame(object sender, RoutedEventArgs e)
+    {
+        GameAnchorable.IsSelected = true;
+        GameAnchorable.IsActive = true;
+    }
 
     /// <summary>Opens a table in the table editor, or brings its tab forward if it's open already.</summary>
     void OpenTable(GameFile file)
@@ -159,7 +130,7 @@ public partial class MainWindow : Window
         string key = "table:" + file.Name;
         if (documents.TryGetValue(key, out var open))
         {
-            Documents.SelectedItem = open.Tab;
+            Select(open.Tab);
             return;
         }
         Try(() => AddDocument(key, new TableEditor(context, file.Archive, file.Name)));
@@ -171,7 +142,7 @@ public partial class MainWindow : Window
         string key = $"level:{file.Where}>{file.Name}";
         if (documents.TryGetValue(key, out var open))
         {
-            Documents.SelectedItem = open.Tab;
+            Select(open.Tab);
             return;
         }
         Mouse.OverrideCursor = Cursors.Wait;
@@ -191,13 +162,14 @@ public partial class MainWindow : Window
     {
         foreach (var (document, tab) in documents.Values.ToList())
         {
-            Documents.SelectedItem = tab;
+            Select(tab);
             if (!document.ConfirmClose())
             {
                 e.Cancel = true;
                 return;
             }
         }
+        gamePanel.Release();  // the game gets its own window back before the editor's goes
     }
 
     // ---- Explorer ------------------------------------------------------------------------------

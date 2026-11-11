@@ -420,10 +420,13 @@ Start the game with `RFAModLauncher.exe` (the console mod links it to the editor
   doesn't, and the picked object's box and the gizmo stay where the zone puts it. This has only
   been tried with a stand-in for the game, not yet with the game itself.
 
-### The game, docked in the editor
+### Panels, and the game docked in the editor
 
-The **Game** button (top right) opens the Game tab, where the running game's window is docked
-inside the editor:
+Every panel (Explorer, Outliner, Inspector, Log, Game) can be dragged by its title to dock it
+elsewhere or float it as a window of its own; documents are the tabs in the middle.
+
+The **Game** tab holds the running game's window, docked inside the editor (the **Game** button,
+top right, brings it forward):
 
 - **Start the game** runs `RFAModLauncher.exe` (Steam has to be running). With **Dock
   automatically** on, the game is docked as soon as its window is up. **Dock** takes a game that
@@ -433,11 +436,10 @@ inside the editor:
 - **Click the game to play.** The first click only gives it the mouse and keys. **Shift+F1**,
   **Back to the editor** or Alt+Tab gives them back. The game keeps running while you work in the
   editor (it doesn't pause), and doesn't see your keys or mouse.
-- **Beside** shows the game next to the documents, so you see a level and the game at once; **In
-  a tab** puts it back.
+- Drag the Game tab to a side of the documents to see a level and the game at once.
 - The game keeps its shape (black bars around it) and draws at its own resolution, stretched to
   the space it has.
-- **Undock**, closing the tab or closing the editor gives the game its own window back, as it was.
+- **Undock** or closing the editor gives the game its own window back, as it was.
 
 ## Not yet
 
