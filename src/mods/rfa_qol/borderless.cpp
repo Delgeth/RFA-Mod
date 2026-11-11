@@ -320,17 +320,33 @@ HWND WINAPI Hk_CreateWindowExW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style
 
 // The game switches modes by setting a new style (ApplyDisplayMode), then the extended
 // style, then the position, so the style tells us which mode it is heading into.
+// The game changing its display mode (video settings) while docked crashed it: it sets the graphics
+// device to the new mode first and its window after, and died on the next frame. So before either,
+// the game gets its own window back and changes mode as it always does; the editor sees the window
+// gone from its panel and docks it again a few seconds later.
+void TakeWindowBack() {
+    rfa::Log("The game is changing its display mode: taking its window out of the editor for that");
+    LONG style = GetWindowLongW(g_hwnd, GWL_STYLE);
+    o_SetWindowLongW(g_hwnd, GWL_STYLE, (style & ~WS_CHILD) | WS_POPUP);
+    SetParent(g_hwnd, nullptr);
+}
+
+// The game's "apply this display mode" (publicbeta exe, 0x76B310; cdecl: the mode's number and the
+// video settings; true if the device took the mode). Its first 9 bytes are push ebp / mov ebp,esp /
+// sub esp,0xBC.
+constexpr DWORD kApplyDisplayMode = 0x76B310;
+constexpr size_t kApplyDisplayModePrologue = 9;
+using ApplyDisplayModeFn = bool(__cdecl*)(int, void*);
+ApplyDisplayModeFn o_ApplyDisplayMode = nullptr;
+
+bool __cdecl Hk_ApplyDisplayMode(int mode, void* settings) {
+    if (Docked()) TakeWindowBack();
+    return o_ApplyDisplayMode(mode, settings);
+}
+
 LONG FilterWindowLong(HWND hwnd, int index, LONG value) {
     if (hwnd != g_hwnd || (index != GWL_STYLE && index != GWL_EXSTYLE)) return value;
-    if (Docked()) {
-        // The game is changing its display mode (video settings). Docked, that crashed it, so it gets
-        // its own window back first and changes mode as it always does; the editor sees the window
-        // gone from its panel and docks it again a moment later.
-        rfa::Log("The game is changing its display mode: taking its window out of the editor for that");
-        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-        o_SetWindowLongW(hwnd, GWL_STYLE, (style & ~WS_CHILD) | WS_POPUP);
-        SetParent(hwnd, nullptr);
-    }
+    if (Docked()) TakeWindowBack();  // (a build without the hook below gets here first)
     // The game builds the new style from the one the window has, which while docked says "child".
     if (index == GWL_STYLE) value &= ~static_cast<LONG>(WS_CHILD);
     if (index == GWL_STYLE) NoteGameMode(value);
@@ -505,6 +521,12 @@ void borderless::Init() {
     RECT r = TargetRect();
     rfa::Log("In Windowed mode the game will cover %ldx%ld at %ld,%ld", r.right - r.left, r.bottom - r.top, r.left,
              r.top);
+
+    if (g_enabled && rfa::game::IsSupportedBuild()) {
+        o_ApplyDisplayMode = reinterpret_cast<ApplyDisplayModeFn>(
+            rfa::HookFunction(kApplyDisplayMode, kApplyDisplayModePrologue, reinterpret_cast<void*>(&Hk_ApplyDisplayMode)));
+        rfa::Log("Hook of the game's display mode change: %s", o_ApplyDisplayMode ? "ok" : "FAILED");
+    }
 
     HMODULE game = GetModuleHandleW(nullptr);
     struct {
