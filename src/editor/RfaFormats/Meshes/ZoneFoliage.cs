@@ -144,6 +144,71 @@ public sealed class ZoneFoliage
     }
 
     /// <summary>
+    /// Moves a zone's foliage with its ground (the terrain sculptor), in a terrain file's bytes
+    /// (changed in place): each marked sub-cube within <see cref="NearGround"/> metres of the ground
+    /// as it was (<paramref name="before"/>, the height at a place x, z in the world) goes up or down
+    /// by as many sub-cubes as the ground moved there (<paramref name="after"/>), so the game, which
+    /// sets each piece on the surface it finds in its sub-cube, still finds the ground. Sub-cubes stay
+    /// in their cell, or go to the cell above or below where the zone has one for the same layer:
+    /// the cells and patches stay as they are (they may be laid out for looking up by their keys), so
+    /// the file keeps its size; a sub-cube with nowhere to go is left out. Returns how many moved
+    /// and how many were left out.
+    /// </summary>
+    public static (int Moved, int Lost) Follow(byte[] file, string zone, Func<float, float, float> before, Func<float, float, float> after)
+    {
+        ZoneFoliage? foliage = Read(file, zone);
+        if (foliage == null || foliage.patchCount == 0) return (0, 0);
+        int header = Align4(Align4(Align4(0x28 + I32(file, 0x10)) + I32(file, 0x1C)) + I32(file, 0x18));
+        int cellCount = I32(file, header + 0xB4);
+        int cellsAt = foliage.patchesAt - cellCount * 12;
+        // Every cell's patch for each layer, by where the cell is.
+        var cells = new List<(int X, int Y, int Z, int First, int Count)>();
+        var patchAt = new Dictionary<(int X, int Y, int Z, int Layer), int>();
+        for (int c = 0; c < cellCount; c++)
+        {
+            int at = cellsAt + c * 12;
+            uint key = BitConverter.ToUInt32(file, at);
+            if (key == uint.MaxValue) continue;
+            int x = (int)(key >> 22), y = (int)((key >> 10) & 0xFFF) - 2048, z = (int)(key & 0x3FF);
+            int first = BitConverter.ToUInt16(file, at + 4), count = BitConverter.ToUInt16(file, at + 6);
+            cells.Add((x, y, z, first, count));
+            for (int p = first; p < first + count; p++) patchAt.TryAdd((x, y, z, file[foliage.patchesAt + p * 16]), p);
+        }
+        var masks = new ulong[foliage.patchCount];
+        var seen = new bool[foliage.patchCount];
+        int moved = 0, lost = 0;
+        foreach ((int x, int y, int z, int first, int count) in cells)
+            for (int p = first; p < first + count; p++)
+            {
+                seen[p] = true;
+                int layer = file[foliage.patchesAt + p * 16];
+                float size = foliage.Layers[layer].CellSize > 0 ? foliage.Layers[layer].CellSize : 4, sub = size / 4;
+                ulong mask = BitConverter.ToUInt64(file, foliage.patchesAt + p * 16 + 8);
+                for (int bit = 0; bit < 64; bit++)
+                {
+                    if ((mask & (1UL << bit)) == 0) continue;
+                    int sx = (bit >> 4) & 3, sh = (bit >> 2) & 3, sz = bit & 3;
+                    float wx = foliage.Corner.X + x * size + (sx + 0.5f) * sub, wz = foliage.Corner.Z + z * size + (sz + 0.5f) * sub;
+                    float middle = y * size + (sh + 0.5f) * sub, ground = before(wx, wz);
+                    int steps = MathF.Abs(middle - ground) <= NearGround ? (int)MathF.Round((after(wx, wz) - ground) / sub) : 0;
+                    int height = y * 4 + sh + steps, cellY = (int)Math.Floor(height / 4.0), inCell = height - cellY * 4;
+                    int target = cellY == y ? p : patchAt.TryGetValue((x, cellY, z, layer), out int other) ? other : -1;
+                    if (target < 0) { lost++; continue; }
+                    masks[target] |= 1UL << ((sx << 4) | (inCell << 2) | sz);
+                    if (steps != 0) moved++;
+                }
+            }
+        if (moved == 0 && lost == 0) return (0, 0);
+        for (int p = 0; p < foliage.patchCount; p++)
+            if (!seen[p]) masks[p] = BitConverter.ToUInt64(file, foliage.patchesAt + p * 16 + 8);  // (no cell names it: kept)
+        for (int p = 0; p < foliage.patchCount; p++) BitConverter.TryWriteBytes(file.AsSpan(foliage.patchesAt + p * 16 + 8), masks[p]);
+        return (moved, lost);
+    }
+
+    /// <summary>How far from the ground a sub-cube of foliage may be and still move with it (m): further, it is on something else.</summary>
+    public const float NearGround = 3;
+
+    /// <summary>
     /// Every piece of foliage, scattered as the game does it (read from its code, at 0x6A75F0 and
     /// 0x6A78C0 in the exe), patch by patch:
     ///   how many: the share of the cell's 64 sub-cubes marked × the layer's max density × 4,

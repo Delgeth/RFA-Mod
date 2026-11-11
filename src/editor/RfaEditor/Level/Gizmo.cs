@@ -6,7 +6,7 @@ using System.Windows.Media.Media3D;
 namespace RfaEditor;
 
 /// <summary>What dragging in the level view does: pick objects only, move them, or turn them.</summary>
-enum LevelTool { Select, Move, Rotate }
+enum LevelTool { Select, Move, Rotate, Sculpt }
 
 /// <summary>The game's axes: X east-west, Y up, Z north-south.</summary>
 enum Axis { X, Y, Z }

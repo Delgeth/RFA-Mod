@@ -185,11 +185,16 @@ public sealed class ZoneFile
     {
         if (relationTable != null && objects.Count >= ZoneRelationTable.Entries)
             throw new InvalidOperationException($"a zone can hold at most {ZoneRelationTable.Entries:N0} objects");
+        return AddNew(classHash, NewHandle(PrefixFor(classHash), taken), properties, boundsMin, boundsMax);
+    }
+
+    /// <summary>The first two bytes of a new object's handle: those most of the zone's objects of its class have, else most of its objects.</summary>
+    uint PrefixFor(uint classHash)
+    {
         uint? MostCommonPrefix(IEnumerable<ZoneObject> these) =>
             these.GroupBy(o => o.Handle & 0xFFFF0000).OrderByDescending(g => g.Count()).Select(g => (uint?)g.Key).FirstOrDefault();
-        uint prefix = MostCommonPrefix(objects.Where(o => o.ClassHash == classHash)) ?? MostCommonPrefix(objects)
-                      ?? throw new InvalidOperationException("the zone has no objects to take a handle's zone and layer from");
-        return AddNew(classHash, NewHandle(prefix, taken), properties, boundsMin, boundsMax);
+        return MostCommonPrefix(objects.Where(o => o.ClassHash == classHash)) ?? MostCommonPrefix(objects)
+               ?? throw new InvalidOperationException("the zone has no objects to take a handle's zone and layer from");
     }
 
     /// <summary>As <see cref="AddNew(uint, IReadOnlyList{NewProperty}, Vector3, Vector3, IEnumerable{uint})"/>, with a handle of the caller's (not one any object here has).</summary>
@@ -253,19 +258,29 @@ public sealed class ZoneFile
     /// round, gives the game what its levels never have: the game froze with such copies.
     /// </summary>
     /// <returns>The copies, in the same order as <paramref name="group"/>.</returns>
-    public IReadOnlyList<ZoneObject> AddCopies(IReadOnlyList<ZoneObject> group, IEnumerable<uint> taken, Vector3 by)
+    public IReadOnlyList<ZoneObject> AddCopies(IReadOnlyList<ZoneObject> group, IEnumerable<uint> taken, Vector3 by) => AddCopiesFrom(this, group, taken, by);
+
+    /// <summary>
+    /// As <see cref="AddCopies"/>, with the objects (and the destruction links between them) taken
+    /// from another zone file, <paramref name="from"/> (a building of another level, say). Their
+    /// handles are made with the first two bytes this zone's objects of their class have (else most
+    /// of its objects'), as for <see cref="AddNew(uint, IReadOnlyList{NewProperty}, Vector3, Vector3, IEnumerable{uint})"/>.
+    /// </summary>
+    public IReadOnlyList<ZoneObject> AddCopiesFrom(ZoneFile from, IReadOnlyList<ZoneObject> group, IEnumerable<uint> taken, Vector3 by)
     {
         if (relationTable != null && objects.Count + group.Count > ZoneRelationTable.Entries)
             throw new InvalidOperationException($"a zone can hold at most {ZoneRelationTable.Entries:N0} objects");
         var used = taken.ToHashSet();
         var copyOf = new Dictionary<uint, ZoneObject>();
         var copies = new List<ZoneObject>();
+        uint number = objects.Count == 0 ? 0 : objects.Max(o => o.Number) + 1;
         foreach (ZoneObject original in group)
         {
-            uint handle = NewHandle(original, used);
+            uint handle = from == this ? NewHandle(original, used) : NewHandle(PrefixFor(original.ClassHash), used);
             used.Add(handle);
             var copy = new ZoneObject(original.Snapshot()) { Handle = handle };
             copy.Parent = copy.Sibling = copy.Child = ZoneObject.None;
+            if (from != this) copy.Number = number++;  // (its place in the other file means nothing here)
             copies.Add(copy);
             copyOf[original.Handle] = copy;
         }
@@ -294,15 +309,16 @@ public sealed class ZoneFile
 
         // The destruction links between them, copied after the zone's own (a link's own number is its place).
         int links = extra.Length / DestructionLinkSize, next = links;
+        byte[] source = from.extra;
         var added = new MemoryStream();
         var numbers = copies.ToDictionary(c => c, _ => new List<ushort>());
-        for (int i = 0; i < links; i++)
+        for (int i = 0; i < source.Length / DestructionLinkSize; i++)
         {
             int at = i * DestructionLinkSize;
-            if (!copyOf.TryGetValue(BitConverter.ToUInt32(extra, at + 8), out ZoneObject? a) ||
-                !copyOf.TryGetValue(BitConverter.ToUInt32(extra, at + 12), out ZoneObject? b)) continue;
+            if (!copyOf.TryGetValue(BitConverter.ToUInt32(source, at + 8), out ZoneObject? a) ||
+                !copyOf.TryGetValue(BitConverter.ToUInt32(source, at + 12), out ZoneObject? b)) continue;
             if (next >= ushort.MaxValue) throw new InvalidOperationException("a zone can hold at most 65,535 destruction links");
-            byte[] link = extra[at..(at + DestructionLinkSize)];
+            byte[] link = source[at..(at + DestructionLinkSize)];
             BitConverter.TryWriteBytes(link.AsSpan(8), a.Handle);
             BitConverter.TryWriteBytes(link.AsSpan(12), b.Handle);
             uint flag = BitConverter.ToUInt32(link, 36) & 0xFFFF0000;  // the flags; the low two bytes are the number
@@ -562,7 +578,7 @@ public sealed class ZoneObject
     /// The number Volition's editor gave the object: they count up through a zone's objects
     /// (world_08_02's navpoints 0xA93, 0xA94, ...), but not every number is the zone's alone.
     /// </summary>
-    public uint Number => U32(48);
+    public uint Number { get => U32(48); internal set => SetU32(48, value); }
 
     public List<ZoneProperty> Properties { get; } = [];
 

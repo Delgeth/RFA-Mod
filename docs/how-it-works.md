@@ -143,6 +143,15 @@ finds the archive (`0x6CD1A0`, through `0xC92010`), then opens it with `cf_open`
 `0xC914E0`), both through `FindFile`; the mount itself (`0xCB5280` → `0xCB53C0`) reads the archive
 from the file it was given.
 
+**Edits**: `edits\` does for the archives the mod adds (the new files above, such as the Guerrilla
+world's `build\pc\cache\rfg_l1.vpp_pc`) what `overrides\` does for the game's:
+`edits\build\pc\cache\rfg_l1.vpp_pc\1h_c0312.str2_pc` replaces that archive's copy, the same way
+(when the game finds a copy of that size). `overrides\` can't hold them, as the archive itself is a
+file there with the name the folder would have. The level editor saves its changes to those
+archives here, so they stay as the Guerrilla builder made them. Beside each, `<file>.rfabase` gives
+the size and compressed size the archive's copy had: if the world was built again and its copy is
+different, the change is skipped and logged.
+
 **Ruin maps**: a new Ruin map is listed in an override of `wrecking_crew_maps.xtbl`. The game
 itself starts Ruin maps by their place in that table (it reads at most five), whatever their
 `file_name` says, so the loader puts each map's `file_name` back after the game reads the table

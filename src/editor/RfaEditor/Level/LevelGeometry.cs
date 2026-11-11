@@ -125,20 +125,21 @@ static partial class LevelGeometry
     /// <summary>A zone's terrain: the ground of its sub-zones that have any (caves mostly have none).</summary>
     /// <param name="picture">A picture of a sub-zone's ground over its box (x and z), or null to draw it plain.</param>
     /// <param name="inGameLight">For a sub-zone: what paints its picture for the Direct3D view's game light, if it differs (see TerrainPainter).</param>
+    /// <param name="freeze">False to leave the group and its parts changeable (one GeometryModel3D a sub-zone, in their order), for the terrain sculptor to give them new meshes.</param>
     public static Model3DGroup BuildTerrain(IReadOnlyList<TerrainSubzone> subzones, Func<TerrainSubzone, BitmapSource?> picture,
-                                            Func<TerrainSubzone, Func<BitmapSource>?>? inGameLight = null) =>
+                                            Func<TerrainSubzone, Func<BitmapSource>?>? inGameLight = null, bool freeze = true) =>
         BuildTerrain(subzones, subzone =>
         {
             System.Numerics.Vector3 min = subzone.BoundsMin, size = subzone.BoundsMax - subzone.BoundsMin;
             return (picture(subzone), p => new System.Windows.Point((p.X - min.X) / size.X, (p.Z - min.Z) / size.Z));
-        }, inGameLight);
+        }, inGameLight, freeze);
 
     /// <summary>
     /// A zone's terrain with one picture across its whole square from <paramref name="corner"/> (its
     /// colour map, which the game shows on far-away ground), or plain.
     /// </summary>
-    public static Model3DGroup BuildTerrain(IReadOnlyList<TerrainSubzone> subzones, BitmapSource? zonePicture, System.Numerics.Vector2 corner) =>
-        BuildTerrain(subzones, s => (zonePicture, p => new System.Windows.Point((p.X - corner.X) / s.ZoneWidth, (p.Z - corner.Y) / s.ZoneWidth)));
+    public static Model3DGroup BuildTerrain(IReadOnlyList<TerrainSubzone> subzones, BitmapSource? zonePicture, System.Numerics.Vector2 corner, bool freeze = true) =>
+        BuildTerrain(subzones, s => (zonePicture, p => new System.Windows.Point((p.X - corner.X) / s.ZoneWidth, (p.Z - corner.Y) / s.ZoneWidth)), freeze: freeze);
 
     /// <summary>
     /// The sub-zones' roads (<see cref="TerrainSubzone.Roads"/>: meshes laid into the ground's
@@ -179,7 +180,7 @@ static partial class LevelGeometry
     /// <param name="paint">For a sub-zone: its picture (or null, plain), and where a point of it is in the picture (0 to 1).</param>
     static Model3DGroup BuildTerrain(IReadOnlyList<TerrainSubzone> subzones,
                                      Func<TerrainSubzone, (BitmapSource? Picture, Func<System.Numerics.Vector3, System.Windows.Point> At)> paint,
-                                     Func<TerrainSubzone, Func<BitmapSource>?>? inGameLight = null)
+                                     Func<TerrainSubzone, Func<BitmapSource>?>? inGameLight = null, bool freeze = true)
     {
         Material plain = ModelScene.Plain(Color.FromRgb(150, 138, 118));
         var terrain = new Model3DGroup();
@@ -204,7 +205,7 @@ static partial class LevelGeometry
                 mesh.AddTriangle(subzone.Triangles[i], subzone.Triangles[i + 2], subzone.Triangles[i + 1]);
             terrain.Children.Add(new GeometryModel3D(mesh.ToMesh(), material) { BackMaterial = material });
         }
-        terrain.Freeze();
+        if (freeze) terrain.Freeze();
         return terrain;
     }
 

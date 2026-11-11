@@ -200,6 +200,36 @@ public static class GuerrillaMovers
         return (objects, [.. links.SelectMany(l => l)]);
     }
 
+    /// <summary>
+    /// The properties of a new mover standing on its own (no attachments, links or world anchors):
+    /// an rfg_mover (<paramref name="rfgMover"/>) or a general_mover showing object
+    /// <paramref name="uid"/> of chunk file <paramref name="chunk"/> (without extension) at a place,
+    /// unturned, in the order Volition's tools wrote them, with the schema's defaults (Props,
+    /// gameplay_props, Armageddon's switches), the chunk file's destruction checksum and no LOD
+    /// switching (lod_props None). For the level editor's "any chunk": a mover the game's levels
+    /// don't have to copy.
+    /// </summary>
+    public static List<NewProperty> NewMover(ZoneSchema schema, bool rfgMover, string chunk, uint checksum, uint uid, System.Numerics.Vector3 at)
+    {
+        var chunkRef = schema.Class("obj_chunk_ref") ?? throw new InvalidDataException("the schema has no obj_chunk_ref");
+        byte[]? Default(string name) => chunkRef.Property(name)?.DefaultValue();
+        byte[]? Value(string name) => name switch
+        {
+            "chunk_name" => Text(chunk + ".cchk_pc"),
+            "dest_checksum" => BitConverter.GetBytes(checksum),
+            "oP" => Unturned(at),
+            "uid" => BitConverter.GetBytes(uid),
+            "mtype" or "gm_flags" => new byte[4],
+            "game_destroyed_pct" or "world_anchors" or "anchor_data" or "dynamic_links" or "building_type" => null,
+            "lod_props" => Text(GuerrillaLod.Never),
+            _ => Default(name),
+        };
+        var properties = new List<NewProperty>();
+        foreach (string name in rfgMover ? RfgMoverOrder : GeneralMoverOrder)
+            if (Value(name) is { } value) properties.Add(new NewProperty(TypeOf(name), NameHashes.PropertyHash(name), value));
+        return properties;
+    }
+
     /// <summary>A zone file (with no links of its own) with these links as its extra block.</summary>
     public static byte[] WithLinks(byte[] zone, byte[] links)
     {

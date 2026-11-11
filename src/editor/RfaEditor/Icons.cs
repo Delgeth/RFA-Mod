@@ -50,6 +50,7 @@ public static class Icons
     public const string Link = "\uE71B";       // Link: follow the running game
     public const string Settled = "\uE896";    // Download (an arrow down to a line): props where the running game has them
     public const string Display = "\uE7F4";    // A monitor: the Direct3D view
+    public const string Sculpt = "\uE771";     // Personalize (a brush): sculpt the ground
     public const string GameLight = "\uE793";  // A sun (Brightness): light the level as the game does
 
     // Kinds of objects in a level

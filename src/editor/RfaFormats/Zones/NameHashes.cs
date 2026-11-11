@@ -44,7 +44,9 @@ public sealed class ZoneNames
     /// Names that aren't strings in the exe, found by hashing guesses: object_squad_spawn_node is
     /// class 0x1290612D (4,856 objects), the squad spawns, whose squad_def names a squads.xtbl entry.
     /// </summary>
-    static readonly string[] KnownNames = ["object_squad_spawn_node"];
+    static readonly string[] KnownNames = ["object_squad_spawn_node",
+        // The level editor's own: level geometry (stitch pieces) shown as objects while a zone is open, never saved in one.
+        "level_geometry", "stitch_list", "stitch_flags"];
 
     public static ZoneNames Empty { get; } = new([]);
 

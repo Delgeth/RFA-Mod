@@ -91,7 +91,8 @@ sealed class LevelScene
 
     /// <summary>The model an object places (its "chunk_name", a .cchk_pc file), if it places one.</summary>
     public static string? ModelOf(ZoneObject obj) =>
-        obj.Property("chunk_name") is { Type: ZoneProperty.TextType } c && c.Text.EndsWith(".cchk_pc", StringComparison.OrdinalIgnoreCase)
+        obj.Property("chunk_name") is { Type: ZoneProperty.TextType } c &&
+        (c.Text.EndsWith(".cchk_pc", StringComparison.OrdinalIgnoreCase) || c.Text.EndsWith(".cstch_pc", StringComparison.OrdinalIgnoreCase))  // (.cstch_pc: level geometry, see LevelEditor.Geometry.cs)
             ? c.Text : null;
 
     /// <summary>Which object in its model file an object is (its "uid"), or null if it doesn't say.</summary>
@@ -295,6 +296,31 @@ sealed class LevelScene
         if (!pieceOf.TryGetValue(obj, out Model3DGroup? piece)) return;
         (Vector3 p, Matrix4x4 r) = obj.Placement;
         piece.Transform = new MatrixTransform3D(ViewMatrix(p, r));
+    }
+
+    readonly Dictionary<ZoneObject, (Vector3 Min, Vector3 Max)?> localBoxes = [];
+
+    /// <summary>
+    /// The box around an object's own models, in its own space (the game's: x right, y up, z
+    /// forward), however it is turned; null if it isn't drawn with a model. For magnets.
+    /// </summary>
+    public (Vector3 Min, Vector3 Max)? LocalBox(ZoneObject obj)
+    {
+        if (localBoxes.TryGetValue(obj, out var known)) return known;
+        (Vector3 Min, Vector3 Max)? box = null;
+        if (drawnWithModel.Contains(obj) && pieceOf.TryGetValue(obj, out Model3DGroup? piece))
+        {
+            Rect3D all = Rect3D.Empty;
+            foreach (Model3D child in piece.Children)  // (not the piece's own transform: that places it)
+                foreach ((GeometryModel3D geometry, Matrix3D placement) in Placed(child, Matrix3D.Identity))
+                    if (geometry.Geometry is MeshGeometry3D mesh && !mesh.Bounds.IsEmpty)
+                        all.Union(placement.IsIdentity ? mesh.Bounds : new MatrixTransform3D(placement).TransformBounds(mesh.Bounds));
+            // The models' Z is the game's -Z.
+            if (!all.IsEmpty)
+                box = (new Vector3((float)all.X, (float)all.Y, (float)-(all.Z + all.SizeZ)),
+                       new Vector3((float)(all.X + all.SizeX), (float)(all.Y + all.SizeY), (float)-all.Z));
+        }
+        return localBoxes[obj] = box;
     }
 
     /// <summary>A placement in the game's space (rotation rows: right, up, forward) as a WPF transform, Z flipped.</summary>

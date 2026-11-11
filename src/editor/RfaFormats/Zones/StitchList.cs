@@ -63,14 +63,30 @@ public sealed class StitchList
     /// (it checks for none at 0x6B8D10), though every list in the game has at least one piece.
     /// </summary>
     /// <param name="treeCode">The Havok MOPP code (see <see cref="BoxTreeCode"/>); null for no tree.</param>
-    public static byte[] Write(IReadOnlyList<StitchPieceToWrite> pieces, Vector3 zoneMiddle, Vector3 treeFrom, float treeSize, byte[]? treeCode)
+    public static byte[] Write(IReadOnlyList<StitchPieceToWrite> pieces, Vector3 zoneMiddle, Vector3 treeFrom, float treeSize, byte[]? treeCode) =>
+        Write(pieces, null, null, zoneMiddle, treeFrom, treeSize, treeCode);
+
+    /// <summary>
+    /// As <see cref="Write(IReadOnlyList{StitchPieceToWrite}, Vector3, Vector3, float, byte[])"/>, with a
+    /// stitch list's decals kept: <paramref name="textures"/> is its start up to the counts (the
+    /// texture names' size and count at +8 and +0x0C, the names to 4), and <paramref name="decals"/>
+    /// each list's decals as they are (132 bytes each, their textures named by where they start in
+    /// that block), with their counts (+0x6C + 4n) set.
+    /// </summary>
+    static byte[] Write(IReadOnlyList<StitchPieceToWrite> pieces, byte[]? textures, IReadOnlyList<byte[]>? decals,
+                        Vector3 zoneMiddle, Vector3 treeFrom, float treeSize, byte[]? treeCode)
     {
         var stream = new MemoryStream();
         var w = new BinaryWriter(stream);
-        w.Write(Encoding.ASCII.GetBytes("STCH")); w.Write(Version); w.Write(0); w.Write(0);
+        if (textures != null) w.Write(textures);
+        else { w.Write(Encoding.ASCII.GetBytes("STCH")); w.Write(Version); w.Write(0); w.Write(0); }
         var lists = Enumerable.Range(0, ListCount).Select(n => pieces.Where(p => p.List == n).ToList()).ToArray();
         byte[] counts = new byte[HeaderSize];
-        for (int list = 0; list < ListCount; list++) BitConverter.TryWriteBytes(counts.AsSpan(0x24 + list * 4), lists[list].Count);
+        for (int list = 0; list < ListCount; list++)
+        {
+            BitConverter.TryWriteBytes(counts.AsSpan(0x24 + list * 4), lists[list].Count);
+            if (decals != null) BitConverter.TryWriteBytes(counts.AsSpan(0x6C + list * 4), decals[list].Length / DecalSize);
+        }
         w.Write(counts);
         foreach (var list in lists)
         {
@@ -94,6 +110,7 @@ public sealed class StitchList
                 w.Write(p.AreaMin.X); w.Write(p.AreaMin.Y); w.Write(p.AreaMax.X); w.Write(p.AreaMax.Y);
                 w.Write(new byte[16]);
             }
+            if (decals != null) w.Write(decals[Array.IndexOf(lists, list)]);
         }
         foreach (var _ in pieces) w.Write(0);
         if (treeCode == null)
@@ -117,16 +134,46 @@ public sealed class StitchList
     /// tree's leaves follow the pieces as written (list by list), its frame the boxes with a metre to spare.
     /// No pieces: an empty list with no tree.
     /// </summary>
-    public static byte[] Write(IReadOnlyList<StitchPieceToWrite> pieces, Vector3 zoneMiddle, IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes)
+    public static byte[] Write(IReadOnlyList<StitchPieceToWrite> pieces, Vector3 zoneMiddle, IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes) =>
+        Write(pieces, null, null, zoneMiddle, boxes);
+
+    /// <summary>
+    /// A game's stitch list again with these pieces (moved, added, taken away: the level editor's), its
+    /// decals and their texture names kept as they are in <paramref name="original"/>, and a collision
+    /// tree reaching every piece (as <see cref="Write(IReadOnlyList{StitchPieceToWrite}, Vector3, IReadOnlyList{ValueTuple{Vector3, Vector3}})"/>,
+    /// the one tree the Guerrilla builder's lists have; the game's own may have several). The header's
+    /// other counts are 0, as in the lists the builder writes.
+    /// </summary>
+    public static byte[] WriteEdited(byte[] original, IReadOnlyList<StitchPieceToWrite> pieces, Vector3 zoneMiddle, IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes)
+    {
+        if (original.Length < 0x10 || Encoding.ASCII.GetString(original, 0, 4) != "STCH" || BitConverter.ToInt32(original, 4) != Version)
+            throw new InvalidDataException("not a version-11 stitch list");
+        int textureBytes = BitConverter.ToInt32(original, 8);
+        int header = Align4(0x10 + textureBytes);
+        byte[] textures = original[..header];
+        var decals = new byte[ListCount][];
+        int at = header + HeaderSize;
+        for (int list = 0; list < ListCount; list++)
+        {
+            int pieceCount = BitConverter.ToInt32(original, header + 0x24 + list * 4), decalCount = BitConverter.ToInt32(original, header + 0x6C + list * 4);
+            at = Align4(at + 4 + BitConverter.ToInt32(original, at)) + pieceCount * PieceSize;
+            if (at + decalCount * DecalSize > original.Length) throw new InvalidDataException("the stitch list ends early");
+            decals[list] = original[at..(at + decalCount * DecalSize)];
+            at += decalCount * DecalSize;
+        }
+        return Write(pieces, textures, decals, zoneMiddle, boxes);
+    }
+
+    static byte[] Write(IReadOnlyList<StitchPieceToWrite> pieces, byte[]? textures, IReadOnlyList<byte[]>? decals, Vector3 zoneMiddle, IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes)
     {
         if (boxes.Count != pieces.Count) throw new ArgumentException("a box for every piece");
-        if (pieces.Count == 0) return Write(pieces, zoneMiddle, Vector3.Zero, 0, null);
+        if (pieces.Count == 0) return Write(pieces, textures, decals, zoneMiddle, Vector3.Zero, 0, null);
         var order = Enumerable.Range(0, pieces.Count).OrderBy(i => pieces[i].List).ToList();  // stable: as Write lays them out
         var written = order.Select(i => boxes[i]).ToList();
         var min = new Vector3(written.Min(b => b.Min.X), written.Min(b => b.Min.Y), written.Min(b => b.Min.Z)) - Vector3.One;
         var max = new Vector3(written.Max(b => b.Max.X), written.Max(b => b.Max.Y), written.Max(b => b.Max.Z)) + Vector3.One;
         float size = MathF.Max(max.X - min.X, MathF.Max(max.Y - min.Y, max.Z - min.Z));
-        return Write(pieces, zoneMiddle, min, size, TreeCode(written, min, size));
+        return Write(pieces, textures, decals, zoneMiddle, min, size, TreeCode(written, min, size));
     }
 
     /// <summary>A box round a piece's own box (<paramref name="min"/> to <paramref name="max"/>) placed in the world: turned by <paramref name="rotation"/> (rows right, up, forward) and moved to <paramref name="position"/>.</summary>
@@ -250,7 +297,8 @@ public sealed class StitchList
                     Position: Vector(data, at + 0x04),
                     Rotation: Rotation(data, at + 0x10),
                     AreaMin: new Vector2(F32(data, at + 0x44), F32(data, at + 0x48)),
-                    AreaMax: new Vector2(F32(data, at + 0x4C), F32(data, at + 0x50))));
+                    AreaMax: new Vector2(F32(data, at + 0x4C), F32(data, at + 0x50)),
+                    Flags: BitConverter.ToInt32(data, at + 0x34)));
             }
 
             for (int i = 0; i < decalCount; i++, at += DecalSize)
@@ -295,7 +343,8 @@ public sealed class StitchList
 /// <param name="List">Which of the stitch list's nine lists (sub-zones) it is in, 0 to 8.</param>
 /// <param name="Rotation">Rows: right, up and forward directions.</param>
 /// <param name="AreaMin">The area it covers seen from above: x and z.</param>
-public sealed record StitchPiece(string Name, int List, Vector3 Position, Matrix4x4 Rotation, Vector2 AreaMin, Vector2 AreaMax);
+/// <param name="Flags">4 on most of the game's pieces, 0 on the rest.</param>
+public sealed record StitchPiece(string Name, int List, Vector3 Position, Matrix4x4 Rotation, Vector2 AreaMin, Vector2 AreaMax, int Flags = 4);
 
 /// <param name="Texture">Its colour texture, e.g. "prp_dec_trash_di.tga".</param>
 /// <param name="Rotation">Rows: right, up and forward; the decal lies across right and forward, and reaches along up.</param>
