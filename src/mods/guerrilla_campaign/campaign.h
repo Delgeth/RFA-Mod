@@ -29,4 +29,7 @@ void* Player();                          // the local player, or null
 // The game's clock, in milliseconds: it stops while the game is paused.
 int GameTime();
 
+// One of our worlds is being played, with the player in it: the systems run.
+bool Playing();
+
 }  // namespace campaign

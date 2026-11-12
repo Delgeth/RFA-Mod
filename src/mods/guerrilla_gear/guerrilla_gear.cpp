@@ -77,12 +77,26 @@
 // keeps a full magazine and moves the scale × the owner's reserve into the gun, its pickup gives the
 // firing mode's Rounds_On_Pickup instead of the gun's rounds, and its "player ammo pickup" is 1.0 at
 // every difficulty. So, for Guerrilla's guns (player_weapons.txt), the mod runs Guerrilla's step in
-// place of Armageddon's (0x731A10 wrapped: thiscall, the weapon) and remembers the rounds; after the
-// game's pickup (0x7CAE20 wrapped: cdecl, the human, the item, two flags) or its adding the swapped-in
-// gun to the inventory (0x85B3E0 wrapped: cdecl, the human, the item, a slot, three flags) it sets the
-// player's magazine and reserve to them, through the game's own ammo store (0x84E8F0; its reserve
-// 0x70EF40, add 0x70F4F0, take 0x70F650). Guerrilla's difficulty values come from the player's
-// Guerrilla (mods\guerrilla_gear\ammo_pickup.txt), the game's difficulty from 0x10F7E98.
+// place of Armageddon's (0x731A10 wrapped: thiscall, the weapon) and remembers the rounds; the game's
+// pickup (0x7CAE20 wrapped: cdecl, the human, the item, two flags) gives a gun he has its firing mode's
+// Rounds_On_Pickup (mode+0x144, through 0x8A39C0: as much as his reserve holds, shown as "+N"), so for
+// that one call the mod sets it to the dropped gun's rounds: he gets Guerrilla's, and the "+N" says so.
+// A gun he hasn't, into a free slot, and the swapped-in gun (0x85B3E0 wrapped: cdecl, the human, the
+// item, a slot, three flags) get their magazine (the game's setter 0x7310F0, thiscall: the rounds, the
+// mode) and reserve set to them, through the game's own ammo store (0x84E8F0; its reserve 0x70EF40, add
+// 0x70F4F0, take 0x70F650). A gun's magazine is its mode's +0x118 (weapon+0x2E0, what firing takes
+// from, 0x730FB0); +0x134 (weapon+0x2FC) is the rounds a gun lying on the ground carries besides (what
+// Armageddon's own step adds to and its pickup empties, 0x731BB0). Guerrilla's difficulty values come
+// from the player's Guerrilla (mods\guerrilla_gear\ammo_pickup.txt), the game's difficulty from 0x10F7E98.
+//
+// How much ammo he carries: Guerrilla's weapon::get_max_rounds is the weapon's Max_Rounds (the loaded
+// magazine counted in), Max_Rounds_Upgrade once its weapon upgrade is bought to 2 ("... AMMO",
+// upgrade_weapon_has_extra_ammo), × the worn backpack's ammo_factor (from its active abilities while on, else its
+// passive ones: none of Guerrilla's packs has one in either). Armageddon's
+// ammo type holds its Max_Reserve (ammo info +4; +8 in multiplayer) × the store's factor less the rounds
+// loaded in his guns of that type (0x70EB80), so the weapons build writes Max_Rounds there, and the mod
+// sets it to the upgraded number × the pack's factor while they apply (mods\guerrilla_gear\
+// ammo_capacity.txt, from the build; the ammo types by name 0x70FDA0).
 //
 // The player turns to where he walks. Armageddon keeps Darius facing the camera: its heading
 // step (0x84C6D0, cdecl, the human; once a frame for each one on foot) sets the player's turn
@@ -95,8 +109,29 @@
 // sets, on foot, moving (this frame's movement input, 0x11BE7C4 / 0x11BE7C0), not sprinting, not
 // aiming (0x8BB2F0) and not attacking (the attack buttons, 0x4E4800, and 1.5 s after), it lifts the
 // flag from his entry (the entries are one table, 0x21B7538, kept for the whole game) and lets no
-// camera turn through, as the sprint does; aiming, attacking or standing still he faces the camera
-// as before.
+// camera turn through, as the sprint does; aiming or attacking he faces the camera as before.
+// Standing still, Mason doesn't turn either: Guerrilla turns its player (human_set_steering_heading_offset)
+// to the camera while he is combat ready, to where he goes while he moves, and not at all while he
+// stands, so its camera goes round him. Darius does the same in every world (the user: "Darius too").
+// Standing, the flag is lifted too: with it the movement step sets the player's facing to his target,
+// where the camera aims (0x89D58C, 0x868910), every frame. And standing he looks ahead, not round at the
+// camera's aim (his spine, neck and head bent toward it): Guerrilla's player looks the camera's way only
+// while combat ready (see "Standing still, he looks ahead" below).
+//
+// Guerrilla's attacks that hold Mason where he stands. A human carries the action that holds him
+// (human+0x6F0, an action handle; -1 for none) and how (+0x704: 0 his place, 1 his heading, 2 both, as
+// Guerrilla's block_movement_type), set when an attack, throw, equip or landing starts. While that action
+// plays an animation flagged Zero_Input, the player's movement step (0x8BDCF0) takes no input; the game
+// lets go at the animation's "release movement" trigger or its end (0x89E9E0), and moving after that
+// ramps the rest of it out (0x855BE0); a hold of his heading (1) keeps the heading step (0x84C6D0) from
+// turning him to the camera. That is Guerrilla's rule, function for function. Guerrilla's melee start
+// (human_combat_play_combat_move) holds everyone swinging; Armageddon's twin (0x880420, cdecl: the human,
+// the move, two flags) holds a human swinging on the move (the move's "Forward" variant, his heading
+// held on the camera's way) but one standing only if it isn't the player (0x880952), so Mason walked
+// through his standing swings. The mod wraps it and, for the player playing Mason's set, holds him on the
+// melee slot (0x2007) as Guerrilla does. Throws need nothing: Armageddon's throw start (0x8A3FC0) holds
+// everyone as Guerrilla's does (the throw slot; his heading for a throw, both placing or throwing on the
+// move). Each kind of hold Mason is put in is written to the log once ("Held: ...").
 //
 // Room for more projectiles (the user, 2026-11-06: "Yes, enlarge it"). Every projectile type
 // (projectiles.xtbl: Armageddon's 88, its add-on's 3, Guerrilla's thrown and launched weapons' and its
@@ -193,12 +228,15 @@
 #include "guerrilla_gear.h"
 #include <malloc.h>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -579,9 +617,11 @@ AddItemFn g_addItem;
 constexpr DWORD kWeaponInfo = 0x188;          // a weapon -> its weapons.xtbl entry (whose +0 is its name)
 constexpr DWORD kAdjustedOnlyIf = 0x18C;      // Armageddon's adjustment runs only while this is -1
 constexpr DWORD kFiringModeSlot = 0x1C8;      // the weapon's first firing mode slot
-constexpr DWORD kRoundsInMagazine = 0x2FC;    // and its rounds in the magazine
+constexpr DWORD kRoundsInMagazine = 0x2E0;    // and its rounds in the magazine (the slot's +0x118)
 constexpr DWORD kMagazineSize = 0x13E;        // a firing mode's Magazine_Size (2 bytes)
+constexpr DWORD kRoundsOnPickup = 0x144;      // and its Rounds_On_Pickup
 constexpr DWORD kDroppedAmmoScale = 0x148;    // and its Dropped_Ammo_Scale
+auto const SetMagazine = reinterpret_cast<void(__fastcall*)(BYTE* weapon, void* unused, int rounds, int mode)>(0x7310F0);
 constexpr DWORD kInventoryInfo = 0x18;        // a weapon entry -> its inventory item; an inventory item -> its weapon's handle
 constexpr DWORD kDifficulty = 0x10F7E98;      // the game's difficulty: 0 easy, 1 medium, 2 hard, 3 insane
 auto const FiringModeInfo = reinterpret_cast<BYTE*(__fastcall*)(BYTE* slot, void* unused)>(0x42A1C0);
@@ -652,7 +692,7 @@ void __fastcall AdjustDroppedAmmo(BYTE* weapon, void* unused) {
     }
     const int magazineSize = *reinterpret_cast<const WORD*>(mode + kMagazineSize);
     const float scale = *reinterpret_cast<const float*>(mode + kDroppedAmmoScale);
-    int& magazine = *reinterpret_cast<int*>(weapon + kRoundsInMagazine);
+    const int magazine = *reinterpret_cast<const int*>(weapon + kRoundsInMagazine);
     void* ammo = OwnersAmmo(weapon, nullptr);
     const int reserve = ammo ? ReserveRounds(ammo, nullptr, weapon, 0) : 0;
     const int total = static_cast<int>(scale * static_cast<float>(magazine + reserve) * AmmoPickup());
@@ -661,8 +701,7 @@ void __fastcall AdjustDroppedAmmo(BYTE* weapon, void* unused) {
     const int rest = (std::max)(0, total - dropped);
     rfa::Log("Dropped guns: %s dropped by an NPC with %d | %d (it had %d | %d; Guerrilla's: x %.2f, difficulty x %.2f)",
              NameOf(info), dropped, rest, magazine, reserve, scale, AmmoPickup());
-    magazine = dropped;
-    g_droppedGuns[weapon] = {info, dropped, rest};
+    g_droppedGuns[weapon] = {info, dropped, rest};  // given when he picks it up (below)
 }
 
 // The player's reserve of a gun's ammo type set to one value, through the game's own ammo store
@@ -673,10 +712,11 @@ void SetReserve(void* ammo, BYTE* weapon, int now, int wanted) {
 }
 
 // Walking over a gun (items_3d Touch_Script give_item). Armageddon's: a gun the player has gives him
-// its Rounds_On_Pickup as ammo; one he hasn't, with a free slot (0-3), is added as a new gun of his
-// with those rounds; with none, the prompt to swap. Guerrilla's (item_touch_give_item) gives a dropped
+// its Rounds_On_Pickup as ammo (and the "+N" shows it); one he hasn't, with a free slot (0-3), is added
+// as a new gun of his; with none, the prompt to swap. Guerrilla's (item_touch_give_item) gives a dropped
 // gun's own rounds: as ammo if he has the gun, else the gun itself with them. So for one of Guerrilla's
-// guns an NPC dropped, the game's pickup runs and then the rounds are made Guerrilla's.
+// guns an NPC dropped, the game's pickup runs with the gun's rounds as its Rounds_On_Pickup (put back
+// after), and a new gun's magazine and reserve are then made Guerrilla's.
 bool __cdecl GiveItem(BYTE* human, BYTE* item, bool* ask, bool* other) {
     BYTE* player = LocalPlayer();
     const DroppedGun* found = human && human == player && item ? Dropped(item) : nullptr;
@@ -686,22 +726,24 @@ bool __cdecl GiveItem(BYTE* human, BYTE* item, bool* ask, bool* other) {
     void* ammo = HumansAmmo(player, nullptr);
     const bool had = HasItem(player, inventoryInfo) != nullptr;
     const int before = ammo ? ReserveRounds(ammo, nullptr, item, 0) : 0;
+    BYTE* mode = FiringModeInfo(item + kFiringModeSlot, nullptr);
+    int* onPickup = mode ? reinterpret_cast<int*>(mode + kRoundsOnPickup) : nullptr;  // the gun's weapons.xtbl entry's
+    const int ownOnPickup = onPickup ? *onPickup : 0;
+    if (onPickup) *onPickup = had ? drop.magazine + drop.reserve : drop.reserve;
     const bool result = g_giveItem(human, item, ask, other);
+    if (onPickup) *onPickup = ownOnPickup;
     BYTE* held = HasItem(player, inventoryInfo);
     if (!ammo || !held) return result;  // not taken (no free slot: the swap, below)
     const int after = ReserveRounds(ammo, nullptr, item, 0);
     if (had && after == before) return result;  // his reserve is full: nothing given, the gun stays
-    if (had) {
-        SetReserve(ammo, item, after, before);
-        AddRounds(ammo, nullptr, item, 0, drop.magazine + drop.reserve);
-    } else {
+    if (!had) {  // the magazine first: what's loaded counts against what the reserve holds
         BYTE* gun = ObjectFromHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(held + kInventoryInfo));
-        if (gun) *reinterpret_cast<int*>(gun + kRoundsInMagazine) = drop.magazine;
-        SetReserve(ammo, item, after, before);
+        if (gun) SetMagazine(gun, nullptr, drop.magazine, 0);
+        SetReserve(ammo, item, ReserveRounds(ammo, nullptr, item, 0), before);
         AddRounds(ammo, nullptr, item, 0, drop.reserve);
     }
-    rfa::Log("Dropped guns: %s picked up %s: %d | %d (reserve %d before, %d now)", NameOf(drop.info),
-             had ? "as ammo" : "into a free slot", drop.magazine, drop.reserve, before, ReserveRounds(ammo, nullptr, item, 0));
+    rfa::Log("Dropped guns: %s picked up %s: %d | %d (reserve %d before, %d after the game's pickup, %d now)", NameOf(drop.info),
+             had ? "as ammo" : "into a free slot", drop.magazine, drop.reserve, before, after, ReserveRounds(ammo, nullptr, item, 0));
     g_droppedGuns.erase(item);
     return result;
 }
@@ -717,8 +759,8 @@ BYTE* __cdecl AddItem(BYTE* human, BYTE* item, int slot, bool first, bool second
     const int before = ammo ? ReserveRounds(ammo, nullptr, item, 0) : 0;
     BYTE* added = g_addItem(human, item, slot, first, second, third);
     if (!added || !ammo) return added;
+    SetMagazine(item, nullptr, drop.magazine, 0);  // first: what's loaded counts against what the reserve holds
     SetReserve(ammo, item, ReserveRounds(ammo, nullptr, item, 0), before);
-    *reinterpret_cast<int*>(item + kRoundsInMagazine) = drop.magazine;
     AddRounds(ammo, nullptr, item, 0, drop.reserve);
     rfa::Log("Dropped guns: %s swapped in: %d | %d (reserve %d before, %d now)", NameOf(drop.info), drop.magazine, drop.reserve,
              before, ReserveRounds(ammo, nullptr, item, 0));
@@ -739,6 +781,70 @@ void DroppedGuns() {
     else
         rfa::Log("Dropped guns: Guerrilla's rounds for its guns an NPC drops (player ammo pickup %.2f / %.2f / %.2f / %.2f)",
                  g_ammoPickup[0], g_ammoPickup[1], g_ammoPickup[2], g_ammoPickup[3]);
+}
+
+// ---- How much ammo he carries (see the top)
+
+auto const AmmoTypeNamed = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x70FDA0);  // ammo.xtbl's entry (0x40 bytes)
+constexpr DWORD kAmmoMaxReserve = 0x4, kAmmoMaxReserveMp = 0x8;  // an ammo type's Max_Reserve, Max_Reserve_MP
+
+struct AmmoCapacity {
+    std::string weapon, ammo;  // our weapons.xtbl name, its ammo type
+    int max = 0, upgraded = 0; // Guerrilla's Max_Rounds, Max_Rounds_Upgrade (0: none)
+    BYTE* type = nullptr;      // the game's ammo type, once found
+    int set = -1;              // what the mod last made it (-1: not yet)
+    bool wrong = false;        // the type held something else: left alone
+};
+std::vector<AmmoCapacity> g_ammoCapacities;
+ULONGLONG g_nextAmmoCapacity = 0;
+
+void ReadAmmoCapacity() {
+    std::ifstream list(GearFolder() + L"ammo_capacity.txt");
+    std::string line;
+    while (std::getline(list, line)) {
+        std::istringstream fields(line);
+        std::string kind;
+        AmmoCapacity c;
+        if (fields >> kind >> c.weapon >> c.ammo >> c.max >> c.upgraded && kind == "ammo" && c.max > 0) g_ammoCapacities.push_back(c);
+    }
+    if (g_ammoCapacities.empty())
+        rfa::Log("Ammo capacity: no mods\\guerrilla_gear\\ammo_capacity.txt (build Guerrilla's weapons again); the ammo types keep what the build gave them");
+    else
+        rfa::Log("Ammo capacity: Guerrilla's rounds for %zu guns (Max_Rounds; Max_Rounds_Upgrade with the gun's ammo upgrade; x a worn pack's ammo_factor)",
+                 g_ammoCapacities.size());
+}
+
+// Once a second, on the game's thread: each gun's ammo type holds what Guerrilla's get_max_rounds gives.
+// The type's number is written only where it holds the build's (or what the mod set): anything else
+// means the table isn't this build's, and it is left alone.
+void KeepAmmoCapacity() {
+    const ULONGLONG now = GetTickCount64();
+    if (g_ammoCapacities.empty() || now < g_nextAmmoCapacity) return;
+    g_nextAmmoCapacity = now + 1000;
+    const float factor = backpacks::AmmoFactor();
+    for (AmmoCapacity& c : g_ammoCapacities) {
+        if (c.wrong) continue;
+        if (!c.type) c.type = AmmoTypeNamed(c.ammo.c_str());
+        if (!c.type) continue;
+        int& maxReserve = *reinterpret_cast<int*>(c.type + kAmmoMaxReserve);
+        int& maxReserveMp = *reinterpret_cast<int*>(c.type + kAmmoMaxReserveMp);
+        if (maxReserve != c.max && maxReserve != c.set) {
+            rfa::Log("Ammo capacity: %s's ammo type %s holds %d, not the build's %d; left alone (build Guerrilla's weapons again)",
+                     c.weapon.c_str(), c.ammo.c_str(), maxReserve, c.max);
+            c.wrong = true;
+            continue;
+        }
+        const bool extra = c.upgraded > 0 && upgrades::WeaponValue(c.weapon.c_str()) >= 2;
+        const int wanted = static_cast<int>(static_cast<double>(extra ? c.upgraded : c.max) * factor);
+        if (maxReserve == wanted && maxReserveMp == wanted) {
+            c.set = wanted;
+            continue;
+        }
+        rfa::Log("Ammo capacity: %s carries %d rounds (Guerrilla's %s %d%s)", c.weapon.c_str(), wanted,
+                 extra ? "Max_Rounds_Upgrade" : "Max_Rounds", extra ? c.upgraded : c.max,
+                 factor != 1.0f ? (std::string(", x ") + std::to_string(factor).substr(0, 4) + " for the worn pack").c_str() : "");
+        maxReserve = maxReserveMp = c.set = wanted;
+    }
 }
 
 // ---- The player turns to where he walks (see the top)
@@ -768,6 +874,7 @@ constexpr ULONGLONG kFightingMs = 1500;  // after the last attack he keeps facin
 BYTE* g_liftedEntry;        // the character entry whose "always face target" the mod has lifted, if any
 ULONGLONG g_lastAttack;
 const char* g_walkLogged;   // the set last logged walking free
+const char* g_stillLogged;  // the set last logged standing still
 
 bool PlaysSet(const BYTE* human, const char* setName) {
     const BYTE* character = *reinterpret_cast<const BYTE* const*>(human + kCharacterInstance);
@@ -777,18 +884,107 @@ bool PlaysSet(const BYTE* human, const char* setName) {
     return name && _stricmp(name, setName) == 0;
 }
 
-// Whether the player walks free: Darius or Mason, on foot, moving, not sprinting (Armageddon's own
-// sprint already does this), not aiming, and not attacking (nor in the moment after).
-bool WalksFree(BYTE* player) {
-    if (!PlaysSet(player, kDariusSet) && !PlaysSet(player, kMasonSet)) return false;
-    if (*reinterpret_cast<const int*>(player + kOnFootState) != 0) return false;
-    if (*reinterpret_cast<const DWORD*>(player + kPlayerStateFlags) & kSprinting) return false;
+// How the player turns this frame: to the camera (as Armageddon has it), to where he walks, or not at
+// all (standing still).
+enum class Facing { Camera, Walking, Still };
+
+// Darius or Mason, on foot, not sprinting (Armageddon's own sprint already turns him free), not aiming
+// and not attacking (nor in the moment after): moving, he walks free; standing, he stays as he is.
+Facing PlayerFacing(BYTE* player, const char** why) {
+    *why = "not Darius or Mason";
+    const bool mason = PlaysSet(player, kMasonSet);
+    if (!mason && !PlaysSet(player, kDariusSet)) return Facing::Camera;
+    *why = "not on foot";
+    if (*reinterpret_cast<const int*>(player + kOnFootState) != 0) return Facing::Camera;
+    *why = "sprinting";
+    if (*reinterpret_cast<const DWORD*>(player + kPlayerStateFlags) & kSprinting) return Facing::Camera;
     const int controller = *kLocalController;
     const ULONGLONG now = GetTickCount64();
     if (ControlHeld(kPrimaryAttack, controller, 0) || ControlHeld(kAltAttack, controller, 0) || ControlHeld(kMeleeAttack, controller, 0))
         g_lastAttack = now;
-    if (IsFineAiming(player) || now - g_lastAttack < kFightingMs) return false;
-    return (*kMoveInputX) * (*kMoveInputX) + (*kMoveInputY) * (*kMoveInputY) > 0.0001f;
+    *why = "fine aiming";
+    if (IsFineAiming(player)) return Facing::Camera;
+    *why = "an attack button in the last 1.5 s";
+    if (now - g_lastAttack < kFightingMs) return Facing::Camera;
+    *why = "walking";
+    if ((*kMoveInputX) * (*kMoveInputX) + (*kMoveInputY) * (*kMoveInputY) > 0.0001f) return Facing::Walking;
+    *why = "standing still";
+    return Facing::Still;  // Darius too (the user, 2026-11-12: "Darius too")
+}
+
+// ---- Guerrilla's attacks that hold Mason where he stands (see the top)
+
+struct ActionHandle {  // the game's 8-byte action handle: 7 and a slot (0x2000 + n), 1 and an action, or 1, -1
+    int kind;
+    int value;
+};
+constexpr DWORD kHeldBy = 0x6F0;      // human: the action that holds him
+constexpr DWORD kHoldKind = 0x704;    // human: 0 his place, 1 his heading, 2 both
+constexpr int kMeleeSlot = 0x2007;    // the slot melee moves play in
+constexpr int kThrowSlot = 0x2004;    // the slot throws play in
+constexpr DWORD kAnimationFlags = 0x18;  // an animation's flags (anim_files.xtbl Flags)
+constexpr DWORD kZeroInput = 0x10;       // Zero_Input
+auto const SlotHandle = reinterpret_cast<ActionHandle*(__fastcall*)(ActionHandle* self, void* unused, int slot)>(0x98D940);
+auto const HandleIsNot = reinterpret_cast<BOOL(__fastcall*)(const ActionHandle* self, void* unused, int value)>(0x98DAA0);
+auto const AnimationPlaying = reinterpret_cast<int(__cdecl*)(void* animation_state, ActionHandle action)>(0x987570);  // -1: none
+auto const AnimationInfo = reinterpret_cast<const BYTE*(__cdecl*)(int animation)>(0x95DE50);
+
+constexpr DWORD kMeleeStart = 0x880420;
+constexpr size_t kMeleeStartPrologue = 6;  // push ebp / mov ebp,esp / sub esp,5Ch
+using MeleeStartFn = bool(__cdecl*)(BYTE* human, const void* move, bool first, bool second);
+MeleeStartFn g_meleeStart;
+
+bool IsHeld(const BYTE* human) {
+    return HandleIsNot(reinterpret_cast<const ActionHandle*>(human + kHeldBy), nullptr, -1) != FALSE;
+}
+
+bool __cdecl MeleeStart(BYTE* human, const void* move, bool first, bool second) {
+    const bool started = g_meleeStart(human, move, first, second);
+    // Swung on the move the game has held his heading already; standing, the player isn't held at all.
+    if (started && human && human == LocalPlayer() && PlaysSet(human, kMasonSet) && !IsHeld(human))
+        SlotHandle(reinterpret_cast<ActionHandle*>(human + kHeldBy), nullptr, kMeleeSlot);
+    return started;
+}
+
+// Each kind of hold Mason is put in, once a run: the action, how, and whether its animation takes his input.
+constexpr int kMaxHoldLines = 16;
+int g_holdLines;
+ActionHandle g_lastHold = {1, -1};
+int g_holdsLogged[kMaxHoldLines];
+
+void LogHolds(BYTE* player) {
+    if (g_holdLines >= kMaxHoldLines || !PlaysSet(player, kMasonSet)) return;
+    const ActionHandle heldBy = *reinterpret_cast<const ActionHandle*>(player + kHeldBy);
+    if (heldBy.kind == g_lastHold.kind && heldBy.value == g_lastHold.value) return;
+    g_lastHold = heldBy;
+    if (!IsHeld(player)) return;
+    const BYTE* character = *reinterpret_cast<BYTE* const*>(player + kCharacterInstance);
+    void* state = character ? *reinterpret_cast<void* const*>(character + kAnimationState) : nullptr;
+    const int animation = state ? AnimationPlaying(state, heldBy) : -1;
+    const BYTE* info = animation != -1 ? AnimationInfo(animation) : nullptr;
+    const bool zeroInput = info && (*reinterpret_cast<const DWORD*>(info + kAnimationFlags) & kZeroInput);
+    const int how = *reinterpret_cast<const int*>(player + kHoldKind);
+    const int key = (heldBy.value << 4) | ((how & 3) << 1) | (zeroInput ? 1 : 0);
+    for (int i = 0; i < g_holdLines; ++i)
+        if (g_holdsLogged[i] == key) return;
+    g_holdsLogged[g_holdLines++] = key;
+    const char* what = heldBy.value == kMeleeSlot ? "a swing (the melee slot)"
+                     : heldBy.value == kThrowSlot ? "a throw (the throw slot)" : nullptr;
+    char other[32];
+    if (!what) {
+        std::snprintf(other, sizeof other, "the action 0x%X", heldBy.value);
+        what = other;
+    }
+    rfa::Log("Held: %s holds Mason (his %s); its animation %s", what,
+             how == 0 ? "place" : how == 1 ? "heading" : how == 2 ? "place and heading" : "?",
+             !info ? "isn't found" : zeroInput ? "takes his movement input until its release" : "lets him move (no Zero_Input)");
+}
+
+void HeldInPlace() {
+    g_meleeStart = reinterpret_cast<MeleeStartFn>(
+        rfa::HookFunction(kMeleeStart, kMeleeStartPrologue, reinterpret_cast<void*>(&MeleeStart)));
+    if (!g_meleeStart) rfa::Log("Held: could not wrap the melee start; Mason can walk through a standing swing");
+    else rfa::Log("Held: Mason's standing swings hold him where he stands, as Guerrilla's do");
 }
 
 // The camera's look-at bone. A character entry keeps its skeleton's "camera" and "camera-lookat" bones
@@ -812,6 +1008,174 @@ void GiveCameraLookat(BYTE* entry) {
     }
 }
 
+// ---- Why the player turns standing still (a diagnostic: log only, nothing changes)
+//
+// Standing still the mod zeroes the heading step's turn, yet Mason still turned with the camera (the
+// user, 2026-11-12). The rest of a human's turning is the movement step's (0x89D0C0, cdecl: the human;
+// once a frame): it points him along a direction it picks (his steering, human+0x62C, rotated by the
+// heading step's turn; the camera's own way in camera mode 8, 0x11B9C40) and either sets his facing to
+// it or turns him through the stand-turn step (0x89BAD0, cdecl: the human, an angle), which adds the
+// playing animation's own turn (0xD8B700) to the angle. Both are wrapped to measure his heading before
+// and after while he stands still, and the heading step measures what turned him anywhere else.
+constexpr DWORD kMovementStep = 0x89D0C0;
+constexpr size_t kMovementStepPrologue = 9;  // push ebp / mov ebp,esp / sub esp,260h
+constexpr DWORD kStandTurn = 0x89BAD0;
+constexpr size_t kStandTurnPrologue = 6;     // push ebp / mov ebp,esp / sub esp,5Ch
+using MovementStepFn = void(__cdecl*)(BYTE* human);
+using StandTurnFn = void(__cdecl*)(BYTE* human, float angle);
+MovementStepFn g_movementStep;
+StandTurnFn g_standTurn;
+const int* const kCameraMode = reinterpret_cast<const int*>(0x11B9C40);
+constexpr DWORD kSteering = 0x62C;           // human: the way he is steered
+constexpr DWORD kForward = 0x28;             // human: his facing (the orientation's third row)
+constexpr float kRadiansToDegrees = 57.2957795f;
+constexpr float kNoticeableTurn = 0.004f;    // about a quarter of a degree
+constexpr int kMaxStillTurnLines = 24;
+
+bool g_watchingStill;          // the player stands still this frame
+float g_headingAsked;          // the heading step's turn this frame, before the mod zeroes it
+bool g_inMovementStep;
+float g_standTurned, g_standAsked, g_movementTurned;
+float g_lastStillYaw;
+bool g_haveStillYaw;
+int g_stillTurnLines;
+ULONGLONG g_nextStillTurnLog;
+const char* g_lastFacingWhy;
+int g_facingWhyLines;
+
+float Yaw(const BYTE* human) {
+    const float* forward = reinterpret_cast<const float*>(human + kForward);
+    return std::atan2(forward[0], forward[2]);
+}
+
+float Wrapped(float angle) {
+    while (angle > 3.14159265f) angle -= 6.28318531f;
+    while (angle < -3.14159265f) angle += 6.28318531f;
+    return angle;
+}
+
+bool StillTurnLogDue() {
+    const ULONGLONG now = GetTickCount64();
+    if (g_stillTurnLines >= kMaxStillTurnLines || now < g_nextStillTurnLog) return false;
+    g_nextStillTurnLog = now + 400;
+    ++g_stillTurnLines;
+    return true;
+}
+
+void __cdecl StandTurn(BYTE* human, float angle) {
+    if (!g_inMovementStep || !human) {
+        g_standTurn(human, angle);
+        return;
+    }
+    const float before = Yaw(human);
+    g_standTurn(human, angle);
+    g_standTurned += Wrapped(Yaw(human) - before);
+    g_standAsked += angle;
+}
+
+void __cdecl MovementStep(BYTE* human) {
+    if (!g_watchingStill || !human || human != LocalPlayer()) {
+        g_movementStep(human);
+        return;
+    }
+    const float before = Yaw(human);
+    g_standTurned = g_standAsked = 0.0f;
+    g_inMovementStep = true;
+    g_movementStep(human);
+    g_inMovementStep = false;
+    const float turned = Wrapped(Yaw(human) - before);
+    g_movementTurned += turned;
+    if (std::fabs(turned) < kNoticeableTurn || !StillTurnLogDue()) return;
+    const float* steering = reinterpret_cast<const float*>(human + kSteering);
+    rfa::Log("Still turn: %s turned %.1f degrees in the movement step standing still: %.1f in the stand-turn step "
+             "(asked %.1f, so %.1f the animation's own turn), %.1f set by the movement step itself; the heading "
+             "step asked %.1f (zeroed); steering (%.2f, %.2f, %.2f); camera mode %d; held: %s",
+             PlaysSet(human, kMasonSet) ? "Mason" : "Darius", turned * kRadiansToDegrees,
+             g_standTurned * kRadiansToDegrees, g_standAsked * kRadiansToDegrees,
+             (g_standTurned - g_standAsked) * kRadiansToDegrees, (turned - g_standTurned) * kRadiansToDegrees,
+             g_headingAsked * kRadiansToDegrees, steering[0], steering[1], steering[2], *kCameraMode,
+             IsHeld(human) ? "yes" : "no");
+}
+
+// From the heading step, once a frame: says why he faces the camera when he stands without walking
+// free (once for each reason), and what turned him since the last frame outside the movement step.
+void WatchStillFacing(BYTE* player, Facing facing, const char* why) {
+    const bool standing = facing != Facing::Walking;
+    if (standing && why != g_lastFacingWhy && g_facingWhyLines < kMaxStillTurnLines) {
+        g_lastFacingWhy = why;
+        ++g_facingWhyLines;
+        rfa::Log("Still turn: standing, %s %s (%s)", PlaysSet(player, kMasonSet) ? "Mason" : "Darius",
+                 facing == Facing::Still ? "keeps his heading" : "faces the camera", why);
+    }
+    const float yaw = Yaw(player);
+    if (facing == Facing::Still && g_watchingStill && g_haveStillYaw) {
+        const float elsewhere = Wrapped(yaw - g_lastStillYaw - g_movementTurned);
+        if (std::fabs(elsewhere) >= kNoticeableTurn && StillTurnLogDue())
+            rfa::Log("Still turn: %s turned %.1f degrees standing still outside the movement step (camera mode %d)",
+                     PlaysSet(player, kMasonSet) ? "Mason" : "Darius", elsewhere * kRadiansToDegrees, *kCameraMode);
+    }
+    g_watchingStill = facing == Facing::Still;
+    g_lastStillYaw = yaw;
+    g_haveStillYaw = true;
+    g_movementTurned = 0.0f;
+}
+
+void WatchStillTurns() {
+    g_movementStep = reinterpret_cast<MovementStepFn>(
+        rfa::HookFunction(kMovementStep, kMovementStepPrologue, reinterpret_cast<void*>(&MovementStep)));
+    g_standTurn = reinterpret_cast<StandTurnFn>(
+        rfa::HookFunction(kStandTurn, kStandTurnPrologue, reinterpret_cast<void*>(&StandTurn)));
+    if (!g_movementStep || !g_standTurn) rfa::Log("Still turn: could not wrap the movement step; no \"Still turn:\" lines");
+}
+
+// ---- Standing still, he looks ahead
+//
+// Guerrilla's player_do_frame sets Mason's look-at (human_set_look_at_target: his place + a direction x
+// 10000) along the camera's forward (player +0x1250) only while he is combat ready (human_combat's
+// combat_ready_timestamp, human+0x9D4, still running) in its third-person camera, else along his own
+// forward; human_spinebend_pre_process bends his spine, neck and head toward it (through
+// human_get_look_at_vector_from_eye_pos; determine_spinebend_filter: not combat ready, the "head" bones,
+// which in his spinebend.xtbl entry are spine, spine1, spine2, neck and head). So idle he looks ahead.
+// Armageddon's player looks where the camera aims: its spine bend step (in 0x89BC50, at 0x89BD65) and its
+// heading step (0x84CBC6) take the look direction from 0x868700 (cdecl: the human, out: the direction
+// from his eye to what he looks at), so standing still, his feet kept, his torso and head twisted to the
+// camera's aim, up to about 145 degrees: behind him when the camera looked at his front. While he stands
+// still (the heading step's "standing still": Mason or Darius, on foot, not moving, aiming, attacking or
+// sprinting) that direction is his own forward (human+0x28), as Guerrilla's idle Mason's; aiming,
+// attacking or moving, it is the game's as before.
+constexpr DWORD kLookVector = 0x868700;
+constexpr size_t kLookVectorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,4Ch
+using LookVectorFn = void(__cdecl*)(BYTE* human, float* out);
+LookVectorFn g_lookVector;
+const BYTE* g_lookAhead = nullptr;  // the player while the heading step finds him standing still
+ULONGLONG g_lookAheadAt = 0;        // when it last did (a stale one, as in a vehicle, counts for nothing)
+int g_lookAheadLogs = 0;
+
+void __cdecl LookVector(BYTE* human, float* out) {
+    g_lookVector(human, out);
+    if (!human || !out || human != g_lookAhead || GetTickCount64() - g_lookAheadAt > 250) return;
+    const float* forward = reinterpret_cast<const float*>(human + kForward);
+    if (g_lookAheadLogs < 8) {
+        const float length = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+        const float along = length > 0.0f ? (out[0] * forward[0] + out[1] * forward[1] + out[2] * forward[2]) / length : 1.0f;
+        const float degrees = std::acos((std::max)(-1.0f, (std::min)(1.0f, along))) * kRadiansToDegrees;
+        if (degrees >= 30.0f) {
+            ++g_lookAheadLogs;
+            rfa::Log("Look: %s standing still looks ahead, not %.0f degrees round to the camera's aim (Guerrilla: the camera's way only "
+                     "while combat ready)", PlaysSet(human, kMasonSet) ? "Mason" : "Darius", degrees);
+        }
+    }
+    out[0] = forward[0];
+    out[1] = forward[1];
+    out[2] = forward[2];
+}
+
+void LookAheadStill() {
+    g_lookVector = reinterpret_cast<LookVectorFn>(rfa::HookFunction(kLookVector, kLookVectorPrologue, reinterpret_cast<void*>(&LookVector)));
+    if (!g_lookVector) rfa::Log("Look: could not wrap the look direction; standing still, his torso and head still turn to the camera");
+    else rfa::Log("Look: standing still, Mason and Darius look ahead (Guerrilla's: the camera's way only while combat ready)");
+}
+
 void KeepHammer(BYTE* player);  // (Mason's sledgehammer, below)
 void AfterCarriedThrow(BYTE* player);  // (a carried thing thrown, below)
 void LogItemPreload();          // (room for the preloaded items, below)
@@ -832,13 +1196,23 @@ void __cdecl HeadingStep(BYTE* human) {
     AfterCarriedThrow(player);
     upgrades::Step(player);
     backpacks::Step(player);
+    KeepAmmoCapacity();
     KeepHammer(player);
-    const bool free = WalksFree(player);
+    LogHolds(player);
+    const char* why = nullptr;
+    const Facing facing = PlayerFacing(player, &why);
+    WatchStillFacing(player, facing, why);
+    g_lookAhead = facing == Facing::Still ? player : nullptr;  // his look direction (LookVector, above)
+    g_lookAheadAt = GetTickCount64();
+    const bool walking = facing == Facing::Walking;
+    const bool free = facing != Facing::Camera;  // walking free or standing still
     BYTE* entry = *reinterpret_cast<BYTE**>(player + kCharacterEntry);
     if (entry) GiveCameraLookat(entry);
     // Without the flag the movement step (0x89D0C0) turns him toward where he goes, as it turns
-    // Guerrilla's people (and as Guerrilla turned Mason); with it, he keeps his heading. The flag goes
-    // back the moment he stops walking free (or another character is the player).
+    // Guerrilla's people (and as Guerrilla turned Mason), and standing still nothing turns him; with it,
+    // walking he keeps his heading, and standing (entry+0x290 == 1, the player's) it sets his facing to
+    // his target, where the camera aims (0x89D58C, 0x868910). The flag goes back the moment he faces the
+    // camera again (or another character is the player).
     if (g_liftedEntry && (!free || entry != g_liftedEntry)) {
         g_liftedEntry[kEntryFlags] |= kAlwaysFaceTarget;
         g_liftedEntry = nullptr;
@@ -848,13 +1222,21 @@ void __cdecl HeadingStep(BYTE* human) {
         g_liftedEntry = entry;
     }
     g_headingStep(player);
-    // The heading step turns the player to the camera unless he sprints; walking free, he doesn't either.
-    if (free) {
-        *reinterpret_cast<float*>(player + kHeadingOffset) = 0.0f;
+    g_headingAsked = *reinterpret_cast<const float*>(player + kHeadingOffset);
+    // The heading step turns the player to the camera unless he sprints; walking free or standing
+    // still, he doesn't either.
+    if (free) *reinterpret_cast<float*>(player + kHeadingOffset) = 0.0f;
+    if (walking) {
         const char* who = PlaysSet(player, kMasonSet) ? "Mason" : "Darius";
         if (!g_walkLogged || std::strcmp(g_walkLogged, who) != 0) {
             g_walkLogged = who;
             rfa::Log("Movement: %s turns to where he walks and runs (aiming or attacking, to the camera)", who);
+        }
+    } else if (facing == Facing::Still) {
+        const char* who = PlaysSet(player, kMasonSet) ? "Mason" : "Darius";
+        if (!g_stillLogged || std::strcmp(g_stillLogged, who) != 0) {
+            g_stillLogged = who;
+            rfa::Log("Movement: %s standing still doesn't turn with the camera", who);
         }
     }
 }
@@ -1233,6 +1615,22 @@ void gear::Lift(BYTE* player, float climb) {
     SetControllerVelocity(player, &velocity);
     if (BYTE* controller = *reinterpret_cast<BYTE**>(player + kController))
         *reinterpret_cast<float*>(controller + kLastClimb) = velocity.y;
+}
+
+// Guerrilla's apply_jump_boost (RM 0x957190): his controller's velocity, its sideways part x horizontal, its climb
+// max(climb, 2) + vertical going up, climb - vertical going down (Thrust's slam); returns the climb before.
+float gear::JumpBoost(BYTE* player, float horizontal, float vertical, bool up) {
+    if (!player || player[kHasController] != 1) return 0.0f;
+    Vector3 velocity{};
+    ControllerVelocity(player, &velocity);
+    const float before = velocity.y;
+    velocity.x *= horizontal;
+    velocity.z *= horizontal;
+    velocity.y = up ? (std::max)(velocity.y, 2.0f) + vertical : velocity.y - vertical;
+    SetControllerVelocity(player, &velocity);
+    if (BYTE* controller = *reinterpret_cast<BYTE**>(player + kController))
+        *reinterpret_cast<float*>(controller + kLastClimb) = velocity.y;
+    return before;
 }
 
 namespace {
@@ -1716,9 +2114,13 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreTriggerRoom();
     PlayerAnimations();
     DroppedGuns();
+    ReadAmmoCapacity();
     ThrownCarried();
     RedMaterials();
     PlayerMovement();
+    WatchStillTurns();
+    LookAheadStill();
+    HeldInPlace();
     MasonsHammer();
     LogMeleeHits();
     LogHeldSounds();

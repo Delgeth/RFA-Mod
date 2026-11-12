@@ -22,9 +22,11 @@ namespace RfaFormats.Guerrilla;
 ///   - its inventory item (items_inventory.xtbl), Guerrilla's, its name shown as Guerrilla shows it (its
 ///     strings file's text for the tag);
 ///   - an ammo type of its own (ammo.xtbl): Guerrilla's ammo is the weapon's, Armageddon's shared by
-///     weapons naming the same type. Guerrilla's Max_Rounds counts the loaded magazine too (its
-///     weapon::add_ammo keeps the reserve at most Max_Rounds − Magazine_Size), Armageddon's Max_Reserve
-///     doesn't;
+///     weapons naming the same type. Both count the loaded magazine in: Guerrilla's Max_Rounds (its
+///     weapon::add_ammo keeps the reserve at most Max_Rounds − Magazine_Size), Armageddon's Max_Reserve (a
+///     type's reserve holds it less the rounds loaded in the guns using it, 0x70EB80), so Max_Reserve is
+///     Max_Rounds. Its upgraded number (Max_Rounds_Upgrade, once the weapon's upgrade is bought to its
+///     "... AMMO" level) the guerrilla_gear mod sets at run time (<see cref="AmmoCapacityFile"/>);
 ///   - its weapon entry (weapons.xtbl): Guerrilla's flat entry written as Armageddon's one firing mode
 ///     (field by field: Armageddon's own m16 is Guerrilla's, so moved, with the same numbers);
 ///   - what the entry names that both games have under one name but differently (the NPCs' firing
@@ -94,14 +96,16 @@ public static class GuerrillaWeapons
     /// Heal's static models, the others character models with their own skeletons that follow the wearer's
     /// bones, inherit_bone_transforms). Their multiplayer pickup (Touch_Script give_backpack, which Armageddon
     /// hasn't) is left out: they are worn, not lying about.
-    /// Off for now (<see cref="BuildBackpackModels"/>): nothing puts them on Mason yet (Armageddon picks a
-    /// character's props once, at spawn; the run-time attach isn't written), and built they would only take
-    /// 2.7 MB of the item preload pool and 9 skeletons. Turn it on with that attach.
+    /// Armageddon picks a character's props once, at spawn, so guerrilla_gear's backpacks put the worn one on at
+    /// run time, as that code does (backpacks.txt's "wear" lines: Guerrilla's rfg_PC wears the jetpack as
+    /// multi_object_backpack_jetpack with Jetpack_straps). They take about 2.7 MB of the item preload pool and
+    /// 9 skeletons.
     /// </summary>
-    static readonly bool BuildBackpackModels = false;
+    static readonly bool BuildBackpackModels = true;
 
     public static readonly string[] BackpackItems =
     [
+        "multi_object_backpack_jetpack",
         "Kyle_JetPack", "Jetpack_straps", "multi_object_backpack_thrust", "multi_object_backpack_fleetfoot", "multi_object_backpack_stealth",
         "multi_object_backpack_vision", "multi_object_backpack_commando", "multi_object_backpack_shockwave", "multi_object_backpack_heal",
         "multi_object_backpack_rhino", "multi_object_backpack_tremor",
@@ -351,7 +355,54 @@ public static class GuerrillaWeapons
         foreach (var group in Read(guerrillaMisc, MeleeGroupTable).Entries.Concat(Read(guerrillaMisc, BulletGroupTable).Entries))
             foreach (var element in Descendants(group).Where(e => e.Name.Equals("Effect", StringComparison.OrdinalIgnoreCase)))
                 if (element.Value?.Trim() is { Length: > 0 } effect && !effects.Contains(effect, StringComparer.OrdinalIgnoreCase)) effects.Add(effect);
+        // What the worn backpacks play (guerrilla_gear's backpacks.cpp, as Guerrilla's multi_object_backpack does).
+        foreach (string effect in BackpackMedia(guerrillaMisc).Effects)
+            if (!effects.Contains(effect, StringComparer.OrdinalIgnoreCase)) effects.Add(effect);
         return effects;
+    }
+
+    /// <summary>
+    /// The effects, camera shakes and sounds of Guerrilla's ten backpacks the guerrilla_gear mod plays, from its
+    /// mp_backpacks.xtbl (written into backpacks.txt) as parse_backpacks_table reads it: each pack's activatable block
+    /// (its ramp-up's backpack_effects, player_effects and camera_shake; its activation_camera_shake; the loop_effect and
+    /// attack_effect of each of its backpack_effects and player_effects; failed_activation_foley; fuel_refill_foley;
+    /// sfx_alr, an attack-loop-release set of foley_alr.xtbl; its abilities' effects and shakes: the slam-down's
+    /// ground hit, the ripple, the kaboom's and the rhino's shakes, the bullet hit effects) and its pickup_effects (the
+    /// equip sound). The effects go into the world's effect table with their own sounds (the world build; their files
+    /// are in mp_common.vpp_pc, see GuerrillaTextures.EffectArchives); the shakes into camera_shake.xtbl and the foley
+    /// (one-shots; a set's loop as a loop with its stop) into the weapons' sound banks (this build). The fields at the
+    /// top of an entry, which nothing reads, are left out.
+    /// </summary>
+    public static (List<string> Effects, List<string> Shakes, List<(string Cue, bool Looping)> Sounds) BackpackMedia(Packfile guerrillaMisc)
+    {
+        var effects = new List<string>();
+        var shakes = new List<string>();
+        var sounds = new List<(string, bool)>();
+        void Add<T>(List<T> list, T item) { if (!list.Contains(item)) list.Add(item); }
+        if (guerrillaMisc.Find("mp_backpacks.xtbl") is not { } table) return (effects, shakes, sounds);
+        var sets = guerrillaMisc.Find("foley_alr.xtbl") is { } alr
+            ? Read(guerrillaMisc, "foley_alr.xtbl").Entries.ToDictionary(XtblFile.EntryName, e => e, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, XtblElement>(StringComparer.OrdinalIgnoreCase);
+        string[] effectFields = ["loop_effect", "attack_effect", "backpack_effects", "player_effects", "ripple_effect_name",
+                                 "jump_boost_downthrust_ground_hit_effect", "rhino_mover_hit_effect", "replacement_bullet_hit_effect_self",
+                                 "additional_bullet_hit_effect_other", "replacement_bullet_hit_effect_other_player"];
+        foreach (var pack in XtblFile.FromBytes(guerrillaMisc.Read(table)).Entries)
+            foreach (var block in pack.Elements.Where(e => e.Name.Equals("activatable", StringComparison.OrdinalIgnoreCase) ||
+                                                          e.Name.Equals("pickup_effects", StringComparison.OrdinalIgnoreCase)))
+                foreach (var field in Descendants(block).Where(e => !e.Elements.Any() && e.Value?.Trim() is { Length: > 0 } v &&
+                                                                     !v.Equals("False", StringComparison.OrdinalIgnoreCase) && !v.Equals("True", StringComparison.OrdinalIgnoreCase)))
+                {
+                    string name = field.Name, value = field.Value!.Trim();
+                    if (effectFields.Contains(name, StringComparer.OrdinalIgnoreCase)) Add(effects, value);
+                    else if (name.Contains("camera_shake", StringComparison.OrdinalIgnoreCase) && !name.Contains("intensity", StringComparison.OrdinalIgnoreCase) &&
+                             !name.Contains("falloff", StringComparison.OrdinalIgnoreCase)) Add(shakes, value);
+                    else if (name.Equals("failed_activation_foley", StringComparison.OrdinalIgnoreCase) || name.Equals("fuel_refill_foley", StringComparison.OrdinalIgnoreCase))
+                        Add(sounds, (value, false));
+                    else if (name.Equals("sfx_alr", StringComparison.OrdinalIgnoreCase) && sets.TryGetValue(value, out var set))
+                        foreach (var (part, looping) in new[] { ("Near_Attack", false), ("Near_Loop", true), ("Near_Release", false) })
+                            if (Descendant(set, part) is { Length: > 0 } cue) Add(sounds, (cue, looping));
+                }
+        return (effects, shakes, sounds);
     }
 
     /// <summary>
@@ -372,6 +423,9 @@ public static class GuerrillaWeapons
                 foreach (string line in b.BackpackItem(name)) yield return line;
         // The turrets' parts and their guns drawn as the top, as the vehicles part's turrets name them.
         foreach (string line in b.TurretItems(modFolder)) yield return line;
+        // The backpacks' camera shakes (BackpackMedia), which guerrilla_gear plays: into camera_shake.xtbl before it is written.
+        var backpackMedia = BackpackMedia(Packfile.Open(Path.Combine(guerrilla, "build", "pc", "cache", "misc.vpp_pc")));
+        foreach (string line in b.BackpackShakes(backpackMedia.Shakes)) yield return line;
 
         string cache = Path.Combine(overrides, "build", "pc", "cache");
         Directory.CreateDirectory(cache);
@@ -398,6 +452,13 @@ public static class GuerrillaWeapons
         var otherEvents = OtherPartsEvents(overrides, modFolder);
         foreach (string line in GuerrillaPlayerAnimations.Build(guerrilla, game, overrides, modFolder, GearFolder(modFolder), b.PlayerWeapons,
                                                                 (cue, looping) => b.AnimationSound(cue, looping, otherEvents))) yield return line;
+        // And the ladder slide's two, which Guerrilla's code plays (see GuerrillaLadders.SlideCues), with them.
+        foreach (var (cue, looping) in GuerrillaLadders.SlideCues) b.AnimationSound(cue, looping, otherEvents);
+        // And the backpacks' foley (BackpackMedia), which guerrilla_gear plays (their camera shakes: above, with the tables).
+        var packSounds = new List<string>();
+        foreach (var (cue, looping) in backpackMedia.Sounds)
+            packSounds.Add(b.AnimationSound(cue, looping, otherEvents) is { } foley ? foley + (looping ? " (a loop)" : "") : $"{cue} (not in Guerrilla's files: left out)");
+        yield return $"backpacks: {packSounds.Count} sounds: {string.Join(", ", packSounds)}";
         foreach (string line in b.HitGroupLines) yield return line;
         // The sounds, the guns' and their animations': Guerrilla's cues as banks of Armageddon's kind (rfgw_<Guerrilla's bank>), listed for the game.
         foreach (string line in b.Sounds.Log.Distinct()) yield return $"sounds: {line}";
@@ -406,6 +467,10 @@ public static class GuerrillaWeapons
             yield return $"sounds: the player's animations' cues Guerrilla's files haven't (left out): {string.Join(", ", b.AnimationSoundsLeft)}";
         // What Guerrilla scales the rounds of a gun an NPC drops by, at each difficulty (guerrilla_gear's dropped guns).
         yield return WriteAmmoPickup(guerrilla, GearFolder(modFolder));
+        // How many rounds each gun holds, and with its ammo upgrade (guerrilla_gear's ammo capacity).
+        File.WriteAllLines(Path.Combine(GearFolder(modFolder), AmmoCapacityFile),
+                           ["# Guerrilla's Max_Rounds and Max_Rounds_Upgrade (0: none) for the guerrilla_gear mod: ammo <weapon> <ammo type> <max> <upgraded>", .. b.AmmoCapacities]);
+        yield return $"ammo capacity: {b.AmmoCapacities.Count} guns' Max_Rounds (the ammo types' Max_Reserve) and upgraded numbers in {Path.Combine(GearFolder(modFolder), AmmoCapacityFile)}";
         // Guerrilla's upgrades (guerrilla_gear's F7 window), naming the weapons as this build did.
         var armageddonWeapons = Read(Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc")), "weapons.xtbl");
         var made = b.Tables.First(t => t.File == "weapons.xtbl").Table.Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -486,6 +551,14 @@ public static class GuerrillaWeapons
     /// </summary>
     public const string AmmoPickupFile = "ammo_pickup.txt";
 
+    /// <summary>
+    /// The file the guerrilla_gear mod reads each built gun's rounds from (weapon::get_max_rounds): Guerrilla's
+    /// Max_Rounds (the ammo type's Max_Reserve as built) and Max_Rounds_Upgrade (in effect once the gun's weapon
+    /// upgrade is bought to 2, upgrade_weapon_has_extra_ammo; 0 for a gun without), both × a worn backpack's
+    /// ammo_factor. "ammo &lt;weapon&gt; &lt;ammo type&gt; &lt;max&gt; &lt;upgraded&gt;" a line.
+    /// </summary>
+    public const string AmmoCapacityFile = "ammo_capacity.txt";
+
     static string WriteAmmoPickup(string guerrilla, string gearFolder)
     {
         var misc = Packfile.Open(Path.Combine(guerrilla, "build", "pc", "cache", "misc.vpp_pc"));
@@ -538,6 +611,8 @@ public static class GuerrillaWeapons
         }
         string ammoPickup = Path.Combine(GearFolder(modFolder), AmmoPickupFile);
         if (File.Exists(ammoPickup)) { File.Delete(ammoPickup); yield return $"Deleted {ammoPickup}"; }
+        string ammoCapacity = Path.Combine(GearFolder(modFolder), AmmoCapacityFile);
+        if (File.Exists(ammoCapacity)) { File.Delete(ammoCapacity); yield return $"Deleted {ammoCapacity}"; }
     }
 
     /// <summary>The work of one Build: both games' files, the tables being written and what has been made.</summary>
@@ -620,6 +695,7 @@ public static class GuerrillaWeapons
         public readonly GuerrillaSoundBanks Sounds;
         public readonly List<string> Built = [];
         public readonly List<GuerrillaPlayerAnimations.PlayerWeapon> PlayerWeapons = [];  // the guns built and their animation groups
+        public readonly List<string> AmmoCapacities = [];  // the lines of AmmoCapacityFile
         public IEnumerable<(string File, XtblFile Table)> Tables =>
             [("weapons.xtbl", weapons), ("items_3d.xtbl", items), ("items_inventory.xtbl", inventory), ("ammo.xtbl", ammo),
              ("weapon_firing_patterns.xtbl", patterns), ("aim_drift.xtbl", drift), ("camera_shake.xtbl", gameShakes), ("projectiles.xtbl", projectiles),
@@ -758,7 +834,9 @@ public static class GuerrillaWeapons
 
             int magazine = Int(g, "Magazine_Size"), maxRounds = Int(g, "Max_Rounds"), restock = Int(g, "Ammo_Box_Restock"), magazines = Int(g, "Num_Magazines");
             // A melee weapon (the sledgehammer, the gutter) uses no ammo (as Armageddon's own sledgehammer).
-            string? ammoType = melee ? null : AmmoType(Ours(ours, ammo), Math.Max(0, maxRounds - magazine), restock);
+            string? ammoType = melee ? null : AmmoType(Ours(ours, ammo), Math.Max(0, maxRounds), restock);
+            if (ammoType != null && !TurretWeapons.Contains(name, StringComparer.OrdinalIgnoreCase))
+                AmmoCapacities.Add($"ammo\t{ours}\t{ammoType}\t{Math.Max(0, maxRounds)}\t{Math.Max(0, Int(g, "Max_Rounds_Upgrade"))}");
             string? pattern = Support(g.ValueOf("NPC_Firing_Pattern"), rfgPatterns, patterns, "Firing_Pattern", notes);
             string? aimDrift = Support(g.ValueOf("NPC_Aim_Drift"), rfgDrift, drift, "Profile", notes);
             var entry = WeaponEntry(g, ours, id, item, inventoryItem, ammoType, Math.Max(0, magazines - 1) * magazine, pattern, aimDrift, projectile, notes);
@@ -2126,6 +2204,18 @@ public static class GuerrillaWeapons
             ourTable.Table!.AddElement(entry);
             notes.Add($"{tag} {name}: Guerrilla's, added as {ours}");
             return supportDone[key] = ours;
+        }
+
+        /// <summary>The backpacks' camera shakes (<see cref="GuerrillaWeapons.BackpackMedia"/>) in our camera_shake.xtbl, as a weapon's are.</summary>
+        public IEnumerable<string> BackpackShakes(IEnumerable<string> shakes)
+        {
+            var lines = new List<string>();
+            foreach (string shake in shakes)
+            {
+                string? ours = Support(shake, rfgShakes, gameShakes, "Camera_Shake", lines);
+                lines.Add(ours != null ? $"backpacks: the camera shake {shake} as {ours}" : $"backpacks: the camera shake {shake}: left out");
+            }
+            return lines;
         }
 
         /// <summary>The effect a weapon's field names, as the world's tables have it ("rfg_" + Guerrilla's), or null (noted) if the world built hasn't it.</summary>

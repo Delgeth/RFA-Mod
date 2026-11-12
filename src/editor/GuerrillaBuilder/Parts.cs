@@ -7,7 +7,7 @@ using RfaFormats.Interface;
 namespace GuerrillaBuilder;
 
 /// <summary>What the builder makes, in the order it makes them: each part may use what the ones before it wrote.</summary>
-enum Part { World, Hud, Vehicles, Weapons, People }
+enum Part { World, Hud, Vehicles, Weapons, People, Cloth }
 
 enum State { NotBuilt, Built, BuildAgain }
 
@@ -95,6 +95,7 @@ static class Parts
         Part.Vehicles => "Guerrilla's vehicles, to spawn and drive.",
         Part.Weapons => "Guerrilla's guns (the ones ported so far), to spawn and use.",
         Part.People => "Guerrilla's EDF soldiers, and their patrols in the world.",
+        Part.Cloth => "Guerrilla's cloth: Mason's coat swings as he moves and blows in the wind.",
         _ => "",
     };
 
@@ -105,6 +106,8 @@ static class Parts
         Part.Vehicles or Part.Weapons => [Part.World],
         // The soldiers carry Guerrilla's guns.
         Part.People => [Part.World, Part.Weapons],
+        // The cloth is worn by the people's props (Mason's coat).
+        Part.Cloth => [Part.People],
         _ => [],
     };
 
@@ -114,6 +117,7 @@ static class Parts
         // Everything else names the world's tables (its effects, explosions and texture room).
         Part.World => [Part.Hud, Part.Vehicles, Part.Weapons, Part.People],
         Part.Weapons => [Part.People],
+        Part.People => [Part.Cloth],
         _ => [],
     };
 
@@ -125,6 +129,7 @@ static class Parts
         Part.Vehicles => Path.Combine(setup.WorldFolder, GuerrillaArsenal.Table),
         Part.Weapons => Path.Combine(setup.Overrides, GuerrillaWeapons.ItemList),
         Part.People => Path.Combine(setup.PeopleFolder, GuerrillaPeople.PeopleList),
+        Part.Cloth => Path.Combine(setup.Overrides, GuerrillaCloth.AssetList),
         _ => throw new ArgumentOutOfRangeException(nameof(part)),
     };
 
@@ -240,6 +245,9 @@ static class Parts
                     foreach (string line in GuerrillaCampaign.Build(guerrilla, setup.CampaignFolder)) log.Line(line);
                     usedOptions = options.Characters is { } characters ? string.Join(",", characters) : "";
                     break;
+                case Part.Cloth:
+                    foreach (string line in GuerrillaCloth.Build(guerrilla, game, setup.Overrides)) log.Line(line);
+                    break;
             }
         }
         catch (Exception error)
@@ -315,6 +323,7 @@ static class Parts
                     Part.Weapons => GuerrillaWeapons.Remove(setup.Game!, setup.Overrides, setup.WorldFolder),
                     Part.People => GuerrillaPeople.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, setup.PeopleFolder)
                         .Concat(GuerrillaCampaign.Remove(setup.CampaignFolder)),
+                    Part.Cloth => GuerrillaCloth.Remove(setup.Game!, setup.Overrides),
                     _ => [],
                 };
                 int count = 0;
@@ -368,7 +377,7 @@ static class Parts
             files.AddRange(Directory.EnumerateFiles(cache, "gw_*.fxo_pc_dx11"));
         }
         foreach (string table in new[] { "gameplay_properties.xtbl", "lod_properties.xtbl", "glass.xtbl", "vfx.xtbl", "effects.xtbl",
-                                         "level_objects.xtbl", "explosions.xtbl", GuerrillaMaterialEvents.FileName, "clouds.bin", "stars.bin", "corona.bin", GuerrillaWorld.StampFile,
+                                         "level_objects.xtbl", "explosions.xtbl", "explosions_armageddon_cuts.xtbl", GuerrillaMaterialEvents.FileName, "clouds.bin", "stars.bin", "corona.bin", GuerrillaWorld.StampFile,
                                          GuerrillaSquads.PlacedList })
             files.Add(Path.Combine(setup.WorldFolder, table));
         if (Directory.Exists(setup.WorldFolder))
@@ -378,8 +387,13 @@ static class Parts
             File.Delete(file);
             yield return $"Deleted {file}";
         }
+        // Its people's footsteps: their rows out of the mod's footsteps.xtbl (the vehicles' rows are in it too).
+        GuerrillaFootsteps.Remove(setup.WorldFolder);
         // Its effects' sounds: their banks, table rows and stop events.
         foreach (string line in GuerrillaSoundBanks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, GuerrillaWorld.EffectSoundPart)) yield return line;
+        // Its music (so far the format test's bank and list).
+        foreach (string line in GuerrillaSoundBanks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, GuerrillaMusic.Part)) yield return line;
+        if (File.Exists(Path.Combine(setup.WorldFolder, GuerrillaMusic.TestList))) File.Delete(Path.Combine(setup.WorldFolder, GuerrillaMusic.TestList));
     }
 
     /// <summary>

@@ -40,7 +40,9 @@ $parts = @(
     @{ From = 'docs\renderer-plan.md';         To = 'docs\renderer-plan.md' },
     @{ From = 'docs\third-party-notices.txt';  To = 'docs\third-party-notices.txt' },
     # The GPL asks that its text travels with the programs.
-    @{ From = 'LICENSE';                To = 'LICENSE.txt' }
+    @{ From = 'LICENSE';                To = 'LICENSE.txt' },
+    # The permission added to it for the editor's docking library, which is under another licence.
+    @{ From = 'LICENSE-exception.txt';  To = 'LICENSE-exception.txt' }
 )
 # Our own mods only (those built from src\mods\<name>\, which holds <name>.cpp and perhaps more
 # source files): bin\mods may also hold mods others made with the framework, which aren't ours to

@@ -37,6 +37,9 @@ public sealed class GuerrillaSounds
         ReadCues(sounds.Read(sounds.Find("foley.aud_pc") ?? throw new InvalidDataException("no foley.aud_pc in sounds_r.vpp_pc")));
     }
 
+    /// <summary>A file of Guerrilla's sound archive by name (a music score, .mtbl), or null.</summary>
+    public byte[]? ReadFile(string name) => sounds.Find(name) is { } file ? sounds.Read(file) : null;
+
     /// <summary>The CRC-32 Guerrilla finds cues by (of the name as written) and banks (of the lower-case name).</summary>
     public static uint Crc(string text)
     {
@@ -74,7 +77,11 @@ public sealed class GuerrillaSounds
     /// random (<see cref="Picks"/>); its volume (the sound's and its track's, in dB) and pitch (in cents).
     /// The cue's own volume (<see cref="Cue.Volume"/>, a gain) and loop count come on top.
     /// </summary>
-    public sealed record Sound(IReadOnlyList<(string Bank, int Wave)> Waves, bool Picks, float VolumeDb, float PitchCents);
+    /// <param name="Also">
+    /// The sound's other tracks, played at once with this, its first (each with its own waves and volume; Guerrilla
+    /// has one such sound, a Marauder's step with his gear), or null.
+    /// </param>
+    public sealed record Sound(IReadOnlyList<(string Bank, int Wave)> Waves, bool Picks, float VolumeDb, float PitchCents, IReadOnlyList<Sound>? Also = null);
 
     /// <summary>What a cue plays (it must be in <paramref name="soundBank"/>, as foley_*.xtbl names it).</summary>
     public Sound SoundOf(Cue cue, string soundBank)
@@ -133,7 +140,7 @@ public sealed class GuerrillaSounds
     /// count, then each its info (type &amp; 0x1F), a random offset (2 bytes), 1 byte, then by type: 1 (play a
     /// wave) or 4 (with variation): flags, wave (2 bytes), wave bank, loop count, ...; 3 (play one of several):
     /// flags, loop count, pan (4 bytes), the waves' count (2), the variation type (2), 4 bytes, then each wave
-    /// (2), wave bank, its weight's range (2). Guerrilla's vehicles' sounds all have one track of one event.
+    /// (2), wave bank, its weight's range (2). Guerrilla's sounds have one track of one event, but for one of two tracks.
     /// </summary>
     sealed class Xsb(byte[] b)
     {
@@ -159,9 +166,16 @@ public sealed class GuerrillaSounds
             int tracks = b[o++];
             if ((flags & 0x0E) != 0) o += BitConverter.ToUInt16(b, o);
             if ((flags & 0x10) != 0) o += 3 + 4 * b[o + 2];
-            if (tracks != 1) throw new NotSupportedException($"sound at {at}: {tracks} tracks at once (not read yet)");
-            volume += XactDecibels(b[o]);
-            int e = BitConverter.ToInt32(b, o + 1);
+            if (tracks < 1) throw new InvalidDataException($"sound at {at}: no track");
+            // Its tracks (9 bytes each: volume, its events' offset, a filter) play at once: the first is the sound, the others come with it.
+            var all = new List<Sound>();
+            for (int t = 0; t < tracks; t++, o += 9) all.Add(Track(at, volume + XactDecibels(b[o]), pitch, BitConverter.ToInt32(b, o + 1)));
+            return all.Count == 1 ? all[0] : all[0] with { Also = all.Skip(1).ToList() };
+        }
+
+        // One track's one event: a wave, or one of several.
+        Sound Track(int at, float volume, float pitch, int e)
+        {
             if (b[e] != 1) throw new NotSupportedException($"sound at {at}: {b[e]} events (one read)");
             e++;
             int type = (int)(BitConverter.ToUInt32(b, e) & 0x1F);
@@ -223,6 +237,111 @@ public sealed class GuerrillaSounds
             if (loops && (loopStart + loopLength) * channels <= samples.Length) samples = samples[..((loopStart + loopLength) * channels)];
             return new Wave(bank, index, samples, channels, rate, loops, loops && loopStart * channels < samples.Length ? loopStart : 0);
         }
+    }
+}
+
+/// <summary>
+/// Wwise's ADPCM as Armageddon's sound engine reads it, from its own code (the publicbeta exe): the block decoder
+/// 0xEC0DE0 and its tables (0x10AE320 the 89 steps, 0x10AE300 the 16 index changes: the standard IMA ones). A block
+/// is 36 bytes for 64 samples of one channel: the first sample (16 bits), the step's index (a byte), a byte unused,
+/// then 63 codes of 4 bits, the low half of each byte first (the last byte's high half unused). A code changes the
+/// sample by step × (2 × its low three bits + 1) / 8, down if its top bit is set, kept within 16 bits; then the
+/// index moves by the table, kept within 0 to 88. The channels' blocks follow each other (stereo: left's 36 bytes,
+/// right's 36), and a file's length in samples is its data's × 64 / its block align.
+/// Wwise's source factory (0xEB0470) makes the ADPCM sources for codec 2 itself, as it does PCM's for codec 1 (a
+/// streamed one 0xEBE750, one in a bank 0xEBDEE0); only other codecs (Vorbis) are plug-ins that must be registered.
+/// </summary>
+public static class WwiseAdpcm
+{
+    public const int BlockBytes = 36, BlockSamples = 64;
+
+    static readonly short[] Steps =
+    [
+        7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173,
+        190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+        2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818,
+        18500, 20350, 22385, 24623, 27086, 29794, 32767,
+    ];
+    static readonly sbyte[] IndexChanges = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+
+    /// <summary>What a code does to the sample and the index, as the game's decoder has it.</summary>
+    static void Apply(int code, ref int sample, ref int index)
+    {
+        int change = Steps[index] * (2 * (code & 7) + 1) / 8;
+        sample = Math.Clamp((code & 8) != 0 ? sample - change : sample + change, short.MinValue, short.MaxValue);
+        index = Math.Clamp(index + IndexChanges[code], 0, 88);
+    }
+
+    /// <summary>
+    /// 16-bit samples (channels interleaved) as blocks; the last block is filled with the last sample. Each code is
+    /// the nearer of the two the difference lies between, by what the decoder would make of it.
+    /// </summary>
+    public static byte[] Encode(short[] samples, int channels)
+    {
+        int frames = samples.Length / channels, blocks = (frames + BlockSamples - 1) / BlockSamples;
+        var data = new byte[blocks * BlockBytes * channels];
+        for (int c = 0; c < channels; c++)
+        {
+            short At(int frame) => samples[Math.Min(frame, frames - 1) * channels + c];
+            // The first block's step: the first one not smaller than the first difference.
+            int index = frames > 1 ? Math.Min(88, Array.FindIndex(Steps, s => s >= Math.Abs(At(1) - At(0)))) : 0;
+            if (index < 0) index = 88;
+            for (int b = 0; b < blocks; b++)
+            {
+                int at = (b * channels + c) * BlockBytes, first = b * BlockSamples, sample = At(first);
+                BitConverter.TryWriteBytes(data.AsSpan(at), (short)sample);
+                data[at + 2] = (byte)index;
+                for (int n = 1; n < BlockSamples; n++)
+                {
+                    int target = At(first + n), difference = target - sample, sign = difference < 0 ? 8 : 0;
+                    int low = Math.Min(7, Math.Abs(difference) * 4 / Steps[index]), code = low | sign;
+                    if (low < 7)
+                    {
+                        int a = sample, ai = index, bSample = sample, bi = index;
+                        Apply(low | sign, ref a, ref ai);
+                        Apply((low + 1) | sign, ref bSample, ref bi);
+                        if (Math.Abs(target - bSample) < Math.Abs(target - a)) code = (low + 1) | sign;
+                    }
+                    Apply(code, ref sample, ref index);
+                    int place = at + 4 + (n - 1) / 2;
+                    data[place] |= (byte)((n - 1) % 2 == 0 ? code : code << 4);
+                }
+            }
+        }
+        return data;
+    }
+
+    /// <summary>The blocks as samples again, step for step as the game's decoder (for checking what was encoded).</summary>
+    public static short[] Decode(byte[] data, int channels)
+    {
+        int blocks = data.Length / (BlockBytes * channels);
+        var samples = new short[blocks * BlockSamples * channels];
+        for (int b = 0; b < blocks; b++)
+            for (int c = 0; c < channels; c++)
+            {
+                int at = (b * channels + c) * BlockBytes, sample = BitConverter.ToInt16(data, at), index = Math.Min((int)data[at + 2], 88);
+                int to = b * BlockSamples * channels + c;
+                samples[to] = (short)sample;
+                for (int n = 1; n < BlockSamples; n++)
+                {
+                    int both = data[at + 4 + (n - 1) / 2];
+                    Apply((n - 1) % 2 == 0 ? both & 15 : both >> 4, ref sample, ref index);
+                    samples[to + n * channels] = (short)sample;
+                }
+            }
+        return samples;
+    }
+
+    /// <summary>How close the decoded samples are to the first ones: signal over error, in dB.</summary>
+    public static double SignalToError(short[] samples, short[] decoded)
+    {
+        double signal = 0, error = 0;
+        for (int i = 0; i < samples.Length && i < decoded.Length; i++)
+        {
+            signal += (double)samples[i] * samples[i];
+            error += (double)(samples[i] - decoded[i]) * (samples[i] - decoded[i]);
+        }
+        return error == 0 ? 120 : signal == 0 ? 0 : 10 * Math.Log10(signal / error);
     }
 }
 
@@ -292,6 +411,19 @@ public sealed class WwiseBankWriter
 {
     const int BankVersion = 48;
     const uint PcmPlugin = 0x00010001;  // Wwise's PCM codec (Armageddon's own media are Vorbis, 0x00040001)
+    const uint AdpcmPlugin = 0x00020001;  // its ADPCM codec (built in as PCM's is: see WwiseAdpcm)
+
+    /// <summary>
+    /// The bank's media are Wwise ADPCM (a quarter of the uncompressed sound's bytes) and its sounds name that
+    /// codec. Not for a looping wave yet (its loop would have to lie on blocks of 64 samples).
+    /// </summary>
+    public bool Adpcm { get; init; }
+
+    /// <summary>For an ADPCM bank: how close its media decode to the waves they were made of (dB), the worst and the sum, and how many.</summary>
+    public (double Worst, double Sum, int Count) AdpcmCheck { get; private set; } = (double.MaxValue, 0, 0);
+
+    /// <summary>The bytes the bank's waves are as uncompressed 16-bit sound, and as written.</summary>
+    public (long Pcm, long Written) MediaBytes { get; private set; }
 
     /// <summary>
     /// Armageddon's bus (in init.bnk_pc) for its walkers' and flyers' sounds: −4 dB, −8 dB with its parents', and no
@@ -412,9 +544,40 @@ public sealed class WwiseBankWriter
     /// <summary>A wave as a medium (once), by its id.</summary>
     public uint Medium(GuerrillaSounds.Wave wave)
     {
-        uint id = Id($"rfg_media:{wave.Bank}:{wave.Index}");
-        if (!media.ContainsKey(id)) media[id] = PcmWem(wave);
+        uint id = Id($"{(Adpcm ? "rfg_media_adpcm" : "rfg_media")}:{wave.Bank}:{wave.Index}");
+        if (!media.ContainsKey(id))
+        {
+            media[id] = Adpcm ? AdpcmWem(wave) : PcmWem(wave);
+            MediaBytes = (MediaBytes.Pcm + wave.Samples.Length * 2L, MediaBytes.Written + media[id].Length);
+        }
         return id;
+    }
+
+    /// <summary>
+    /// A Wwise ADPCM .wem as Armageddon's parser takes it (0xEC00F0 the chunks, 0xEBEB30 the ADPCM source's reading
+    /// of the format: 24 bytes, tag 2, the channels, rate and block align, the channels' mask at +20; the length is
+    /// the data's × 64 / the block align): RIFF/WAVE, fmt, a 4-byte JUNK as the PCM ones have, data.
+    /// </summary>
+    byte[] AdpcmWem(GuerrillaSounds.Wave wave)
+    {
+        // (A wave's own loop isn't written: Guerrilla's music waves all name their whole length as one, which only
+        // gives their exact length; a sound that is to loop is refused where it is made, see Sound.)
+        int channels = wave.Channels, align = WwiseAdpcm.BlockBytes * channels;
+        byte[] data = WwiseAdpcm.Encode(wave.Samples, channels);
+        double close = WwiseAdpcm.SignalToError(wave.Samples, WwiseAdpcm.Decode(data, channels));
+        AdpcmCheck = (Math.Min(AdpcmCheck.Worst, close), AdpcmCheck.Sum + close, AdpcmCheck.Count + 1);
+        var w = new List<byte>();
+        void U32(int v) => w.AddRange(BitConverter.GetBytes(v));
+        void U16(int v) => w.AddRange(BitConverter.GetBytes((ushort)v));
+        w.AddRange(Encoding.ASCII.GetBytes("RIFF")); U32(4 + 8 + 24 + 8 + 4 + 8 + data.Length);
+        w.AddRange(Encoding.ASCII.GetBytes("WAVE"));
+        w.AddRange(Encoding.ASCII.GetBytes("fmt ")); U32(24);
+        U16(2); U16(channels); U32(wave.Rate); U32(wave.Rate * align / WwiseAdpcm.BlockSamples); U16(align); U16(4);
+        U16(6); U16(WwiseAdpcm.BlockSamples); U32(channels == 1 ? 4 : channels == 2 ? 3 : (1 << channels) - 1);
+        w.AddRange(Encoding.ASCII.GetBytes("JUNK")); U32(4); U32(0);
+        w.AddRange(Encoding.ASCII.GetBytes("data")); U32(data.Length);
+        w.AddRange(data);
+        return [.. w];
     }
 
     /// <summary>An attenuation: volume (dB) against distance (m), no cone, low-pass or spread.</summary>
@@ -439,8 +602,9 @@ public sealed class WwiseBankWriter
     {
         uint id = ObjectId("sound:" + key);
         if (taken.Contains(id)) return id;
+        if (Adpcm && loops) throw new NotSupportedException($"{name}: a looping sound in an ADPCM bank (not written yet)");
         var w = new Writer();
-        w.U32(PcmPlugin);
+        w.U32(Adpcm ? AdpcmPlugin : PcmPlugin);
         w.U32(1);          // streamed
         w.U32(medium);     // the source
         w.U32(medium);     // its file

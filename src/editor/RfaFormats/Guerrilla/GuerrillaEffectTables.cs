@@ -94,6 +94,9 @@ public static class GuerrillaEffectTables
                                 int VisualsAdded, int EffectsAdded, int ExplosionsAdded, IReadOnlyList<string> VisualsLeft, IReadOnlyList<string> ExplosionsWaiting,
                                 IReadOnlyList<string> ExplosionsLeft)
     {
+        /// <summary>The explosions again, cutting buildings by Armageddon's explosion of the same name rather than by Guerrilla's own fields (see <see cref="ExplosionEntry"/>).</summary>
+        public byte[] ExplosionsArmageddonCuts { get; init; } = [];
+
         /// <summary>How many of the added effects have a sound; how many have a sound alone; the cues of added effects that couldn't be had.</summary>
         public int SoundsAdded { get; init; }
         public int SoundOnly { get; init; }
@@ -121,7 +124,7 @@ public static class GuerrillaEffectTables
     /// </summary>
     public static Tables Build(Packfile armageddonMisc, Packfile guerrillaMisc, IReadOnlyDictionary<string, int> used, Func<string, bool> hasFile,
                                IReadOnlyCollection<string> worldEffects, int dlcExplosions, IReadOnlyCollection<string>? worldExplosions = null,
-                               Func<string, bool, Sound?>? soundOf = null)
+                               Func<string, bool, Sound?>? soundOf = null, IReadOnlyDictionary<string, string>? alsoPlays = null)
     {
         string Text(Packfile archive, string table) =>
             Encoding.Latin1.GetString(archive.Read(archive.Find(table) ?? throw new InvalidDataException($"no {table} in {archive.Name}")));
@@ -201,13 +204,20 @@ public static class GuerrillaEffectTables
         var explosionCues = addedExplosions.SelectMany(ExplosionEffects).Where(effects.ContainsKey).Select(e => Field(effects[e], "sound")).OfType<string>()
                                            .Where(c => c.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sounds = new Dictionary<string, Sound?>(StringComparer.OrdinalIgnoreCase);
-        Sound? SoundOf(string effect)
+        // What is asked of soundOf for an effect: its cue, or with none its attack-loop-release set (sound_alr: a
+        // thruster, a generator) by the set's name; and after a "+" a second cue played with it (alsoPlays: Guerrilla's
+        // name of the effect -> that cue; a footstep's and the walker's own gear).
+        string? CueOf(string effect)
         {
-            if (soundOf == null || !effects.TryGetValue(effect, out string? entry)) return null;
-            // Its cue, or with none its attack-loop-release set (sound_alr: a thruster, a generator), asked for by the set's name.
+            if (!effects.TryGetValue(effect, out string? entry)) return null;
             string? cue = Field(entry, "sound") is { Length: > 0 } named ? named
                         : Field(entry, "sound_alr") is { Length: > 0 } set ? GuerrillaSoundBanks.AlrPrefix + set : null;
-            if (cue == null) return null;
+            if (cue != null && alsoPlays != null && alsoPlays.TryGetValue(effect, out string? second) && second.Length > 0) cue += "+" + second;
+            return cue;
+        }
+        Sound? SoundOf(string effect)
+        {
+            if (soundOf == null || CueOf(effect) is not { } cue) return null;
             if (!sounds.TryGetValue(cue, out var sound)) sounds[cue] = sound = soundOf(cue, explosionCues.Contains(cue));
             return sound;
         }
@@ -310,17 +320,25 @@ public static class GuerrillaEffectTables
         var knownFlags = XtblFile.FromBytes(Encoding.Latin1.GetBytes(ourExplosionText)).Description?.Children
                              .FirstOrDefault(f => f.Name.Equals("Flags", StringComparison.OrdinalIgnoreCase))?.Flags.ToHashSet(StringComparer.OrdinalIgnoreCase);
         lock (FlagsLeftOut) FlagsLeftOut.Clear();
+        // Twice: cutting buildings by Guerrilla's own fields (the table the world uses), and by Armageddon's
+        // explosion of the same name (as before; the guerrilla_world mod hands the game that one with
+        // GuerrillaExplosions=0, to compare).
         var explosionText = new StringBuilder();
+        var armageddonCutText = new StringBuilder();
         int uniqueId = ourExplosions.Values.Select(x => int.TryParse(Field(x, "Unique_ID"), out int id) ? id : 0).DefaultIfEmpty(0).Max();
         foreach (string x in rankedExplosions.Where(addedExplosions.Contains))
         {
-            string body = Fit(ExplosionEntry(theirExplosions[x], Added(x), DamageFrom(x), effectSet, ++uniqueId, knownFlags), "Explosion", explosionShape);
-            // The game stops while it starts on an explosion without a field all of Armageddon's have
-            // ("Could not find required attribute Explosion:Structural_Damage_Type"), so check here.
-            var fields = XElement.Parse($"<Explosion>{body}</Explosion>").Elements().Select(e => e.Name.LocalName).ToHashSet();
-            if (explosionShape.Always.TryGetValue("Explosion", out var always) && always.Where(f => !fields.Contains(f)).ToList() is { Count: > 0 } missing)
-                throw new InvalidDataException($"the added explosion {Added(x)} has no {string.Join(", ", missing)}, which all of Armageddon's have");
-            explosionText.Append($"\t<Explosion>{body}</Explosion>\n");
+            ++uniqueId;
+            foreach (bool guerrillaCuts in new[] { true, false })
+            {
+                string body = Fit(ExplosionEntry(theirExplosions[x], Added(x), DamageFrom(x), effectSet, uniqueId, knownFlags, guerrillaCuts), "Explosion", explosionShape);
+                // The game stops while it starts on an explosion without a field all of Armageddon's have
+                // ("Could not find required attribute Explosion:Structural_Damage_Type"), so check here.
+                var fields = XElement.Parse($"<Explosion>{body}</Explosion>").Elements().Select(e => e.Name.LocalName).ToHashSet();
+                if (explosionShape.Always.TryGetValue("Explosion", out var always) && always.Where(f => !fields.Contains(f)).ToList() is { Count: > 0 } missing)
+                    throw new InvalidDataException($"the added explosion {Added(x)} has no {string.Join(", ", missing)}, which all of Armageddon's have");
+                (guerrillaCuts ? explosionText : armageddonCutText).Append($"\t<Explosion>{body}</Explosion>\n");
+            }
         }
 
         var files = addedVisuals.Select(v => FileOf(visuals[v])).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
@@ -329,9 +347,10 @@ public static class GuerrillaEffectTables
                           propsOf, filesOf, files, worldFiles, addedVisuals.Count, addedEffects.Count, addedExplosions.Count, ranked.Skip(visualRoom).ToList(),
                           rankedExplosions.Skip(explosionRoom).ToList(), [.. explosionsLeft])
         {
+            ExplosionsArmageddonCuts = Append(ourExplosionText, armageddonCutText),
             SoundsAdded = addedEffects.Count(e => SoundOf(e) != null),
             SoundOnly = addedEffects.Count(e => !Shown(e)),
-            SoundsLeft = [.. addedEffects.Select(e => Field(effects[e], "sound")).OfType<string>().Where(c => c.Length > 0 && sounds.GetValueOrDefault(c) == null)
+            SoundsLeft = [.. addedEffects.Select(CueOf).OfType<string>().Where(c => c.Length > 0 && sounds.GetValueOrDefault(c) == null)
                                          .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)],
         };
     }
@@ -346,24 +365,27 @@ public static class GuerrillaEffectTables
     /// One of Guerrilla's explosions as an Armageddon entry named <paramref name="name"/>: Guerrilla's
     /// fields (Impulse and Structural_Damage under Armageddon's names, see <see cref="ExplosionFieldNames"/>),
     /// its effects in Armageddon's form (each an Effect with its Name, the added one, and Play_Style
-    /// Always; those not added left out), and the fields only Armageddon's have (how it damages
-    /// buildings: Material_Damage_Class_Inner and _Outer, the Structural_Damage_Type shape cutters, its
-    /// radii, Electrical_Explosion) from <paramref name="ours"/>: Armageddon's entry of the same name,
-    /// or of the explosion Guerrilla's table gives the same damage (see DamageFrom in Build).
+    /// Always; those not added left out), with <paramref name="guerrillaCuts"/> how it damages buildings
+    /// from its own fields (see <see cref="GuerrillaStructuralDamage"/>), and the fields only Armageddon's
+    /// have (Material_Damage_Class_Inner and _Outer, Electrical_Explosion, ...; without
+    /// <paramref name="guerrillaCuts"/> also Structural_Damage_Type) from <paramref name="ours"/>:
+    /// Armageddon's entry of the same name, or of the explosion Guerrilla's table gives the same damage
+    /// (see DamageFrom in Build).
     /// </summary>
-    static string ExplosionEntry(string theirs, string name, string? ours, ISet<string> addedEffects, int uniqueId, ISet<string>? knownFlags)
+    static string ExplosionEntry(string theirs, string name, string? ours, ISet<string> addedEffects, int uniqueId, ISet<string>? knownFlags, bool guerrillaCuts)
     {
         var entry = XElement.Parse($"<Explosion>{Rename(theirs, name)}</Explosion>");
-        // Its flags Armageddon's table names, the others left out (see FlagsLeftOut).
+        // Its flags Armageddon's table names, the others left out (see FlagsLeftOut; listed once).
         if (knownFlags != null && entry.Element("Flags") is { } flags)
             foreach (var flag in flags.Elements().Where(f => !knownFlags.Contains(f.Value.Trim())).ToList())
             {
-                lock (FlagsLeftOut) FlagsLeftOut.Add($"{name}: {flag.Value.Trim()}");
+                if (guerrillaCuts) lock (FlagsLeftOut) FlagsLeftOut.Add($"{name}: {flag.Value.Trim()}");
                 flag.Remove();
             }
         foreach (var (guerrilla, armageddon) in ExplosionFieldNames)
             foreach (var e in entry.Elements(guerrilla).ToList())
                 e.Name = armageddon;
+        if (guerrillaCuts) entry.Add(GuerrillaStructuralDamage(entry));
         if (entry.Element("Effects") is { } list)
             list.ReplaceNodes(list.Elements("Element").Select(e => e.Value.Trim()).Where(addedEffects.Contains)
                                   .Select(e => new XElement("Effect", new XElement("Name", Added(e)), new XElement("Play_Style", "Always"))));
@@ -372,6 +394,53 @@ public static class GuerrillaEffectTables
             foreach (var e in XElement.Parse($"<Explosion>{ours}</Explosion>").Elements())
                 if (entry.Element(e.Name) == null && e.Name.LocalName != "Effects") entry.Add(e);  // (never Armageddon's effects)
         return string.Concat(entry.Nodes().Select(n => Write(n, 2)));
+    }
+
+    /// <summary>
+    /// How one of Guerrilla's explosions (its fields as <paramref name="entry"/> has them) damages buildings, as
+    /// Armageddon's Structural_Damage_Type. Both games have the same two ways, chosen per explosion:
+    /// - An explosion with a Duration (Guerrilla's reader then sets its flag 0x8000) makes a shape cutter
+    ///   instead of a damage pass: a sphere growing from nothing to the explosion's Radius (not its
+    ///   CrumbleRadius) over Duration ms, after its Delay, that cuts every link of every piece it touches
+    ///   (or with Break_off_pieces' Time_between_breaks, breaks links every so often: Duration over that many
+    ///   times). Armageddon's Expanding_Shape_Cutter is the same cut, grown to its Outer radius in
+    ///   Number_Of_Cuts equal steps Delay_Between_Cuts ms apart (at least one: none never finishes): so
+    ///   Outer = Radius, a cut every 50 ms for Duration (every Time_between_breaks, "break links only", with
+    ///   that), Delay as Guerrilla's.
+    /// - Any other damages each piece within its CrumbleRadius C (at least its Radius) by Structural_Damage
+    ///   times 1 − d / C, d the piece's distance; the damage wears its links' strength down and breaks them
+    ///   when it runs out. Armageddon's Immediate does the same with 1 − d² / Outer (its code compares the
+    ///   squared distance with the radius) between Inner and Outer: so Inner 0 and Outer C², which reaches
+    ///   exactly C (C itself under 1 m, where C² would reach less far); between, the damage is up to a quarter
+    ///   of it stronger than Guerrilla's (at half the way out, three quarters of it, not half).
+    /// Armageddon doesn't read Duration, the top-level StructuralDamageInnerRadius and _OuterRadius or the
+    /// Material_Damage_Class fields.
+    /// </summary>
+    static XElement GuerrillaStructuralDamage(XElement entry)
+    {
+        float Number(string field) =>
+            entry.Element(field) is { } e && float.TryParse(e.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : 0;
+        static string Text(float v) => v.ToString("0.0####", CultureInfo.InvariantCulture);
+        float radius = Number("Radius"), crumble = MathF.Max(Number("CrumbleRadius"), radius);
+        if (entry.Element("Duration") != null)
+        {
+            int duration = (int)Number("Duration"), between = 50;
+            bool breakLinksOnly = false;
+            if (entry.Element("Break_off_pieces")?.Element("Time_between_breaks") is { } breaks &&
+                int.TryParse(breaks.Value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int every) && every > 0)
+                (between, breakLinksOnly) = (every, true);
+            int cuts = Math.Max(1, breakLinksOnly ? duration / between : (int)MathF.Round(duration / 50f));
+            return new XElement("Structural_Damage_Type", new XElement("Expanding_Shape_Cutter",
+                new XElement("Delay", (int)Number("Delay")),
+                new XElement("Number_Of_Cuts", cuts),
+                new XElement("Delay_Between_Cuts", between),
+                new XElement("StructuralDamageInnerRadius", "0.0"),
+                new XElement("StructuralDamageOuterRadius", Text(radius)),
+                new XElement("Flags", breakLinksOnly ? new XElement("Flag", "break links only") : null)));
+        }
+        return new XElement("Structural_Damage_Type", new XElement("Immediate",
+            new XElement("StructuralDamageInnerRadius", "0.0"),
+            new XElement("StructuralDamageOuterRadius", Text(crumble >= 1 ? crumble * crumble : crumble))));
     }
 
     /// <summary>A visual's file (its Filename without ".effectx").</summary>

@@ -13,17 +13,20 @@
 // the gun can hit and who is within about 11 degrees of where the gun points now (or within 10 m and 14
 // degrees); the nearest and most central wins, and the one fired at last is kept while the gun's keep-target
 // timer runs. Armageddon dropped the walker test: every gun a driving player owns follows the player's aim
-// point, which suits its own vehicles (the driver of its LAV or walker aims the gun with the camera). On
-// Guerrilla's cars the camera is the chase camera behind the car, so the roof gun swung after a point that
-// wandered with the camera and fired there.
+// point, which suits its own vehicles (the driver of its LAV or walker aims the gun with the camera).
 //
 // So for a vehicle that isn't one of Armageddon's own, the gun's aiming (0x830C70) is Guerrilla's again:
 // the walker's rule, else the search below, which is the game's own (it still runs it for a gun nobody
 // drives) with the same settings (Turret_autoaim_*, alike in both games' tweak tables). Armageddon's own
 // vehicles keep Armageddon's rule. In the gunner's seat nothing changes: the gun follows the camera.
 //
-// The guns on Guerrilla's vehicles also get Guerrilla's hinge motors (see "The hinges' motors" below): with
-// Armageddon's the gun swung to and fro around where it was sent.
+// RFA-Mod's own addition, not Guerrilla's: the upgrade TURRET LINK (bought with salvage like Guerrilla's
+// own; guerrilla_gear sells it) hands the driver the aim: once bought, the gun follows the player's aim point
+// on Guerrilla's vehicles too. See "TURRET LINK" below.
+//
+// The guns on Guerrilla's vehicles also get Guerrilla's hinge motors and Guerrilla's weights for their parts
+// (see "The hinges' motors" and "What a part ... weighs" below): with Armageddon's the gun swung to and fro
+// around where it was sent, and a turn or a bump threw it off.
 //
 // The log says when a vehicle's gun gets or loses its gunner, and who aims it, and for the first minute the
 // player drives with a gun, four times a second, where it aims and where the gun points.
@@ -180,9 +183,33 @@ void AimAsGuerrillas(BYTE* turret, BYTE* driver, BYTE* vehicle) {
     }
 }
 
+// ---- TURRET LINK: RFA-Mod's own upgrade (NOT one of Guerrilla's), sold by guerrilla_gear beside Guerrilla's in
+// its F7 window and the safehouses' shop (its upgrades.cpp, kOwnUpgrades). Once bought, the gun of a vehicle
+// the player drives follows his aim point, which is the game's own rule, in place of Guerrilla's. Asked of
+// guerrilla_gear.dll twice a second while the player drives with a gun, so it takes hold in the vehicle, at
+// once; without that mod, or before it is bought, Guerrilla's rule stays.
+constexpr char kAimUpgrade[] = "rfa_turret_link";
+bool AimUpgradeBought() {
+    using LevelFn = int(__cdecl*)(const char* name);
+    static LevelFn level = nullptr;
+    static ULONGLONG askedAt = 0;
+    static bool bought = false;
+    const ULONGLONG now = GetTickCount64();
+    if (askedAt != 0 && now - askedAt < 500) return bought;
+    askedAt = now;
+    if (!level)
+        if (HMODULE gear = GetModuleHandleW(L"guerrilla_gear.dll")) level = reinterpret_cast<LevelFn>(GetProcAddress(gear, "GuerrillaGear_UpgradeLevel"));
+    const bool has = level && level(kAimUpgrade) > 0;
+    if (has != bought)
+        rfa::Log(has ? "Turrets: TURRET LINK is bought (RFA-Mod's own upgrade): the gun of a vehicle the player drives follows his aim point from now on"
+                     : "Turrets: TURRET LINK is no longer bought: a driver's gun aims by itself again, as Guerrilla's");
+    bought = has;
+    return bought;
+}
+
 // The driver whose gun this is, if Guerrilla's search is what it should do now; null leaves it to the game
-// (nobody drives it, one of Armageddon's own vehicles, or a walker's gun that can reach the player's aim point).
-// `rule` says which it is, for the log.
+// (nobody drives it, one of Armageddon's own vehicles, a walker's gun that can reach the player's aim point,
+// or the player has bought TURRET LINK). `rule` says which it is, for the log.
 BYTE* DriverForGuerrillasSearch(BYTE* turret, BYTE*& vehicle, const char*& rule) {
     rule = "the game's own rule (it isn't a gun that aims by itself in a single-player game)";
     if (Multiplayer() || !AimsByItself(turret, nullptr)) return nullptr;
@@ -197,6 +224,8 @@ BYTE* DriverForGuerrillasSearch(BYTE* turret, BYTE*& vehicle, const char*& rule)
     rule = "the game's own rule (one of Armageddon's own vehicles, or none)";
     vehicle = VehicleOfHuman(owner);
     if (!vehicle || IsArmageddons(vehicle)) return nullptr;
+    rule = "the game's own rule (TURRET LINK is bought: it follows the aim point)";
+    if (AimUpgradeBought()) return nullptr;
     rule = "the game's own rule (a walker's gun that can reach the aim point)";
     if (VehicleSubtype(vehicle, nullptr) == kWalker && CanHit(turret, nullptr, reinterpret_cast<const V3*>(player + kPlayerAimPoint))) return nullptr;
     rule = "Guerrilla's rule";
@@ -287,6 +316,7 @@ void __fastcall AttachGunner(BYTE* turret, void* unused, BYTE* human) {
     }
     const char* aims = !AimsByItself(turret, nullptr) ? "the gunner aims it"
                        : IsArmageddons(vehicle)       ? "it follows the player's aim point (Armageddon's rule for its own vehicles)"
+                       : player && AimUpgradeBought() ? "it follows the player's aim point (TURRET LINK is bought)"
                        : VehicleSubtype(vehicle, nullptr) == kWalker ? "it follows the player's aim point while it can reach it, else it aims by itself (Guerrilla's walkers)"
                                                                      : "it aims by itself: enemies ahead, else straight ahead (Guerrilla's rule for a driver)";
     // The player's lines always (a test's evidence), NPCs' only a few: traffic's gunners come and go all the time.
@@ -421,7 +451,8 @@ void StartTurrets() {
         rfa::Log("Turrets: could not hook the turret aiming; a driver's gun keeps Armageddon's rule");
         return;
     }
-    rfa::Log("Turrets: on Guerrilla's vehicles a driver's gun aims by itself as Guerrilla's (enemies ahead, else straight ahead; a walker's follows the aim point)");
+    rfa::Log("Turrets: on Guerrilla's vehicles a driver's gun aims by itself as Guerrilla's (enemies ahead, else straight ahead; a walker's follows the aim point), "
+             "until the player buys TURRET LINK (RFA-Mod's own upgrade): then it follows his aim point");
     if (Opens(kAttachGunner, attachOpening, sizeof(attachOpening)) && Opens(kDetachGunner, detachOpening, sizeof(detachOpening))) {
         g_attachGunner = reinterpret_cast<GunnerFn>(rfa::HookFunction(kAttachGunner, kGunnerPrologue, reinterpret_cast<void*>(&AttachGunner)));
         if (g_attachGunner) g_detachGunner = reinterpret_cast<GunnerFn>(rfa::HookFunction(kDetachGunner, kGunnerPrologue, reinterpret_cast<void*>(&DetachGunner)));

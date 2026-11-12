@@ -15,7 +15,7 @@ static class Program
     {
         if (args.Length > 0) return CommandLine.Run(args);
         var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-        app.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("pack://application:,,,/GuerrillaBuilder;component/Theme.xaml") });
+        RfaEditor.FluentLook.Load(app, new Uri("pack://application:,,,/GuerrillaBuilder;component/Theme.xaml"));
         return app.Run(new MainWindow());
     }
 }

@@ -22,7 +22,7 @@
 // all of our documents are unloaded there, as the load frees their memory (see LoadStart).
 //
 // Guerrilla's map ([GuerrillaHud] Map=1): its minimap (the document rfg_ui_hud) and its world map
-// (rfg_ui_fullscreen, opened and closed with [GuerrillaHud] MapKey=). Guerrilla drew the map itself
+// (rfg_ui_fullscreen, opened and closed with [GuerrillaKeys] Map=, see keys.cpp). Guerrilla drew the map itself
 // in its HUD's map elements (its "cartographer"); Armageddon kept that code only for its compass. So
 // here the documents' scripts build the map from pictures, Guerrilla's own: its world map picture,
 // each zone's own picture, its minimap's frame, mask and player arrow. What they need to know each
@@ -34,10 +34,12 @@
 #define RFA_MOD_NAME "guerrilla_hud"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "keys.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <set>
 #include <string>
@@ -397,6 +399,10 @@ void RaiseDocumentLimits() {
     if (!g_documentListMake) rfa::Log("Interface documents: could not hook the document lists; each keeps its 16");
 }
 
+// Whether one of the game's own interface screens (its pause menu, ...) is up: the interface's per-frame update
+// (0x58B810) sets this byte while one is, and the game frees the mouse for it (0x4E4070 reads it).
+bool GameMenuUp() { return *reinterpret_cast<const BYTE*>(0x135CE04) != 0; }
+
 // The loader's answer to "are its menus (or the developer console) up?" (RFALoader_MenusWant(0)).
 bool MenusShown() {
     using WantFn = int(__cdecl*)(int);
@@ -413,7 +419,10 @@ struct Document {
     std::string name;
     bool drawn = true;       // put on the draw list (the zone pictures' documents only bring textures)
     bool whileOpen = false;  // drawn only while the world map is open
-    bool whileShop = false;  // drawn only while a safehouse's upgrade shop is open
+    bool whileShop = false;  // loaded and drawn only while a safehouse's upgrade shop is open
+    bool whileCabinet = false;  // loaded and drawn only while Guerrilla's weapon cabinet is open
+    bool whileHandbook = false;  // loaded and drawn only while Guerrilla's handbook is open
+    bool handbookPicture = false;  // one of the handbook's entries' pictures: loaded while its entry is shown
     bool zoneSet = false;    // one of the four documents of the zones' pictures (ZoneSetDocument)
     bool loaded = false;     // the mod asked for it
     bool seen = false;       // and the game has had it open since
@@ -437,6 +446,8 @@ DrawPassFn g_drawPass;
 constexpr ULONGLONG kHudGoneAfterMs = 250;
 constexpr int kClosedByGameTimes = 3;
 ULONGLONG g_lastHudUpdate;
+ULONGLONG g_hudFrameMs = 0;                    // since the HUD's last update, at most kHudFrameMostMs
+constexpr ULONGLONG kHudFrameMostMs = 100;
 std::vector<Document> g_documents;
 std::vector<std::string> g_worlds;
 int g_inOurWorld = -1;  // last frame's answer, to log the switches (-1 before the first frame)
@@ -476,7 +487,6 @@ struct MapView {
 MapView g_view;
 bool g_mapOpen = false;      // the world map is up
 std::string g_mapDocument;   // rfg_ui_fullscreen
-int g_mapKey = 'M';
 bool g_mapKeyDown = false;
 std::map<int, std::string> g_districts;          // column × 100 + row -> name (districts.txt)
 std::map<int, bool> g_tilePictures;              // column × 100 + row -> the zone has its picture
@@ -503,17 +513,6 @@ bool InOurWorld() {
     for (const std::string& name : g_worlds)
         if (_stricmp(world, name.c_str()) == 0) return true;
     return false;
-}
-
-// A key's virtual-key code from its name in rfa_mods.ini: a letter or digit, Tab, or F1-F12.
-int KeyCode(const std::wstring& name) {
-    if (name.size() == 1 && iswalnum(name[0])) return towupper(name[0]);
-    if (_wcsicmp(name.c_str(), L"Tab") == 0) return VK_TAB;
-    if ((name[0] == L'F' || name[0] == L'f') && name.size() <= 3) {
-        const int number = _wtoi(name.c_str() + 1);
-        if (number >= 1 && number <= 12) return VK_F1 + number - 1;
-    }
-    return 0;
 }
 
 // districts.txt (made by GuerrillaBuilder.exe): "CCRR=name" a zone a line, ; comments.
@@ -554,6 +553,20 @@ void FollowRadioTags();  // Guerrilla's radio tags (below)
 void FollowSafehouses();  // Guerrilla's safehouses' stations (below)
 bool ShopIsOpen();
 void CloseShop(const char* why);
+bool CabinetIsOpen();  // Guerrilla's weapon cabinet (below)
+void CloseCabinet(const char* why, bool giveAmmo);
+bool StationScreenOpen() { return ShopIsOpen() || CabinetIsOpen(); }  // a safehouse's screen (the shop or the cabinet)
+bool HandbookIsOpen();  // Guerrilla's handbook (below)
+bool HandbookClosing();
+void FollowHandbook();
+void HandbookDocumentArrived();
+void HandbookPictureShown(const std::string& document);
+void CloseHandbook(const char* why, bool toPauseMenu);
+extern bool g_handbookBackToPauseMenu;
+// One of our screens that pause the game: a safehouse's, or the handbook (also while it closes).
+bool OurScreenOpen() { return StationScreenOpen() || HandbookIsOpen() || HandbookClosing(); }
+void FollowMessages(ULONGLONG hudMs);  // Guerrilla's pickups, use action and saving icon (below)
+void ForgetPickups();
 
 // Where a point of Guerrilla's world (x, z metres) is on its world map picture, in its pixels.
 void MapPixels(double x, double z, double& mapX, double& mapY) {
@@ -617,19 +630,23 @@ Document* FindDocument(const std::string& name) {
 // crashed the render thread (2026-11-07, 10:58: the game froze).
 constexpr ULONGLONG kReadySettleMs = 1000;
 
+// Whether a loaded document's pictures can be drawn: the document ready (its textures in) for a second.
+bool DocumentSettled(Document& doc) {
+    if (!doc.loaded) return false;
+    BYTE* open = OpenDocument(doc.name.c_str());
+    if (!open || DocumentStatus(*reinterpret_cast<unsigned short*>(open + 0x40)) != kDocumentReady) {
+        doc.readyAt = 0;
+        return false;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (doc.readyAt == 0) doc.readyAt = now;
+    return now - doc.readyAt >= kReadySettleMs;
+}
+
 bool ZoneReady(int column, int row) {
     const std::string set = ZoneSetDocument(column, row);
-    for (Document& doc : g_documents) {
-        if (!doc.zoneSet || !doc.loaded || doc.name != set) continue;
-        BYTE* open = OpenDocument(doc.name.c_str());
-        if (!open || DocumentStatus(*reinterpret_cast<unsigned short*>(open + 0x40)) != kDocumentReady) {
-            doc.readyAt = 0;
-            return false;
-        }
-        const ULONGLONG now = GetTickCount64();
-        if (doc.readyAt == 0) doc.readyAt = now;
-        return now - doc.readyAt >= kReadySettleMs;
-    }
+    for (Document& doc : g_documents)
+        if (doc.zoneSet && doc.loaded && doc.name == set) return DocumentSettled(doc);
     return false;
 }
 
@@ -736,7 +753,7 @@ void OpenMap() {
     g_full.lastStep = 0;
     g_full.lastWheel = g_wheelTotal;
     g_full.escDown = HeldDown(VK_ESCAPE);
-    g_full.centreDown = HeldDown('X');
+    g_full.centreDown = HeldDown(keys::Key(keys::MapCentre));
     if (!g_full.paused) {
         PauseGame(1, 1, 0, 0);
         g_full.paused = true;
@@ -760,8 +777,9 @@ void CloseMap(const char* why) {
 // Not with Alt or the Windows key held: Alt+Tab and Win+Tab are Windows' own, and the game still has
 // the focus when Tab goes down.
 void FollowTheMapKey() {
-    if (!g_mapKey || ShopIsOpen()) return;
-    const bool down = HeldDown(g_mapKey);
+    const int mapKey = keys::Key(keys::Map);  // [GuerrillaKeys] Map (keys.cpp)
+    if (!mapKey || OurScreenOpen()) return;
+    const bool down = HeldDown(mapKey);
     const bool windowsShortcut = HeldDown(VK_MENU) || HeldDown(VK_LWIN) || HeldDown(VK_RWIN);
     if (down && !g_mapKeyDown && !windowsShortcut && GameFocused()) {
         if (g_mapOpen) CloseMap("its key");
@@ -816,15 +834,17 @@ void StepFullMap(bool fromScript) {
         return;
     }
     if (focused) {
-        const double right = (HeldDown('D') || HeldDown(VK_RIGHT) ? 1.0 : 0.0) - (HeldDown('A') || HeldDown(VK_LEFT) ? 1.0 : 0.0);
-        const double down = (HeldDown('S') || HeldDown(VK_DOWN) ? 1.0 : 0.0) - (HeldDown('W') || HeldDown(VK_UP) ? 1.0 : 0.0);
+        const double right = (HeldDown(keys::Key(keys::Right)) || HeldDown(VK_RIGHT) ? 1.0 : 0.0) -
+                             (HeldDown(keys::Key(keys::Left)) || HeldDown(VK_LEFT) ? 1.0 : 0.0);
+        const double down = (HeldDown(keys::Key(keys::Down)) || HeldDown(VK_DOWN) ? 1.0 : 0.0) -
+                            (HeldDown(keys::Key(keys::Up)) || HeldDown(VK_UP) ? 1.0 : 0.0);
         const double pan = kPanScreensPerSecond * ViewPixels() * seconds;
         g_full.centreX += right * pan;
         g_full.centreY += down * pan;
-        const double zoomIn = (HeldDown(VK_PRIOR) || HeldDown('E') || HeldDown(VK_ADD) || HeldDown(VK_OEM_PLUS) ? 1.0 : 0.0) -
-                              (HeldDown(VK_NEXT) || HeldDown('Q') || HeldDown(VK_SUBTRACT) || HeldDown(VK_OEM_MINUS) ? 1.0 : 0.0);
+        const double zoomIn = (HeldDown(VK_PRIOR) || HeldDown(keys::Key(keys::MapZoomIn)) || HeldDown(VK_ADD) || HeldDown(VK_OEM_PLUS) ? 1.0 : 0.0) -
+                              (HeldDown(VK_NEXT) || HeldDown(keys::Key(keys::MapZoomOut)) || HeldDown(VK_SUBTRACT) || HeldDown(VK_OEM_MINUS) ? 1.0 : 0.0);
         g_full.zoom += zoomIn * kZoomPerSecond * seconds + notches * kZoomPerNotch;
-        if (Pressed('X', g_full.centreDown)) {
+        if (Pressed(keys::Key(keys::MapCentre), g_full.centreDown)) {
             g_full.centreX = g_view.mapX;
             g_full.centreY = g_view.mapY;
         }
@@ -841,21 +861,117 @@ void StepFullMap(bool fromScript) {
 // the HUD's update, which runs before the HUD opens the menu (0x57B774).
 void SwallowPauseMenuRequest() {
     if (!g_pauseMenuRequest) return;
-    if (g_mapOpen || ShopIsOpen() || (GetTickCount64() < g_full.swallowPauseUntil && HeldDown(VK_ESCAPE))) {
+    if (g_mapOpen || OurScreenOpen() || (GetTickCount64() < g_full.swallowPauseUntil && HeldDown(VK_ESCAPE))) {
         g_pauseMenuRequest = 0;
         RFA_LOG_FIRST(20, "The pause menu wasn't opened: the world map is open (or Esc just closed it)");
     }
 }
 
-// Whether a document should be loaded now (in our world): all of them, for as long as the level lasts
-// (see the zone pictures' documents above).
-bool Wanted(const Document&) { return true; }
+// The game's own switch for its pause menu: a count (0x135B3EC) that 0x5828C0(true) raises and 0x5828C0(false)
+// lowers (Armageddon's scenes use it; a level's start sets it to 0, 0x58161E). While it's above 0, neither the HUD's
+// frame (0x57B730) nor the game's other way in (0x593793) opens the menu. The HUD's frame opens it on the pause key's
+// press (its input action 0x74, read at 0x57B765) after the HUD's update, where the keys of the map, the shop and the
+// cabinet are read: so the Esc that closed one of them opened the pause menu at once (2026-11-12, the weapon
+// cabinet; the request flag above is only the scripts' and borderless's way in). Guerrilla's back key closed only
+// its screen. Here the count is held one up while one of ours is open, and after one closes until the keys that
+// close them are let go, and one HUD update more.
+auto const BlockPauseMenu = reinterpret_cast<void(__cdecl*)(bool block)>(0x5828C0);
+constexpr int kPauseMenuBlockAfterUpdates = 2;
+bool g_pauseMenuBlocked = false;  // we hold one of the game's count
+int g_pauseMenuBlockLeft = 0;     // HUD updates the block lasts after our screens have gone
+
+void HoldPauseMenu(bool hold) {
+    if (hold == g_pauseMenuBlocked) return;
+    BlockPauseMenu(hold);
+    g_pauseMenuBlocked = hold;
+}
+
+// Each HUD update, after the screens' keys have been read and before the game's frame reads the pause key.
+void FollowPauseMenuBlock() {
+    // The handbook closed by its back key goes back to the pause menu (as Guerrilla's went back to its menu): no block.
+    if (g_handbookBackToPauseMenu) {
+        g_handbookBackToPauseMenu = false;
+        g_pauseMenuBlockLeft = 0;
+        HoldPauseMenu(false);
+        return;
+    }
+    const bool screenOpen = g_mapOpen || OurScreenOpen();
+    const bool closeKeyHeld = HeldDown(VK_ESCAPE) || HeldDown(VK_TAB) || HeldDown(VK_BACK) || HeldDown(keys::Key(keys::Map));
+    if (screenOpen) g_pauseMenuBlockLeft = kPauseMenuBlockAfterUpdates;
+    else if (g_pauseMenuBlockLeft > 0 && !closeKeyHeld) --g_pauseMenuBlockLeft;
+    HoldPauseMenu(screenOpen || g_pauseMenuBlockLeft > 0);
+}
+
+// The handbook's documents (see "Guerrilla's handbook" below).
+std::string HandbookPictureWanted();  // the picked entry's picture's document, "" for none
+
+bool AnyHandbookPictureLoaded() {
+    for (const Document& doc : g_documents)
+        if (doc.handbookPicture && doc.loaded) return true;
+    return false;
+}
+
+bool AnyHandbookDocumentLoaded() {
+    for (const Document& doc : g_documents)
+        if ((doc.whileHandbook || doc.handbookPicture) && doc.loaded) return true;
+    return false;
+}
+
+// A screen's document, loaded only while it's open (the handbook's, the shop's, the cabinet's; see Wanted).
+bool ScreenDocument(const Document& doc) { return doc.whileHandbook || doc.handbookPicture || doc.whileShop || doc.whileCabinet; }
+
+bool AnyScreenDocumentLoaded() {
+    for (const Document& doc : g_documents)
+        if (ScreenDocument(doc) && doc.loaded) return true;
+    return false;
+}
+
+bool HandbookScreenReady() {
+    for (const Document& doc : g_documents)
+        if (doc.whileHandbook) return doc.loaded && doc.seen;
+    return false;
+}
+
+// Whether a document should be loaded now (in our world): the HUD's for as long as the level lasts (see the zone
+// pictures' documents above); the handbook's only while it's open, as Guerrilla loaded its handbook as its pause
+// menu opened it (13 MB of pictures loaded with the HUD ran the interface's memory out, 2026-11-12). The interface's
+// memory for documents is a stack (see the zone pictures' documents): the handbook's are loaded last, on top of the
+// HUD's, and go in the opposite order: its picture first (one at a time: the next waits until the last is gone),
+// then the handbook itself.
+//
+// The shop's and the cabinet's screens (Guerrilla's were game states of their own, their documents loaded as they
+// opened) are loaded only while they're open too: the shop's alone is 22 MB of the interface's memory (its
+// blueprints), and every loaded document's script and elements live in the interface's own 1.5 MB heap (Vint and its
+// Lua: Armageddon's Dl_mempool, see LogVintHeap), which Options > Controls ran out of in the Guerrilla world
+// ("dlmalloc out of memory!", 2026-11-12).
+//
+// A picture's document goes only once the screen no longer shows its picture (rfg_handbook_picture_shown) and a
+// moment more: the renderer may still be drawing a frame with it (a texture freed under a drawn picture crashed the
+// render thread, 2026-11-07, with the zone pictures).
+bool HandbookPictureKept(const Document& doc);  // (see "Guerrilla's handbook")
+
+bool Wanted(const Document& doc) {
+    if (doc.whileShop) return ShopIsOpen();
+    if (doc.whileCabinet) return CabinetIsOpen();
+    if (doc.whileHandbook) return HandbookIsOpen() || AnyHandbookPictureLoaded();
+    if (doc.handbookPicture) {
+        if (doc.loaded && HandbookPictureKept(doc)) return true;
+        if (!HandbookIsOpen() || !HandbookScreenReady() || doc.name != HandbookPictureWanted()) return false;
+        if (doc.loaded) return true;
+        return !AnyHandbookPictureLoaded();
+    }
+    return true;
+}
 
 // Whether a loaded document should be on the draw list now.
-// While a shop is open only its screen is drawn (Guerrilla hid its HUD for it).
+// While a shop or the weapon cabinet is open only its screen is drawn (Guerrilla hid its HUD for them).
 bool ShouldDraw(const Document& doc, bool hudRuns) {
-    if (ShopIsOpen() && !doc.whileShop && !doc.zoneSet) return false;
-    return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen) && (!doc.whileShop || ShopIsOpen());
+    const bool shop = ShopIsOpen(), cabinet = CabinetIsOpen(), handbook = HandbookIsOpen();
+    if ((shop || cabinet || handbook) && !(shop && doc.whileShop) && !(cabinet && doc.whileCabinet) &&
+        !(handbook && doc.whileHandbook) && !doc.zoneSet && !doc.handbookPicture)
+        return false;
+    return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen) && (!doc.whileShop || shop) && (!doc.whileCabinet || cabinet) &&
+           (!doc.whileHandbook || handbook);
 }
 
 void Unload(Document& doc, BYTE* open) {
@@ -900,7 +1016,9 @@ void FollowTheWorld() {
         if (g_mapOpen) StepFullMap(false);
         else FollowTheMapKey();
         FollowRadioTags();
-        FollowSafehouses();
+        FollowHandbook();
+        if (!HandbookIsOpen() && !HandbookClosing()) FollowSafehouses();
+        FollowMessages(g_hudFrameMs);
     } else {
         g_view.active = false;
     }
@@ -911,12 +1029,16 @@ void FollowTheWorld() {
         if (open && !doc.seen) {
             if (doc.loaded) RFA_LOG_FIRST(200, "The game has %s open", doc.name.c_str());
             doc.seen = true;
+            if (doc.whileHandbook || doc.handbookPicture) HandbookDocumentArrived();
         }
         if (!wanted) {
             if (doc.loaded && open) Unload(doc, open);  // one still loading is unloaded once it is open
             continue;
         }
         if (open || doc.missing || (doc.loaded && !doc.seen) || GetTickCount64() < doc.retryAt) continue;
+        // While a screen's documents are loaded (on top of the stack), no other is loaded above them: they couldn't go
+        // first then.
+        if (!ScreenDocument(doc) && AnyScreenDocumentLoaded()) continue;
         if (doc.loaded) {
             // The game closes a document whose containers don't fit its interface memory (see
             // EnlargeInterfacePool); loading it again and again wouldn't help.
@@ -958,11 +1080,59 @@ void FollowTheWorld() {
     }
 }
 
+// The interface's own heap: Vint (Armageddon's interface library) and its Lua allocate from Armageddon's dlmalloc pool
+// Dl_mempool, made at start-up with 1.5 MB (0xA469DD; Vint's init 0x5B3F90 gives Vint its malloc and free, 0x8FBAD0
+// and 0x8FBA90, and its Lua the same through 0xB77240 and 0xD94A90; Lua's allocator 0xD95830). dlmalloc grows into it
+// through 0x8FD080, which keeps how far it has grown at [0x2476378] (it never gives any back) of [0x247637C], and
+// shows "dlmalloc out of memory!" when a growth doesn't fit. Logged as it grows (64 KB steps), with the world.
+constexpr DWORD kVintHeapGrown = 0x2476378, kVintHeapSize = 0x247637C;
+constexpr DWORD kVintHeapLogStep = 64 * 1024;       // while playing
+constexpr DWORD kVintHeapMenuLogStep = 16 * 1024;   // while one of the game's menus is up (they take it in smaller steps)
+
+// Logs the heap's use when it has grown by step since the last line (step 0: now, saying why).
+void LogVintHeap(DWORD step, const char* why) {
+    static DWORD logged = 0;
+    const DWORD grown = *reinterpret_cast<const DWORD*>(kVintHeapGrown), size = *reinterpret_cast<const DWORD*>(kVintHeapSize);
+    if (size == 0 || (step != 0 && logged != 0 && grown < logged + step)) return;
+    logged = grown;
+    RFA_LOG_FIRST(300, "The interface's heap (Vint and its Lua, Dl_mempool): %lu KB of its %lu KB used at the most so far (world %s; %s)",
+                  grown / 1024, size / 1024, WorldName(), why);
+}
+
+// Dl_mempool's size: the game makes it 1.5 MB at start-up (0xA45600: 0xA44A20(0x180000), its memory from the
+// process heap, then the mempool "dlmalloc" of 0x180000 that dlmalloc grows into). With Guerrilla's HUD documents'
+// scripts and elements in it, Armageddon's Options > Controls > On Foot Controls ran it out in the Guerrilla world
+// (2026-11-12: "dlmalloc out of memory!", the heap at 1080 KB after the world loaded): 3 MB (the user's choice). The two
+// sizes are the values of the start-up's push 0x180000 at 0xA469DD and 0xA469F6; each is checked before it's changed.
+constexpr DWORD kVintHeapSizeValues[] = {0xA469DE, 0xA469F7};
+constexpr DWORD kVintHeapGame = 0x180000, kVintHeapOurs = 0x300000;
+
+void RaiseVintHeap() {
+    for (DWORD at : kVintHeapSizeValues)
+        if (rfa::CodeValue(at) != kVintHeapGame) {
+            rfa::Log("The interface's heap (Dl_mempool): the game's code at 0x%08lX isn't as expected (0x%08lX, not 0x%08lX); "
+                     "it keeps the game's 1.5 MB", at, rfa::CodeValue(at), kVintHeapGame);
+            return;
+        }
+    for (DWORD at : kVintHeapSizeValues)
+        if (!rfa::PatchCode(reinterpret_cast<void*>(at), &kVintHeapOurs, sizeof(kVintHeapOurs))) {
+            rfa::Log("The interface's heap (Dl_mempool): could not change the game's code at 0x%08lX", at);
+            return;
+        }
+    rfa::Log("The interface's heap (Vint and its Lua, Dl_mempool): %lu KB, was 0x%08lX (%lu KB) at 0x%08lX and 0x%08lX "
+             "(the game's 1.5 MB ran out in the Guerrilla world's Options > Controls)", kVintHeapOurs / 1024, kVintHeapGame,
+             kVintHeapGame / 1024, kVintHeapSizeValues[0], kVintHeapSizeValues[1]);
+}
+
 void __cdecl HudUpdate(void* hud) {
     g_hudUpdate(hud);
-    g_lastHudUpdate = GetTickCount64();
+    LogVintHeap(kVintHeapLogStep, "playing");
+    const ULONGLONG now = GetTickCount64();
+    g_hudFrameMs = (std::min)(now - g_lastHudUpdate, kHudFrameMostMs);  // the HUD's time: none while it's stopped
+    g_lastHudUpdate = now;
     FollowTheWorld();
     SwallowPauseMenuRequest();
+    FollowPauseMenuBlock();
     // For the log: an element pool past the game's own size (each pool: +0x0C in use, +0x10 room).
     struct PoolWatch { const char* type; DWORD pool; DWORD game; DWORD logged; };
     static PoolWatch watched[] = {{"tween", 0x28EEB00, 0x334, 0}, {"document", 0x28F15CC, 0xC4, 0},
@@ -988,8 +1158,18 @@ void __cdecl HudUpdate(void* hud) {
 // Before each draw pass: our loaded documents on the draw list while the HUD runs (the world map
 // only while it is open), off it otherwise.
 bool __cdecl DrawPass(bool flag) {
-    // While the world map is open the game is paused, which may stop the HUD's update: still ours.
-    const bool hudRuns = g_mapOpen || ShopIsOpen() || GetTickCount64() - g_lastHudUpdate <= kHudGoneAfterMs;
+    // The interface's heap while the game's own menus are up (the HUD's update doesn't run then): as one opens, and
+    // in 16 KB steps while they're up (the screens they open take it: Options > Controls > On Foot Controls ran it out).
+    static bool menuWasUp = false;
+    const bool menuUp = GameMenuUp();
+    if (menuUp && !menuWasUp) LogVintHeap(0, "a menu opened");
+    else if (menuUp) LogVintHeap(kVintHeapMenuLogStep, "in a menu");
+    menuWasUp = menuUp;
+    // While the world map or a safehouse's screen is open the game is paused, which may stop the HUD's update: still
+    // ours, but not while one of the game's own screens is up over it (its pause menu, which it opens itself when
+    // the window loses the focus: 2026-11-11, the weapon cabinet drawn over it).
+    const bool screenUp = (g_mapOpen || StationScreenOpen()) && !GameMenuUp();
+    const bool hudRuns = screenUp || GetTickCount64() - g_lastHudUpdate <= kHudGoneAfterMs;
     for (Document& doc : g_documents) {
         const bool draw = ShouldDraw(doc, hudRuns);
         if (!doc.loaded || doc.listed == draw) continue;
@@ -1022,6 +1202,11 @@ void __cdecl LoadStart() {
     g_loadStartedAt = GetTickCount64();
     CloseMap("a level load");  // and the game unpaused
     CloseShop("a level load");
+    CloseCabinet("a level load", false);
+    CloseHandbook("a level load", false);
+    g_pauseMenuBlockLeft = 0;
+    HoldPauseMenu(false);  // before the level's start sets the game's count to 0
+    ForgetPickups();  // what the new level gives at its start isn't picked up
     int unloaded = 0, forgotten = 0;
     for (Document& doc : g_documents) {
         doc.closedByGame = 0;
@@ -1067,6 +1252,8 @@ constexpr float kTagReachSquared = 2.25f;
 constexpr DWORD kHumanVehicle = 0x1160;              // the vehicle a human is in (as guerrilla_vehicles reads it)
 using AddHudMessageFn = void(__cdecl*)(const char* text);
 auto const AddHudMessage = reinterpret_cast<AddHudMessageFn>(0x581820);
+// One of Guerrilla's message lines (its major line, or its minor line; see "Guerrilla's messages" below).
+void ShowMessage(const std::string& text, bool major, float seconds = -1.0f);
 
 std::wstring RadioTagsFoundPath() { return rfa::RootDir() + L"\\mods\\guerrilla_hud\\radio_tags_found.txt"; }
 
@@ -1160,7 +1347,7 @@ void FollowRadioTags() {
         } else {
             message = left == 1 ? RadioTagMessage("tag_found", 1) : RadioTagMessage("tags_found", left);
         }
-        AddHudMessage(message.c_str());
+        ShowMessage(message, true);  // bftp_touch_tag: a primary message (hud_message_add)
         rfa::Log("Radio tag %d found (%u of 36): %s", node.pair, static_cast<unsigned>(g_tagsFoundOrder.size()), message.c_str());
     }
 }
@@ -1326,9 +1513,9 @@ void StepShop() {
     g_shop.lastWheel += notches * kWheelNotch;
     int move = -notches;
     if (Pressed(VK_UP, g_shop.upDown)) move -= 1;
-    if (Pressed('W', g_shop.wDown)) move -= 1;
+    if (Pressed(keys::Key(keys::Up), g_shop.wDown)) move -= 1;
     if (Pressed(VK_DOWN, g_shop.downDown)) move += 1;
-    if (Pressed('S', g_shop.sDown)) move += 1;
+    if (Pressed(keys::Key(keys::Down), g_shop.sDown)) move += 1;
     const int count = static_cast<int>(g_shop.list.size());
     if (count > 0 && move != 0) {
         g_shop.highlighted = (g_shop.highlighted + move) % count;
@@ -1359,10 +1546,20 @@ void StepShop() {
     g_shop.closeDown = close;
 }
 
-// Each HUD update in our world: the station the player is at (on foot), and the use key there.
+void OpenCabinet(bool crate);  // Guerrilla's weapon cabinet (below)
+void StepCabinet();
+void FollowCabinet();
+
+// Each HUD update in our world: the station the player is at (on foot), and the use key there: an upgrade shop
+// opens Guerrilla's upgrade screen, a weapon locker its weapon cabinet.
 void FollowSafehouses() {
+    FollowCabinet();
     if (g_shop.open) {
         StepShop();
+        return;
+    }
+    if (CabinetIsOpen()) {
+        StepCabinet();
         return;
     }
     g_shop.nearStation = -1;
@@ -1373,12 +1570,14 @@ void FollowSafehouses() {
     if (vehicle == 0xFFFFFFFF || vehicle == 0)
         for (size_t i = 0; i < g_stations.size(); ++i) {
             const Station& station = g_stations[i];
-            if (!station.shop) continue;  // the weapon cabinets come later
             const float dx = station.x - position[0], dy = station.y - position[1], dz = station.z - position[2];
             if (dx * dx + dy * dy + dz * dz < kStationReachSquared) g_shop.nearStation = static_cast<int>(i);
         }
     const bool use = ButtonHeld(UseAction(g_localPlayer), g_localPlayer);
-    if (use && !g_shop.useDown && g_shop.nearStation >= 0 && !g_mapOpen && !MenusShown() && GameFocused() && GearReady()) OpenShop();
+    if (use && !g_shop.useDown && g_shop.nearStation >= 0 && !g_mapOpen && !MenusShown() && GameFocused()) {
+        if (!g_stations[g_shop.nearStation].shop) OpenCabinet(false);
+        else if (GearReady()) OpenShop();
+    }
     g_shop.useDown = use;
 }
 
@@ -1410,10 +1609,20 @@ constexpr int kActionUseAmmoBox = 9;
 constexpr DWORD kPlayerUseAction = 0x1540;  // the player's use action now (a UseActionRecord)
 using UsableItemsFn = bool(__cdecl*)(BYTE* player, UseActionRecord* action);
 UsableItemsFn g_usableItems = nullptr;
+using UseActionFunction = bool(__cdecl*)(BYTE* player, bool use);
+UseActionFunction g_ammoCrateUse = nullptr;  // the game's own use of an ammo box (0x8B9C80), which ours calls
+bool __cdecl UseAmmoCrate(BYTE* player, bool use);  // Guerrilla's weapon cabinet (below)
 
 bool __cdecl UsableItems(BYTE* player, UseActionRecord* action) {
     const bool found = g_usableItems(player, action);
-    if (found && action && action->type == kActionUseAmmoBox) action->text[0] = L'\0';
+    if (found && action && action->type == kActionUseAmmoBox) {
+        action->text[0] = L'\0';
+        // Guerrilla's ammo crate opens its weapon cabinet: the action's function is ours (UseAmmoCrate, below).
+        if (action->function && action->function != reinterpret_cast<void*>(&UseAmmoCrate)) {
+            g_ammoCrateUse = reinterpret_cast<UseActionFunction>(action->function);
+            action->function = reinterpret_cast<void*>(&UseAmmoCrate);
+        }
+    }
     return found;
 }
 
@@ -1426,16 +1635,1548 @@ void HookUsableItems() {
     if (!g_usableItems) rfa::Log("Ammo boxes: could not hook the game's search for usable items; its use prompt stays as it is");
 }
 
+// ---- Guerrilla's weapon cabinet: a safehouse's weapon locker, and every ammo crate
+//
+// Guerrilla's weapon cabinet (hud_ui_weapon_cabinet_*, its game state GS_INGAME_WEAPON_CABINET, its document
+// rfg_ui_safehouse_weapons) opens two ways: at a safehouse's locker (its object_action_node "Player Open Weapon
+// Cabinet": player::do_frame_action_node RM 0xAC25AA, show(false)) and at any ammo crate (player_use_ammo_box,
+// player::do_frame_open_ammo_box RM 0xACD6A6, show(true), but during a Demolitions Master activity, which refills
+// at once). Its rules, as kept here:
+//   - The list (Guerrilla's Weapon_list: weapon and whether bought, in the order found; hud_ui_weapon_cabinet_save
+//     keeps it in the save): every weapon the player carries as it opens (add_inventory_items RM 0x87CBC0), picks
+//     up (pick_up_cb), buys (player_meta_data::purchase_upgrade: a "Weapon" upgrade's weapon) or a mission gives,
+//     unlocked; and each weapon a "Weapon" upgrade not bought yet but on sale sells, locked ("PURCHASE AT UPGRADE
+//     TABLE"; hud_ui_upgrades_update_list RM 0x87C950). Never the sledgehammers (class melee_sledgehammer) or a
+//     non-inventory weapon. The singularity bomb is passed over unless carried.
+//   - The screen: seven of the list at a time around the one picked, its name, the ammo it will have, its upgrades
+//     bought, its team's logo, "n / count"; the four slots below with their weapons and ammo. The list runs top to
+//     bottom, the next weapon below the one picked. Keys here: W / S, the arrows or the mouse wheel pick (S, down
+//     and the wheel down the next); 1, 2 and 3 put the weapon picked into that slot (Guerrilla's
+//     process_input RM 0x85A300: a weapon already in another of the three swaps places with the slot's; the
+//     fourth slot is Mason's hammer and never changes); Esc, Tab or Backspace close it (Guerrilla's back).
+//   - Its HUD is hidden while it's open (hud_ui_unload_items on enter): here ours and Armageddon's (the script).
+//   - Ammo, as it closes (exit RM 0x85AFA0, weapon_cabinet_get_ammo_box_ammo RM 0x85A170), for each gun carried
+//     that uses ammo: at a locker, full (Max_Rounds, or Max_Rounds_Upgrade with its "Weapon" upgrade's value 2
+//     bought) and "FULL AMMO" said; at a crate, what it had as the cabinet opened (none for a gun taken from it)
+//     plus Ammo_Box_Restock × the district's morale's share (Guerrilla's table, by tenths) × the difficulty's
+//     "player ammo crates", up to full. A "never in cabinet" gun keeps its ammo; melee has none.
+//   - An ammo crate opens once (player::open_ammo_box RM 0xA846E0): opening it uses it up until its zone loads it
+//     again (see UseUpAmmoCrate). A locker opens as often as wanted, full each time.
+// The game is paused while it's open (as the shop), and only its screen is drawn. Here the list is kept in
+// mods\guerrilla_hud\cabinet_weapons.txt, one for every save (as the upgrades bought are), and the weapons carried
+// are looked at every second (pickups, purchases). Armageddon's inventory: the record in a slot (0x7A8290), the
+// game's own delete of a record (0x85C6A0, as its swap 0x8BEB00 calls it) and add into a slot (0x85B260). Not here
+// yet: Mason's walk to the crate and its opening animation (the crate's lid, Weap_RM), the cabinet's sounds, the
+// singularity bomb's warning, the morale system (the district's morale at the start is used).
+struct CabinetWeapon {          // cabinet.txt's "weapon" lines (Guerrilla's weapons.xtbl)
+    std::string guerrilla;      // Guerrilla's name
+    std::string ours;           // the built weapon's (player_weapons.txt: rfg_<name> or <name>), "" if not built
+    std::string shown;          // its name, as Guerrilla shows it
+    std::string picture;        // its icon (rfg_ui_hud_weapon_icon_...)
+    int team = -1;              // whose logo: 0 Guerrilla, 1 EDF, 2 Ultor, 3 Marauder
+    bool sledgehammer = false, nonInventory = false, neverInCabinet = false, melee = false, singularity = false;
+    int maxRounds = 0, maxRoundsUpgraded = 0, restock = 0;
+    const BYTE* entry = nullptr;  // our weapon entry, found at first use
+    bool looked = false;
+};
+struct CabinetUpgrade {         // upgrades.txt's (guerrilla_gear's) upgrades of a weapon: "Weapon" or "Weapon Upgrade"
+    std::string name, type, weapon;  // weapon: ours
+    std::vector<int> values;
+    std::vector<std::string> levelNames, levelTexts;
+};
+struct CabinetItem {
+    int weapon = -1;            // in g_cabinetWeapons
+    bool unlocked = false;
+};
+struct Cabinet {
+    bool open = false, paused = false;
+    bool crate = false;         // opened at an ammo crate, else at a safehouse's locker
+    bool pending = false;       // an ammo crate's use asked for it: opens at the next HUD update
+    DWORD crateHandle = 0xFFFFFFFF;  // that crate
+    std::vector<CabinetItem> list;
+    int current = 0;            // the one picked, in list
+    int skipped = -1;           // the singularity bomb's place in list, passed over while not carried
+    std::map<int, int> roundsAtOpen;  // by weapon: the rounds carried as it opened
+    int version = 0;            // changed with anything the screen shows
+    int scroll = 0;             // the last move: +1 on, -1 back (the list's slide)
+    int shine = 0;              // the slot just filled, 1-4 (its plate's shine)
+    bool useDown = true, closeDown = true, upDown = false, wDown = false, downDown = false, sDown = false;
+    bool slotDown[3] = {true, true, true};
+    int lastWheel = 0;
+    ULONGLONG nextLook = 0;
+    ULONGLONG lastStep = 0;     // its keys' last step (see StepCabinet)
+};
+std::vector<CabinetWeapon> g_cabinetWeapons;
+std::vector<CabinetUpgrade> g_cabinetUpgrades;
+std::map<std::string, std::string> g_cabinetTexts;  // crate, locker, full_ammo, buy, back, charges
+std::map<std::string, int> g_districtMorale;         // a district's shown name -> its morale at the start (0-100)
+float g_crateDifficulty[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+Cabinet g_cabinet;
+// Guerrilla's ammo crates' share of the restock by the district's morale, a step a tenth (RM 0x1662710).
+constexpr float kCrateMoraleShare[11] = {0.2f, 0.3f, 0.35f, 0.4f, 0.45f, 0.5f, 0.55f, 0.6f, 0.7f, 0.8f, 1.0f};
+constexpr int kCabinetSlots = 3;          // the slots the cabinet fills; the fourth is Mason's hammer
+constexpr int kInventorySlots = 4;
+constexpr ULONGLONG kCabinetLookMs = 1000;
+constexpr DWORD kGameDifficulty = 0x10F7E98;  // 0 easy, 1 medium, 2 hard, 3 insane
+constexpr DWORD kWeaponTable = 0x18F8048, kWeaponTableCount = 0x18F804C, kWeaponEntrySize = 0xE0;
+constexpr DWORD kEntryInventoryItem = 0x18;   // a weapon entry -> its inventory item
+constexpr DWORD kRecordWeapon = 0x18;         // an inventory record -> its weapon's handle
+constexpr DWORD kWeaponEntry = 0x188;         // a weapon -> its weapon entry
+// A weapon's firing modes (0x138 apart from +0x1C8; the first one's fields here): its magazine +0x2E0 (the game's getter
+// 0x730EC0, which its HUD reads, and setter 0x7310F0, which the reload 0x7334B0 writes it with), and +0x2FC the rounds
+// a gun lying on the ground carries besides (a dead NPC's reserve, 0x731A10 from the gun drop 0x8A2F52).
+constexpr DWORD kWeaponFiringMode = 0x1C8, kWeaponMagazine = 0x2E0, kModeMagazineSize = 0x13E;
+void* const kCabinetWorld = reinterpret_cast<void*>(0x1870630);
+auto const RecordInSlot = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human, int slot)>(0x7A8290);
+auto const DeleteRecord = reinterpret_cast<void(__cdecl*)(BYTE* human, BYTE* record, bool, bool, bool)>(0x85C6A0);
+auto const GiveIntoSlot = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human, const void* inventoryItem, int rounds, int slot, bool, bool, bool)>(0x85B260);
+auto const ObjectFromHandle = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x436250);
+auto const FiringModeInfo = reinterpret_cast<BYTE*(__fastcall*)(BYTE* slot, void* unused)>(0x42A1C0);
+auto const HumansAmmo = reinterpret_cast<void*(__fastcall*)(BYTE* human, void* unused)>(0x84E8F0);
+auto const ReserveRounds = reinterpret_cast<int(__fastcall*)(void* ammo, void* unused, BYTE* weapon, int slot)>(0x70EF40);
+auto const AddRounds = reinterpret_cast<int(__fastcall*)(void* ammo, void* unused, BYTE* weapon, int slot, int rounds)>(0x70F4F0);
+auto const TakeRounds = reinterpret_cast<int(__fastcall*)(void* ammo, void* unused, BYTE* weapon, int slot, int rounds)>(0x70F650);
+// The game's setter of a firing mode's magazine (thiscall: the weapon, the rounds, the mode): it keeps it within the
+// magazine's size and tells the owner's ammo store (0x70F840, 0x70F790), as the reload does.
+auto const SetMagazine = reinterpret_cast<void(__fastcall*)(BYTE* weapon, void* unused, int rounds, int mode)>(0x7310F0);
+// The rounds a gun carries (thiscall: the weapon, the mode, with its magazine): +0x2FC, and its magazine when it has one
+// of its own (its mode info's +0x14C, Shared_Magazine_Index, -1): what a gun on the ground gives.
+auto const RoundsCarried = reinterpret_cast<int(__fastcall*)(BYTE* weapon, void* unused, int mode, bool withMagazine)>(0x731B00);
+// The record in a hand (0: the main one) and the one on its way there (thiscall: the human, the hand).
+auto const RecordInHand = reinterpret_cast<BYTE*(__fastcall*)(BYTE* human, void* unused, int hand)>(0x84E840);
+auto const RecordOnItsWay = reinterpret_cast<BYTE*(__fastcall*)(BYTE* human, void* unused, int hand)>(0x84E860);
+// An item from its handle, or null for another kind of object (thiscall on the world).
+auto const ItemFromHandle = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x4431B0);
+auto const RemoveMaterialEffect = reinterpret_cast<void(__cdecl*)(DWORD effect)>(0x6F5720);
+constexpr DWORD kItemSpecialFlags = 0xC9;      // an item's special flags (as Guerrilla's: bit 0 is_ammo_box, bit 1 use_enabled)
+constexpr BYTE kItemIsAmmoBox = 0x01, kItemUseEnabled = 0x02;
+constexpr DWORD kItemEffect = 0x124;           // its material effect (an ammo crate's glow), -1 for none
+constexpr DWORD kItemOpenedFlags = 0x130;      // its first bit cleared by the game's own open (0x8B6F22)
+constexpr DWORD kNoEffect = 0xFFFFFFFF;
+
+std::vector<std::string> SplitFields(const std::string& line, char separator) {
+    std::vector<std::string> fields(1);
+    for (char c : line) {
+        if (c == separator) fields.emplace_back();
+        else if (c != '\r' && c != '\n') fields.back() += c;
+    }
+    return fields;
+}
+
+std::wstring CabinetListPath() { return rfa::RootDir() + L"\\mods\\guerrilla_hud\\cabinet_weapons.txt"; }
+
+int CabinetWeaponNamed(const std::string& guerrilla) {
+    for (size_t i = 0; i < g_cabinetWeapons.size(); ++i)
+        if (_stricmp(g_cabinetWeapons[i].guerrilla.c_str(), guerrilla.c_str()) == 0) return static_cast<int>(i);
+    return -1;
+}
+
+int CabinetWeaponOurs(const std::string& ours) {
+    for (size_t i = 0; i < g_cabinetWeapons.size(); ++i)
+        if (!g_cabinetWeapons[i].ours.empty() && _stricmp(g_cabinetWeapons[i].ours.c_str(), ours.c_str()) == 0) return static_cast<int>(i);
+    return -1;
+}
+
+void SaveCabinetList() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, CabinetListPath().c_str(), L"w") != 0 || !file) return;
+    fputs("; Guerrilla's weapon cabinet: the weapons found or bought, in order (guerrilla_hud; one list for every save)\n", file);
+    for (const CabinetItem& item : g_cabinet.list)
+        fprintf(file, "%s\t%d\n", g_cabinetWeapons[item.weapon].guerrilla.c_str(), item.unlocked ? 1 : 0);
+    fclose(file);
+}
+
+// cabinet.txt (GuerrillaBuilder.exe), our built weapons (guerrilla_gear's player_weapons.txt), the weapons'
+// upgrades (guerrilla_gear's upgrades.txt) and the list kept so far.
+void ReadCabinet() {
+    const std::wstring folder = rfa::RootDir() + L"\\mods\\";
+    std::set<std::string> built;
+    FILE* file = nullptr;
+    char line[1024];
+    if (_wfopen_s(&file, (folder + L"guerrilla_gear\\player_weapons.txt").c_str(), L"r") == 0 && file) {
+        while (fgets(line, sizeof(line), file)) {
+            std::string name = SplitFields(line, '\t')[0];
+            if (!name.empty() && name[0] != ';') built.insert(name);
+        }
+        fclose(file);
+    }
+    if (_wfopen_s(&file, (folder + L"guerrilla_hud\\cabinet.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("No mods\\guerrilla_hud\\cabinet.txt (editor\\GuerrillaBuilder.exe build hud makes it): no weapon cabinet");
+        return;
+    }
+    auto number = [](const std::string& text) { return atoi(text.c_str()); };
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == ';') continue;
+        const std::vector<std::string> f = SplitFields(line, '|');
+        if (f[0] == "weapon" && f.size() >= 11) {
+            CabinetWeapon w;
+            w.guerrilla = f[1];
+            w.shown = f[2];
+            w.picture = f[3];
+            w.team = number(f[4]);
+            w.sledgehammer = _stricmp(f[5].c_str(), "melee_sledgehammer") == 0;
+            w.singularity = _stricmp(f[5].c_str(), "singularity_bomb") == 0;
+            w.melee = _stricmp(f[6].c_str(), "melee") == 0;
+            w.nonInventory = f[7].find("non_inventory") != std::string::npos;
+            w.neverInCabinet = f[7].find("never_in_cabinet") != std::string::npos;
+            w.maxRounds = number(f[8]);
+            w.maxRoundsUpgraded = number(f[9]);
+            w.restock = number(f[10]);
+            // Our name for it: Guerrilla's, or rfg_ + it where Armageddon has one of that name (the weapons build's).
+            if (built.count("rfg_" + w.guerrilla)) w.ours = "rfg_" + w.guerrilla;
+            else if (built.count(w.guerrilla)) w.ours = w.guerrilla;
+            g_cabinetWeapons.push_back(w);
+        } else if (f[0] == "crates" && f.size() >= 5) {
+            for (int i = 0; i < 4; ++i) g_crateDifficulty[i] = static_cast<float>(atof(f[i + 1].c_str()));
+        } else if (f[0] == "morale" && f.size() >= 3) {
+            g_districtMorale[f[1]] = number(f[2]);
+        } else if (f[0] == "text" && f.size() >= 3) {
+            g_cabinetTexts[f[1]] = f[2];
+        }
+    }
+    fclose(file);
+    if (_wfopen_s(&file, (folder + L"guerrilla_gear\\upgrades.txt").c_str(), L"r") == 0 && file) {
+        while (fgets(line, sizeof(line), file)) {
+            const std::vector<std::string> f = SplitFields(line, '\t');
+            if (f[0] == "upgrade" && f.size() >= 5 && (f[3] == "Weapon" || f[3] == "Weapon Upgrade") && !f[4].empty() && f[4] != "-") {
+                CabinetUpgrade u;
+                u.name = f[1];
+                u.type = f[3];
+                u.weapon = f[4];
+                g_cabinetUpgrades.push_back(u);
+            } else if (f[0] == "upgrade") {
+                g_cabinetUpgrades.push_back({});  // not a weapon's: its levels are skipped
+            } else if (f[0] == "level" && f.size() >= 5 && !g_cabinetUpgrades.empty()) {
+                CabinetUpgrade& u = g_cabinetUpgrades.back();
+                u.values.push_back(number(f[2]));
+                u.levelNames.push_back(f[3]);
+                u.levelTexts.push_back(f[4]);
+            }
+        }
+        fclose(file);
+        g_cabinetUpgrades.erase(std::remove_if(g_cabinetUpgrades.begin(), g_cabinetUpgrades.end(),
+                                               [](const CabinetUpgrade& u) { return u.name.empty(); }), g_cabinetUpgrades.end());
+    }
+    if (_wfopen_s(&file, CabinetListPath().c_str(), L"r") == 0 && file) {
+        while (fgets(line, sizeof(line), file)) {
+            if (line[0] == ';') continue;
+            const std::vector<std::string> f = SplitFields(line, '\t');
+            const int weapon = CabinetWeaponNamed(f[0]);
+            if (weapon >= 0 && f.size() >= 2) g_cabinet.list.push_back({weapon, f[1] == "1"});
+        }
+        fclose(file);
+    }
+    rfa::Log("Weapon cabinet: %u of Guerrilla's weapons (%u built), %u weapon upgrades, %u weapons in the cabinet so far",
+             static_cast<unsigned>(g_cabinetWeapons.size()),
+             static_cast<unsigned>(std::count_if(g_cabinetWeapons.begin(), g_cabinetWeapons.end(), [](const CabinetWeapon& w) { return !w.ours.empty(); })),
+             static_cast<unsigned>(g_cabinetUpgrades.size()), static_cast<unsigned>(g_cabinet.list.size()));
+}
+
+const BYTE* CabinetEntry(CabinetWeapon& w) {
+    if (w.looked) return w.entry;
+    w.looked = true;
+    BYTE* entries = *reinterpret_cast<BYTE* const*>(kWeaponTable);
+    const int count = *reinterpret_cast<const int*>(kWeaponTableCount);
+    for (int i = 0; entries && !w.ours.empty() && i < count; ++i) {
+        const char* name = *reinterpret_cast<const char* const*>(entries + i * kWeaponEntrySize);
+        if (name && _stricmp(name, w.ours.c_str()) == 0) w.entry = entries + i * kWeaponEntrySize;
+    }
+    return w.entry;
+}
+
+// The weapon entry of an inventory record (and its weapon), or null.
+const BYTE* RecordEntry(BYTE* record, BYTE** weapon = nullptr) {
+    BYTE* object = record ? ObjectFromHandle(kCabinetWorld, nullptr, *reinterpret_cast<const DWORD*>(record + kRecordWeapon)) : nullptr;
+    if (weapon) *weapon = object;
+    return object ? *reinterpret_cast<const BYTE* const*>(object + kWeaponEntry) : nullptr;
+}
+
+// The cabinet's weapon of a weapon entry, or -1.
+int CabinetWeaponOfEntry(const BYTE* entry) {
+    if (!entry) return -1;
+    for (size_t i = 0; i < g_cabinetWeapons.size(); ++i)
+        if (CabinetEntry(g_cabinetWeapons[i]) == entry) return static_cast<int>(i);
+    return -1;
+}
+
+bool Listable(const CabinetWeapon& w) { return !w.sledgehammer && !w.nonInventory && !w.ours.empty(); }
+
+// Guerrilla's unlock_weapon then add_weapon (unlocked), or add_unique (locked): a weapon is listed once.
+void CabinetAdd(int weapon, bool unlocked) {
+    if (weapon < 0 || !Listable(g_cabinetWeapons[weapon])) return;
+    for (CabinetItem& item : g_cabinet.list)
+        if (item.weapon == weapon) {
+            if (unlocked && !item.unlocked) {
+                item.unlocked = true;
+                ++g_cabinet.version;
+                SaveCabinetList();
+                rfa::Log("Weapon cabinet: %s bought", g_cabinetWeapons[weapon].guerrilla.c_str());
+            }
+            return;
+        }
+    g_cabinet.list.push_back({weapon, unlocked});
+    ++g_cabinet.version;
+    SaveCabinetList();
+    rfa::Log("Weapon cabinet: %s added (%s)", g_cabinetWeapons[weapon].guerrilla.c_str(), unlocked ? "found" : "on sale, not bought");
+}
+
+// The level bought of an upgrade (guerrilla_gear's), and whether its next can be bought now.
+int UpgradeBought(const std::string& name, bool* available = nullptr) {
+    if (available) *available = false;
+    if (!GearReady()) return 0;
+    GearApi& api = Gear();
+    const int count = api.count();
+    for (int i = 0; i < count; ++i) {
+        GuerrillaGearUpgrade upgrade{};
+        upgrade.size = sizeof(upgrade);
+        if (api.upgrade(i, &upgrade) && name == upgrade.name) {
+            if (available) *available = upgrade.available != 0;
+            return upgrade.bought;
+        }
+    }
+    return 0;
+}
+
+// The weapons carried (Guerrilla's add_inventory_items, and its pick-up event), the "Weapon" upgrades bought
+// (purchase_upgrade) and, with onSale, those on sale (hud_ui_upgrades_update_list, locked).
+void CabinetLook(BYTE* player, bool onSale) {
+    for (int slot = 0; slot < kInventorySlots; ++slot)
+        CabinetAdd(CabinetWeaponOfEntry(RecordEntry(RecordInSlot(player, slot))), true);
+    for (const CabinetUpgrade& u : g_cabinetUpgrades) {
+        if (u.type != "Weapon") continue;
+        bool available = false;
+        const int bought = UpgradeBought(u.name, &available);
+        if (bought >= 1) CabinetAdd(CabinetWeaponOurs(u.weapon), true);
+        else if (onSale && available) CabinetAdd(CabinetWeaponOurs(u.weapon), false);
+    }
+}
+
+// Guerrilla's upgrade_weapon_has_extra_ammo: the weapon's "Weapon" upgrade at a value of 2 or more.
+bool HasExtraAmmo(const CabinetWeapon& w) {
+    for (const CabinetUpgrade& u : g_cabinetUpgrades)
+        if (u.type == "Weapon" && _stricmp(u.weapon.c_str(), w.ours.c_str()) == 0) {
+            const int bought = UpgradeBought(u.name);
+            return bought >= 0 && bought < static_cast<int>(u.values.size()) && u.values[bought] >= 2;
+        }
+    return false;
+}
+
+// The rounds a weapon will have as the cabinet closes (weapon_cabinet_get_ammo_box_ammo); -1 for none (melee).
+int CabinetRounds(int weapon) {
+    const CabinetWeapon& w = g_cabinetWeapons[weapon];
+    const auto had = g_cabinet.roundsAtOpen.find(weapon);
+    const int before = had != g_cabinet.roundsAtOpen.end() ? had->second : 0;
+    if (w.neverInCabinet) return before;
+    if (w.melee) return -1;
+    const int most = HasExtraAmmo(w) ? w.maxRoundsUpgraded : w.maxRounds;
+    if (!g_cabinet.crate) return most;
+    int morale = 0;
+    const auto district = g_districtMorale.find(g_view.district);
+    if (district != g_districtMorale.end()) morale = district->second;
+    const int step = (std::min)(10, (std::max)(0, morale / 10));
+    const int level = *reinterpret_cast<const int*>(kGameDifficulty);
+    const float difficulty = level >= 0 && level < 4 ? g_crateDifficulty[level] : 1.0f;
+    const int restock = static_cast<int>(static_cast<float>(w.restock) * kCrateMoraleShare[step] * difficulty);
+    return (std::min)(most, before + restock);
+}
+
+// Whether a weapon is the one in the player's hands (the record in his main hand, 0x84E840, as guerrilla_gear reads it).
+bool InHands(BYTE* player, const BYTE* weapon) {
+    BYTE* held = nullptr;
+    RecordEntry(RecordInHand(player, nullptr, 0), &held);
+    return held && held == weapon;
+}
+
+// A weapon's rounds: the player's reserve of its ammo (the game's own ammo store), and its magazine while it's in his
+// hands. Armageddon empties a gun's magazine into the reserve as it's put away and takes the same number back out as
+// it's drawn, so a gun put away has all its rounds in the reserve (2026-11-12: each gun put away showed its magazine as
+// "picked up"; m16 with 18 in its magazine put away "+18", drawn again: 18 in the magazine, the total the same).
+int RoundsOf(BYTE* player, BYTE* weapon) {
+    void* ammo = HumansAmmo(player, nullptr);
+    const int reserve = ammo ? ReserveRounds(ammo, nullptr, weapon, 0) : 0;
+    return reserve + (InHands(player, weapon) ? *reinterpret_cast<const int*>(weapon + kWeaponMagazine) : 0);
+}
+
+// Gives a weapon that many rounds in all: its magazine as full as they fill it (through the game's setter), the rest
+// in the reserve; all of them in the reserve for a gun put away, which takes its magazine's out of it as it's drawn.
+// The reserve is read after the magazine is set, as the setter tells the store.
+void SetRounds(BYTE* player, BYTE* weapon, int total) {
+    BYTE* mode = FiringModeInfo(weapon + kWeaponFiringMode, nullptr);
+    const int size = mode ? *reinterpret_cast<const WORD*>(mode + kModeMagazineSize) : 0;
+    const int magazine = (std::max)(0, (std::min)(total, size));
+    const bool inHands = InHands(player, weapon);
+    SetMagazine(weapon, nullptr, magazine, 0);
+    void* ammo = HumansAmmo(player, nullptr);
+    if (!ammo) return;
+    const int now = ReserveRounds(ammo, nullptr, weapon, 0), wanted = (std::max)(0, inHands ? total - magazine : total);
+    if (now > wanted) TakeRounds(ammo, nullptr, weapon, 0, now - wanted);
+    else if (now < wanted) AddRounds(ammo, nullptr, weapon, 0, wanted - now);
+}
+
+// Guerrilla's get_weapon(offset, true): the list's place that many on from the one picked, round the end,
+// passing over the singularity bomb while it isn't carried.
+int CabinetPlace(int from, int by) {
+    const int count = static_cast<int>(g_cabinet.list.size());
+    if (count == 0) return -1;
+    int place = from;
+    while (by != 0) {
+        place = by > 0 ? (place + 1) % count : (place + count - 1) % count;
+        if (place == g_cabinet.skipped && count > 1) continue;
+        by += by > 0 ? -1 : 1;
+    }
+    return place;
+}
+
+bool CabinetIsOpen() { return g_cabinet.open; }
+
+// Guerrilla's ammo crate opens once: its player::open_ammo_box (RM 0xA846E0) clears the crate's use_enabled (which
+// ammo_box_is_usable_by_player, RM 0xA10280, asks for unless the debug Ammo_box_unlimited_use is set), takes its glow
+// off (its material effect) and its map icon away; the crate is usable again only when it's made again
+// (item::serialize RM 0xAA7FFE: use_enabled = is_ammo_box), as its zone loads. Armageddon kept that whole: its own
+// open (0x8B6CF0, from the ammo box's use 0x8B9C80) clears the same flag (+0xC9's second bit, which its usable check
+// 0x8B29B0 reads), removes the effect (+0x124) and clears +0x130's first bit (its map icon's removal, 0xEFA6F0, does
+// nothing). The cabinet opens instead of the game's open (UseAmmoCrate), so that part is done here.
+// (2026-11-12: without it a crate gave its restock again at each opening.)
+void UseUpAmmoCrate(DWORD handle) {
+    BYTE* crate = handle != 0xFFFFFFFF ? ItemFromHandle(kCabinetWorld, nullptr, handle) : nullptr;
+    if (!crate || !(crate[kItemSpecialFlags] & kItemIsAmmoBox)) {
+        rfa::Log("Weapon cabinet: the ammo crate it opened at is gone; nothing used up");
+        return;
+    }
+    crate[kItemSpecialFlags] &= static_cast<BYTE>(~kItemUseEnabled);
+    const DWORD effect = *reinterpret_cast<const DWORD*>(crate + kItemEffect);
+    if (effect != kNoEffect) RemoveMaterialEffect(effect);
+    *reinterpret_cast<DWORD*>(crate + kItemOpenedFlags) &= ~1u;
+}
+
+void OpenCabinet(bool crate) {
+    BYTE* player = g_player;
+    if (!player || g_cabinet.open || g_cabinetWeapons.empty()) return;
+    CabinetLook(player, true);
+    if (g_cabinet.list.empty()) {
+        rfa::Log("Weapon cabinet: nothing in it yet; it stays shut");
+        return;
+    }
+    g_cabinet.roundsAtOpen.clear();
+    bool singularityCarried = false;
+    for (int slot = 0; slot < kInventorySlots; ++slot) {
+        BYTE* weapon = nullptr;
+        const int w = CabinetWeaponOfEntry(RecordEntry(RecordInSlot(player, slot), &weapon));
+        if (w < 0 || !weapon) continue;
+        g_cabinet.roundsAtOpen[w] = RoundsOf(player, weapon);
+        if (g_cabinetWeapons[w].singularity) singularityCarried = true;
+    }
+    g_cabinet.skipped = -1;
+    for (size_t i = 0; !singularityCarried && i < g_cabinet.list.size(); ++i)
+        if (g_cabinetWeapons[g_cabinet.list[i].weapon].singularity) g_cabinet.skipped = static_cast<int>(i);
+    g_cabinet.crate = crate;
+    if (crate) UseUpAmmoCrate(g_cabinet.crateHandle);
+    g_cabinet.current = 0;
+    if (g_cabinet.current == g_cabinet.skipped) g_cabinet.current = CabinetPlace(0, 1);
+    g_cabinet.open = true;
+    g_cabinet.scroll = g_cabinet.shine = 0;
+    ++g_cabinet.version;
+    g_cabinet.useDown = g_cabinet.closeDown = true;  // keys held as it opens aren't presses
+    g_cabinet.upDown = g_cabinet.wDown = g_cabinet.downDown = g_cabinet.sDown = true;
+    for (bool& down : g_cabinet.slotDown) down = true;
+    g_cabinet.lastWheel = g_wheelTotal;
+    if (!g_cabinet.paused) {
+        PauseGame(1, 1, 0, 0);
+        g_cabinet.paused = true;
+    }
+    rfa::Log("Weapon cabinet opened at %s (%u weapons); the game paused", crate ? "an ammo crate (now used up)" : "a safehouse's locker",
+             static_cast<unsigned>(g_cabinet.list.size()));
+}
+
+void CloseCabinet(const char* why, bool giveAmmo) {
+    if (!g_cabinet.open) return;
+    BYTE* player = g_player;
+    if (giveAmmo && player) {
+        int guns = 0;
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            BYTE* weapon = nullptr;
+            const int w = CabinetWeaponOfEntry(RecordEntry(RecordInSlot(player, slot), &weapon));
+            if (w < 0 || !weapon) continue;
+            const int rounds = CabinetRounds(w);
+            if (rounds < 0) continue;
+            SetRounds(player, weapon, rounds);
+            ++guns;
+        }
+        // hud_ui_weapon_cabinet_exit: a secondary message (ui_add_secondary_message).
+        if (!g_cabinet.crate && g_cabinetTexts.count("full_ammo")) ShowMessage(g_cabinetTexts["full_ammo"], false);
+        rfa::Log("Weapon cabinet: ammo for %d guns (%s)", guns, g_cabinet.crate ? "the crate's restock" : "full, at a locker");
+    }
+    g_cabinet.open = false;
+    g_shop.useDown = true;  // the use key still held doesn't open it again
+    if (g_cabinet.paused) {
+        UnpauseGame(1, 1);
+        g_cabinet.paused = false;
+    }
+    rfa::Log("Weapon cabinet closed (%s)", why);
+}
+
+// Guerrilla's process_input for a slot key: the weapon picked into slot 0-2 of the three, swapping places with
+// the slot's weapon when it's in another of them already.
+void CabinetPutInSlot(int slot) {
+    BYTE* player = g_player;
+    if (!player || g_cabinet.list.empty()) return;
+    const CabinetItem item = g_cabinet.list[g_cabinet.current];
+    CabinetWeapon& chosen = g_cabinetWeapons[item.weapon];
+    const BYTE* entry = CabinetEntry(chosen);
+    if (!item.unlocked || !entry) {
+        rfa::Log("Weapon cabinet: %s isn't bought yet", chosen.guerrilla.c_str());
+        return;
+    }
+    int from = -1;
+    for (int s = 0; s < kCabinetSlots; ++s)
+        if (RecordEntry(RecordInSlot(player, s)) == entry) from = s;
+    if (from == slot) return;
+    BYTE* old = RecordInSlot(player, slot);
+    const BYTE* oldEntry = RecordEntry(old);
+    const int oldWeapon = CabinetWeaponOfEntry(oldEntry);
+    if (oldWeapon >= 0 && g_cabinetWeapons[oldWeapon].sledgehammer) {
+        rfa::Log("Weapon cabinet: slot %d holds Mason's hammer, which stays", slot + 1);
+        return;
+    }
+    const void* oldItem = oldEntry ? *reinterpret_cast<const void* const*>(oldEntry + kEntryInventoryItem) : nullptr;
+    if (old) DeleteRecord(player, old, false, false, false);
+    if (from >= 0) {
+        if (BYTE* moved = RecordInSlot(player, from)) DeleteRecord(player, moved, false, false, false);
+        if (oldItem) GiveIntoSlot(player, oldItem, 0, from, false, false, false);
+    }
+    const void* chosenItem = *reinterpret_cast<const void* const*>(entry + kEntryInventoryItem);
+    const BYTE* given = GiveIntoSlot(player, chosenItem, 0, slot, false, false, false);
+    g_cabinet.shine = slot + 1;
+    ++g_cabinet.version;
+    rfa::Log("Weapon cabinet: %s into slot %d%s%s", chosen.guerrilla.c_str(), slot + 1, from >= 0 ? " (swapped with the slot's)" : "",
+             given ? "" : "; the game refused it");
+}
+
+void CabinetMove(int by) {
+    if (g_cabinet.list.empty() || by == 0) return;
+    g_cabinet.current = CabinetPlace(g_cabinet.current, by);
+    g_cabinet.scroll = by > 0 ? 1 : -1;
+    g_cabinet.shine = 0;
+    ++g_cabinet.version;
+}
+
+// The cabinet's keys, each HUD update while it's open. After a pause in its steps (the game's own pause menu was
+// up, which stops the HUD's update, or the window lost the focus) a key still held isn't a press: the Esc that
+// closed the pause menu doesn't close the cabinet too. Guerrilla's keys to leave are its back's (Esc here, and Tab
+// and Backspace); the use key does nothing on its screen.
+void StepCabinet() {
+    const ULONGLONG now = GetTickCount64();
+    const bool resumed = now - g_cabinet.lastStep > kHudGoneAfterMs;
+    g_cabinet.lastStep = now;
+    if (!GameFocused() || resumed) {
+        g_cabinet.closeDown = g_cabinet.upDown = g_cabinet.wDown = g_cabinet.downDown = g_cabinet.sDown = true;
+        for (bool& down : g_cabinet.slotDown) down = true;
+        g_cabinet.lastWheel = g_wheelTotal;
+        return;
+    }
+    const int notches = (g_wheelTotal - g_cabinet.lastWheel) / kWheelNotch;
+    g_cabinet.lastWheel += notches * kWheelNotch;
+    int move = -notches;
+    // The list runs top to bottom (its groups 0-6, the one picked in the middle): down and the wheel down the next.
+    if (Pressed(VK_UP, g_cabinet.upDown)) move -= 1;
+    if (Pressed(keys::Key(keys::Up), g_cabinet.wDown)) move -= 1;
+    if (Pressed(VK_DOWN, g_cabinet.downDown)) move += 1;
+    if (Pressed(keys::Key(keys::Down), g_cabinet.sDown)) move += 1;
+    if (move != 0) CabinetMove(move);
+    for (int slot = 0; slot < kCabinetSlots; ++slot)
+        if (Pressed('1' + slot, g_cabinet.slotDown[slot])) CabinetPutInSlot(slot);
+    const bool close = HeldDown(VK_ESCAPE) || HeldDown(VK_TAB) || HeldDown(VK_BACK);
+    if (close && !g_cabinet.closeDown) {
+        g_full.swallowPauseUntil = GetTickCount64() + kSwallowPauseMs;
+        CloseCabinet("its key", true);
+    }
+    g_cabinet.closeDown = close;
+}
+
+// Each HUD update in our world: the weapons carried and bought looked at every second, and an ammo crate's use.
+void FollowCabinet() {
+    if (g_cabinet.pending) {
+        g_cabinet.pending = false;
+        if (!g_shop.open && !g_mapOpen) OpenCabinet(true);
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (g_cabinet.open || now < g_cabinet.nextLook || !g_player) return;
+    g_cabinet.nextLook = now + kCabinetLookMs;
+    CabinetLook(g_player, false);
+}
+
+// An ammo crate's use (its action's function, see UsableItems): asked first whether it can be used (use false),
+// then used. The game's own (Armageddon's refill at once) says whether it can be; using it opens the cabinet.
+bool __cdecl UseAmmoCrate(BYTE* player, bool use) {
+    if (!g_ammoCrateUse) return false;
+    if (!g_ammoCrateUse(player, false)) return false;
+    if (!use) return true;
+    if (g_cabinetWeapons.empty() || player != g_player) return g_ammoCrateUse(player, true);  // no cabinet: the game's refill
+    g_cabinet.pending = true;
+    g_cabinet.crateHandle = reinterpret_cast<const UseActionRecord*>(player + kPlayerUseAction)->handle;
+    return true;
+}
+
+// rfg_cabinet() -> open, version, scroll, shine
+//   The weapon cabinet: whether it's open; a number that changes with anything it shows; the last move (1 on,
+//   -1 back, 0 none: the list's slide); the slot just filled (1-4, 0 none: its plate's shine).
+int __cdecl LuaCabinet(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    lua_pushboolean(L, g_cabinet.open);
+    lua_pushnumber(L, g_cabinet.version);
+    lua_pushnumber(L, g_cabinet.scroll);
+    lua_pushnumber(L, g_cabinet.shine);
+    return 4;
+}
+
+// rfg_cabinet_screen() -> title, back, counter, counter's title
+//   Its title (an ammo crate's or a locker's), the word by the back key, "n / count", and the word over that (the
+//   document names it by Guerrilla's tag MENU_WEAPON, which Armageddon's strings haven't).
+int __cdecl LuaCabinetScreen(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const std::string title = g_cabinetTexts[g_cabinet.crate ? "crate" : "locker"];
+    const int count = static_cast<int>(g_cabinet.list.size()) - (g_cabinet.skipped >= 0 ? 1 : 0);
+    const int place = g_cabinet.current + 1 - (g_cabinet.skipped >= 0 && g_cabinet.current > g_cabinet.skipped ? 1 : 0);
+    char counter[32];
+    sprintf_s(counter, "%d / %d", place, count);
+    lua_pushstring(L, title.c_str());
+    lua_pushstring(L, g_cabinetTexts["back"].c_str());
+    lua_pushstring(L, counter);
+    lua_pushstring(L, g_cabinetTexts["weapon"].c_str());
+    return 4;
+}
+
+// rfg_cabinet_info() -> name, ammo, upgrades, team, bought
+//   The weapon picked: its name; the ammo it will have (at a crate after Guerrilla's logo; "PURCHASE AT UPGRADE
+//   TABLE" if not bought; "" for none); its upgrades bought, by name; its team (-1 none, 0-3); whether bought.
+int __cdecl LuaCabinetInfo(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    if (g_cabinet.list.empty()) return 0;
+    const CabinetItem& item = g_cabinet.list[g_cabinet.current];
+    const CabinetWeapon& w = g_cabinetWeapons[item.weapon];
+    std::string ammo;
+    if (!item.unlocked) {
+        ammo = g_cabinetTexts["buy"];
+    } else if (CabinetRounds(item.weapon) >= 0) {
+        const int rounds = CabinetRounds(item.weapon);
+        char text[160];
+        if (g_cabinet.crate) sprintf_s(text, "[format][scale:0.5][image:rfg_ui_hud_guerilla_logo_white][/format] %d", rounds);
+        else sprintf_s(text, "%d", rounds);
+        ammo = text;
+    }
+    // Its upgrades bought (hud_ui_weapon_cabinet_process_weapon_info_data): each of its upgrades' level bought,
+    // by name (a remote charge count by its description), a "Weapon" upgrade only from its second level.
+    std::string upgrades;
+    for (const CabinetUpgrade& u : g_cabinetUpgrades) {
+        if (_stricmp(u.weapon.c_str(), w.ours.c_str()) != 0) continue;
+        const int bought = UpgradeBought(u.name);
+        if (bought < 1 || bought >= static_cast<int>(u.levelNames.size())) continue;
+        if (u.type == "Weapon" && u.values[bought] < 2) continue;
+        std::string name = u.levelNames[bought];
+        if (name == g_cabinetTexts["charges"]) name = u.levelTexts[bought];
+        if (name.empty()) continue;
+        if (!upgrades.empty()) upgrades += ", ";
+        upgrades += name;
+    }
+    lua_pushstring(L, w.shown.c_str());
+    lua_pushstring(L, ammo.c_str());
+    lua_pushstring(L, upgrades.c_str());
+    lua_pushnumber(L, w.team);
+    lua_pushboolean(L, item.unlocked);
+    return 5;
+}
+
+// rfg_cabinet_icon(offset) -> picture, bought
+//   The list's weapon that many on from the one picked (-3 to 3, Guerrilla's seven): its picture, whether bought.
+int __cdecl LuaCabinetIcon(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const int place = CabinetPlace(g_cabinet.current, static_cast<int>(lua_tonumber(L, 1)));
+    if (place < 0) return 0;
+    const CabinetItem& item = g_cabinet.list[place];
+    lua_pushstring(L, g_cabinetWeapons[item.weapon].picture.c_str());
+    lua_pushboolean(L, item.unlocked);
+    return 2;
+}
+
+// rfg_cabinet_slot(slot) -> picture, ammo
+//   The player's slot 1-4: its weapon's picture and the rounds it will have (-1 for none); nothing for an empty
+//   slot or a weapon not Guerrilla's.
+int __cdecl LuaCabinetSlot(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const int slot = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (!g_player || slot < 0 || slot >= kInventorySlots) return 0;
+    const int w = CabinetWeaponOfEntry(RecordEntry(RecordInSlot(g_player, slot)));
+    if (w < 0) return 0;
+    lua_pushstring(L, g_cabinetWeapons[w].picture.c_str());
+    lua_pushnumber(L, CabinetRounds(w));
+    return 2;
+}
+
+// ---- Guerrilla's handbook: its pause menu's HANDBOOK
+//
+// Guerrilla's handbook (hud_ui_handbook_*, its document rfg_ui_handbook; RM 0x8691E0 its frame) lists the entries of
+// guerrilla_handbook.xtbl (handbook.txt, GuerrillaBuilder.exe's), a page for each category, only the pages with an
+// entry open (hud_ui_handbook_count_viewable_pages) and only the open entries on them. An entry is open from the
+// start (Unlocked) or once the game opens it (hud_ui_handbook_unlock_entry): here, by what this mod keeps already:
+//   - a weapon in the weapon cabinet's list (found, bought or on sale) opens the entry of its Guerrilla name
+//     (hud_ui_weapon_cabinet_add_weapon RM 0x877200: unlock_entry(crc of the weapon's name));
+//   - a radio tag found opens the radio tags' page's ("BLAST FROM THE PAST") entry of its number
+//     (bftp_touch_tag RM 0xA8DBB2: hud_ui_handbook_unlock_bftp_entry(the tag's number)).
+// Not yet: the activities' starts (activity_base::activity_initialize opens theirs), the tool tips, the cutscenes;
+// the videos (gameplay, cutscenes) and the radio tags' recordings and portraits.
+// An entry not read yet is marked new (its page too) until it's shown (handbook_entry_set_viewed): the entries read
+// are kept in mods\guerrilla_hud\handbook_read.txt, one list for every save (as the cabinet's list).
+// It opens from Armageddon's pause menu (rfg_handbook_open: the game stays paused, held by this mod, as the pause
+// menu closes), and its back key (Esc, Tab or Backspace) closes it and opens the pause menu again, as Guerrilla's
+// went back to its menu. Up / down pick an entry (W / S, the arrows, the mouse wheel), left / right the page (A / D,
+// the arrows): [GuerrillaKeys] Up, Down, Left, Right.
+struct HandbookPage {
+    std::string tag, shown, kind;
+};
+struct HandbookEntry {
+    std::string name, title, text, picture, video, icon, voice;
+    std::string pictureDocument;  // the document its picture is in (loaded while it's shown)
+    int page = 0;           // in g_handbookPages
+    bool openAtStart = false;
+};
+struct Handbook {
+    bool open = false, paused = false, pending = false;
+    bool closing = false;   // closed by its back key: the pause menu opens once its documents are gone
+    int page = 0;           // the page shown, in g_handbookPages
+    int row = 0;            // the entry picked, among the page's open ones
+    int top = 0;            // the first row shown
+    int version = 0;        // changed with anything shown
+    bool upDown = true, downDown = true, leftDown = true, rightDown = true, closeDown = true;
+    int lastWheel = 0;
+    ULONGLONG lastStep = 0;
+};
+std::vector<HandbookPage> g_handbookPages;
+std::vector<HandbookEntry> g_handbookEntries;
+std::map<std::string, std::string> g_handbookTexts;  // title, new, back, select
+std::set<std::string> g_handbookRead;
+Handbook g_handbook;
+constexpr int kHandbookRows = 16;   // Guerrilla's MAX_ROWS
+constexpr int kHandbookPagesShown = 8;  // its MAX_PAGES (its page tabs)
+
+std::wstring HandbookReadPath() { return rfa::RootDir() + L"\\mods\\guerrilla_hud\\handbook_read.txt"; }
+
+// A text field of handbook.txt: "\n" (the two characters) a new line.
+std::string HandbookText(const std::string& field) {
+    std::string text;
+    for (size_t i = 0; i < field.size(); ++i) {
+        if (field[i] == '\\' && i + 1 < field.size() && (field[i + 1] == 'n' || field[i + 1] == 'N')) {
+            text += '\n';
+            ++i;
+        } else {
+            text += field[i];
+        }
+    }
+    return text;
+}
+
+void ReadHandbook() {
+    FILE* file = nullptr;
+    char line[8192];
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_hud\\handbook.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("No mods\\guerrilla_hud\\handbook.txt (editor\\GuerrillaBuilder.exe build hud makes it): no handbook");
+        return;
+    }
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == ';') continue;
+        const std::vector<std::string> f = SplitFields(line, '|');
+        if (f[0] == "page" && f.size() >= 5) {
+            g_handbookPages.push_back({f[2], f[3], f[4]});
+        } else if (f[0] == "entry" && f.size() >= 10) {
+            HandbookEntry e;
+            e.name = f[1];
+            e.page = atoi(f[2].c_str()) - 1;
+            e.title = HandbookText(f[3]);
+            e.text = HandbookText(f[4]);
+            e.picture = f[5];
+            e.video = f[6];
+            e.icon = f[7];
+            e.openAtStart = f[8] == "1";
+            if (f.size() >= 10) e.voice = f[9];
+            if (f.size() >= 11) e.pictureDocument = f[10];
+            if (e.page >= 0 && e.page < static_cast<int>(g_handbookPages.size())) g_handbookEntries.push_back(e);
+        } else if (f[0] == "text" && f.size() >= 3) {
+            g_handbookTexts[f[1]] = HandbookText(f[2]);
+        }
+    }
+    fclose(file);
+    if (_wfopen_s(&file, HandbookReadPath().c_str(), L"r") == 0 && file) {
+        while (fgets(line, sizeof(line), file)) {
+            const std::string name = SplitFields(line, '\t')[0];
+            if (!name.empty() && name[0] != ';') g_handbookRead.insert(name);
+        }
+        fclose(file);
+    }
+    rfa::Log("Handbook: %u entries on %u pages, %u read so far", static_cast<unsigned>(g_handbookEntries.size()),
+             static_cast<unsigned>(g_handbookPages.size()), static_cast<unsigned>(g_handbookRead.size()));
+}
+
+void SaveHandbookRead() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, HandbookReadPath().c_str(), L"w") != 0 || !file) return;
+    fputs("; Guerrilla's handbook: the entries read (guerrilla_hud; one list for every save)\n", file);
+    for (const std::string& name : g_handbookRead) fprintf(file, "%s\n", name.c_str());
+    fclose(file);
+}
+
+bool HandbookEntryOpen(const HandbookEntry& e) {
+    if (e.openAtStart) return true;
+    const std::string& kind = g_handbookPages[e.page].kind;
+    if (kind == "bftp") {
+        const int number = atoi(e.name.c_str());
+        return number > 0 && g_tagsFound.count(number) != 0;
+    }
+    for (const CabinetItem& item : g_cabinet.list)
+        if (_stricmp(g_cabinetWeapons[item.weapon].guerrilla.c_str(), e.name.c_str()) == 0) return true;
+    return false;
+}
+
+bool HandbookEntryNew(const HandbookEntry& e) { return HandbookEntryOpen(e) && g_handbookRead.count(e.name) == 0; }
+
+// The open entries of a page, in the table's order.
+std::vector<int> HandbookRows(int page) {
+    std::vector<int> rows;
+    for (size_t i = 0; i < g_handbookEntries.size(); ++i)
+        if (g_handbookEntries[i].page == page && HandbookEntryOpen(g_handbookEntries[i])) rows.push_back(static_cast<int>(i));
+    return rows;
+}
+
+// The pages shown: those with an open entry.
+std::vector<int> HandbookPagesShown() {
+    std::vector<int> pages;
+    for (int page = 0; page < static_cast<int>(g_handbookPages.size()); ++page)
+        if (!HandbookRows(page).empty() && static_cast<int>(pages.size()) < kHandbookPagesShown) pages.push_back(page);
+    return pages;
+}
+
+bool HandbookIsOpen() { return g_handbook.open; }
+
+// The entry picked, marked read (handbook_entry_set_viewed).
+void HandbookMarkRead() {
+    const std::vector<int> rows = HandbookRows(g_handbook.page);
+    if (g_handbook.row < 0 || g_handbook.row >= static_cast<int>(rows.size())) return;
+    if (g_handbookRead.insert(g_handbookEntries[rows[g_handbook.row]].name).second) SaveHandbookRead();
+}
+
+void HandbookPick(int page, int row) {
+    const std::vector<int> rows = HandbookRows(page);
+    g_handbook.page = page;
+    g_handbook.row = rows.empty() ? 0 : (std::max)(0, (std::min)(row, static_cast<int>(rows.size()) - 1));
+    if (g_handbook.row < g_handbook.top) g_handbook.top = g_handbook.row;
+    if (g_handbook.row >= g_handbook.top + kHandbookRows) g_handbook.top = g_handbook.row - kHandbookRows + 1;
+    g_handbook.top = (std::max)(0, (std::min)(g_handbook.top, (std::max)(0, static_cast<int>(rows.size()) - kHandbookRows)));
+    ++g_handbook.version;
+}
+
+// rfg_handbook_open (the pause menu's HANDBOOK): the game paused now, held by this mod, and the handbook opened at the
+// next HUD update (the pause menu closes first).
+void RequestHandbook() {
+    if (g_handbook.open || g_handbook.pending || g_handbookEntries.empty()) return;
+    g_handbook.pending = true;
+    if (!g_handbook.paused) {
+        PauseGame(1, 1, 0, 0);
+        g_handbook.paused = true;
+    }
+}
+
+void OpenHandbook() {
+    g_handbook.pending = false;
+    const std::vector<int> pages = HandbookPagesShown();
+    const Document* screen = FindDocument("rfg_ui_handbook");
+    if (pages.empty() || !InOurWorld() || !screen || screen->missing) {
+        if (g_handbook.paused) {
+            UnpauseGame(1, 1);
+            g_handbook.paused = false;
+        }
+        rfa::Log("Handbook: nothing open in it; it stays shut");
+        return;
+    }
+    g_handbook.open = true;
+    g_handbook.top = 0;
+    HandbookPick(pages[0], 0);
+    HandbookMarkRead();
+    g_handbook.upDown = g_handbook.downDown = g_handbook.leftDown = g_handbook.rightDown = g_handbook.closeDown = true;
+    g_handbook.lastWheel = g_wheelTotal;
+    if (!g_handbook.paused) {
+        PauseGame(1, 1, 0, 0);
+        g_handbook.paused = true;
+    }
+    rfa::Log("Handbook opened (%u pages, %u entries open); the game paused", static_cast<unsigned>(pages.size()),
+             static_cast<unsigned>(std::count_if(g_handbookEntries.begin(), g_handbookEntries.end(), HandbookEntryOpen)));
+}
+
+bool g_handbookBackToPauseMenu = false;  // closed by its back key: the pause menu opens again (FollowPauseMenuBlock)
+
+// Closed by its back key, it goes back to the pause menu once its documents are gone (FollowHandbook), the game kept
+// paused and the pause menu kept from opening till then: the pause menu's documents mustn't be loaded on top of the
+// handbook's while those are still to go (the interface's memory is a stack, see Wanted).
+void CloseHandbook(const char* why, bool toPauseMenu) {
+    const bool wasOpen = g_handbook.open || g_handbook.pending;
+    g_handbook.open = g_handbook.pending = false;
+    HandbookPictureShown("");
+    g_handbook.closing = wasOpen && toPauseMenu;
+    if (g_handbook.paused && !g_handbook.closing) {
+        UnpauseGame(1, 1);
+        g_handbook.paused = false;
+    }
+    if (!wasOpen) return;
+    rfa::Log("Handbook closed (%s)", why);
+}
+
+bool HandbookClosing() { return g_handbook.closing; }
+
+// Its keys, each HUD update while it's open (see StepCabinet for the pause in its steps).
+void StepHandbook() {
+    const ULONGLONG now = GetTickCount64();
+    const bool resumed = now - g_handbook.lastStep > kHudGoneAfterMs;
+    g_handbook.lastStep = now;
+    if (!GameFocused() || resumed) {
+        g_handbook.upDown = g_handbook.downDown = g_handbook.leftDown = g_handbook.rightDown = g_handbook.closeDown = true;
+        g_handbook.lastWheel = g_wheelTotal;
+        return;
+    }
+    const int notches = (g_wheelTotal - g_handbook.lastWheel) / kWheelNotch;
+    g_handbook.lastWheel += notches * kWheelNotch;
+    // A key and its arrow count as one: pressed as either goes down while neither was.
+    auto pressed = [](int arrow, keys::Action action, bool& was) {
+        const bool down = HeldDown(arrow) || HeldDown(keys::Key(action));
+        const bool press = down && !was;
+        was = down;
+        return press;
+    };
+    int move = -notches;
+    if (pressed(VK_UP, keys::Up, g_handbook.upDown)) move -= 1;
+    if (pressed(VK_DOWN, keys::Down, g_handbook.downDown)) move += 1;
+    int turn = 0;
+    if (pressed(VK_LEFT, keys::Left, g_handbook.leftDown)) turn -= 1;
+    if (pressed(VK_RIGHT, keys::Right, g_handbook.rightDown)) turn += 1;
+    if (turn != 0) {
+        const std::vector<int> pages = HandbookPagesShown();
+        const auto at = std::find(pages.begin(), pages.end(), g_handbook.page);
+        const int place = at == pages.end() ? 0 : static_cast<int>(at - pages.begin());
+        const int count = static_cast<int>(pages.size());
+        if (count > 0) {
+            g_handbook.top = 0;
+            HandbookPick(pages[((place + turn) % count + count) % count], 0);
+            HandbookMarkRead();
+        }
+    } else if (move != 0) {
+        const int count = static_cast<int>(HandbookRows(g_handbook.page).size());
+        if (count > 0) {
+            HandbookPick(g_handbook.page, ((g_handbook.row + move) % count + count) % count);
+            HandbookMarkRead();
+        }
+    }
+    const bool close = HeldDown(VK_ESCAPE) || HeldDown(VK_TAB) || HeldDown(VK_BACK);
+    if (close && !g_handbook.closeDown) CloseHandbook("its key", true);
+    g_handbook.closeDown = close;
+}
+
+// The pause menu's documents (it opens the handbook): they were loaded after ours, and go as it closes; the
+// handbook's are loaded once they're gone, so that theirs stay on top (see Wanted).
+constexpr const char* kPauseMenuDocuments[] = {"ui_pause_menu", "ui_background_ingame"};
+constexpr ULONGLONG kHandbookWaitMostMs = 5000;
+ULONGLONG g_handbookAskedAt = 0;
+
+bool PauseMenuDocumentsOpen() {
+    for (const char* name : kPauseMenuDocuments)
+        if (OpenDocument(name)) return true;
+    return false;
+}
+
+// A picture sheet tied to its texture again. Armageddon ties each sheet of its sheet tables to a texture once, as it
+// reads them at start-up (0xC4F2E0: for each sheet, 0xCAFD90 finds the texture by its name "<sheet>.tga", or makes it
+// an empty slot, and keeps the slot at the sheet's +4; sheets at 0x28BBD68, 12 bytes each, the count at 0x28BC698).
+// The zones' pictures load once and fill those slots; a handbook picture's document is loaded and unloaded as its
+// entry is picked and left, and a texture loaded again needn't land in the slot the sheet kept: its picture then came
+// out a small grey box, the same for every entry (2026-11-12, at image_holder's corner). So once a picture's document
+// has settled, its sheet is pointed at the slot its texture has now: found by name (0xCAF200, which makes nothing new;
+// -1 if not there). Logged, with what it was before.
+struct SheetEntry {
+    const char* name;  // the sheet's texture's name ("<sheet>.tga")
+    int bitmap;        // its slot, -1 if none
+    int rest;          // not used here
+};
+static_assert(sizeof(SheetEntry) == 12, "Armageddon's sheet entries are 12 bytes");
+auto* const kSheets = reinterpret_cast<SheetEntry*>(0x28BBD68);
+auto& g_sheetCount = *reinterpret_cast<unsigned*>(0x28BC698);
+auto const FindBitmapByName = reinterpret_cast<int(__cdecl*)(const char* name)>(0xCAF200);
+
+// Whether a sheet entry's name is this sheet's, with or without ".tga".
+bool SheetNamed(const char* name, const std::string& sheet) {
+    if (!name || _strnicmp(name, sheet.c_str(), sheet.size()) != 0) return false;
+    return name[sheet.size()] == '\0' || _stricmp(name + sheet.size(), ".tga") == 0;
+}
+
+void TieSheetAgain(const std::string& sheet) {
+    static int logged = 0;
+    for (unsigned i = 0; i < g_sheetCount; ++i) {
+        SheetEntry& entry = kSheets[i];
+        if (!SheetNamed(entry.name, sheet)) continue;
+        const int now = FindBitmapByName(entry.name);
+        if (logged < 40) {
+            ++logged;
+            rfa::Log("Handbook picture %s: its sheet had texture slot %d, the texture is at %d now%s", sheet.c_str(), entry.bitmap, now,
+                     now == -1 ? " (not found: left as it was)" : now == entry.bitmap ? "" : " (tied again)");
+        }
+        if (now != -1) entry.bitmap = now;
+        return;
+    }
+    if (logged < 40) {
+        ++logged;
+        rfa::Log("Handbook picture %s: no such sheet among the game's %u", sheet.c_str(), g_sheetCount);
+    }
+}
+
+// Each HUD update in our world.
+void FollowHandbook() {
+    if (g_handbook.closing && !AnyHandbookDocumentLoaded()) {
+        g_handbook.closing = false;
+        if (g_handbook.paused) {
+            UnpauseGame(1, 1);
+            g_handbook.paused = false;
+        }
+        g_handbookBackToPauseMenu = true;
+        g_pauseMenuRequest = 1;  // the HUD's frame opens the pause menu (0x57B774)
+    }
+    if (g_handbook.pending) {
+        if (g_handbookAskedAt == 0) g_handbookAskedAt = GetTickCount64();
+        if (!PauseMenuDocumentsOpen()) {
+            g_handbookAskedAt = 0;
+            OpenHandbook();
+        } else if (GetTickCount64() - g_handbookAskedAt > kHandbookWaitMostMs) {
+            g_handbookAskedAt = 0;
+            rfa::Log("Handbook: the pause menu's documents are still open after %llu s; it stays shut", kHandbookWaitMostMs / 1000);
+            CloseHandbook("the pause menu stayed", false);
+        }
+    }
+    if (g_handbook.open) {
+        StepHandbook();
+        // The picked entry's picture, once its document has settled: the screen asks again and shows it.
+        static std::string lastWanted, settled;
+        const std::string wanted = HandbookPictureWanted();
+        if (wanted != lastWanted) {
+            lastWanted = wanted;
+            settled.clear();
+        }
+        if (!wanted.empty() && settled != wanted) {
+            Document* doc = FindDocument(wanted);
+            if (doc && DocumentSettled(*doc)) {
+                settled = wanted;
+                for (const HandbookEntry& e : g_handbookEntries)
+                    if (e.pictureDocument == wanted) {
+                        TieSheetAgain(e.picture + "_sheet");
+                        break;
+                    }
+                ++g_handbook.version;
+            }
+        }
+    }
+}
+
+// The picked entry's picture's document, "" for none (see Wanted).
+std::string HandbookPictureWanted() {
+    const std::vector<int> rows = HandbookRows(g_handbook.page);
+    if (!g_handbook.open || g_handbook.row < 0 || g_handbook.row >= static_cast<int>(rows.size())) return "";
+    return g_handbookEntries[rows[g_handbook.row]].pictureDocument;
+}
+
+// One of its documents has arrived: what the screen shows changes.
+void HandbookDocumentArrived() { ++g_handbook.version; }
+
+// An entry's picture can be shown once its document has settled (as the zone pictures': see DocumentSettled).
+bool HandbookPictureReady(const HandbookEntry& e) {
+    if (e.pictureDocument.empty()) return false;
+    Document* doc = FindDocument(e.pictureDocument);
+    return doc && DocumentSettled(*doc);
+}
+
+// The picture the screen shows now (its script says, rfg_handbook_picture_shown), and the one it showed last, released
+// at g_handbookPictureReleasedAt: its document stays that much longer (see Wanted).
+std::string g_handbookShownDocument, g_handbookReleasedDocument;
+ULONGLONG g_handbookPictureReleasedAt = 0;
+constexpr ULONGLONG kHandbookPictureLingerMs = 300;
+
+std::string HandbookPictureDocumentOf(const std::string& picture) {
+    if (picture.empty()) return "";
+    for (const HandbookEntry& e : g_handbookEntries)
+        if (e.picture == picture) return e.pictureDocument;
+    return "";
+}
+
+void HandbookPictureShown(const std::string& document) {
+    if (document == g_handbookShownDocument) return;
+    g_handbookReleasedDocument = g_handbookShownDocument;
+    g_handbookPictureReleasedAt = GetTickCount64();
+    g_handbookShownDocument = document;
+}
+
+bool HandbookPictureKept(const Document& doc) {
+    if (doc.name == g_handbookShownDocument) return true;
+    return doc.name == g_handbookReleasedDocument && GetTickCount64() - g_handbookPictureReleasedAt < kHandbookPictureLingerMs;
+}
+
+// rfg_handbook_available() -> available, label
+//   For Armageddon's pause menu: whether its HANDBOOK shows (in our world, with entries), and its word.
+int __cdecl LuaHandbookAvailable(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const bool available = InOurWorld() && !g_handbookEntries.empty();
+    lua_pushboolean(L, available);
+    const auto title = g_handbookTexts.find("title");
+    lua_pushstring(L, title != g_handbookTexts.end() ? title->second.c_str() : "HANDBOOK");
+    return 2;
+}
+
+// rfg_handbook_open() -> opened: the pause menu's HANDBOOK (the pause menu closes itself after).
+int __cdecl LuaHandbookOpen(rfa::game::lua_State* L) {
+    RequestHandbook();
+    rfa::game::lua_pushboolean(L, g_handbook.pending);
+    return 1;
+}
+
+// rfg_handbook() -> open, version: whether it's open, and a number that changes with anything it shows.
+int __cdecl LuaHandbook(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    lua_pushboolean(L, g_handbook.open);
+    lua_pushnumber(L, g_handbook.version);
+    return 2;
+}
+
+// rfg_handbook_screen() -> title, page name, page number (1-), pages, show scroll, scroll percent, back word, new word
+//   and rfg_handbook_page_new(i) -> whether the i-th page shown (1-) has an entry not read yet.
+int __cdecl LuaHandbookScreen(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const std::vector<int> pages = HandbookPagesShown();
+    const auto at = std::find(pages.begin(), pages.end(), g_handbook.page);
+    const int rows = static_cast<int>(HandbookRows(g_handbook.page).size());
+    lua_pushstring(L, g_handbookTexts["title"].c_str());
+    lua_pushstring(L, g_handbook.page < static_cast<int>(g_handbookPages.size()) ? g_handbookPages[g_handbook.page].shown.c_str() : "");
+    lua_pushnumber(L, at == pages.end() ? 1 : static_cast<double>(at - pages.begin() + 1));
+    lua_pushnumber(L, static_cast<double>(pages.size()));
+    lua_pushboolean(L, rows > kHandbookRows);
+    lua_pushnumber(L, rows > kHandbookRows ? static_cast<double>(g_handbook.top) / (rows - kHandbookRows) : 0.0);
+    lua_pushstring(L, g_handbookTexts["back"].c_str());
+    lua_pushstring(L, g_handbookTexts["new"].c_str());
+    return 8;
+}
+
+int __cdecl LuaHandbookPageNew(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const int i = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    const std::vector<int> pages = HandbookPagesShown();
+    bool isNew = false;
+    if (i >= 0 && i < static_cast<int>(pages.size()))
+        for (int entry : HandbookRows(pages[i])) isNew = isNew || HandbookEntryNew(g_handbookEntries[entry]);
+    lua_pushboolean(L, isNew);
+    return 1;
+}
+
+// rfg_handbook_rows() -> count, picked: the rows shown (at most 16) and which of them is picked (1-).
+// rfg_handbook_row(i) -> caption, new: the i-th row shown.
+int __cdecl LuaHandbookRows(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const int rows = static_cast<int>(HandbookRows(g_handbook.page).size());
+    lua_pushnumber(L, (std::min)(kHandbookRows, rows - g_handbook.top));
+    lua_pushnumber(L, g_handbook.row - g_handbook.top + 1);
+    return 2;
+}
+
+int __cdecl LuaHandbookRow(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const std::vector<int> rows = HandbookRows(g_handbook.page);
+    const int i = g_handbook.top + static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (i < 0 || i >= static_cast<int>(rows.size())) return 0;
+    const HandbookEntry& e = g_handbookEntries[rows[i]];
+    lua_pushstring(L, e.title.c_str());
+    lua_pushboolean(L, HandbookEntryNew(e));
+    return 2;
+}
+
+// rfg_handbook_entry() -> kind, title, text, picture, icon, video, name, counter: the entry picked, and its page's kind
+// (gameplay, actions, combat, vehicles, background, bftp, cutscene); "" for none (the picture until its document has
+// settled). A radio tag's entry is named by its number; the radio tags' page's counter is the tags found of all
+// (hud_ui_handbook_process_page: "%d/%d" of the entries opened, [0x2B9DCE0], and the page's entries less its first).
+int __cdecl LuaHandbookEntry(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const std::vector<int> rows = HandbookRows(g_handbook.page);
+    if (g_handbook.row < 0 || g_handbook.row >= static_cast<int>(rows.size())) return 0;
+    const HandbookEntry& e = g_handbookEntries[rows[g_handbook.row]];
+    lua_pushstring(L, g_handbookPages[e.page].kind.c_str());
+    lua_pushstring(L, e.title.c_str());
+    lua_pushstring(L, e.text.c_str());
+    lua_pushstring(L, HandbookPictureReady(e) ? e.picture.c_str() : "");  // its document loads while it's shown
+    lua_pushstring(L, e.icon.c_str());
+    lua_pushstring(L, e.video.c_str());
+    lua_pushstring(L, e.name.c_str());
+    std::string counter;
+    if (g_handbookPages[e.page].kind == "bftp") {
+        int tags = 0;
+        for (const HandbookEntry& other : g_handbookEntries)
+            if (other.page == e.page && atoi(other.name.c_str()) > 0) ++tags;
+        char text[32];
+        sprintf_s(text, "%d/%d", static_cast<int>(g_tagsFound.size()), tags);
+        counter = text;
+    }
+    lua_pushstring(L, counter.c_str());
+    return 8;
+}
+
+// rfg_handbook_picture_shown(picture): the screen shows that picture now ("" for none): its document stays (Wanted).
+int __cdecl LuaHandbookPictureShown(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const char* picture = lua_type(L, 1) == 4 ? lua_tolstring(L, 1, nullptr) : nullptr;
+    HandbookPictureShown(HandbookPictureDocumentOf(picture ? picture : ""));
+    return 0;
+}
+
+// rfg_handbook_clock() -> seconds: a clock for the screen's own movements (the documents' tweens stand still while
+// the game is paused, as it is while the handbook is open).
+int __cdecl LuaHandbookClock(rfa::game::lua_State* L) {
+    rfa::game::lua_pushnumber(L, static_cast<double>(GetTickCount64() % 100000000ULL) / 1000.0);
+    return 1;
+}
+
+// ---- Guerrilla's messages: its message lines, pickups, use prompt, weapon swap and saving icon
+//
+// The document rfg_ui_messages (Guerrilla's, run by its own script and ours, rfg_ui_messages.lua) shows them; Guerrilla's
+// game code fed it, which Armageddon hasn't, so here is what our script needs (RM: ui_process_primary_messages 0x8E8890,
+// ui_process_secondary_messages 0x8E8E50, hud_ui_add_item_pickup_message 0x895700, hud_ui_process_use_action_info
+// 0x8E9410, hud_render_pickup_message 0x8550C0 with hud_ui_set_swap_data 0x8B1EA0, ui_process_save_data 0x8B96F0):
+//   - message lines: the major line in the middle (Guerrilla's primary messages) and the minor line at the top left
+//     (its secondary ones), each 3 s unless given. Ours go to the script through rfg_message_next while the document
+//     is up (Armageddon's message line otherwise); Armageddon's own lines (its messages_hud) the script takes itself.
+//   - pickups: Guerrilla lists what is picked up beside the reticle, at most three rows at once: salvage (its total,
+//     with "+N" over it from 3 up), a weapon picked up, rounds picked up ("+ N"), each with its picture; the same single
+//     thing picked up again while its row shows adds to that row. Here they're seen as they happen: the salvage and
+//     the carried weapons' rounds looked at each HUD update (not while a safehouse's screen or the world map is up,
+//     nor just after: what those give isn't picked up, as Guerrilla's cabinet gave its ammo without rows).
+//   - the use prompt: Guerrilla's use action (t_usable_object, which Armageddon kept with its own text after it, at
+//     the player's +0x1540) names its prompt's picture (use_object_icon: 1 a hand, 2 a hydrogen tank, 3 a ladder, 4 a
+//     vehicle, 5 a mission's start, 10 the upgrades; 0 a weapon to swap). Its prompt shows for any of 1-10 on foot;
+//     the safehouses' stations are ours (see above), and the start of one of Guerrilla's activities is the
+//     guerrilla_campaign mod's (GuerrillaCampaign_UsePrompt, when it has one). Guerrilla's prompts replace
+//     Armageddon's ("[E] Enter" at a car, 2026-11-12): its own shows only for an action they have no picture for.
+//   - the weapon swap: icon 0 at a weapon on the ground (Armageddon's search, 0x8B29F0, gives it when no slot is free;
+//     the weapon to drop is 0x8BE980's): the held weapon's picture and rounds, an arrow, the other's.
+//   - the saving icon: while the guerrilla_save mod makes a save (GuerrillaSave_Saving) and 3 s of play after.
+struct GuerrillaMessage {
+    bool major = false;
+    std::string text;
+    float seconds = -1.0f;      // -1: Guerrilla's 3 s
+};
+std::deque<GuerrillaMessage> g_messages;
+constexpr size_t kMessagesKept = 16;
+
+struct Pickup {
+    std::string picture;
+    int amount = 0;             // rounds, or salvage, picked up (0: a weapon without rounds)
+    int total = 0;              // salvage: the total after
+    bool salvage = false;
+};
+struct Pickups {
+    std::vector<Pickup> rows;   // the rows shown now
+    int version = 0;            // changed with each new set of rows
+    bool merged = false;        // the last change added to the one row shown
+    ULONGLONG shownAt = 0;
+    bool known = false;         // what was carried is known (below)
+    ULONGLONG quietUntil = 0;   // until then what changes isn't picked up (a level's start, a screen just closed)
+    const BYTE* entries[kInventorySlots] = {};
+    int rounds[kInventorySlots] = {};
+    int salvage = -1;
+    const BYTE* inHand = nullptr;      // the records in his hand and on their way there, as last seen
+    const BYTE* onItsWay = nullptr;
+    ULONGLONG handsChangedAt = 0;
+};
+Pickups g_pickups;
+constexpr int kPickupRows = 3;
+// Rounds that come while a weapon is drawn or put away (the game moves its magazine to and from the reserve then)
+// aren't picked up: not within this long of a change in his hands.
+constexpr ULONGLONG kPickupHandsQuietMs = 750;
+constexpr ULONGLONG kPickupMergeMs = 2500;      // a row takes this long to fade (its animation, ammo_anim)
+constexpr ULONGLONG kPickupQuietAfterLoadMs = 3000;
+constexpr ULONGLONG kPickupQuietAfterScreenMs = 500;
+const char* const kSalvagePicture = "rfg_ui_hud_icon_salvage";
+
+constexpr int kUseIconSwap = 0, kUseIconDefault = 1, kUseIconUpgrade = 10, kUseIconLast = 10;
+constexpr DWORD kObjectSubtype = 0x7B;          // an object's subtype (0x423530); 9 a weapon
+constexpr int kWeaponSubtype = 9;
+auto const SwapRecord = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human)>(0x8BE980);  // the record a swap drops
+
+struct UsePrompt {
+    int useType = 0;            // Guerrilla's use_object_icon, 0 none
+    bool swap = false;
+    std::string currentIcon, nextIcon;
+    int currentAmmo = -1, nextAmmo = -1;  // -1: none shown
+    bool armageddonOwn = false; // an action Guerrilla's prompts have no picture for: Armageddon's own prompt shows it
+};
+
+constexpr ULONGLONG kSavingAfterMs = 3000;
+ULONGLONG g_savingLeftMs = 0;   // HUD time the saving icon still shows
+unsigned g_savesMade = 0;
+bool g_savesKnown = false;
+
+bool MessagesDocumentUp() {
+    const Document* doc = FindDocument("rfg_ui_messages");
+    return doc && doc->loaded && doc->seen && InOurWorld();
+}
+
+void ShowMessage(const std::string& text, bool major, float seconds) {
+    if (text.empty()) return;
+    if (!MessagesDocumentUp()) {
+        AddHudMessage(text.c_str());
+        return;
+    }
+    if (g_messages.size() >= kMessagesKept) g_messages.pop_front();
+    g_messages.push_back({major, text, seconds});
+}
+
+void ForgetPickups() {
+    g_pickups.known = false;
+    g_pickups.quietUntil = 0;
+}
+
+void AddPickups(std::vector<Pickup> found, ULONGLONG now) {
+    if (found.empty()) return;
+    if (found.size() > static_cast<size_t>(kPickupRows)) found.resize(kPickupRows);
+    // hud_ui_add_item_pickup_message: one thing picked up again while its row shows adds to it.
+    if (found.size() == 1 && g_pickups.rows.size() == 1 && now - g_pickups.shownAt < kPickupMergeMs &&
+        found[0].picture == g_pickups.rows[0].picture) {
+        g_pickups.rows[0].amount += found[0].amount;
+        g_pickups.rows[0].total = found[0].total;
+        g_pickups.merged = true;
+    } else {
+        g_pickups.rows = found;
+        g_pickups.merged = false;
+    }
+    g_pickups.shownAt = now;
+    ++g_pickups.version;
+    for (const Pickup& p : found) RFA_LOG_FIRST(60, "Picked up: %s %+d%s", p.picture.c_str(), p.amount, p.salvage ? " (salvage)" : "");
+}
+
+// Each HUD update in our world: what was picked up since the last (salvage, weapons, rounds).
+void FollowPickups(ULONGLONG now) {
+    BYTE* player = g_player;
+    if (!player || g_shop.open || CabinetIsOpen() || HandbookIsOpen() || g_mapOpen) {
+        g_pickups.known = false;
+        g_pickups.quietUntil = now + kPickupQuietAfterScreenMs;
+        return;
+    }
+    const BYTE* entries[kInventorySlots] = {};
+    int rounds[kInventorySlots] = {};
+    for (int slot = 0; slot < kInventorySlots; ++slot) {
+        BYTE* weapon = nullptr;
+        entries[slot] = RecordEntry(RecordInSlot(player, slot), &weapon);
+        rounds[slot] = weapon ? RoundsOf(player, weapon) : 0;
+    }
+    int salvage = -1;
+    if (!GetSalvage(&salvage)) salvage = -1;
+    const BYTE* inHand = RecordInHand(player, nullptr, 0);
+    const BYTE* onItsWay = RecordOnItsWay(player, nullptr, 0);
+    if (inHand != g_pickups.inHand || onItsWay != g_pickups.onItsWay) g_pickups.handsChangedAt = now;
+    g_pickups.inHand = inHand;
+    g_pickups.onItsWay = onItsWay;
+    const bool handsSettled = now - g_pickups.handsChangedAt >= kPickupHandsQuietMs;
+    if (!g_pickups.known && g_pickups.quietUntil == 0) g_pickups.quietUntil = now + kPickupQuietAfterLoadMs;
+    std::vector<Pickup> found;
+    if (g_pickups.known && now >= g_pickups.quietUntil) {
+        if (salvage >= 0 && g_pickups.salvage >= 0 && salvage > g_pickups.salvage)
+            found.push_back({kSalvagePicture, salvage - g_pickups.salvage, salvage, true});
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            const int w = CabinetWeaponOfEntry(entries[slot]);
+            if (w < 0 || g_cabinetWeapons[w].picture.empty() || g_cabinetWeapons[w].sledgehammer) continue;
+            int before = -1;  // where it was carried (a weapon moved to another slot isn't new)
+            for (int s = 0; s < kInventorySlots; ++s)
+                if (g_pickups.entries[s] == entries[slot]) before = s;
+            if (before < 0) found.push_back({g_cabinetWeapons[w].picture, rounds[slot], 0, false});
+            else if (rounds[slot] > g_pickups.rounds[before] && handsSettled)
+                found.push_back({g_cabinetWeapons[w].picture, rounds[slot] - g_pickups.rounds[before], 0, false});
+        }
+    }
+    for (int slot = 0; slot < kInventorySlots; ++slot) {
+        g_pickups.entries[slot] = entries[slot];
+        g_pickups.rounds[slot] = rounds[slot];
+    }
+    g_pickups.salvage = salvage;
+    g_pickups.known = true;
+    AddPickups(found, now);
+}
+
+// The guerrilla_campaign mod's use prompt at the start of one of Guerrilla's activities (Guerrilla's use_object_icon,
+// 0 none), when it has one.
+int CampaignUsePrompt() {
+    using PromptFn = int(__cdecl*)();
+    static PromptFn prompt = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        if (HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll"))
+            prompt = reinterpret_cast<PromptFn>(GetProcAddress(campaign, "GuerrillaCampaign_UsePrompt"));
+    }
+    return prompt ? prompt() : 0;
+}
+
+bool OnFoot(const BYTE* player) {
+    const DWORD vehicle = *reinterpret_cast<const DWORD*>(player + kHumanVehicle);
+    return vehicle == 0xFFFFFFFF || vehicle == 0;
+}
+
+// What Guerrilla's prompts show now (see above).
+UsePrompt CurrentUsePrompt() {
+    UsePrompt prompt;
+    BYTE* player = g_player;
+    if (!player || !InOurWorld() || g_shop.open || CabinetIsOpen() || HandbookIsOpen() || g_mapOpen || !OnFoot(player)) return prompt;
+    if (g_shop.nearStation >= 0) {
+        prompt.useType = g_stations[g_shop.nearStation].shop ? kUseIconUpgrade : kUseIconDefault;
+        return prompt;
+    }
+    const int activity = CampaignUsePrompt();
+    if (activity >= 1 && activity <= kUseIconLast) {
+        prompt.useType = activity;
+        return prompt;
+    }
+    if (!g_usableItems) return prompt;
+    const auto* action = reinterpret_cast<const UseActionRecord*>(player + kPlayerUseAction);
+    if (!action->function) return prompt;
+    if (action->icon >= 1 && action->icon <= kUseIconLast) {
+        prompt.useType = action->icon;
+        return prompt;
+    }
+    // A weapon on the ground, and no slot free: Guerrilla's swap, for its weapons. Anything else (a weapon of
+    // Armageddon's, an icon past Guerrilla's) keeps Armageddon's own prompt, which shows the action's text.
+    BYTE* ground = action->icon == kUseIconSwap ? ObjectFromHandle(kCabinetWorld, nullptr, action->handle) : nullptr;
+    const int next = ground && static_cast<signed char>(ground[kObjectSubtype]) == kWeaponSubtype
+                         ? CabinetWeaponOfEntry(*reinterpret_cast<const BYTE* const*>(ground + kWeaponEntry)) : -1;
+    if (next < 0 || g_cabinetWeapons[next].picture.empty()) {
+        prompt.armageddonOwn = action->text[0] != L'\0';
+        return prompt;
+    }
+    prompt.swap = true;
+    prompt.nextIcon = g_cabinetWeapons[next].picture;
+    if (!g_cabinetWeapons[next].melee) prompt.nextAmmo = RoundsCarried(ground, nullptr, 0, true);
+    BYTE* held = nullptr;
+    const int current = CabinetWeaponOfEntry(RecordEntry(SwapRecord(player), &held));
+    if (current >= 0 && held) {
+        prompt.currentIcon = g_cabinetWeapons[current].picture;
+        if (!g_cabinetWeapons[current].melee) prompt.currentAmmo = RoundsOf(player, held);
+    }
+    return prompt;
+}
+
+// For finding out which use actions Armageddon gives in our world: each new type and icon, once (the first 40).
+void LogUseAction() {
+    static std::set<long long> seen;
+    BYTE* player = g_player;
+    if (!player || !g_usableItems || seen.size() >= 40) return;
+    const auto* action = reinterpret_cast<const UseActionRecord*>(player + kPlayerUseAction);
+    if (!action->function) return;
+    const long long key = (static_cast<long long>(action->type) << 32) | static_cast<unsigned>(action->icon);
+    if (!seen.insert(key).second) return;
+    BYTE* object = ObjectFromHandle(kCabinetWorld, nullptr, action->handle);
+    char text[96] = {};
+    WideCharToMultiByte(CP_UTF8, 0, action->text, -1, text, sizeof(text) - 1, nullptr, nullptr);
+    rfa::Log("Use action seen: type %d, icon %d, object type %d subtype %d, text \"%s\"", action->type, action->icon,
+             object ? static_cast<signed char>(object[0x7A]) : -1, object ? static_cast<signed char>(object[kObjectSubtype]) : -1, text);
+}
+
+// The saving icon: while guerrilla_save makes a save, and 3 s of the HUD's time after it.
+void FollowSaving(ULONGLONG hudMs) {
+    using SavingFn = int(__cdecl*)(unsigned* savesMade);
+    static SavingFn saving = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        if (HMODULE save = GetModuleHandleW(L"guerrilla_save.dll"))
+            saving = reinterpret_cast<SavingFn>(GetProcAddress(save, "GuerrillaSave_Saving"));
+    }
+    g_savingLeftMs = g_savingLeftMs > hudMs ? g_savingLeftMs - hudMs : 0;
+    if (!saving) return;
+    unsigned made = 0;
+    const bool now = saving(&made) != 0;
+    if (g_savesKnown && (now || made != g_savesMade)) g_savingLeftMs = kSavingAfterMs;
+    g_savesMade = made;
+    g_savesKnown = true;
+}
+
+void FollowMessages(ULONGLONG hudMs) {
+    const ULONGLONG now = GetTickCount64();
+    FollowPickups(now);
+    LogUseAction();
+    FollowSaving(hudMs);
+}
+
+// rfg_message_next() -> major, text, seconds: the next of our messages for Guerrilla's lines (its major line or its
+//   minor line; seconds -1 for Guerrilla's 3), taken off the list; nothing when there's none.
+int __cdecl LuaMessageNext(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    if (g_messages.empty()) return 0;
+    const GuerrillaMessage message = g_messages.front();
+    g_messages.pop_front();
+    lua_pushboolean(L, message.major);
+    lua_pushstring(L, message.text.c_str());
+    lua_pushnumber(L, message.seconds);
+    return 3;
+}
+
+// rfg_pickups() -> version, count, merged: the rows picked up now (version changes with each new set; merged: the
+//   last change added to the one row shown). rfg_pickup(i) -> picture, amount, total, salvage: its i-th row.
+int __cdecl LuaPickups(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    lua_pushnumber(L, g_pickups.version);
+    lua_pushnumber(L, static_cast<double>(g_pickups.rows.size()));
+    lua_pushboolean(L, g_pickups.merged);
+    return 3;
+}
+
+int __cdecl LuaPickup(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_pickups.rows.size())) return 0;
+    const Pickup& row = g_pickups.rows[index];
+    lua_pushstring(L, row.picture.c_str());
+    lua_pushnumber(L, row.amount);
+    lua_pushnumber(L, row.total);
+    lua_pushboolean(L, row.salvage);
+    return 4;
+}
+
+// rfg_use_prompt() -> use_type, swap, current_icon, next_icon, current_ammo, next_ammo, armageddon_own
+//   Guerrilla's use prompt (its picture, Guerrilla's use_object_icon 1-10; 0 none) or weapon swap now (the held
+//   weapon's picture and rounds, the one on the ground's; "" and -1 where there's none); armageddon_own: the player's
+//   use action is one Guerrilla's prompts have no picture for, which Armageddon's own prompt shows (else it's hidden:
+//   Guerrilla's replace it, and Guerrilla showed none while a pickup row was up).
+int __cdecl LuaUsePrompt(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    const UsePrompt prompt = CurrentUsePrompt();
+    lua_pushnumber(L, prompt.useType);
+    lua_pushboolean(L, prompt.swap);
+    lua_pushstring(L, prompt.currentIcon.c_str());
+    lua_pushstring(L, prompt.nextIcon.c_str());
+    lua_pushnumber(L, prompt.currentAmmo);
+    lua_pushnumber(L, prompt.nextAmmo);
+    lua_pushboolean(L, prompt.armageddonOwn);
+    return 7;
+}
+
+// rfg_saving() -> whether Guerrilla's saving icon shows now.
+int __cdecl LuaSaving(rfa::game::lua_State* L) {
+    rfa::game::lua_pushboolean(L, g_savingLeftMs > 0);
+    return 1;
+}
+
 // ---- What the documents' scripts ask (Lua, on the game's thread)
 
 using rfa::game::lua_State;
 
 // rfg_station_prompt() -> near, kind
 //   Whether the player is at one of Guerrilla's safehouse stations now (on foot, within reach): its kind,
-//   "shop" (or "cabinet", later). For Guerrilla's use prompt.
+//   "shop" (an upgrade shop) or "cabinet" (a weapon locker). For Guerrilla's use prompt.
 int __cdecl LuaStationPrompt(lua_State* L) {
     using namespace rfa::game;
-    const bool atStation = !g_shop.open && g_shop.nearStation >= 0;
+    const bool atStation = !g_shop.open && !CabinetIsOpen() && g_shop.nearStation >= 0;
     lua_pushboolean(L, atStation);
     lua_pushstring(L, atStation && g_stations[g_shop.nearStation].shop ? "shop" : "cabinet");
     return 2;
@@ -1447,7 +3188,7 @@ int __cdecl LuaStationPrompt(lua_State* L) {
 int __cdecl LuaAmmoBoxPrompt(lua_State* L) {
     using namespace rfa::game;
     bool atBox = false;
-    if (g_usableItems && g_player && InOurWorld() && !g_shop.open) {
+    if (g_usableItems && g_player && InOurWorld() && !g_shop.open && !CabinetIsOpen()) {
         const auto* action = reinterpret_cast<const UseActionRecord*>(g_player + kPlayerUseAction);
         atBox = action->type == kActionUseAmmoBox && action->function != nullptr;
     }
@@ -1775,20 +3516,28 @@ int __cdecl LuaScreenDim(lua_State* L) {
 // Guerrilla's cartographer collects the people and vehicles within its minimap's reach every frame and draws
 // each as a blip (collect_humans RM 0x86D140, collect_vehicles 0x86D590, render_humans 0x86D710,
 // render_vehicles 0x86DED0). Its rules, as kept here:
-//   People: never the player, the dead, or anyone in a vehicle (the vehicle is the blip). Then by how the
-//   player's side takes theirs:
-//     hostile: only while in combat, or once the player owns the Personnel Detector upgrade ("locate enemy
-//       EDF on your minimap"); red, the Marauders purple;
-//     allied (the Red Faction): only while the alert level is above green; yellow;
-//     anyone else (civilians among them): never.
+//   Reach: the minimap's zoom radius (its zoom_radius_squared: the frame's edge, 40 m, more in a fast
+//     vehicle), not out to the frame's corners.
+//   People: never the player, the dead, the hidden, or anyone in a vehicle (the vehicle is the blip). Then
+//   by how the player's side takes theirs (human_teams_get_disposition):
+//     hostile: once the player owns the Personnel Detector (get_upgrade_value(0x11) > 0: "locate enemy EDF
+//       on your minimap"), else only those human::render_on_minimap passes: in combat (is_in_combat), or
+//       flagged always_show_on_minimap, or with minimap_flags; red, the Marauders purple;
+//     allied (the Red Faction): never the player's squad; those flagged always_show_on_minimap or
+//       activity_related; the rest only while the alert level is above green; yellow;
+//     friendly (civilians): only a house arrest's hostages (activity_ha_hostage), and only with the
+//       Personnel Detector;
+//     unfriendly and the rest: never (Guerrilla's debug switch only).
 //   Vehicles: every one but the player's own and wrecks, coloured by who is in it (its driver, else another
 //     occupant): yellow the Red Faction's, red a hostile's (purple the Marauders'), grey the others and the
 //     empty ones.
 // The colours are Guerrilla's (get_human_color RM 0x862400, get_vehicle_color 0x862680); the script has them.
-// "In combat" is Guerrilla's npc::is_in_combat (its AI has a target); here the person's combat target
-// (0x880B70). Not here yet: Guerrilla's flags that nothing of ours sets (always_show_on_minimap,
-// activity_related, the zone files' minimap_flags, a house arrest's hostages, hidden people), the player's
-// squad (never shown), and its radar sweep (a line moving down the minimap that lights each blip as it passes).
+// "In combat" is Guerrilla's npc::is_in_combat (its AI knows of an enemy); here the person's combat target
+// (0x880B70). Nothing of ours sets Guerrilla's flags yet (always_show_on_minimap, activity_related,
+// minimap_flags, hostages, hidden), and the player has no squad (Armageddon's player_squad_* are empty): so
+// the parts of the rule that need them are left out until a mod sets them. Its radar sweep (a line moving down the
+// minimap, a ring growing on each person it passes, the blips fading behind it) is the script's (rfg_ui_hud.lua),
+// by rfg_map_sweep_clock below.
 void* const kWorldLists = reinterpret_cast<void*>(0x1870630);
 using ListCountFn = int(__thiscall*)(void* world);
 using ListAtFn = BYTE*(__thiscall*)(void* world, int index);
@@ -1840,20 +3589,32 @@ int AlertLevelNow() {
 bool OwnsPersonnelDetector() {
     static ULONGLONG askedAt = 0;
     static bool owned = false;
+    static int logged = -1;  // what the log said last: -1 nothing yet, 0 not owned, 1 owned, 2 guerrilla_gear not there
     const ULONGLONG now = GetTickCount64();
     if (askedAt != 0 && now - askedAt < 1000) return owned;
     askedAt = now;
     owned = false;
-    if (!GearReady()) return false;
-    GearApi& api = Gear();
-    const int count = api.count();
-    for (int i = 0; i < count; ++i) {
-        GuerrillaGearUpgrade upgrade{};
-        upgrade.size = sizeof(upgrade);
-        if (api.upgrade(i, &upgrade) && strcmp(upgrade.name, "personnel") == 0) {
-            owned = upgrade.bought > 0;
-            break;
+    bool found = false;
+    if (GearReady()) {
+        GearApi& api = Gear();
+        const int count = api.count();
+        for (int i = 0; i < count; ++i) {
+            GuerrillaGearUpgrade upgrade{};
+            upgrade.size = sizeof(upgrade);
+            if (api.upgrade(i, &upgrade) && strcmp(upgrade.name, "personnel") == 0) {
+                owned = upgrade.bought > 0;
+                found = true;
+                break;
+            }
         }
+    }
+    const int state = !GearReady() ? 2 : owned ? 1 : 0;
+    if (state != logged) {
+        logged = state;
+        rfa::Log("Minimap: the Personnel Detector is %s", state == 2 ? "unknown (guerrilla_gear's upgrades aren't there)"
+                                                       : owned ? "owned: every hostile in reach shows"
+                                                       : found ? "not bought: hostiles show only while in combat"
+                                                               : "not among guerrilla_gear's upgrades");
     }
     return owned;
 }
@@ -1966,6 +3727,33 @@ int __cdecl LuaMapBlip(lua_State* L) {
     return 5;
 }
 
+// rfg_map_sweep_clock() -> seconds: the clock Guerrilla's minimap radar sweep moves by. Guerrilla's
+// render_scan_line (RM 0x863A60) moves its line by the real frame time (Frametime_real), and not while the game
+// is paused (game_is_paused): so this is real time that stands still while Armageddon's game is paused
+// (0x520260, its pause count above 0). The HUD's script runs while the game is paused, so it can't tell itself.
+auto const GameIsPaused = reinterpret_cast<bool(__cdecl*)()>(0x520260);
+
+int __cdecl LuaMapSweepClock(lua_State* L) {
+    using namespace rfa::game;
+    static ULONGLONG last = 0;
+    static double seconds = 0.0;
+    const ULONGLONG now = GetTickCount64();
+    if (last != 0 && !GameIsPaused()) seconds += static_cast<double>(now - last) / 1000.0;
+    last = now;
+    lua_pushnumber(L, seconds);
+    return 1;
+}
+
+// rfg_sin_cos(angle) -> sine, cosine (radians): the game's Lua has no math library, and the sweep needs where each
+// blip is on the turned minimap.
+int __cdecl LuaSinCos(lua_State* L) {
+    using namespace rfa::game;
+    const double angle = lua_tonumber(L, 1);
+    lua_pushnumber(L, std::sin(angle));
+    lua_pushnumber(L, std::cos(angle));
+    return 2;
+}
+
 // rfg_alert() -> whether Guerrilla's alert level is running (the guerrilla_campaign mod runs it in this
 // world), and what Guerrilla's HUD shows of it: 0 to 25 green, to 50 yellow, to 75 orange, above red
 // (its AlertLevel data item's alert_level_value).
@@ -1997,6 +3785,26 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_map_full_tile", LuaMapFullTile);
     rfa::game::lua_register(L, "rfg_station_prompt", LuaStationPrompt);
     rfa::game::lua_register(L, "rfg_ammo_box_prompt", LuaAmmoBoxPrompt);
+    rfa::game::lua_register(L, "rfg_use_prompt", LuaUsePrompt);
+    rfa::game::lua_register(L, "rfg_message_next", LuaMessageNext);
+    rfa::game::lua_register(L, "rfg_pickups", LuaPickups);
+    rfa::game::lua_register(L, "rfg_pickup", LuaPickup);
+    rfa::game::lua_register(L, "rfg_saving", LuaSaving);
+    rfa::game::lua_register(L, "rfg_cabinet", LuaCabinet);
+    rfa::game::lua_register(L, "rfg_handbook_available", LuaHandbookAvailable);
+    rfa::game::lua_register(L, "rfg_handbook_open", LuaHandbookOpen);
+    rfa::game::lua_register(L, "rfg_handbook", LuaHandbook);
+    rfa::game::lua_register(L, "rfg_handbook_screen", LuaHandbookScreen);
+    rfa::game::lua_register(L, "rfg_handbook_page_new", LuaHandbookPageNew);
+    rfa::game::lua_register(L, "rfg_handbook_rows", LuaHandbookRows);
+    rfa::game::lua_register(L, "rfg_handbook_row", LuaHandbookRow);
+    rfa::game::lua_register(L, "rfg_handbook_entry", LuaHandbookEntry);
+    rfa::game::lua_register(L, "rfg_handbook_picture_shown", LuaHandbookPictureShown);
+    rfa::game::lua_register(L, "rfg_handbook_clock", LuaHandbookClock);
+    rfa::game::lua_register(L, "rfg_cabinet_screen", LuaCabinetScreen);
+    rfa::game::lua_register(L, "rfg_cabinet_info", LuaCabinetInfo);
+    rfa::game::lua_register(L, "rfg_cabinet_icon", LuaCabinetIcon);
+    rfa::game::lua_register(L, "rfg_cabinet_slot", LuaCabinetSlot);
     rfa::game::lua_register(L, "rfg_shop", LuaShop);
     rfa::game::lua_register(L, "rfg_shop_item", LuaShopItem);
     rfa::game::lua_register(L, "rfg_shop_text", LuaShopText);
@@ -2007,6 +3815,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_alert", LuaAlert);
     rfa::game::lua_register(L, "rfg_map_blips", LuaMapBlips);
     rfa::game::lua_register(L, "rfg_map_blip", LuaMapBlip);
+    rfa::game::lua_register(L, "rfg_map_sweep_clock", LuaMapSweepClock);
+    rfa::game::lua_register(L, "rfg_sin_cos", LuaSinCos);
 }
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -2015,6 +3825,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         return;
     }
     RaiseDocumentLimits();  // The builder adds the HUD's documents to the interface project whatever the settings
+    RaiseVintHeap();
     g_worlds = SplitList(rfa::IniString(L"GuerrillaHud", L"Worlds", L"rfg"));
     for (const std::string& name : SplitList(rfa::IniString(L"GuerrillaHud", L"Documents", L"rfg_ui_hud_health")))
         g_documents.push_back({name});
@@ -2034,6 +3845,12 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         Document shop{"rfg_ui_upgrades"};
         shop.whileShop = true;
         g_documents.push_back(shop);
+        Document cabinet{"rfg_ui_safehouse_weapons"};  // Guerrilla's weapon cabinet, drawn only while it's open
+        cabinet.whileCabinet = true;
+        g_documents.push_back(cabinet);
+        Document handbook{"rfg_ui_handbook"};  // Guerrilla's handbook, loaded only while it's open (see Wanted)
+        handbook.whileHandbook = true;
+        g_documents.push_back(handbook);
         for (const char* set : kZoneSets) {
             // Listed to be drawn like the others (they draw nothing: one empty group). Unlisted and
             // without a script, the game closed such documents as soon as they had loaded (2026-11-05).
@@ -2041,13 +3858,24 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
             tiles.zoneSet = true;
             g_documents.push_back(tiles);
         }
-        const std::wstring key = rfa::IniString(L"GuerrillaHud", L"MapKey", L"Tab");
-        g_mapKey = key.empty() ? 0 : KeyCode(key);
-        if (!key.empty() && !g_mapKey) rfa::Log("[GuerrillaHud] MapKey=%ls isn't a key this mod knows (a letter, a digit, Tab, F1-F12)", key.c_str());
+        keys::Read();  // the map's keys among Guerrilla's ([GuerrillaKeys], F7 Guerrilla > Keys)
         ReadDistricts();
         ReadMapIcons();
         ReadRadioTags();
         ReadSafehouses();
+        ReadCabinet();
+        ReadHandbook();
+        // The handbook's entries' pictures' documents, listed before the handbook's own: each pass over the list
+        // unloads a picture before the handbook (the opposite of the order they load in; see Wanted).
+        std::set<std::string> pictureDocuments;
+        auto handbookAt = std::find_if(g_documents.begin(), g_documents.end(), [](const Document& d) { return d.whileHandbook; });
+        size_t at = static_cast<size_t>(handbookAt - g_documents.begin());
+        for (const HandbookEntry& e : g_handbookEntries)
+            if (!e.pictureDocument.empty() && pictureDocuments.insert(e.pictureDocument).second) {
+                Document picture{e.pictureDocument};
+                picture.handbookPicture = true;
+                g_documents.insert(g_documents.begin() + static_cast<std::ptrdiff_t>(at++), picture);
+            }
         EnlargeInterfacePool();
     }
     if (g_worlds.empty() || g_documents.empty()) {
@@ -2068,5 +3896,5 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     for (const Document& doc : g_documents) documents += (documents.empty() ? "" : ", ") + doc.name;
     for (const std::string& world : g_worlds) worlds += (worlds.empty() ? "" : ", ") + world;
     rfa::Log("Guerrilla's HUD (%s) in the worlds %s%s", documents.c_str(), worlds.c_str(),
-             g_mapDocument.empty() ? "" : "; the world map's key is [GuerrillaHud] MapKey=");
+             g_mapDocument.empty() ? "" : "; the world map's key is [GuerrillaKeys] Map= (F7 Guerrilla > Keys)");
 }

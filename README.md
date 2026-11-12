@@ -161,7 +161,8 @@ work as before.
      the Nano Forge rebuilds) and its sky;
    - Guerrilla's HUD;
    - its vehicles, and the guns ported so far;
-   - its EDF soldiers, who patrol the world.
+   - its EDF soldiers, who patrol the world;
+   - Mason's coat, whose tails swing as he moves and blow in Guerrilla's wind.
 
    All of it goes into `overrides\` and `mods\` in your RFA-Mod folder.
 4. Start the game, open the console with the `` ` `` key (from the main menu is fine) and type
@@ -176,8 +177,8 @@ Things to know:
 - After updating RFA-Mod, run `editor\GuerrillaBuilder.exe` again: it ticks what needs building
   again, so click **Build**. Build the HUD again after changing its scripts.
 - **Remove...** takes the ticked parts away again, with what's built on them: the world takes
-  everything with it, the weapons take the soldiers (who carry them). Only take the HUD away there:
-  one of its files also holds Armageddon's own HUD pictures.
+  everything with it, the weapons take the soldiers (who carry them), the soldiers take the cloth.
+  Only take the HUD away there: one of its files also holds Armageddon's own HUD pictures.
 - To build only some of a part, use the builder from a command prompt, for example
   `editor\GuerrillaBuilder.exe build world --zones 11-12,10-11` (that block of zones: columns,
   then rows), `build world --props none` (no buildings or props), `build vehicles --vehicles
@@ -185,9 +186,17 @@ Things to know:
   help` lists everything. It's a window program, so start it with `start /wait` in a command
   prompt, or add `| Out-Host` in PowerShell, for the prompt to wait for it.
 - Guerrilla's minimap sits at the bottom left: north turns with the camera, the arrow in the middle
-  is you, and it zooms out as you drive faster. Press Tab (`MapKey=` under `[GuerrillaHud]`) for
-  the world map, with you on it, and Tab again to close it; the game keeps running while it's open. The
-  minimap shows each zone's own detailed picture once it has loaded, a moment after you come near.
+  is you, and it zooms out as you drive faster. Press Tab (`Map=` under `[GuerrillaKeys]`, or F7 >
+  Guerrilla > Keys) for the world map, with you on it, and Tab again to close it; the game pauses
+  while it's open. The minimap shows each zone's own detailed picture once it has loaded, a moment
+  after you come near.
+- Dots on the minimap show the people and vehicles near you, as in Guerrilla: the EDF (red) and the
+  Marauders (purple) only while they're fighting, or all of them once you buy the Personnel
+  Detector upgrade at a safehouse; the Red Faction (yellow) while the alert level is above green;
+  every vehicle, coloured by who's in it. Guerrilla's radar sweep runs down the minimap: each dot
+  is brightest just after the line passes it and fades until the line comes round again, and a ring
+  grows from each person it passes. To keep the dots showing between sweeps, raise `RadarMinAlpha=`
+  under `[GuerrillaHud]` (0 to 255; Guerrilla's is 0).
 - Guerrilla's reticle sits in the middle, turning red over an enemy and green over a friend, with
   the rounds in your magazine beside it and the rest in the box (the infinity sign where ammo is
   unlimited), which turn red when you should reload. Guerrilla's weapons have their own reticles
@@ -242,8 +251,8 @@ Things to know:
   (Thrust, Fleetfoot, Stealth, Vision, Firepower, Concussion, Heal, Rhino, Tremor; 250 salvage each),
   in the same window, and pick the one you wear under **Backpacks → Wear**. With the jetpack, hold jump
   in the air to climb; it runs on fuel that refills while you don't use it (faster with Jetpack
-  Recharge). Switch the others on with **B** (`BackpackKey=` under `[GuerrillaGear]` in
-  `rfa_mods.ini`), each with Guerrilla's numbers: Thrust throws you up and Rhino makes you take no damage
+  Recharge). Switch the others on with **B** (change it in **F7 → Guerrilla → Keys**, or `Backpack=`
+  under `[GuerrillaKeys]` in `rfa_mods.ini`), each with Guerrilla's numbers: Thrust throws you up and Rhino makes you take no damage
   while on; Fleetfoot makes you run and sprint faster; Firepower makes your guns, melee and explosions
   hit harder; Concussion sets off a blast around you a second after you switch it on; Tremor shakes the
   ground around you while on; Heal heals everyone near you, enemies too. Stealth, Vision and Rhino's
@@ -373,7 +382,9 @@ This project's own code and notes are free software under the GNU General Public
 version 3 or (at your option) any later version ([LICENSE](LICENSE)). Anyone may use, change and
 share them, but whatever they pass on, changed or not, must stay under the same licence with its
 source code. Dear ImGui, which draws the in-game menus, and the editor's Direct3D libraries are
-under the MIT License, which allows this; their notices are in
+under the MIT License, which allows this. AvalonDock, which draws the editor's movable panels, is
+under the Microsoft Public License, which the GPL doesn't allow by itself, so the editor carries an
+added permission for it ([LICENSE-exception.txt](LICENSE-exception.txt)). Their notices are in
 [docs/third-party-notices.txt](docs/third-party-notices.txt). The source code is at
 <https://github.com/FragsAreUs/RFA-Mod>; a release's `version.txt` says which commit it was built from.
 

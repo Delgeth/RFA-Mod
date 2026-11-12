@@ -15,6 +15,66 @@ string = { find = rfg_string_find }
 
 -- Guerrilla's scripts give and read tints as 0-1, Armageddon's interface as 0-255 (in its documents
 -- both are 0-1). GuerrillaBuilder.exe makes their vint_set_property and vint_get_property calls these.
+-- Guerrilla's text sizes. Armageddon has fonts of the same names as Guerrilla's, drawn bigger (its font_body half as
+-- big again as Guerrilla's; its font_header a little taller), so GuerrillaBuilder.exe scales the texts of some of
+-- Guerrilla's documents by their font (Guerrilla's height over Armageddon's) and tells this script which, by each
+-- document's text elements' names (rfg_text_scales, at the top of the document's script). A text_scale Guerrilla's
+-- script sets or reads is then scaled the same way, so its script works in Guerrilla's sizes as it did.
+-- Kept by every document's copy of these shims: { document = name, scales = { { element, scale }, ... }, found = its
+-- handle the names were looked up in }, and element handle -> scale.
+if Rfg_text_scale_documents == nil then
+	Rfg_text_scale_documents = {}
+end
+if Rfg_text_scale_of == nil then
+	Rfg_text_scale_of = {}
+end
+
+function rfg_text_scales(document, scales)
+	for i, known in ipairs(Rfg_text_scale_documents) do
+		if known.document == document then
+			known.scales = scales
+			known.found = nil
+			return
+		end
+	end
+	Rfg_text_scale_documents[#Rfg_text_scale_documents + 1] = { document = document, scales = scales }
+end
+
+local function rfg_text_scale(handle)
+	-- Each document's names looked up in it, again whenever one of the documents is loaded again (its elements'
+	-- handles are new, and old ones may be reused).
+	local changed = false
+	for i, known in ipairs(Rfg_text_scale_documents) do
+		local found = vint_document_find(known.document)
+		if found == nil then
+			found = 0
+		end
+		if known.found ~= found then
+			known.found = found
+			changed = true
+		end
+	end
+	if changed then
+		Rfg_text_scale_of = {}
+		for i, known in ipairs(Rfg_text_scale_documents) do
+			if known.found ~= 0 then
+				for j, pair in ipairs(known.scales) do
+					local element = vint_object_find(pair[1], 0, known.found)
+					if element ~= nil and element ~= 0 then
+						Rfg_text_scale_of[element] = pair[2]
+					end
+				end
+			end
+		end
+	end
+	local scale = Rfg_text_scale_of[handle]
+	if scale == nil then
+		scale = 1
+		Rfg_text_scale_of[handle] = scale
+	end
+	return scale
+end
+
 function rfg_vint_set_property(handle, property, ...)
 	-- Guerrilla's game named many texts by their string tag's hash (text_tag_crc), which Armageddon's
 	-- string tables don't have: our bridges hand the words instead, as a string.
@@ -28,6 +88,13 @@ function rfg_vint_set_property(handle, property, ...)
 		local r, g, b = ...
 		return vint_set_property(handle, property, r * 255, g * 255, b * 255)
 	end
+	if property == "text_scale" then
+		local x, y = ...
+		local scale = rfg_text_scale(handle)
+		if x ~= nil and y ~= nil then
+			return vint_set_property(handle, property, x * scale, y * scale)
+		end
+	end
 	return vint_set_property(handle, property, ...)
 end
 
@@ -35,6 +102,14 @@ function rfg_vint_get_property(handle, property, ...)
 	if property == "tint" then
 		local r, g, b = vint_get_property(handle, property, ...)
 		return r / 255, g / 255, b / 255
+	end
+	if property == "text_scale" then
+		local x, y = vint_get_property(handle, property, ...)
+		local scale = rfg_text_scale(handle)
+		if x ~= nil and y ~= nil then
+			return x / scale, y / scale
+		end
+		return x, y
 	end
 	return vint_get_property(handle, property, ...)
 end
@@ -48,6 +123,13 @@ function rfg_play_audio(name)		-- Guerrilla's interface sounds aren't brought ov
 end
 
 function rfg_get_max_charges()		-- nor its remote charges
+	return 0
+end
+
+-- Its language (the handbook lays its texts out right to left for Arabic): Armageddon's get_language() gives a
+-- name; the user's strings here are English.
+LANGUAGE_MODE_AR = -1
+function rfg_get_language()
 	return 0
 end
 

@@ -23,7 +23,7 @@
 //     Guerrilla world's size as when the world is started; with the empty name the game gives a save,
 //     the load hung.
 //
-// The game's save, found in its exe (see "Saving in the rfg world" in docs\game-notes.md):
+// The game's save, found in its exe:
 //   world 0x6DA1B0(message, b) asks for one: +0x2514 bit 2, +0x2515 bit 0 the "Checkpoint" message,
 //     bit 1 "write it into the autosave slot when done";
 //   the gameplay step 0x542110 (through 0x542030 and 0x6DA0E0) starts it: +0x2514 bit 4;
@@ -84,6 +84,7 @@ bool g_waitingToSave = false;
 bool g_saveStarted = false;  // the game's 0x6D7E20 ran for it and wrote the header and systems
 DWORD g_askedAt = 0;
 const char* g_saveOutcome = "failed";
+unsigned g_savesMade = 0;    // saves SAVE GAME has made since the game started (for guerrilla_hud's saving icon)
 
 BYTE& Byte(DWORD address) { return *reinterpret_cast<BYTE*>(address); }
 int Int(DWORD address) { return *reinterpret_cast<const int*>(address); }
@@ -211,6 +212,7 @@ const char* SaveState() {
                  Int(kSavedRoom) / 1024, waited);
         g_saveOutcome = "saved";
         g_waitingToSave = false;
+        ++g_savesMade;
         return g_saveOutcome;
     }
     g_saveOutcome = "failed";
@@ -260,6 +262,14 @@ bool Starts(DWORD address, std::initializer_list<BYTE> bytes) {
 }
 
 }  // namespace
+
+// For guerrilla_hud, which shows Guerrilla's saving icon while a save is made and a moment after: 1 while
+// SAVE GAME's save is being made in a Guerrilla world, else 0; and through savesMade (if given) how many
+// saves it has made since the game started.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaSave_Saving(unsigned* savesMade) {
+    if (savesMade) *savesMade = g_savesMade;
+    return InGuerrillaWorld() && (g_waitingToSave || SaveRunning()) ? 1 : 0;
+}
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(rfa::game::lua_State* L) {
     rfa::game::lua_register(L, "rfg_save_can_save", LuaCanSave);

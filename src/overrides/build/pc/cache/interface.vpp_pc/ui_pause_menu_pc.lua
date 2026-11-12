@@ -4,7 +4,8 @@
 -- Adds Options > Experimentals (single player only): the Gameplay screen opened with
 -- Rfa_options_page set to "experimentals", which makes it show RFA-Mod's own settings (see
 -- ui_options_gameplay.lua). In the Guerrilla world, SAVE GAME saves the moment you're in (guerrilla_save's
--- rfg_save_can_save, rfg_save_game and rfg_save_state). Every line we added or changed is marked [RFA]; everything else is the
+-- rfg_save_can_save, rfg_save_game and rfg_save_state), and HANDBOOK opens Guerrilla's handbook (guerrilla_hud's
+-- rfg_handbook_available and rfg_handbook_open). Every line we added or changed is marked [RFA]; everything else is the
 -- game's original script. Only the [RFA] lines are this project's (GNU GPL version 3 or later, see
 -- LICENSE); the rest belongs to the game's owners. To compare with the original, extract it with the
 -- editor.
@@ -26,6 +27,7 @@ local EXTRAS_ID					= 10
 local CHEATS_ID					= 11
 local PLAYER_STATS_ID			= 12
 local RFG_SAVE_GAME_ID			= 13 -- [RFA] SAVE GAME in the Guerrilla world (guerrilla_save)
+local RFG_HANDBOOK_ID			= 14 -- [RFA] HANDBOOK in the Guerrilla world (guerrilla_hud)
 
 -- Options menu
 local OPTIONS_CONTROLS_ID		= 101
@@ -305,6 +307,15 @@ function ui_pause_menu_construct_top_menu_from_flags()
 			tack_on_infos(MENU_INFOS.DEMO)
 
 		else
+			-- [RFA] In the Guerrilla world, Guerrilla's handbook first, as its pause menu had it: rfg_handbook_available()
+			-- [RFA] says whether it shows there, and its word (guerrilla_hud); nil without that mod
+			if rfg_handbook_available ~= nil then -- [RFA]
+				local rfg_handbook, rfg_handbook_label = rfg_handbook_available() -- [RFA]
+				if rfg_handbook == true then -- [RFA]
+					tack_on_infos({ {label = rfg_handbook_label, id = RFG_HANDBOOK_ID} }) -- [RFA]
+				end -- [RFA]
+			end -- [RFA]
+
 			if is_signed_into_profile() then
 				-- Add save/load
 
@@ -510,6 +521,12 @@ function ui_pause_menu_button_a(event, acceleration)
 		if rfg_save_game() then -- [RFA] (guerrilla_save), then goes to the save screen as SAVE GAME does,
 			Rfg_save_asked = true -- [RFA] once the save is made (ui_pause_menu_load_screen)
 			set_next_screen(NEXT_SCREEN_SAVE_GAME, PAUSE_MENU_TIER) -- [RFA]
+		end -- [RFA]
+
+	elseif current_id == RFG_HANDBOOK_ID then -- [RFA] Guerrilla's handbook (guerrilla_hud): the mod keeps the game
+		if rfg_handbook_open() then -- [RFA] paused and opens it as this menu closes; its back key opens this menu again
+			pause_menu_reset_selections() -- [RFA]
+			rf4_pop_ui() -- [RFA]
 		end -- [RFA]
 
 	elseif current_id == LOAD_GAME_ID then

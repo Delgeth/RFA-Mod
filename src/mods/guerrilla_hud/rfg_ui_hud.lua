@@ -21,7 +21,8 @@
 --     safehouses and its missions' and activities' starts, from map_icons.txt), each kept upright;
 --     under the icons, Guerrilla's blips for the people and vehicles near the player (a dot a person,
 --     a marker turned as the vehicle is; who shows and in which colour is Guerrilla's, in the mod:
---     rfg_map_blips);
+--     rfg_map_blips), each fading behind Guerrilla's radar sweep, a ring growing on each person it passes;
+--   - over them, not turned, the sweep's line moving down the minimap (see SWEEP_PIXELS_PER_SECOND);
 --   - the frame on top: the document's own map element, which GuerrillaBuilder.exe made a picture.
 -- How far the minimap shows is Guerrilla's: 40 metres from the player to the frame's edge, and half
 -- the vehicle's speed more while driving. Where the player is, which way the camera looks and which
@@ -59,6 +60,27 @@ local VEHICLE_BLIP_METRES = 9.75
 -- Guerrilla's blip colours (0 to 255), by the number the mod gives: grey (nobody's, or no one in it), the
 -- Red Faction's yellow, the EDF's red, the Marauders' purple.
 local BLIP_COLOURS = { [0] = { 200, 200, 200 }, { 240, 200, 52 }, { 148, 13, 0 }, { 120, 80, 130 } }
+-- Guerrilla's radar sweep (its cartographer's render_scan_line, render_humans and render_vehicles: RM 0x863A60,
+-- 0x86D710, 0x86DED0). A line moves down the minimap at 150 screen pixels a second (Minimap_radar_update_rate;
+-- Guerrilla's minimap window is the frame's size on screen), from the frame's top until its picture, as tall as
+-- the frame with the line at its bottom, has left the frame's bottom: twice the frame's height, then from the top
+-- again. It stands still while the game is paused (the mod's rfg_map_sweep_clock). Behind it each blip fades,
+-- from full where the line has just passed to nothing when it comes round again (Minimap_radar_min_alpha is 0);
+-- and on each person a ring (ui_map_icon_ring) grows: from half its size (Minimap_blip_start_scale) by 6 sizes
+-- (Minimap_radar_blip_scale_rate) a sweep, twice the dot across at a size of 1 (Minimap_radar_blip_scale), so as
+-- big as the dot as the line passes; in the dot's colour lightened by 128; fading from 128 x 2
+-- (Minimap_blip_opacity) to nothing a third of a sweep behind the line. People's rings are drawn under every
+-- dot, the vehicles under the people, the line over them all (Guerrilla's order).
+local SWEEP_PIXELS_PER_SECOND = 150
+local SWEEP_PICTURE = "rfg_ui_minimap_scan_line"
+local SWEEP_PICTURE_PIXELS = 128
+local RING_PICTURE = "rfg_ui_map_icon_ring"
+local RING_PIXELS = 24
+local RING_START = 0.5
+local RING_GROWTH = 6
+local RING_ACROSS = 2
+local RING_OPACITY = 128
+local RING_LIGHTER = 128
 -- The game's Lua has no math or string library (its globals are checked: reading a missing one is
 -- an error), so these are written out.
 local QUARTER_TURN = 1.5707963267949
@@ -93,6 +115,9 @@ local Icon_shown = {}                   -- the picture each icon element shows, 
 local Blip_handles = {}
 local Blip_shown = {}                   -- what each blip element shows (its kind and colour), or nil while hidden
 local Blips_on = true
+local Ring_handles = {}
+local Ring_shown = {}                   -- the colour each ring element shows, or nil while hidden
+local Sweep = { on = false, position = 0, clock = nil, handle = nil, pixels = FRAME, checked = 0, check_at = 5, least_alpha = 0 }
 local Tile_shown = {}                   -- "column_row" each tile element shows, or nil
 local In_vehicle = false
 local Shown_district = nil
@@ -165,6 +190,7 @@ local function build_map()
 	local frame = find("map_overlay")
 	local main = find("mini_map_main")
 	local x, y = vint_get_property(frame, "anchor")
+	Map_handles.frame = frame
 
 	local clip = make("rfg_minimap_clip", "clip", main)
 	vint_set_property(clip, "anchor", x + OCTAGON_FROM, y + OCTAGON_FROM)
@@ -215,20 +241,81 @@ local function build_map()
 	end
 	log(#Icons .. " map icons")
 
-	-- Guerrilla's blips: under its icons, the people over the vehicles (the order Guerrilla draws them in).
+	-- Guerrilla's blips: under its icons, the people over the vehicles (the order Guerrilla draws them in), the
+	-- sweep's rings between them.
 	for i = 1, BLIPS do
 		Blip_handles[i] = make("rfg_minimap_blip" .. i, "bitmap", turn)
 		vint_set_property(Blip_handles[i], "visible", false)
 		vint_set_property(Blip_handles[i], "auto_offset", "c")
-		vint_set_property(Blip_handles[i], "depth", -2)
+		vint_set_property(Blip_handles[i], "depth", -1)
 	end
+
+	-- Guerrilla's radar sweep: its line over the map, not turned with it; a ring for each person.
+	if rfg_map_sweep_clock ~= nil and rfg_sin_cos ~= nil then
+		for i = 1, BLIPS do
+			Ring_handles[i] = picture("rfg_minimap_ring" .. i, turn, RING_PICTURE)
+			vint_set_property(Ring_handles[i], "visible", false)
+			vint_set_property(Ring_handles[i], "auto_offset", "c")
+			vint_set_property(Ring_handles[i], "depth", -2)
+		end
+		local line = picture("rfg_minimap_sweep", clip, SWEEP_PICTURE)
+		vint_set_property(line, "auto_offset", "nw")
+		vint_set_property(line, "scale", FRAME / SWEEP_PICTURE_PIXELS, FRAME / SWEEP_PICTURE_PIXELS)
+		vint_set_property(line, "depth", -12)		-- over the turned map (-10)
+		Sweep.handle = line
+		Sweep.on = true
+	else
+		log("no rfg_map_sweep_clock or rfg_sin_cos (an older guerrilla_hud.dll?): no radar sweep", true)
+	end
+end
+
+-- The sweep's line, moved by the time since the last frame: 150 screen pixels a second, in the frame's units.
+local function sweep_step()
+	local now = rfg_map_sweep_clock()
+	local seconds = 0
+	if Sweep.clock ~= nil then
+		seconds = now - Sweep.clock
+	end
+	Sweep.clock = now
+	local ok, x1, y1, x2, y2 = pcall(vint_get_bbox, Map_handles.frame)
+	if ok and y1 ~= nil and y2 ~= nil and y2 - y1 > 1 then
+		Sweep.pixels = y2 - y1
+	end
+	Sweep.position = Sweep.position + seconds * SWEEP_PIXELS_PER_SECOND * FRAME / Sweep.pixels
+	if Sweep.position > 2 * FRAME or Sweep.position < 0 then
+		Sweep.position = 0
+	end
+	vint_set_property(Sweep.handle, "anchor", -OCTAGON_FROM, Sweep.position - FRAME - OCTAGON_FROM)
+end
+
+-- How far behind the line a point on the minimap is, as a part of a sweep (0 just passed, to 1 about to be passed
+-- again); from (y) its height in the frame, from the top.
+local function behind_sweep(y)
+	local ahead = y - Sweep.position
+	if ahead > 0 then
+		ahead = ahead - 2 * FRAME
+	end
+	local part = -ahead / (2 * FRAME)
+	if part > 1 then
+		part = 1
+	end
+	return part
+end
+
+local function lighter(value)
+	value = value + RING_LIGHTER
+	if value > 255 then
+		value = 255
+	end
+	return value
 end
 
 -- Guerrilla's blips for the people and vehicles within reach (the mod picks them and their colours).
 local function place_blips(map_x, map_y, heading, radius, scale, world_scale)
 	local count = 0
 	if rfg_map_blips ~= nil then
-		count = rfg_map_blips(radius * ICON_REACH)
+		-- Guerrilla collects them within its zoom radius only (its zoom_radius_squared), not out to the corners.
+		count = rfg_map_blips(radius)
 		if count > BLIPS then
 			count = BLIPS
 		end
@@ -239,8 +326,15 @@ local function place_blips(map_x, map_y, heading, radius, scale, world_scale)
 	elseif zoomed_out > 1 then
 		zoomed_out = 1
 	end
-	local human_size = HUMAN_BLIP * (1 - (1 - HUMAN_BLIP_LEAST) * zoomed_out) / BLIP_PIXELS
+	local human_units = HUMAN_BLIP * (1 - (1 - HUMAN_BLIP_LEAST) * zoomed_out)
+	local human_size = human_units / BLIP_PIXELS
 	local vehicle_size = VEHICLE_BLIP_METRES * scale / BLIP_PIXELS
+	-- The turned map's sine and cosine: where a blip is in the frame (the map group turns by -heading about its
+	-- middle), for the sweep.
+	local sine, cosine = 0, 1
+	if Sweep.on then
+		sine, cosine = rfg_sin_cos(heading)
+	end
 	for i = 1, count do
 		local vehicle, x, y, colour, facing = rfg_map_blip(i)
 		local handle = Blip_handles[i]
@@ -248,17 +342,18 @@ local function place_blips(map_x, map_y, heading, radius, scale, world_scale)
 		if vehicle then
 			look = look + 10
 		end
+		local tint = BLIP_COLOURS[colour] or BLIP_COLOURS[0]
 		if Blip_shown[i] ~= look then
-			local tint = BLIP_COLOURS[colour] or BLIP_COLOURS[0]
 			vint_set_property(handle, "image", vehicle and "rfg_ui_map_icon_vehicle" or "rfg_ui_map_icon_blip_human")
 			vint_set_property(handle, "tint", tint[1], tint[2], tint[3])
-			vint_set_property(handle, "depth", vehicle and -2 or -3)
+			vint_set_property(handle, "depth", vehicle and -1 or -3)
 			if Blip_shown[i] == nil then
 				vint_set_property(handle, "visible", true)
 			end
 			Blip_shown[i] = look
 		end
-		vint_set_property(handle, "anchor", (x - map_x) * world_scale, (y - map_y) * world_scale)
+		local anchor_x, anchor_y = (x - map_x) * world_scale, (y - map_y) * world_scale
+		vint_set_property(handle, "anchor", anchor_x, anchor_y)
 		if vehicle then
 			vint_set_property(handle, "scale", vehicle_size, vehicle_size)
 			vint_set_property(handle, "rotation", facing)
@@ -266,11 +361,70 @@ local function place_blips(map_x, map_y, heading, radius, scale, world_scale)
 			vint_set_property(handle, "scale", human_size, human_size)
 			vint_set_property(handle, "rotation", heading)
 		end
+
+		-- The sweep: the blip fades behind the line; a person's ring grows from where the line passed.
+		local ring_alpha = 0
+		local ring_part = 0
+		if Sweep.on then
+			local frame_y = FRAME / 2 - anchor_x * sine + anchor_y * cosine
+			local part = behind_sweep(frame_y)
+			-- Guerrilla's alpha: 255 x (1 - part) + Minimap_radar_min_alpha, at most 255.
+			local alpha = (255 * (1 - part) + Sweep.least_alpha) / 255
+			if alpha > 1 then
+				alpha = 1
+			end
+			vint_set_property(handle, "alpha", alpha)
+			if not vehicle then
+				ring_part = part * RING_GROWTH
+				if ring_part < 2 then
+					ring_alpha = RING_OPACITY * (2 - ring_part) / 255
+					if ring_alpha > 1 then
+						ring_alpha = 1
+					end
+				end
+			end
+			if i == 1 and Sweep.checked < 3 and Sweep.clock ~= nil and Sweep.clock >= Sweep.check_at then
+				-- For finding out what goes wrong (always logged, three times 5 s apart): the height worked out against
+				-- where the game drew it (the two should match), and the frame's height on screen.
+				Sweep.checked = Sweep.checked + 1
+				Sweep.check_at = Sweep.clock + 5
+				local ok_blip, bx1, by1, bx2, by2 = pcall(vint_get_bbox, handle)
+				local ok_frame, fx1, fy1, fx2, fy2 = pcall(vint_get_bbox, Map_handles.frame)
+				if ok_blip and ok_frame and by1 ~= nil and by2 ~= nil and fy1 ~= nil and fy2 ~= nil and fy2 > fy1 then
+					log("sweep check: a blip at " .. tostring(frame_y) .. " of the frame's " .. FRAME .. ", drawn at " ..
+						tostring(((by1 + by2) / 2 - fy1) * FRAME / (fy2 - fy1)) .. "; the line at " .. tostring(Sweep.position) ..
+						"; the frame " .. tostring(fy2 - fy1) .. " pixels high; the blip's alpha " .. tostring(alpha), true)
+				end
+			end
+		end
+		local ring = Ring_handles[i]
+		if ring ~= nil then
+			if ring_alpha > 0 then
+				if Ring_shown[i] ~= colour then
+					vint_set_property(ring, "tint", lighter(tint[1]), lighter(tint[2]), lighter(tint[3]))
+					if Ring_shown[i] == nil then
+						vint_set_property(ring, "visible", true)
+					end
+					Ring_shown[i] = colour
+				end
+				local ring_size = human_units * RING_ACROSS * (RING_START + ring_part) / RING_PIXELS
+				vint_set_property(ring, "anchor", anchor_x, anchor_y)
+				vint_set_property(ring, "scale", ring_size, ring_size)
+				vint_set_property(ring, "alpha", ring_alpha)
+			elseif Ring_shown[i] ~= nil then
+				vint_set_property(ring, "visible", false)
+				Ring_shown[i] = nil
+			end
+		end
 	end
 	for i = count + 1, BLIPS do
 		if Blip_shown[i] ~= nil then
 			vint_set_property(Blip_handles[i], "visible", false)
 			Blip_shown[i] = nil
+		end
+		if Ring_shown[i] ~= nil then
+			vint_set_property(Ring_handles[i], "visible", false)
+			Ring_shown[i] = nil
 		end
 	end
 end
@@ -304,7 +458,7 @@ local function place_icons(map_x, map_y, heading, radius, world_scale)
 end
 
 -- The map around the player: turned against the camera, scaled to the minimap's reach.
-local function place_map(map_x, map_y, heading, speed)
+local function place_map(map_x, map_y, heading, speed, shown)
 	local radius = RADIUS
 	if In_vehicle then
 		radius = radius + SPEED_RADIUS * speed
@@ -339,6 +493,23 @@ local function place_map(map_x, map_y, heading, speed)
 	end
 
 	place_icons(map_x, map_y, heading, radius, world_scale)
+	-- The sweep's line, only while the minimap shows (Guerrilla's moved as it drew the minimap); should it fail,
+	-- the blips go on without it.
+	if Sweep.on and shown then
+		local ok, problem = pcall(sweep_step)
+		if not ok then
+			Sweep.on = false
+			vint_set_property(Sweep.handle, "visible", false)
+			for i = 1, BLIPS do
+				vint_set_property(Blip_handles[i], "alpha", 1)
+				vint_set_property(Ring_handles[i], "visible", false)
+				Ring_shown[i] = nil
+			end
+			log("the minimap's radar sweep stopped: " .. tostring(problem), true)
+		end
+	elseif Sweep.on then
+		Sweep.clock = nil		-- hidden: the line waits where it is
+	end
 	-- The blips on their own: should they fail, the map goes on without them.
 	if Blips_on then
 		local ok, problem = pcall(place_blips, map_x, map_y, heading, radius, scale, world_scale)
@@ -433,9 +604,10 @@ end
 local function frame()
 	local active, map_x, map_y, heading, speed, column, row, district, map_open = rfg_map_view()
 	Map_open = map_open
-	show(active and not Hud_hidden and not map_open)
+	local shown = active and not Hud_hidden and not map_open
+	show(shown)
 	if active then
-		place_map(map_x, map_y, heading, speed)
+		place_map(map_x, map_y, heading, speed, shown)
 		if district ~= Shown_district then
 			show_district(district)
 			Shown_district = district
@@ -475,6 +647,16 @@ end
 
 function rfg_ui_hud_init()
 	Log_on = rfa_get_setting ~= nil and rfa_get_setting("GuerrillaHud", "Log", 0) ~= 0
+	-- Guerrilla's Minimap_radar_min_alpha (0 to 255): how faint a blip gets before the sweep comes round again. Guerrilla
+	-- left it 0 (nothing sets it), so a blip fades out entirely; RadarMinAlpha= under [GuerrillaHud] keeps them showing.
+	if rfa_get_setting ~= nil then
+		Sweep.least_alpha = rfa_get_setting("GuerrillaHud", "RadarMinAlpha", 0)
+		if Sweep.least_alpha < 0 then
+			Sweep.least_alpha = 0
+		elseif Sweep.least_alpha > 255 then
+			Sweep.least_alpha = 255
+		end
+	end
 	Logged = 0
 	Frames_logged = 0
 	log("init: this document " .. tostring(vint_document_find("rfg_ui_hud")) .. ", rfg_map_view " .. tostring(rfg_map_view))

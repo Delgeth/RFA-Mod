@@ -58,9 +58,10 @@ public static class GuerrillaRocks
         }
 
         var (header, textures) = GuerrillaChunks.Convert(rfgHeader, textureAlias);
+        // The box its collision fills: its triangles' and the shape's radius round them.
         var (collisionVertices, _) = PieceCollision.Read(rfgHeader);
-        var collisionMin = collisionVertices.Aggregate(new Vector3(float.MaxValue), Vector3.Min);
-        var collisionMax = collisionVertices.Aggregate(new Vector3(float.MinValue), Vector3.Max);
+        var collisionMin = collisionVertices.Aggregate(new Vector3(float.MaxValue), Vector3.Min) - new Vector3(PieceCollision.Radius);
+        var collisionMax = collisionVertices.Aggregate(new Vector3(float.MinValue), Vector3.Max) + new Vector3(PieceCollision.Radius);
         return new Piece(header, rfgData, min, max, textures, collisionMin, collisionMax, [.. corners]);
     }
 

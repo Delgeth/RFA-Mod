@@ -26,9 +26,18 @@ namespace RfaFormats.Guerrilla;
 ///     Armageddon added (no_magnet_gun, suppress_salvage, no_repair, ignore_shape_cutters,
 ///     mp_unimportant: all off)
 ///   - lod_props: the draw distance of its gameplay entry's LOD class (see <see cref="GuerrillaLod"/>),
-///     else "None" (never switched off), and the destruction checksum the chunk file's own (its header's
-///     0x24), as in all of Armageddon's zones: Guerrilla's zones have it too, but for two
-///     smokestacks (campaign targets) an older one than their files.
+///     else "None" (never switched off)
+///   - the destruction checksum as Guerrilla's zone has it. Both games, as an object streams in, compare
+///     it with its chunk file's (the header's 0x24): the same, and they trust the zone's saved state (its
+///     world_anchors are the pieces held to the ground; the anchors aren't looked for again); different,
+///     and they throw that state away (Guerrilla's rfg_mover::release_anchor_points) and anchor the pieces
+///     touching the ground. Guerrilla's zones have their files' own, but for the 0105smokestack_a towers in
+///     terr01_04_10, whose world_anchors were saved for an older version of the file and name pieces up
+///     to 50 m up the stack: with their checksum made the file's own (as before 2026-11-11) the game held
+///     the stack by them, and it hung in the air with its base gone. Left stale, the game anchors them by
+///     contact as Guerrilla does, but Armageddon shows "out of date anchor data" for each; so where we have a
+///     correction (<see cref="GuerrillaAnchorFixes"/>: what the game itself works out by contact for them)
+///     those objects get its world_anchors and links, ours, and the file's own checksum: the zone resaved.
 /// Guerrilla's chunk_flags (dynamic_link, world_anchor) aren't written: Armageddon's chunk flags are
 /// other ones (casts_shadows, regenerate, ...), so it would read them as none, and it finds the links
 /// and anchors in their own lists.
@@ -58,6 +67,23 @@ public static class GuerrillaMovers
         "suppress_salvage", "no_repair", "dynamic_links", "ignore_shape_cutters", "gm_flags", "mp_unimportant", "lod_props", "Props",
     ];
 
+    /// <summary>
+    /// The placed objects whose zone checksum isn't their chunk file's (their saved anchor data is stale: the game
+    /// throws it away and warns), each with its correction (see <see cref="GuerrillaAnchorFixes"/>) or null.
+    /// </summary>
+    public static List<(GuerrillaZoneObject Object, GuerrillaAnchorFixes.Fix? Fix)> StaleAnchorData(IReadOnlyList<GuerrillaZoneObject> placed, Func<string, uint> checksumOf)
+    {
+        var stale = new List<(GuerrillaZoneObject, GuerrillaAnchorFixes.Fix?)>();
+        foreach (var o in placed)
+        {
+            if (o.Value("dest_checksum") is not { Length: 4 } own) continue;
+            string chunk = Path.GetFileNameWithoutExtension(o.Text("chunk_name") ?? "");
+            uint zoneSum = BitConverter.ToUInt32(own), fileSum = checksumOf(chunk);
+            if (zoneSum != fileSum) stale.Add((o, GuerrillaAnchorFixes.For(chunk, zoneSum, fileSum, o.Handle)));
+        }
+        return stale;
+    }
+
     /// <summary>The movers as Armageddon's objects (handles not in <paramref name="taken"/>, which gains theirs), and the extra block's links for them.</summary>
     /// <param name="placed">The movers to place, in the zone's order (written in it, but each parent before its children).</param>
     /// <param name="all">Every object of their Guerrilla zone, by handle (to follow attachments through).</param>
@@ -79,10 +105,27 @@ public static class GuerrillaMovers
             handleOf[o.Handle] = handle;
         }
 
-        // The links between placed objects, each once, numbered in the order they are first named.
+        // The objects whose stale anchor data has a correction of ours (see GuerrillaAnchorFixes): their zone
+        // checksum isn't their file's, and the correction was made for both.
+        var fixOf = new Dictionary<uint, GuerrillaAnchorFixes.Fix>();
+        foreach (var (o, fix) in StaleAnchorData(placed, checksumOf))
+            if (fix != null) fixOf[o.Handle] = fix;
+
+        // The links between placed objects, each once, numbered in the order they are first named. A stale
+        // link naming a corrected object keeps its number (so every other link keeps its own) but is named
+        // by neither object: its place goes to the first of the correction's links.
         var links = new List<byte[]>();
         var linkNumber = new Dictionary<string, int>();
         var linksOf = placed.ToDictionary(o => o.Handle, _ => new List<int>());
+        var freed = new List<int>();
+        byte[] NewLink(int n)
+        {
+            var link = new byte[ZoneFile.DestructionLinkSize];
+            Array.Fill(link, (byte)0xFF, 16, 8);
+            Array.Fill(link, (byte)0xFF, 28, 8);
+            BitConverter.TryWriteBytes(link.AsSpan(36), n);  // its own number
+            return link;
+        }
         foreach (var o in placed)
         {
             if (o.Value("dynamic_links") is not { } list) continue;
@@ -95,20 +138,45 @@ public static class GuerrillaMovers
                 {
                     n = links.Count;
                     linkNumber[key] = n;
-                    var link = new byte[ZoneFile.DestructionLinkSize];
-                    Array.Fill(link, (byte)0xFF, 16, 8);
-                    Array.Fill(link, (byte)0xFF, 28, 8);
+                    var link = NewLink(n);
                     Array.Copy(list, at, link, 0, 8);                       // the two pieces, flags
                     BitConverter.TryWriteBytes(link.AsSpan(8), handleOf[a]);
                     BitConverter.TryWriteBytes(link.AsSpan(12), handleOf[b]);
                     Array.Copy(list, at + 16, link, 24, 4);                 // the number
-                    BitConverter.TryWriteBytes(link.AsSpan(36), n);         // its own number
                     links.Add(link);
+                    if (fixOf.ContainsKey(a) || fixOf.ContainsKey(b))
+                    {
+                        freed.Add(n);
+                        continue;
+                    }
                     linksOf[a].Add(n);
                     if (b != a) linksOf[b].Add(n);
                 }
             }
         }
+        // The corrections' links, between corrected objects both placed, in the order the game made them: in the
+        // freed places first, then after the rest.
+        int nextFreed = 0;
+        foreach (var fix in fixOf.Values.Distinct())
+            foreach (var l in fix.Links)
+            {
+                if (!fixOf.ContainsKey(l.A) || !fixOf.ContainsKey(l.B)) continue;
+                int n = nextFreed < freed.Count ? freed[nextFreed++] : links.Count;
+                var link = NewLink(n);
+                BitConverter.TryWriteBytes(link.AsSpan(0), l.PieceA);
+                BitConverter.TryWriteBytes(link.AsSpan(2), l.PieceB);
+                BitConverter.TryWriteBytes(link.AsSpan(4), l.DepthA);       // the depths from the ground, as the flags hold them
+                BitConverter.TryWriteBytes(link.AsSpan(6), l.DepthB);
+                BitConverter.TryWriteBytes(link.AsSpan(8), handleOf[l.A]);
+                BitConverter.TryWriteBytes(link.AsSpan(12), handleOf[l.B]);
+                BitConverter.TryWriteBytes(link.AsSpan(24), l.Area);
+                if (n == links.Count) links.Add(link);
+                else links[n] = link;
+                linksOf[l.A].Add(n);
+                if (l.B != l.A) linksOf[l.B].Add(n);
+            }
+        if (nextFreed < freed.Count)
+            throw new InvalidDataException($"{freed.Count - nextFreed} stale links' places left unused: the correction of their objects has fewer links than they had");
 
         // Attachments: to a placed parent only; its placed children in the order of Guerrilla's chain
         // (first child, then each one's sibling), any the chain misses after them.
@@ -155,7 +223,9 @@ public static class GuerrillaMovers
         foreach (var o in order)
         {
             string chunk = Path.GetFileNameWithoutExtension(o.Text("chunk_name") ?? "");
-            byte[]? anchors = o.Value("world_anchors");
+            var fixedBy = fixOf.GetValueOrDefault(o.Handle);
+            byte[]? anchors = fixedBy == null ? o.Value("world_anchors")
+                            : fixedBy.Anchors.TryGetValue(o.Handle, out var held) ? [.. held.SelectMany(BitConverter.GetBytes)] : null;
             byte[]? linkList = null;
             if (linksOf[o.Handle] is { Count: > 0 } mine)
             {
@@ -166,7 +236,9 @@ public static class GuerrillaMovers
             byte[]? Value(string name) => name switch
             {
                 "chunk_name" => Text(chunk + ".cchk_pc"),
-                "dest_checksum" => BitConverter.GetBytes(checksumOf(chunk)),
+                // Guerrilla's own, stale or not (see the class's description); the file's where it has none, or where
+                // its stale anchor data is corrected (GuerrillaAnchorFixes).
+                "dest_checksum" => fixedBy == null && o.Value("dest_checksum") is { Length: 4 } own ? own : BitConverter.GetBytes(checksumOf(chunk)),
                 "oP" => o.Value("oP") is { Length: 48 } placement ? placement : Unturned((o.BoundsMin + o.BoundsMax) / 2),
                 "uid" or "mtype" or "gm_flags" => o.Value(name) is { Length: 4 } v ? v : new byte[4],
                 // (Left out at the schema's default, -1: the game's own.)

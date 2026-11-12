@@ -16,6 +16,8 @@
 // - liberation.cpp: the districts, EDF control and morale, the alert level, the tech and
 //   progression levels, salvage; alert_sources.cpp what the alert level hears from the world (the
 //   EDF's people seeing the player, its dead, its vehicles damaged and wrecked).
+// - restricted_areas.cpp: Guerrilla's restricted areas (its EDF bases); undercover.cpp its rule that
+//   the EDF take the player for a civilian while the alert is green.
 // - activities.cpp (and activity_base.h): the activity framework; demolitions_master.cpp its
 //   first kind.
 // - tables.cpp: Guerrilla's tables, from mods\guerrilla_campaign\tables\, and world_objects.cpp
@@ -34,9 +36,10 @@
 // So far only the alert level is tried in the game. The script words and the activities have never
 // run, so each waits behind a setting of its own, off unless asked for.
 //
-// [GuerrillaCampaign] in rfa_mods.ini: Enabled= (1; 0 leaves the game alone), Worlds= (rfg), Scripts=
-// (0; 1 puts Guerrilla's script words in), Activities= (0; 1 runs the activity framework), Log= (0; 1
-// writes what the alert level counts, each second it changes).
+// [GuerrillaCampaign] in rfa_mods.ini: Enabled= (1; 0 leaves the game alone), Worlds= (rfg), Undercover=
+// (1; 0: the EDF take the player for an enemy at any alert level, as Armageddon's do), Scripts= (0; 1
+// puts Guerrilla's script words in), Activities= (0; 1 runs the activity framework), Log= (0; 1 writes
+// what the alert level counts, each second it changes).
 #define RFA_MOD_NAME "guerrilla_campaign"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -47,6 +50,10 @@
 #include "liberation.h"
 #include "activities.h"
 #include "alert_sources.h"
+#include "restricted_areas.h"
+#include "undercover.h"
+#include "kill_regions.h"
+#include "stealth.h"
 
 namespace campaign {
 namespace {
@@ -88,6 +95,9 @@ void __cdecl ScriptFrame() {
     if (playing && !g_playing) {
         liberation::Enter();
         alert_sources::Enter();
+        restricted_areas::Enter();
+        kill_regions::Enter();
+        stealth::Enter();
         if (g_activities) activities::Enter();
     }
     g_playing = playing;
@@ -96,6 +106,10 @@ void __cdecl ScriptFrame() {
     if (playing && ticking) {
         const float seconds = FrameTime();
         alert_sources::Frame();
+        restricted_areas::Frame();
+        undercover::Frame();
+        kill_regions::Frame(g_activities && activities::AnyRunning());
+        stealth::Frame();
         liberation::Update(seconds);
         if (g_activities) activities::Update(seconds);
     }
@@ -127,6 +141,8 @@ Vector PositionOf(const void* object) {
 void* Player() { return g_player; }
 
 int GameTime() { return *reinterpret_cast<const int*>(0x1121300); }
+
+bool Playing() { return g_playing; }
 
 bool InOurWorld() {
     const char* world = WorldName();
@@ -169,6 +185,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     }
     g_worlds = SplitList(rfa::IniString(L"GuerrillaCampaign", L"Worlds", L"rfg"));
     liberation::Init();
+    restricted_areas::Init();
+    undercover::Init();
+    kill_regions::Init();
+    stealth::Init();
     g_activities = rfa::IniInt(L"GuerrillaCampaign", L"Activities", 0) != 0;
     if (g_activities) activities::Init();
     if (rfa::IniInt(L"GuerrillaCampaign", L"Scripts", 0) != 0) {

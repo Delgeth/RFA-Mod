@@ -293,6 +293,10 @@ public static class GuerrillaMaterials
         [H("rfg-colorshift")] = new(GuerrillaShaders.Family.VehiclePaint, 0, null, false, null, false, BrdfKind: 1),
         // The Oasis roofs: every map at UV0 untiled but the decal (UV1 × its tiling).
         [H("rfg-ed-oasisroof")] = new(GuerrillaShaders.Family.Clearcoat, 1, null, false, null, false),
+        // The backpacks' fuel gauges (character meshes, alpha-tested): the colour map's alpha their shape, lit by the
+        // pack's fuel (the guerrilla_world mod's PackFuel); Self_Illumination in gw_Glow.x, Diffuse_Map_OffsetU in
+        // gw_Scroll.x (so "Animated").
+        [H("rfg-mp_fuel_gauge")] = new(GuerrillaShaders.Family.FuelGauge, 0, null, false, null, false, Specular: false, Animated: true),
     };
 
     /// <summary>

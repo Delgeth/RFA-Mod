@@ -31,6 +31,10 @@
 //   - the rest (remote charge count, the guns' own upgrades, armor, the personnel detector, radiation
 //     shielding, the salvage collector, ore additive, Guerrilla Express, quantum multiplier): kept as
 //     bought, not in effect yet.
+//
+// RFA-Mod's own upgrades are sold beside Guerrilla's (kOwnUpgrades below): they are NOT Guerrilla's, its
+// upgrades.xtbl has none of them, and their names start with "rfa_". Other mods ask whether one is bought
+// with GuerrillaGear_UpgradeLevel.
 #define RFA_MOD_NAME "guerrilla_gear"
 #include "rfa_mod.h"
 #include "rfa_menu.h"
@@ -61,6 +65,8 @@ struct Level {
 struct Upgrade {
     std::string name, shown, type, weapon, effect;
     std::vector<Level> levels;
+    bool ours = false;  // RFA-Mod's own, not one of Guerrilla's (kOwnUpgrades)
+    std::string does;   // ours: what buying it does, for the window
     bool Backpack() const { return effect.rfind("backpack:", 0) == 0; }
     int BackpackId() const { return Backpack() ? std::atoi(effect.c_str() + 9) : -1; }
     bool Weapon() const { return effect == "weapon"; }
@@ -69,6 +75,25 @@ struct Upgrade {
 
 std::vector<Upgrade> g_upgrades;  // read at start-up, then only read
 float g_costScale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+// ---- RFA-Mod's own upgrades: NOT Guerrilla's (its upgrades.xtbl has none of these). They are added after
+// Guerrilla's list, so they are sold in the same two places (the F7 window and the safehouses' shop), cost
+// salvage × the same difficulty scale, and are kept in the same list of what was bought. Each has one level
+// to buy. A name here starts with "rfa_", so it can never be taken for a row of Guerrilla's table.
+struct OwnUpgrade {
+    const char* name;         // what upgrades_bought.txt and other mods call it
+    const char* shown;        // as Guerrilla shows its own: capitals
+    const char* type;         // General: the window's Mason tab
+    int cost;                 // salvage at Medium
+    const char* description;  // one line, as Guerrilla's
+    const char* does;         // what buying it does, for the window
+};
+const OwnUpgrade kOwnUpgrades[] = {
+    // The gun of a vehicle the player drives follows his aim point, where Guerrilla's rule aims it by itself
+    // (guerrilla_vehicles' turrets.cpp asks for it by this name).
+    {"rfa_turret_link", "TURRET LINK", "General", 200, "AIM YOUR VEHICLE'S GUN YOURSELF WHILE YOU DRIVE",
+     "the gun of a vehicle you drive follows your aim (a tank's main gun does anyway)"},
+};
 
 struct Request {
     enum Kind { kBuy, kTake, kWear } kind;
@@ -109,6 +134,16 @@ void ReadUpgrades() {
             g_upgrades.back().levels.push_back({std::atoi(f[1].c_str()), std::atoi(f[2].c_str()), f[3], f[4],
                                                 f[5] == "-" ? "" : f[5], f[6] == "-" ? "" : f[6]});
         }
+    }
+    // RFA-Mod's own, after Guerrilla's (only with Guerrilla's: without its list there is no shop to sell in).
+    if (g_upgrades.empty()) return;
+    for (const OwnUpgrade& own : kOwnUpgrades) {
+        Upgrade u{own.name, own.shown, own.type, "", "none", {}};
+        u.levels.push_back({});                                                 // what you start with: nothing
+        u.levels.push_back({own.cost, 1, own.shown, own.description, "", ""});  // the one level to buy
+        u.ours = true;
+        u.does = own.does;
+        g_upgrades.push_back(u);
     }
 }
 
@@ -167,6 +202,7 @@ bool NeedsMetLocked(const Level& level, std::string& why) {
 
 // What buying this level does now.
 const char* InEffect(const Upgrade& u, int level) {
+    if (u.ours) return u.does.c_str();
     if (u.Weapon()) return level == 1 ? "gives you the gun" : "not in effect yet";
     if (!u.Hammer().empty()) return "Mason's hammer becomes this one";
     if (u.Backpack()) return u.BackpackId() == 0 ? "worn (Wear): jump held in the air climbs" : "worn (Wear): the backpack key switches it on; its ability isn't in yet";
@@ -241,7 +277,10 @@ void upgrades::Init() {
     }
     int bought = 0;
     for (const auto& [name, level] : g_bought) bought += level > 0 ? 1 : 0;
-    rfa::Log("Upgrades: %zu of Guerrilla's for sale in the F7 window (Guerrilla > Upgrades), %d bought", g_upgrades.size(), bought);
+    size_t ours = 0;
+    for (const auto& u : g_upgrades) ours += u.ours ? 1 : 0;
+    rfa::Log("Upgrades: %zu of Guerrilla's and %zu of RFA-Mod's own for sale in the F7 window (Guerrilla > Upgrades), %d bought", g_upgrades.size() - ours, ours,
+             bought);
 }
 
 void upgrades::Step(BYTE* player) {
@@ -284,6 +323,16 @@ int upgrades::BoughtLevel(const char* name) {
     return name ? BoughtLocked(name) : 0;
 }
 
+int upgrades::WeaponValue(const char* weapon) {
+    std::lock_guard<std::mutex> hold(g_lock);
+    for (const auto& u : g_upgrades)
+        if (u.Weapon() && weapon && _stricmp(u.weapon.c_str(), weapon) == 0) {
+            const int level = BoughtLocked(u.name);
+            return level >= 0 && level < static_cast<int>(u.levels.size()) ? u.levels[level].value : 0;
+        }
+    return 0;
+}
+
 // ---- The window (on the thread that draws the game)
 
 namespace {
@@ -318,6 +367,7 @@ void DrawRow(int index, int salvage) {
                         l.value != i ? (" (" + std::to_string(l.value) + ")").c_str() : "");
             if (!l.description.empty()) ImGui::TextDisabled("    %s", l.description.c_str());
             if (!l.note.empty()) ImGui::TextDisabled("    %s (not held to: the world has no districts or activities yet)", l.note.c_str());
+            if (u.ours) ImGui::TextDisabled("    RFA-Mod's own upgrade, not one of Guerrilla's");
             ImGui::TextDisabled("    %s", InEffect(u, i));
         }
         ImGui::EndTooltip();
@@ -494,6 +544,11 @@ extern "C" __declspec(dllexport) void __cdecl GuerrillaGear_BuyNow(BYTE* player,
     if (!player || index < 0 || index >= static_cast<int>(g_upgrades.size())) return;
     Buy(player, index);
 }
+
+// The level bought of the upgrade of that name (upgrades.txt's, or one of RFA-Mod's own, kOwnUpgrades): 0 for
+// none, or for no such upgrade. From any thread; guerrilla_vehicles asks for "rfa_turret_link" while the player
+// drives with a gun.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_UpgradeLevel(const char* name) { return upgrades::BoughtLevel(name); }
 
 extern "C" __declspec(dllexport) void __cdecl GuerrillaGear_Status(char* out, int size) {
     if (!out || size <= 0) return;

@@ -73,14 +73,22 @@
 #define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "ambient.h"
 #include <intrin.h>
 #include <malloc.h>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <memory>
+#include <queue>
+#include <iterator>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -394,6 +402,125 @@ void MakeRoomForLoadouts() {
     else rfa::Log("Squad loadouts: the table's constructor isn't as expected; the game keeps its %d (loadouts past them are dropped, and squads naming them aren't read)", kGameLoadouts);
 }
 
+// ---- Room for the spawn resources (the user, 2026-11-11: "yes you can raise the limit if needed")
+//
+// spawn_resource.xtbl's reader (0x75F190 → 0x75EA90, each entry) takes a 0x1B0-byte entry from the table's pool
+// (0x1969960, through its pointer at 0x196997C = the pool's +0x1C, which its set-up 0x71C5D0 points at itself;
+// 0x75F390 → 0x75F680: none when the free list's count, a word at +0xE, is 0, and then the entry is dropped without a
+// word) and files it by name in a hash table (0x1970740: a count byte at +4, 64 bucket bytes from +5, a free list of
+// 64 one-byte slots; insert 0x516070, find 0x5160A0, clear 0x972F30, remove 0x75F5A0; FindSpawnResource 0x75EC70 asks
+// it, then the pool for the slot). Both hold 64: the pool's start-up (0xF293F0 → 0x75F960: the pool set up, a memory
+// pool on the 0x6D45 bytes inside it from +0x30, then 0x75F9B0(that, 64): the slots' words +0x14, the entries +0x10,
+// a byte a slot +0x18, the count at +0xA) and the table's code (its buckets and hash, 0x40, built in). Armageddon's
+// own table has 75 entries, the Guerrilla world adds 8 (83): those that read become entries until the 64 are taken,
+// and rfg_eos, rfg_oasis and rfg_parker, its last three, never were (a level started in Eos or Parker then had no
+// resource in force: Darius as the player, Armageddon's "Default" asked for the level, its people). So the mod makes
+// the pool on a buffer of its own for kSpawnResources and keeps the names itself: its own table answers insert, find,
+// clear and remove for 0x1970740 (the four are shared with other tables, so any other is passed to the game's code),
+// names as the game's, letters' case aside (its hash lowers each letter, 0xDAD89A), each naming the entry's slot.
+// Nothing else reads the table (its 7 uses are those calls, its constructor and destructor), and nothing else holds
+// 64 for it (the slots are words). Sized for what is still to come: Armageddon's 75 and the world's 8 now; Guerrilla's
+// own table has 23 (Default and a mission's each), and more districts' and activities' versions: 256, 0x1B5 bytes a
+// slot (112 KB). All or nothing: every value checked first, the four hooks in before the pool is made bigger, and if
+// one isn't the hooks pass everything to the game's code. Always, whatever [GuerrillaPeople] Enabled= says.
+constexpr DWORD kResourcePoolMake = 0x75F960, kResourceBufferSize = 0x75F97B, kResourceCount = 0x75F98F, kResourcePoolName = 0x75F976;
+constexpr DWORD kGameResourceBuffer = 0x6D45, kResourceEntry = 0x1B0;
+constexpr int kGameSpawnResources = 64, kSpawnResources = 256;
+constexpr DWORD kResourceTable = 0x1970740;
+alignas(16) BYTE g_resourceBuffer[PoolBytes(kSpawnResources, kResourceEntry)];
+using ResourcePoolSizeFn = void(__fastcall*)(void* pool, void* unused, void* mempool, int count);
+auto const SizeResourcePool = reinterpret_cast<ResourcePoolSizeFn>(0x75F9B0);
+
+void* __fastcall MakeResourcePool(void* pool, void*) {
+    PoolSetUp(pool, nullptr);
+    alignas(16) BYTE mempool[0x60];  // the game's is 0x58 bytes on its stack
+    MempoolMake(mempool, nullptr, g_resourceBuffer, sizeof(g_resourceBuffer), reinterpret_cast<const char*>(kPoolName), 1, 0);
+    SizeResourcePool(pool, nullptr, mempool, kSpawnResources);
+    MempoolEnd(mempool, nullptr);
+    return pool;
+}
+
+// The names' table: lower-cased name → the entry's slot.
+std::unordered_map<std::string, int> g_resourceSlots;
+bool g_ownResourceTable = false;  // all four hooks in: our table answers for 0x1970740
+
+std::string LowerName(const char* name) {
+    std::string lower = name ? name : "";
+    for (char& c : lower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return lower;
+}
+
+using TableInsertFn = bool(__fastcall*)(void* table, void* unused, const char* key, const int* slot);
+using TableFindFn = bool(__fastcall*)(void* table, void* unused, const char* key, int* slot);
+using TableClearFn = void(__fastcall*)(void* table, void* unused);
+constexpr DWORD kTableInsert = 0x516070, kTableFind = 0x5160A0, kTableClear = 0x972F30, kResourceTableRemove = 0x75F5A0;
+constexpr size_t kTableInsertPrologue = 7;  // push ebp / mov ebp,esp / push ecx / mov [ebp-4],ecx
+constexpr size_t kTableFindPrologue = 6;    // push ebp / mov ebp,esp / sub esp,8
+constexpr size_t kTableClearPrologue = 6;   // push ebp / mov ebp,esp / sub esp,8
+TableInsertFn g_tableInsert = nullptr;
+TableFindFn g_tableFind = nullptr;
+TableClearFn g_tableClear = nullptr;
+
+bool __fastcall TableInsert(void* table, void* unused, const char* key, const int* slot) {
+    if (!g_ownResourceTable || table != reinterpret_cast<void*>(kResourceTable)) return g_tableInsert(table, unused, key, slot);
+    if (!key || !slot) return false;
+    g_resourceSlots[LowerName(key)] = *slot;
+    return true;
+}
+
+bool __fastcall TableFind(void* table, void* unused, const char* key, int* slot) {
+    if (!g_ownResourceTable || table != reinterpret_cast<void*>(kResourceTable)) return g_tableFind(table, unused, key, slot);
+    if (!key) return false;
+    auto found = g_resourceSlots.find(LowerName(key));
+    if (found == g_resourceSlots.end()) return false;
+    if (slot) *slot = found->second;
+    return true;
+}
+
+void __fastcall TableClear(void* table, void* unused) {
+    if (!g_ownResourceTable || table != reinterpret_cast<void*>(kResourceTable)) {
+        g_tableClear(table, unused);
+        return;
+    }
+    g_resourceSlots.clear();
+}
+
+// The table's remove (only this table's: replaced whole; thiscall, the name).
+bool __fastcall ResourceTableRemove(void* table, void* unused, const char* key) {
+    (void)table;
+    (void)unused;
+    return key && g_resourceSlots.erase(LowerName(key)) > 0;
+}
+
+bool ResourcePoolAsExpected() {
+    return rfa::CodeValue(kResourceBufferSize) == kGameResourceBuffer && *reinterpret_cast<const BYTE*>(kResourceCount) == kGameSpawnResources &&
+           rfa::CodeValue(kResourcePoolName) == kPoolName &&
+           *reinterpret_cast<const BYTE*>(kTableFind + 9) == 0x6A && *reinterpret_cast<const BYTE*>(kTableFind + 0xA) == kGameSpawnResources &&  // push 40h
+           *reinterpret_cast<const BYTE*>(kResourceTableRemove + 0xA) == 0x6A && *reinterpret_cast<const BYTE*>(kResourceTableRemove + 0xB) == kGameSpawnResources;
+}
+
+void MakeRoomForSpawnResources() {
+    if (!ResourcePoolAsExpected()) {
+        rfa::Log("Spawn resources: the table's code isn't as expected; the game keeps its %d (entries past them are dropped)", kGameSpawnResources);
+        return;
+    }
+    g_tableInsert = reinterpret_cast<TableInsertFn>(rfa::HookFunction(kTableInsert, kTableInsertPrologue, reinterpret_cast<void*>(&TableInsert)));
+    g_tableFind = reinterpret_cast<TableFindFn>(rfa::HookFunction(kTableFind, kTableFindPrologue, reinterpret_cast<void*>(&TableFind)));
+    g_tableClear = reinterpret_cast<TableClearFn>(rfa::HookFunction(kTableClear, kTableClearPrologue, reinterpret_cast<void*>(&TableClear)));
+    if (!g_tableInsert || !g_tableFind || !g_tableClear) {
+        rfa::Log("Spawn resources: could not hook the names' table; the game keeps its %d", kGameSpawnResources);
+        return;  // the hooks that are in pass everything to the game's code
+    }
+    if (!rfa::ReplaceFunction(kResourceTableRemove, reinterpret_cast<void*>(&ResourceTableRemove))) {
+        rfa::Log("Spawn resources: could not replace the names' remove; the game keeps its %d", kGameSpawnResources);
+        return;
+    }
+    g_ownResourceTable = true;
+    if (rfa::ReplaceFunction(kResourcePoolMake, reinterpret_cast<void*>(&MakeResourcePool)))
+        rfa::Log("Spawn resources: the game holds %d (its own %d), in its pool and the names' table", kSpawnResources, kGameSpawnResources);
+    else rfa::Log("Spawn resources: the names' table is the mod's, but the pool's constructor couldn't be replaced; the game keeps %d", kGameSpawnResources);
+}
+
 // ---- Guerrilla's standing squads spread out from their node (the user's Round 1, 2026-11-06: "Static Spawn Error")
 //
 // A squad on foot with Standard orders spawns "static", at its node: the squad's spawn (0x80EC20 → 0x80E2F0, by the
@@ -518,17 +645,79 @@ BYTE* SquadOfNpc(BYTE* human) {
     return SquadOf(world, nullptr, *reinterpret_cast<const DWORD*>(ai + kAiSquad));
 }
 
+// ---- Failed paths: who asks (the user, 2026-11-11: an error shown in game means something to fix, never to hide)
+//
+// Besides the guard posts, people ask for ways the search can't give. In rfg_04_10 (2026-11-11 20:07-20:08) patrol node
+// 0x4A070509's squad asked nine times for one fixed point 60-70 m east of its route's start: on neither its route (four
+// navpoints within 25 m) nor the player (about 190 m away then). Guerrilla's switched-off cells (flag 0x08; 18 % of the
+// map's people's cells, which only one mission ever switches on) make the way round 611-631 m, past the search's limit
+// of about 250. Guerrilla's own search (the same mesh, the same flags refused, the same limit, the same failure: the
+// person's last_pf_failed, the goal kept) fails the same request quietly; Armageddon reports it. All of the AI's moves
+// ask through one go-to helper (0x431C20), so which move asks isn't known from the code alone: until it is, each failed
+// request in our worlds is logged with the code that asked (the game's return addresses up the stack, named offline
+// from its RTTI) and where the player is. This part is built with frame pointers so the walk up the stack starts from
+// here and climbs the game's own frames (the publicbeta exe keeps them).
+constexpr DWORD kHumanSpawnNode = 0x1590;                       // a human's squad node (the fall report's "Spawn")
+auto& g_localPlayer = *reinterpret_cast<BYTE**>(0x2271490);     // the local player (0x8B92D0 returns it)
+#pragma optimize("y", off)
+// Each request is written the first time its asker (the game's frames) and goal (to 4 m) come up, up to 256 kinds,
+// and every 100th failure with the count, so one person asking every second doesn't hide the others.
+int g_failedPaths = 0;
+std::unordered_set<unsigned long long> g_failedPathKinds;
+void LogFailedPath(BYTE* human, const float* goal) {
+    ++g_failedPaths;
+    void* frames[16] = {};
+    const USHORT count = RtlCaptureStackBackTrace(0, 16, frames, nullptr);
+    char chain[160] = "";
+    size_t used = 0;
+    int shown = 0;
+    unsigned long long kind = static_cast<unsigned long long>(static_cast<long long>(floorf(goal[0] / 4)) & 0xFFFFF) << 40 |
+                              static_cast<unsigned long long>(static_cast<long long>(floorf(goal[2] / 4)) & 0xFFFFF) << 20;
+    for (USHORT i = 0; i < count && shown < 8; ++i) {
+        const DWORD at = reinterpret_cast<DWORD>(frames[i]);
+        if (at < 0x401000 || at >= 0x1000000) continue;  // the game's code only (its .text), not this DLL's
+        used += sprintf_s(chain + used, sizeof(chain) - used, shown ? " %06X" : "%06X", at);
+        if (shown >= 3 && shown < 6) kind ^= static_cast<unsigned long long>(at) * (shown + 1);  // the asking move's frames
+        ++shown;
+    }
+    const bool firstOfItsKind = g_failedPathKinds.size() < 256 && g_failedPathKinds.insert(kind).second;
+    if (!firstOfItsKind && g_failedPaths % 100 != 0) return;
+    const float* from = reinterpret_cast<const float*>(human + kObjectPlace);
+    const float dx = goal[0] - from[0], dz = goal[2] - from[2];
+    float goalToPlayer = -1;
+    if (g_localPlayer) {
+        const float* player = reinterpret_cast<const float*>(g_localPlayer + kObjectPlace);
+        goalToPlayer = sqrtf((player[0] - goal[0]) * (player[0] - goal[0]) + (player[2] - goal[2]) * (player[2] - goal[2]));
+    }
+    BYTE* squad = SquadOfNpc(human);
+    rfa::Log("Paths: no way found for NPC 0x%08X (squad 0x%08X, leash type %d, spawn node 0x%08X) from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f), %.0f m straight; "
+             "the goal is %.0f m from the player; asked through %s (%d so far)",
+             ObjectHandle(human, nullptr), squad ? ObjectHandle(squad, nullptr) : kNoHandle, squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0,
+             *reinterpret_cast<const DWORD*>(human + kHumanSpawnNode), from[0], from[1], from[2], goal[0], goal[1], goal[2], sqrtf(dx * dx + dz * dz), goalToPlayer,
+             shown ? chain : "(no frames)", g_failedPaths);
+}
+
+bool GoalOutOfReach(BYTE* human, const float* start, const float* goal);  // below, with the people's nav cells
+
+// The game's search, and the log line when it finds nothing for an NPC in our worlds.
+void* AskTheGame(BYTE* human, const float* start, const float* goal, DWORD pathA, DWORD pathB, DWORD flagsLow, DWORD flagsHigh, bool flag) {
+    if (human && goal && InOurWorld() && AsNpc(reinterpret_cast<void*>(kWorld), nullptr, human) && GoalOutOfReach(human, start, goal)) return nullptr;
+    void* path = g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    if (!path && human && goal && InOurWorld() && AsNpc(reinterpret_cast<void*>(kWorld), nullptr, human)) LogFailedPath(human, goal);
+    return path;
+}
+
 void* __cdecl HumanPath(BYTE* human, const float* start, const float* goal, DWORD pathA, DWORD pathB, DWORD flagsLow, DWORD flagsHigh, bool flag) {
     if (!human || !goal || !InOurWorld()) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
     BYTE* squad = SquadOfNpc(human);
     if (!squad || *reinterpret_cast<const int*>(squad + kSquadLeashType) != kBoxLeash)
-        return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+        return AskTheGame(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
     const DWORD boxHandle = *reinterpret_cast<const DWORD*>(squad + kSquadLeashAnchor);
     const BYTE* box = boxHandle == kNoHandle ? nullptr : WorldObject(reinterpret_cast<void*>(kWorld), nullptr, boxHandle);
-    if (!box) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    if (!box) return AskTheGame(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
     const float* boxPlace = reinterpret_cast<const float*>(box + kObjectPlace);
     const float goalAtBoxHeight[3] = {goal[0], boxPlace[1], goal[2]};
-    if (!OutsideLeash(squad, nullptr, goalAtBoxHeight)) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    if (!OutsideLeash(squad, nullptr, goalAtBoxHeight)) return AskTheGame(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
     ++g_pathsTurnedDown;
     if (g_pathsTurnedDown <= 16 || g_pathsTurnedDown % 200 == 0) {
         const float* from = reinterpret_cast<const float*>(human + kObjectPlace);
@@ -538,46 +727,706 @@ void* __cdecl HumanPath(BYTE* human, const float* start, const float* goal, DWOR
     }
     return nullptr;
 }
+#pragma optimize("", on)
 
 // ---- Who falls out of the world (the user's test of 2026-11-10: "An NPC 0x8AFF00AA fell out of the world and died")
 //
 // Under each loaded zone's ground lies a box that ends whatever enters it (made per zone by 0x815570, its top 10 m
 // under the zone's lowest ground; its callback 0x78D660 puts the player back on the ground and hands everything else
-// to 0x78D2E0, cdecl, the object: a living human is reported and killed). So the report means a living person went
-// through the ground. The zones stream as Guerrilla's (3 x 3 zones, 5 x 5 sub-zones) and the ground's collision is the
-// zone's own height field, so what the log must tell is who it was and whether there was ground: this writes, before
-// the game's report, the person's squad and its spawn node (the human's +0x1590, the report's "Spawn"), the ground's
-// height at that spot (0x7748E0: false where no ground is loaded) and how far the player was.
+// to 0x78D2E0, cdecl, the object: a living human is reported, then it and its children are removed with the world's
+// delete 0x6D5450). Guerrilla's box does the same (game_aabb_phantom::addOverlappingCollidable, RM 0x83BE10: the
+// player back on the ground, anything else deleted), only without the report. So the report means a living person
+// went through the ground. The ground's collision is the zone's own height field, streamed with the zone (500 m, as
+// Guerrilla's 510): three falls in rfg_04_10 (2026-11-11) dropped 19-27 m through ground that was loaded. What the log
+// must tell is how they got there: this line, before the game's report, says whether ground collision is under them
+// and what the falls watch (below) last saw of them; the watch writes the moment one goes under, while it still can.
 constexpr DWORD kLeftTheWorld = 0x78D2E0;
 constexpr size_t kLeftTheWorldPrologue = 6;  // push ebp / mov ebp,esp / sub esp,24h
 constexpr DWORD kObjectType = 0x7A;          // an object's type (the game's getter 0x422AD0): 0 a human
-constexpr DWORD kHumanSpawnNode = 0x1590;
 using LeftTheWorldFn = void(__cdecl*)(BYTE* object);
-using GroundHeightFn = bool(__cdecl*)(float* height, float x, float z, float* normal, bool flag);
+// 0x7748E0 casts its ray from (x, *height + 1, z) down to y -1000 (with `upward`, from *height - 1 up to +1000) with
+// the ray filter 0x1975F00 (layer 0x1C: the ground and its rocks, not buildings) and writes the hit's height. A ray
+// from the top must start at 999 (the world's box ends at 1000): from any lower start it misses ground above it.
+// (The first version of this line passed 0 and so said "NO ground loaded" over any ground higher than 1 m.)
+using GroundHeightFn = bool(__cdecl*)(float* height, float x, float z, float* normal, bool upward);
 auto const GroundHeight = reinterpret_cast<GroundHeightFn>(0x7748E0);
-auto& g_localPlayer = *reinterpret_cast<BYTE**>(0x2271490);
+constexpr float kRayFromTheTop = 998.0f;
 LeftTheWorldFn g_leftTheWorld = nullptr;
+
+// The height of the ground's collision under (x, z), from the top; false where there is none.
+bool GroundUnder(float x, float z, float& height) {
+    height = kRayFromTheTop;
+    return GroundHeight(&height, x, z, nullptr, false);
+}
+
+float PlayerDistance(const float* at) {
+    if (!g_localPlayer) return -1;
+    const float* player = reinterpret_cast<const float*>(g_localPlayer + kObjectPlace);
+    return sqrtf((player[0] - at[0]) * (player[0] - at[0]) + (player[2] - at[2]) * (player[2] - at[2]));
+}
+
+// ---- The falls watch: every living NPC in our worlds looked at about every 0.2 s (a dozen a frame, through the
+// world's list of NPCs: count 0x424480, one 0x4244D0, both thiscall on the world; its list by the NPC's subtype, 2,
+// at world +0x308; the first version walked 0x477090 / 0x4770E0, the world's VEHICLES, type 3, and so never looked
+// at anyone). Each look asks for the ground's collision under it from the top. On it (within 0.75 m) or above it is
+// remembered (each look asks down from 3 m over its feet, and from the top only where nothing is below: a rock over a
+// place stops a ray from the top); the first look that finds it more than 1.5 m under that collision, or over none at
+// all, is written
+// once, with what the look before saw (on the ground, or how high above it: on a building, a vehicle, debris, or in
+// the air), where it last stood on the ground, how fast it moved since, and how long it has existed. 30 s into each
+// stay in our worlds it writes how many it looks at, so a quiet log means no falls, not no watch.
+using HumanCountFn = int(__fastcall*)(void* world, void*);
+using HumanAtFn = BYTE*(__fastcall*)(void* world, void*, int index);
+using GoneOrDeadFn = bool(__cdecl*)(BYTE* object);
+auto const HumanCount = reinterpret_cast<HumanCountFn>(0x424480);  // world::get_num_objects<npc>
+auto const HumanAt = reinterpret_cast<HumanAtFn>(0x4244D0);        // world::get_object<npc>(index)
+auto const GoneOrDead = reinterpret_cast<GoneOrDeadFn>(0x42ADC0);  // true for null or a dead one (vfunc +0x10)
+constexpr int kLooksPerFrame = 12;
+constexpr float kOnGround = 0.75f, kUnderGround = 1.5f;
+constexpr float kLookFrom = 3.0f;  // how far over an NPC's feet the look down starts (0x7748E0 starts at the height given + 1)
+
+struct FallWatch {
+    const BYTE* human = nullptr;   // a handle used again for another human starts over
+    DWORD firstSeen = 0, seenAt = 0;
+    bool looked = false, everOnGround = false, reported = false;
+    DWORD lookAt = 0;              // the last look
+    float look[3]{};
+    bool lookHadGround = false;
+    float lookAbove = 0;           // its height over the ground's collision then
+    DWORD onGroundAt = 0;          // the last look that found it on the ground's collision
+    float onGround[3]{};
+};
+std::unordered_map<DWORD, FallWatch> g_fallWatch;
+int g_fallWatchNext = 0;
+DWORD g_fallWatchPruned = 0;
+DWORD g_fallWatchSince = 0;      // when this stay in our worlds began (0: not in one)
+bool g_fallWatchTold = false;    // its 30 s line written
+int g_fallWatchLooks = 0, g_fallWatchUnder = 0;
+
+// What the watch last saw of a human, for a log line.
+void DescribeBefore(const FallWatch* w, const float* now, DWORD tick, char* out, size_t size) {
+    if (!w || !w->looked) {
+        strcpy_s(out, size, "the watch never saw it");
+        return;
+    }
+    char look[160];
+    const float dt = (tick - w->lookAt) / 1000.0f;
+    if (!w->lookHadGround)
+        sprintf_s(look, "the look %.2f s before, at (%.1f, %.1f, %.1f): no ground collision under it", dt, w->look[0], w->look[1], w->look[2]);
+    else if (w->lookAbove >= -kOnGround && w->lookAbove <= kOnGround)
+        sprintf_s(look, "the look %.2f s before, at (%.1f, %.1f, %.1f): it stood ON the ground (%.1f m over its collision)", dt, w->look[0], w->look[1],
+                  w->look[2], w->lookAbove);
+    else if (w->lookAbove > kOnGround)
+        sprintf_s(look, "the look %.2f s before, at (%.1f, %.1f, %.1f): %.1f m ABOVE the ground (on a building, a vehicle or debris, or in the air)", dt,
+                  w->look[0], w->look[1], w->look[2], w->lookAbove);
+    else
+        sprintf_s(look, "the look %.2f s before, at (%.1f, %.1f, %.1f): already %.1f m under the ground", dt, w->look[0], w->look[1], w->look[2], -w->lookAbove);
+    const float dx = now[0] - w->look[0], dy = now[1] - w->look[1], dz = now[2] - w->look[2];
+    const float speed = dt > 0 ? sqrtf(dx * dx + dy * dy + dz * dz) / dt : 0;
+    char ground[128];
+    if (w->everOnGround)
+        sprintf_s(ground, "last on the ground %.2f s before, at (%.1f, %.1f, %.1f)", (tick - w->onGroundAt) / 1000.0f, w->onGround[0], w->onGround[1], w->onGround[2]);
+    else
+        strcpy_s(ground, "never seen on the ground");
+    sprintf_s(out, size, "%s; moving %.1f m/s since (%.1f m/s down); %s; it has existed %.1f s", look, speed, dt > 0 ? -dy / dt : 0, ground,
+              (tick - w->firstSeen) / 1000.0f);
+}
+
+const FallWatch* WatchOf(BYTE* human) {
+    auto found = g_fallWatch.find(ObjectHandle(human, nullptr));
+    return found != g_fallWatch.end() && found->second.human == human ? &found->second : nullptr;
+}
+
+void ReportUnderground(BYTE* human, const float* at, bool hasGround, float ground, const FallWatch& w, DWORD tick) {
+    char before[512], where[128];
+    DescribeBefore(&w, at, tick, before, sizeof(before));
+    if (hasGround)
+        sprintf_s(where, "%.1f m UNDER the ground: ground collision IS there (its top at %.1f)", ground - at[1], ground);
+    else
+        strcpy_s(where, "over NO ground collision at all (a ray from 999 m down met nothing)");
+    BYTE* squad = SquadOfNpc(human);
+    RFA_LOG_FIRST(64, "Falls watch: NPC 0x%08X at (%.1f, %.1f, %.1f) is %s; %s; squad 0x%08X (leash type %d), spawn node 0x%08X; the player %.0f m away",
+                  ObjectHandle(human, nullptr), at[0], at[1], at[2], where, before, squad ? ObjectHandle(squad, nullptr) : kNoHandle,
+                  squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0, *reinterpret_cast<const DWORD*>(human + kHumanSpawnNode),
+                  PlayerDistance(at));
+}
+
+// ---- Transitions' cells (the run of 2026-11-11 23:07: "Transition navpoint (0x…) at <…> with invalid navcell", 62)
+//
+// A transition (types 11, 12, 15, 16, 21, 24) stands on a cell of the people's mesh, kept at the navpoint's +0x98. The
+// world build writes it as Armageddon's own do (navpoint_data version 4: the cell's zone prefix × 2^24, layer × 2^15,
+// number), and the navpoint's serializer (vtable slot 5, 0x7EFA70) turns that into the cell only if the cell's zone is
+// among the loaded zones with its mesh in (0x5D23B0 / 0x5D2400; the zone's people's layer +0x98, cells +0x14 × 36,
+// their count a word at +0x10) as it reads the navpoint; it keeps no handle to try again with. The start zone's mesh
+// is in by then; the zones round it at a level's start aren't yet (all 62 were in rfg_06_10, 07_08, 07_10, 08_09 and
+// 08_10, round Dust's 07_09), so their transitions were left without one, and the game's check at the end of the
+// load (0x5D17D0, from 0x5D1790 ← 0x544150: each navpoint of type 11, 12 or 16 with none) reported them. The world
+// build also writes each one's cell to mods\guerrilla_world\transition_cells.txt (its handle, the cell's), and the
+// mod gives a transition still without one its cell as the serializer would: before that check, and each second
+// after for zones streamed in later. In our worlds only.
+constexpr DWORD kNavpointType = 0xF4, kNavpointCell = 0x98;
+constexpr DWORD kZonePeopleLayer = 0x98, kZoneVehicleLayer = 0xA4, kLayerCellCount = 0x10, kLayerCells = 0x14, kNavCellSize = 36;
+using WorldCountFn = int(__fastcall*)(void* world, void*);
+using WorldAtFn = BYTE*(__fastcall*)(void* world, void*, int index);
+auto const NavpointCount = reinterpret_cast<WorldCountFn>(0x43AC80);  // world::get_num_objects<navpoint>
+auto const NavpointAt = reinterpret_cast<WorldAtFn>(0x43ACD0);
+auto const NavZoneCount = reinterpret_cast<WorldCountFn>(0x5D23B0);   // the loaded zones (obj_zone)
+auto const NavZoneAt = reinterpret_cast<WorldAtFn>(0x5D2400);
+constexpr DWORD kNavCheck = 0x5D17D0;
+constexpr size_t kNavCheckPrologue = 6;  // push ebp / mov ebp,esp / sub esp,34h
+using NavCheckFn = void(__cdecl*)();
+NavCheckFn g_navCheck = nullptr;
+std::unordered_map<DWORD, unsigned long long> g_transitionCells;
+bool g_transitionCellsRead = false;
+int g_cellPasses = 0;
+
+// The world build also lists the pedestrians (type 2) it gave the nearest switched-on cell, those on buildings' floors
+// and walkways over the ground's switched-off cells (the run of 2026-11-12 15:24, Eos).
+bool IsCellNavpoint(int type) { return type == 2 || type == 11 || type == 12 || type == 15 || type == 16 || type == 21 || type == 24; }
+
+void ReadTransitionCells() {
+    g_transitionCellsRead = true;
+    std::ifstream file(rfa::RootDir() + L"\\mods\\guerrilla_world\\transition_cells.txt");
+    DWORD navpoint = 0;
+    unsigned long long cell = 0;
+    while (file >> std::hex >> navpoint >> cell) g_transitionCells[navpoint] = cell;
+    rfa::Log("Transitions: %u cells read from mods\\guerrilla_world\\transition_cells.txt", static_cast<unsigned>(g_transitionCells.size()));
+}
+
+// Gives each listed transition still without a cell its cell; how many it gave, and how many are still without one.
+int GiveTransitionsCells(int& without) {
+    without = 0;
+    if (!g_transitionCellsRead) ReadTransitionCells();
+    if (g_transitionCells.empty()) return 0;
+    void* world = reinterpret_cast<void*>(kWorld);
+    int given = 0;
+    const int navpoints = NavpointCount(world, nullptr), zones = NavZoneCount(world, nullptr);
+    for (int i = 0; i < navpoints; ++i) {
+        BYTE* navpoint = NavpointAt(world, nullptr, i);
+        if (!navpoint || !IsCellNavpoint(static_cast<signed char>(navpoint[kNavpointType])) || *reinterpret_cast<void**>(navpoint + kNavpointCell)) continue;
+        auto listed = g_transitionCells.find(ObjectHandle(navpoint, nullptr));
+        if (listed == g_transitionCells.end()) continue;
+        const unsigned long long handle = listed->second;
+        const DWORD zoneByte = static_cast<DWORD>(handle >> 24) & 0xFF, index = static_cast<DWORD>(handle) & 0x7FFF;
+        const DWORD layerAt = (handle & 0x8000) ? kZoneVehicleLayer : kZonePeopleLayer;
+        BYTE* cell = nullptr;
+        for (int z = 0; z < zones && !cell; ++z) {
+            BYTE* zone = NavZoneAt(world, nullptr, z);
+            if (!zone || ObjectHandle(zone, nullptr) >> 24 != zoneByte) continue;
+            const BYTE* layer = *reinterpret_cast<BYTE* const*>(zone + layerAt);
+            if (layer && index < *reinterpret_cast<const WORD*>(layer + kLayerCellCount))
+                cell = *reinterpret_cast<BYTE* const*>(layer + kLayerCells) + index * kNavCellSize;
+        }
+        if (cell) {
+            *reinterpret_cast<BYTE**>(navpoint + kNavpointCell) = cell;
+            ++given;
+        }
+        else ++without;
+    }
+    return given;
+}
+
+void __cdecl NavCheck() {
+    if (InOurWorld()) {
+        int without = 0;
+        const int given = GiveTransitionsCells(without);
+        rfa::Log("Transitions: %d given their cell before the game's check (their zone's mesh came in after them), %d still without one (their zone's mesh not in)",
+                 given, without);
+    }
+    g_navCheck();
+}
+
+void RunTransitionCells() {  // each second in our worlds: zones streamed in since
+    if (!InOurWorld() || !g_navCheck) return;
+    int without = 0;
+    const int given = GiveTransitionsCells(without);
+    if (given > 0 && g_cellPasses < 32) {
+        ++g_cellPasses;
+        rfa::Log("Transitions: %d given their cell as their zone's mesh came in", given);
+    }
+}
+
+// ---- Goals out of the search's reach (the run of 2026-11-12 16:43, Eos; the user's choice: "Don't pick unreachable goals")
+//
+// An EDF patrol's member chasing a target on the sunken strip west of the Eos base (go_to_believed_location: Guerrilla's
+// own action, RM do_action 0x6B5E50, Armageddon's 0x4898A0) asked for a way from the base's door down to the strip:
+// 41 m straight, but the only walk over the people's cells is 304 m round, and the search gives up past its budget
+// (0x5BDF60: 1.5 x the distance + 150, about 211 m there; capped at 350 or 500). Armageddon's search (0x5BD200) then
+// reports "Failed pathfind, probably bad navmesh in the area"; Guerrilla's (the same budget, RM 0xB02D00) fails the same
+// way without a word, and its action avoids itself for 7 s. So in our worlds an NPC's goal is checked before the game
+// searches for it (the human's path query, 0x5C0B90, which every AI go-to reaches through ai_system::pathfind_to
+// 0x431C20): a goal the search can't reach within its own budget isn't asked for, and the query answers "no way" as a
+// failed search does, so the action takes its own failure branch (go_to_believed_location: avoid itself, 7 s in our
+// worlds as in Guerrilla, see MatchGuerrillaAvoidTime). The budget stays the game's.
+//
+// The check walks the same cells as the game's search (the start's and goal's cells by the game's own lookup, 0x5B9AA0;
+// switched-on cells only, from edge midpoint to edge midpoint, a step dropped once its way so far plus 0.75 x its
+// straight distance to the goal passes the budget), with no costs of its own, so it never finds less than the game's
+// would. It turns a goal down only when it is sure: both cells found, in one zone's layer and on one island of it, no
+// edge of that zone met on the way (the walk might go on through the next one), and the goal not reached within the
+// game's budget as it is (no room added: the Eos walk was 241 m by edge midpoints against a budget of about 211, so
+// even 15 % more would have let it through). Anything else goes to the game as before, and a walk the game still can't
+// find is still reported. A layer's cells (36 bytes): neighbours +0x00/+0x04/+0x08 (pointers, -1 none), vertex numbers +0x14/+0x16/
+// +0x18 (into the layer's vertices, +0x0C), flags +0x1F (0x08 and 0x10 switched off), island +0x20; the layer's outer
+// edges (+0x20, their count a word at +0x1C; 8 bytes, the cell's number first) are where it meets the next zone.
+constexpr DWORD kLayerVertices = 0x0C, kLayerOuterEdgeCount = 0x1C, kLayerOuterEdges = 0x20, kOuterEdgeSize = 8;
+constexpr DWORD kCellVertices = 0x14, kCellFlags = 0x1F, kCellIsland = 0x20;
+constexpr BYTE kCellSwitchedOff = 0x18;
+constexpr float kLongestWalkLogged = 3000.0f;  // how far the log's walk is measured
+constexpr size_t kCellQuerySize = 0x30;
+using CellQueryFn = void(__fastcall*)(BYTE* query, void*, const float* place, bool vehicles);   // 0x42C1A0
+using CellQueryRulesFn = void(__fastcall*)(BYTE* query, void*, bool a, bool b);              // 0x463190
+using FindCellFn = BYTE*(__cdecl*)(BYTE* query);                                               // 0x5B9AA0
+using SearchBudgetFn = float(__cdecl*)(BYTE* startCell, const float* start, BYTE* goalCell, const float* goal, bool a, bool b);  // 0x5BDF60
+auto const CellQuery = reinterpret_cast<CellQueryFn>(0x42C1A0);
+auto const CellQueryRules = reinterpret_cast<CellQueryRulesFn>(0x463190);
+auto const FindCell = reinterpret_cast<FindCellFn>(0x5B9AA0);
+auto const SearchBudget = reinterpret_cast<SearchBudgetFn>(0x5BDF60);
+int g_goalsTurnedDown = 0;
+
+// The people's cell under a place, by the game's own lookup (as a navpoint's stream-in asks it), or null.
+BYTE* PeopleCellAt(const float* place) {
+    alignas(16) BYTE query[kCellQuerySize] = {};
+    CellQuery(query, nullptr, place, false);
+    CellQueryRules(query, nullptr, true, true);
+    return FindCell(query);
+}
+
+// The loaded people's layer holding a cell, or null.
+BYTE* LayerOfCell(const BYTE* cell) {
+    void* world = reinterpret_cast<void*>(kWorld);
+    const int zones = NavZoneCount(world, nullptr);
+    for (int z = 0; z < zones; ++z) {
+        BYTE* zone = NavZoneAt(world, nullptr, z);
+        BYTE* layer = zone ? *reinterpret_cast<BYTE**>(zone + kZonePeopleLayer) : nullptr;
+        if (!layer) continue;
+        const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
+        const int count = *reinterpret_cast<const WORD*>(layer + kLayerCellCount);
+        if (cells && cell >= cells && cell < cells + count * kNavCellSize && (cell - cells) % kNavCellSize == 0) return layer;
+    }
+    return nullptr;
+}
+
+struct WalkResult {
+    bool reached = false;     // the goal's cell reached within the limit
+    bool undecided = false;   // the walk met the zone's edge or left its layer: the game's search may still go on
+    float length = 0;         // the walk's length (edge midpoint to edge midpoint) when reached
+};
+
+// The shortest walk over a layer's switched-on cells from a place in one cell to a place in another, by edge midpoints.
+// With a budget, a step whose way so far plus 0.75 x its straight distance to the goal passes it is dropped (the game's
+// search's rule); without one (budget 0), the walk is measured up to kLongestWalkLogged.
+WalkResult Walk(const BYTE* layer, int from, const float* start, int to, const float* goal, float budget) {
+    WalkResult result;
+    const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
+    const int count = *reinterpret_cast<const WORD*>(layer + kLayerCellCount);
+    const float* vertices = *reinterpret_cast<const float* const*>(layer + kLayerVertices);
+    const BYTE* outer = *reinterpret_cast<BYTE* const*>(layer + kLayerOuterEdges);
+    const int outerCount = *reinterpret_cast<const WORD*>(layer + kLayerOuterEdgeCount);
+    if (!cells || !vertices || count <= 0) { result.undecided = true; return result; }
+    std::vector<char> border(count, 0);
+    for (int e = 0; outer && e < outerCount; ++e) {
+        const int cell = *reinterpret_cast<const WORD*>(outer + e * kOuterEdgeSize);
+        if (cell < count) border[cell] = 1;
+    }
+    auto Cell = [&](int i) { return cells + i * kNavCellSize; };
+    auto Vertex = [&](const BYTE* cell, int k) { return vertices + 3 * *reinterpret_cast<const WORD*>(cell + kCellVertices + 2 * k); };
+    auto Distance = [](const float* a, const float* b) {
+        return sqrtf((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+    };
+    std::vector<float> best(count, -1);
+    std::vector<std::array<float, 3>> at(count);
+    using Entry = std::pair<float, int>;  // the step's estimate (way so far + straight to the goal), its cell
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+    best[from] = 0;
+    at[from] = {start[0], start[1], start[2]};
+    open.push({Distance(start, goal), from});
+    const float limit = budget > 0 ? budget : kLongestWalkLogged;
+    while (!open.empty()) {
+        const auto [estimate, i] = open.top();
+        open.pop();
+        const float way = best[i];
+        if (estimate > way + Distance(at[i].data(), goal) + 0.01f) continue;  // an older, longer step to this cell
+        if (i == to) {
+            result.reached = true;
+            result.length = way + Distance(at[i].data(), goal);
+            return result;
+        }
+        if (budget > 0 && border[i]) { result.undecided = true; return result; }
+        const BYTE* cell = Cell(i);
+        for (int k = 0; k < 3; ++k) {
+            const BYTE* next = *reinterpret_cast<BYTE* const*>(cell + 4 * k);
+            if (next == reinterpret_cast<const BYTE*>(-1) || !next) continue;
+            if (next < cells || next >= cells + count * kNavCellSize || (next - cells) % kNavCellSize != 0) {
+                if (budget > 0) { result.undecided = true; return result; }  // into another layer: the game's search may go on there
+                continue;
+            }
+            const int j = static_cast<int>((next - cells) / kNavCellSize);
+            if (next[kCellFlags] & kCellSwitchedOff) continue;
+            // The edge they share: the midpoint of the two vertices both have (else the next cell's middle).
+            float through[3] = {0, 0, 0};
+            int shared = 0;
+            for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b)
+                    if (*reinterpret_cast<const WORD*>(cell + kCellVertices + 2 * a) == *reinterpret_cast<const WORD*>(next + kCellVertices + 2 * b)) {
+                        const float* v = Vertex(cell, a);
+                        for (int c = 0; c < 3; ++c) through[c] += v[c];
+                        ++shared;
+                    }
+            if (shared != 2) {
+                shared = 0;
+                for (int c = 0; c < 3; ++c) through[c] = 0;
+                for (int b = 0; b < 3; ++b, ++shared)
+                    for (int c = 0; c < 3; ++c) through[c] += Vertex(next, b)[c];
+            }
+            for (int c = 0; c < 3; ++c) through[c] /= static_cast<float>(shared);
+            const float wayThere = way + Distance(at[i].data(), through);
+            if (best[j] >= 0 && best[j] <= wayThere) continue;
+            const float straight = Distance(through, goal);
+            if (wayThere + (budget > 0 ? 0.75f * straight : 0) > limit) continue;  // past the budget (the game's rule)
+            best[j] = wayThere;
+            at[j] = {through[0], through[1], through[2]};
+            open.push({wayThere + straight, j});
+        }
+    }
+    return result;
+}
+
+bool GoalOutOfReach(BYTE* human, const float* start, const float* goal) {
+    const float* from = start ? start : reinterpret_cast<const float*>(human + kObjectPlace);
+    BYTE* startCell = PeopleCellAt(from);
+    BYTE* goalCell = PeopleCellAt(goal);
+    if (!startCell || !goalCell || startCell == goalCell) return false;
+    BYTE* layer = LayerOfCell(startCell);
+    if (!layer || LayerOfCell(goalCell) != layer || startCell[kCellIsland] != goalCell[kCellIsland]) return false;
+    // The game's budget, as its search asks it for a person (the larger of its two caps, so the check never asks less).
+    const float budget = std::max(SearchBudget(startCell, from, goalCell, goal, false, false), SearchBudget(startCell, from, goalCell, goal, true, false));
+    if (!(budget > 0)) return false;
+    const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
+    const int fromIndex = static_cast<int>((startCell - cells) / kNavCellSize), toIndex = static_cast<int>((goalCell - cells) / kNavCellSize);
+    const WalkResult withinBudget = Walk(layer, fromIndex, from, toIndex, goal, budget);
+    if (withinBudget.reached || withinBudget.undecided) return false;
+    ++g_goalsTurnedDown;
+    if (g_goalsTurnedDown <= 64 || g_goalsTurnedDown % 100 == 0) {
+        const WalkResult walk = Walk(layer, fromIndex, from, toIndex, goal, 0);
+        const float dx = goal[0] - from[0], dz = goal[2] - from[2];
+        BYTE* squad = SquadOfNpc(human);
+        char walked[64];
+        if (walk.reached) sprintf_s(walked, "the walk %.0f m", walk.length);
+        else sprintf_s(walked, "no walk within %.0f m in this zone", kLongestWalkLogged);
+        rfa::Log("Goals: NPC 0x%08X (squad 0x%08X) asked for a way from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f): %.0f m straight, %s, past the search's "
+                 "budget of %.0f m; not asked for (its action goes on as when no way is found, as Guerrilla's) (%d so far)",
+                 ObjectHandle(human, nullptr), squad ? ObjectHandle(squad, nullptr) : kNoHandle, from[0], from[1], from[2], goal[0], goal[1], goal[2],
+                 sqrtf(dx * dx + dz * dz), walked, budget, g_goalsTurnedDown);
+    }
+    return true;
+}
+
+// Guerrilla's go_to_believed_location avoids itself for 7 s after a failed way (RM 0x6B607B, push 1B58h); Armageddon's
+// for 4 s (0x489C9A, push 0FA0h). In our worlds its own time, set as the world changes.
+constexpr DWORD kBelievedAvoidTime = 0x489C9B;  // the push's value
+constexpr DWORD kGameAvoidTime = 4000, kGuerrillaAvoidTime = 7000;
+
+void MatchGuerrillaAvoidTime(bool ours) {
+    const DWORD want = ours ? kGuerrillaAvoidTime : kGameAvoidTime, have = rfa::CodeValue(kBelievedAvoidTime);
+    if (have == want) return;
+    if (have != kGameAvoidTime && have != kGuerrillaAvoidTime) {
+        RFA_LOG_FIRST(1, "Goals: go_to_believed_location's avoid time isn't as expected (%lu at 0x%08lX); left as it is", have, kBelievedAvoidTime);
+        return;
+    }
+    if (rfa::PatchCode(reinterpret_cast<void*>(kBelievedAvoidTime), &want, sizeof(want)))
+        RFA_LOG_FIRST(8, "Goals: go_to_believed_location avoids itself for %lu s after a failed way (%s)", want / 1000, ours ? "Guerrilla's" : "Armageddon's");
+}
+
+// ---- Navpoints made while the game runs (the run of 2026-11-12 11:06: "Invalid transition navpoint (0x89FF1A70) ...
+// can not find nav cell", four times, after the user blew holes in the walls of Dust's town hall compound)
+//
+// When a blast opens a hole in a wall, the game's hole code (0x5D2B60, each frame from 0x540F50, → 0x5D2EB0; Guerrilla's
+// dynamic_hole_request_process_destruction_event → create_navpoints_for_hole) makes navpoints at the hole, among them a
+// linked pair of transitions (type 11, 0x5D39ED and 0x5D3A3A), one on either side of it. Their props (0x5D45A0) hold a
+// place and a type, no navpoint_data. The serializer (0x7EFA70) sets a navpoint's version (+0xD4) only from
+// navpoint_data, and the constructor (0x7EF9D0) never clears it, so a navpoint made in a pool slot that last held one
+// read from a zone file (version 4, its cell named in the file) keeps that 4. The stream-in (0x7F08A0) then takes it for
+// one whose cell came with it, skips the lookup by place, and reports a transition without a cell. Guerrilla's navpoint
+// has no version: its stream looks a transition's cell up whenever it has none (and, finding no open one there, joins
+// it to the nearest open place, as guerrilla_world's ring search does here). So the version is cleared before the
+// serializer reads the props, as a new navpoint's would be; one with navpoint_data gets its own from it as before.
+// In our worlds only.
+constexpr DWORD kNavpointSerialize = 0x7EFA70;
+constexpr size_t kNavpointSerializePrologue = 9;  // push ebp / mov ebp,esp / sub esp,0F8h
+constexpr DWORD kNavpointVersion = 0xD4;
+using NavpointSerializeFn = bool(__fastcall*)(BYTE* navpoint, void* unused, void* props, bool reading);
+NavpointSerializeFn g_navpointSerialize = nullptr;
+int g_navpointsWithoutData = 0;  // logged, the first 32
+
+bool __fastcall NavpointSerialize(BYTE* navpoint, void* unused, void* props, bool reading) {
+    if (!reading || !navpoint || !InOurWorld()) return g_navpointSerialize(navpoint, unused, props, reading);
+    int& version = *reinterpret_cast<int*>(navpoint + kNavpointVersion);
+    const int left = version;
+    version = 0;
+    const bool result = g_navpointSerialize(navpoint, unused, props, reading);
+    if (version == 0 && g_navpointsWithoutData++ < 32) {  // no navpoint_data: made while the game runs (a blown hole's)
+        const float* at = reinterpret_cast<const float*>(navpoint + kObjectPlace);
+        if (left != 0)
+            rfa::Log("Navpoints: one made at (%.1f, %.1f, %.1f), type %d, with no navpoint_data had version %d, left in its slot by the "
+                     "navpoint before it; cleared, so the game looks its nav cell up by place, as for any new navpoint",
+                     at[0], at[1], at[2], static_cast<signed char>(navpoint[kNavpointType]), left);
+        else
+            rfa::Log("Navpoints: one made at (%.1f, %.1f, %.1f), type %d, with no navpoint_data, in a slot with no version left; the game "
+                     "looks its nav cell up by place", at[0], at[1], at[2], static_cast<signed char>(navpoint[kNavpointType]));
+    }
+    return result;
+}
+
+void RunFallsWatch() {
+    if (!InOurWorld()) {
+        if (!g_fallWatch.empty()) g_fallWatch.clear();
+        g_fallWatchSince = 0;
+        return;
+    }
+    void* world = reinterpret_cast<void*>(kWorld);
+    const int count = HumanCount(world, nullptr);
+    const DWORD tick = GetTickCount();
+    if (g_fallWatchSince == 0) {
+        g_fallWatchSince = tick;
+        g_fallWatchTold = false;
+        g_fallWatchLooks = g_fallWatchUnder = 0;
+    }
+    if (!g_fallWatchTold && tick - g_fallWatchSince >= 30000) {
+        g_fallWatchTold = true;
+        rfa::Log("Falls watch: running; %d NPCs in the world's list now, %d looks at living ones in 30 s, %d found under the ground", count,
+                 g_fallWatchLooks, g_fallWatchUnder);
+    }
+    if (count <= 0) return;
+    for (int n = 0; n < kLooksPerFrame && n < count; ++n) {
+        if (g_fallWatchNext >= count) g_fallWatchNext = 0;
+        BYTE* human = HumanAt(world, nullptr, g_fallWatchNext++);
+        if (!human || human == g_localPlayer || !AsNpc(world, nullptr, human) || GoneOrDead(human)) continue;
+        FallWatch& w = g_fallWatch[ObjectHandle(human, nullptr)];
+        if (w.human != human) {
+            w = FallWatch{};
+            w.human = human;
+            w.firstSeen = tick;
+        }
+        w.seenAt = tick;
+        const float* at = reinterpret_cast<const float*>(human + kObjectPlace);
+        // What it stands on: the first ground or rock surface down from 3 m over its feet. From the top the ray stops
+        // on whatever rock is highest over the place (an arch, an overhang: rfg_07_09's pkr_lm_lbrdge1 over people on
+        // the ground 24 m below it, the 2026-11-11 23:09-23:11 catches), so that is asked only where nothing is below.
+        float ground = at[1] + kLookFrom - 1;
+        bool hasGround = GroundHeight(&ground, at[0], at[2], nullptr, false);
+        bool deepUnder = false;
+        if (!hasGround) {
+            hasGround = GroundUnder(at[0], at[2], ground);
+            deepUnder = hasGround && ground > at[1];  // ground over it and none under it: through the ground
+        }
+        if (hasGround && !deepUnder && at[1] - ground < -kUnderGround) {
+            // A surface over its feet: a roof or overhang it stands under (a second surface at its feet, looking on
+            // down from just under that one), or ground it is inside of (nothing at its feet: under the ground's
+            // collision there is none). rfg_07_09's hill post: a rock 1.7 m over a guard on the ground, 2026-11-11 23:46.
+            float under = ground - 1.05f;  // the ray starts 1 m over the height given: 5 cm under that surface
+            if (GroundHeight(&under, at[0], at[2], nullptr, false) && fabsf(at[1] - under) <= kOnGround + 0.25f) ground = under;
+        }
+        const float above = at[1] - ground;
+        ++g_fallWatchLooks;
+        if (!w.reported && (!hasGround || deepUnder || above < -kUnderGround)) {
+            ReportUnderground(human, at, hasGround, ground, w, tick);
+            w.reported = true;
+            ++g_fallWatchUnder;
+        }
+        if (hasGround && above >= -kOnGround && above <= kOnGround) {
+            w.everOnGround = true;
+            w.onGroundAt = tick;
+            memcpy(w.onGround, at, sizeof(w.onGround));
+        }
+        w.looked = true;
+        w.lookAt = tick;
+        memcpy(w.look, at, sizeof(w.look));
+        w.lookHadGround = hasGround;
+        w.lookAbove = above;
+    }
+    if (tick - g_fallWatchPruned > 10000) {  // forget the ones not seen for 20 s
+        g_fallWatchPruned = tick;
+        for (auto i = g_fallWatch.begin(); i != g_fallWatch.end();)
+            i = tick - i->second.seenAt > 20000 ? g_fallWatch.erase(i) : std::next(i);
+    }
+}
 
 void __cdecl LeftTheWorld(BYTE* object) {
     if (object && InOurWorld() && static_cast<signed char>(object[kObjectType]) == 0) {
         const float* at = reinterpret_cast<const float*>(object + kObjectPlace);
         float ground = 0;
-        const bool loaded = GroundHeight(&ground, at[0], at[2], nullptr, false);
+        const bool hasGround = GroundUnder(at[0], at[2], ground);
         BYTE* squad = SquadOfNpc(object);
-        float away = -1;
-        if (g_localPlayer) {
-            const float* player = reinterpret_cast<const float*>(g_localPlayer + kObjectPlace);
-            away = sqrtf((player[0] - at[0]) * (player[0] - at[0]) + (player[2] - at[2]) * (player[2] - at[2]));
-        }
-        char groundText[64];
-        if (loaded) sprintf_s(groundText, "ground loaded there at %.1f (%.1f m above)", ground, ground - at[1]);
-        else strcpy_s(groundText, "NO ground loaded there");
-        RFA_LOG_FIRST(64, "Falls: %s 0x%08X went under the world at (%.1f, %.1f, %.1f): %s; squad 0x%08X (leash type %d), spawn node 0x%08X; the player %.0f m away",
+        char groundText[128], before[512];
+        if (hasGround) sprintf_s(groundText, "ground collision under it: YES, its top at %.1f (%.1f m above it)", ground, ground - at[1]);
+        else strcpy_s(groundText, "ground collision under it: NO, none at all (a ray from 999 m down met nothing)");
+        DescribeBefore(WatchOf(object), at, GetTickCount(), before, sizeof(before));
+        RFA_LOG_FIRST(64, "Falls: %s 0x%08X went under the world at (%.1f, %.1f, %.1f): %s; the watch: %s; squad 0x%08X (leash type %d), spawn node 0x%08X; the player %.0f m away",
                       object == g_localPlayer ? "the player" : AsNpc(reinterpret_cast<void*>(kWorld), nullptr, object) ? "NPC" : "a human",
-                      ObjectHandle(object, nullptr), at[0], at[1], at[2], groundText, squad ? ObjectHandle(squad, nullptr) : kNoHandle,
-                      squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0, *reinterpret_cast<const DWORD*>(object + kHumanSpawnNode), away);
+                      ObjectHandle(object, nullptr), at[0], at[1], at[2], groundText, before, squad ? ObjectHandle(squad, nullptr) : kNoHandle,
+                      squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0, *reinterpret_cast<const DWORD*>(object + kHumanSpawnNode),
+                      PlayerDistance(at));
     }
     g_leftTheWorld(object);
+}
+
+// ---- People back from far off (the run of 2026-11-12 03:04: three "fell out of the world", each first seen walking
+// flat into rising ground, 1.5 m under it, 65-137 m from the player)
+//
+// A person whose apparent distance from the camera is over 200 m is moved without its controller (the humans'
+// controller pre-step, the check at 0x852236; Guerrilla's human_process_controllers_pre_integrate, RM 0xA53258): its place
+// plus its speed, its height following its path only toward a node off the nav mesh, so over the mesh's cells it
+// moves flat. The apparent distance (0x491120 / 0x76A7F0) is the distance × tan(FOV / 2) / tan(22.5°), so a wider
+// FOV brings that 200 m nearer (at VerticalFov=95 about 76 m). When the person comes nearer again the game puts it
+// back on the ground (0x852294; Guerrilla's RM 0xA533E1): toward a node on a cell it writes the ground's height at
+// its x, z straight into its place (the call at 0x85235E), with no path it takes a higher ground only (0x852404).
+// Guerrilla's havok_terrain_height (RM 0x83B3F0) reads the terrain's top whatever the person's height; Armageddon's
+// 0x7748E0 looks only from 1 m over the height given down, and where that finds nothing it writes 0. So a person
+// more than 1 m under the ground was put at height 0 and fell into the box under the zone (top at -4.5 at Dust).
+// At those two calls in our worlds, a look that finds nothing asks again from the top, as Guerrilla's does; where
+// no ground is loaded at all the person keeps its own height rather than 0.
+constexpr DWORD kGroundHeight = 0x7748E0;
+constexpr size_t kGroundHeightPrologue = 9;     // push ebp / mov ebp,esp / sub esp,98h
+constexpr DWORD kBackTowardCell = 0x852363;     // returned to by the call for a person whose path's next node is on a cell
+constexpr DWORD kBackWithoutPath = 0x852409;    // returned to by the call for a person with no path
+constexpr float kPutFarLower = 2.0f;            // a put-back this much under the person's feet is written in the log
+GroundHeightFn g_groundHeight = nullptr;
+
+bool __cdecl BackFromFarGround(float* height, float x, float z, float* normal, bool upward) {
+    const DWORD caller = reinterpret_cast<DWORD>(_ReturnAddress());
+    if (upward || (caller != kBackTowardCell && caller != kBackWithoutPath) || !InOurWorld())
+        return g_groundHeight(height, x, z, normal, upward);
+    const float feet = *height;
+    const DWORD handle = caller == kBackTowardCell ? ObjectHandle(reinterpret_cast<BYTE*>(height) - kObjectPlace - sizeof(float), nullptr) : kNoHandle;
+    const float* player = g_localPlayer ? reinterpret_cast<const float*>(g_localPlayer + kObjectPlace) : nullptr;
+    const float away = player ? sqrtf((player[0] - x) * (player[0] - x) + (player[2] - z) * (player[2] - z)) : -1;
+    if (g_groundHeight(height, x, z, normal, false)) {
+        if (*height < feet - kPutFarLower)
+            RFA_LOG_FIRST(16, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f) was put %.1f m LOWER, at %.1f (the first ground under its feet); the player %.0f m away",
+                          handle, x, feet, z, feet - *height, *height, away);
+        return true;
+    }
+    *height = kRayFromTheTop;
+    if (g_groundHeight(height, x, z, normal, false)) {
+        RFA_LOG_FIRST(32, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f), %.1f m under the ground, put back on it at %.1f, as Guerrilla does (Armageddon's look from its feet found nothing and would have put it at height 0); the player %.0f m away",
+                      handle, x, feet, z, *height - feet, *height, away);
+        return true;
+    }
+    *height = feet;
+    RFA_LOG_FIRST(16, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f) has no ground loaded under it; it keeps its height (Armageddon would have put it at 0); the player %.0f m away",
+                  handle, x, feet, z, away);
+    return false;
+}
+
+// ---- Far mode by the real distance (the user, 2026-11-12: "Use real distance")
+//
+// The far-mode test (0x852234, fcomp qword ptr [0xF78610]: the 200.0 other code shares) compares the person's
+// apparent distance, measured with the camera FOV at 0x11B9CFC (camera manager +0xBC), with 200 m. Its address
+// operand is pointed at g_farApparent, which is set before each controller step to 200 × tan(FOV / 2) / tan(22.5°),
+// never under 200. So a wider FOV no longer brings far mode nearer than 200 m from the camera (Guerrilla's, at the
+// engine's 45°), and a narrower one (a scope) still takes it further, as in Guerrilla. In Armageddon's own levels it
+// stays 200. The render LOD and the controller step's other tests keep the FOV-scaled distance.
+// [GuerrillaPeople] FarModeRealDistance=0 keeps the game's own test. Every 30 s in our worlds the log says how many
+// people are in far mode and what the humans' controller step costs (pre-step, Havok integration, post-step).
+constexpr DWORD kFarTestOperand = 0x852236;       // the address in that fcomp
+constexpr DWORD kFarDistanceConstant = 0xF78610;  // 200.0, a double
+constexpr double kFarDistance = 200.0;
+constexpr double kReferenceHalfFov = 0.3926925063;  // tan of this in the game's measure (0x76A7F0, 0xFB4958): 22.5°
+constexpr DWORD kHumanControllers = 0x851B70;     // cdecl (frame time): the humans' controller pre-step, integration and post-step
+constexpr size_t kHumanControllersPrologue = 9;   // push ebx / mov ebx,esp / sub esp,8 / and esp,0FFFFFFF0h
+const float* const kDistanceFov = reinterpret_cast<const float*>(0x11B9CFC);  // vertical degrees
+constexpr DWORD kHumanFarFlags = 0xBC;            // a human's: bit 0x20 while in far mode (set at 0x852910, cleared at 0x8522B3)
+constexpr DWORD kInFarMode = 0x20;
+constexpr DWORD kFarReportEvery = 30000;
+using HumanControllersFn = void(__cdecl*)(float frameTime);
+HumanControllersFn g_humanControllers = nullptr;
+double g_farApparent = kFarDistance;
+bool g_farRealDistance = false;
+bool g_farToldThisStay = false;
+DWORD g_farReportAt = 0;
+double g_controllersMs = 0, g_controllersSlowest = 0;
+int g_controllersFrames = 0;
+
+// How much farther the game's measure makes a person look than it is, at a camera FOV (1 at the engine's 45°).
+double FovScale(float fov) { return tan(fov * 0.5 * 3.14159265358979 / 180.0) / tan(kReferenceHalfFov); }
+double FarApparentFor(float fov) {
+    const double scale = FovScale(fov);
+    return kFarDistance * (scale > 1.0 ? scale : 1.0);
+}
+// Where, from the camera, far mode begins now.
+double FarModeStarts(bool realDistance) {
+    const double scale = FovScale(*kDistanceFov);
+    return kFarDistance / (realDistance && scale > 1.0 ? 1.0 : scale);
+}
+
+void ReportFarMode(DWORD tick) {
+    int people = 0, farOff = 0;  // (not "far": a Windows header's macro)
+    void* world = reinterpret_cast<void*>(kWorld);
+    const int count = HumanCount(world, nullptr);
+    for (int i = 0; i < count; ++i) {
+        BYTE* human = HumanAt(world, nullptr, i);
+        if (!human || GoneOrDead(human)) continue;
+        ++people;
+        if (*reinterpret_cast<const DWORD*>(human + kHumanFarFlags) & kInFarMode) ++farOff;
+    }
+    rfa::Log("Far mode: %d of %d people in it (past %.0f m from the camera%s); the humans' controller step took %.2f ms a frame on average, the slowest %.2f ms, over %d frames",
+             farOff, people, FarModeStarts(g_farRealDistance), g_farRealDistance ? ", the real distance" : ", the game's own measure", g_controllersFrames ? g_controllersMs / g_controllersFrames : 0.0,
+             g_controllersSlowest, g_controllersFrames);
+    g_controllersMs = g_controllersSlowest = 0;
+    g_controllersFrames = 0;
+    g_farReportAt = tick;
+}
+
+void __cdecl HumanControllers(float frameTime) {
+    const bool ours = InOurWorld();
+    g_farApparent = ours && g_farRealDistance ? FarApparentFor(*kDistanceFov) : kFarDistance;
+    if (!ours) {
+        g_farToldThisStay = false;
+        g_humanControllers(frameTime);
+        return;
+    }
+    const DWORD tick = GetTickCount();
+    if (!g_farToldThisStay) {
+        g_farToldThisStay = true;
+        g_farReportAt = tick;
+        g_controllersMs = g_controllersSlowest = 0;
+        g_controllersFrames = 0;
+        rfa::Log("Far mode: people switch to it past %.0f m from the camera%s (the camera's FOV for distances is %.1f degrees; the game's own test would switch at %.0f m)",
+                 FarModeStarts(g_farRealDistance), g_farRealDistance ? ", by the real distance" : ", by the game's own measure", *kDistanceFov,
+                 FarModeStarts(false));
+    }
+    LARGE_INTEGER start, end, frequency;
+    QueryPerformanceCounter(&start);
+    g_humanControllers(frameTime);
+    QueryPerformanceCounter(&end);
+    QueryPerformanceFrequency(&frequency);
+    const double ms = (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
+    g_controllersMs += ms;
+    if (ms > g_controllersSlowest) g_controllersSlowest = ms;
+    ++g_controllersFrames;
+    if (tick - g_farReportAt >= kFarReportEvery) ReportFarMode(tick);
+}
+
+void FarModeByRealDistance() {
+    g_farRealDistance = rfa::IniInt(L"GuerrillaPeople", L"FarModeRealDistance", 1) != 0;
+    if (g_farRealDistance) {
+        const DWORD ours = reinterpret_cast<DWORD>(&g_farApparent);
+        if (rfa::CodeValue(kFarTestOperand) != kFarDistanceConstant || !rfa::PatchCode(reinterpret_cast<void*>(kFarTestOperand), &ours, sizeof(ours))) {
+            rfa::Log("Far mode: the controller step's far test isn't as expected (0x%08lX at 0x%08lX); it keeps the game's own measure", rfa::CodeValue(kFarTestOperand),
+                     kFarTestOperand);
+            g_farRealDistance = false;
+        }
+    }
+    g_humanControllers = reinterpret_cast<HumanControllersFn>(rfa::HookFunction(kHumanControllers, kHumanControllersPrologue, reinterpret_cast<void*>(&HumanControllers)));
+    if (!g_humanControllers && g_farRealDistance) {
+        // Without the hook nothing sets g_farApparent per frame: put the game's own test back.
+        const DWORD game = kFarDistanceConstant;
+        rfa::PatchCode(reinterpret_cast<void*>(kFarTestOperand), &game, sizeof(game));
+        g_farRealDistance = false;
+        rfa::Log("Far mode: could not hook the humans' controller step; far mode keeps the game's own measure, and its cost isn't written");
+    }
+    else if (!g_humanControllers) rfa::Log("Far mode: could not hook the humans' controller step; its cost isn't written");
 }
 
 bool __cdecl SquadStaticSpawn(BYTE* spawn) {
@@ -811,13 +1660,34 @@ void __cdecl GivePlayerSet(void* human) {
     }
 }
 
+// The world's player is Guerrilla's whatever the start zone gives: the game takes the Player_Override of the spawn
+// resource of the zone at the start position (the zone at it, 0x6CB3C0; its resource, +0xC0; that one's player,
+// +0x1A8), and where that zone has no resource in force it falls back to Armageddon's RF4_PC, Darius. That happened in
+// every level started in Parker or Eos (`level rfg_04_10`, `level rfg_05_03`; 2026-11-11 19:51, 21:02, 21:26,
+// 22:17: the game then also asked for Armageddon's "Default" for the level, 0x761F21), never in Dust, though every
+// one of the world's resources names rfg_PC: the zones' rfg_parker and rfg_eos weren't in force at the start (why is
+// written 5 s in: ReportOurResources). Guerrilla has one player, Mason, so in our worlds the pick ends on him.
+constexpr DWORD kZoneSpawnResource = 0xC0, kResourcePlayer = 0x1A8;
+using ZoneAtFn = BYTE*(__fastcall*)(void* world, void*, const void* position);
+auto const ZoneAt = reinterpret_cast<ZoneAtFn>(0x6CB3C0);
+
 void* __cdecl PickPlayer(const void* startPosition) {
-    if (!InOurWorld() || *kChosenUniform == 0) return g_pickPlayer(startPosition);
+    if (!InOurWorld()) return g_pickPlayer(startPosition);
     const DWORD uniform = *kChosenUniform;
     *kChosenUniform = 0;
     void* player = g_pickPlayer(startPosition);
     *kChosenUniform = uniform;
-    if (g_uniformsLogged < 5) {
+    void* guerrillas = FindCharacter(PlayerCharacterName);
+    if (guerrillas && player != guerrillas) {
+        BYTE* zone = startPosition ? ZoneAt(reinterpret_cast<void*>(kWorld), nullptr, startPosition) : nullptr;
+        const BYTE* resource = zone ? *reinterpret_cast<BYTE* const*>(zone + kZoneSpawnResource) : nullptr;
+        RFA_LOG_FIRST(16, "Player: the game picked %s in world \"%s\" (the zone at the start: %s, its spawn resource %s, that one's player %s); Guerrilla's %s instead",
+                      player == FindCharacter("RF4_PC") ? "Armageddon's RF4_PC (Darius)" : "another character", WorldName(),
+                      zone ? "found" : "none", resource ? "set" : "NONE", resource && *reinterpret_cast<void* const*>(resource + kResourcePlayer) ? "set" : "none",
+                      PlayerCharacterName);
+        player = guerrillas;
+    }
+    if (uniform && g_uniformsLogged < 5) {
         ++g_uniformsLogged;
         rfa::Log("Player: in world \"%s\" the world's own player, not the uniform chosen in Armageddon's menu (kept for its own levels)", WorldName());
     }
@@ -825,6 +1695,38 @@ void* __cdecl PickPlayer(const void* startPosition) {
 }
 
 // Writes which of the people are loaded, on their way, or neither (`after`: how long in the world).
+// Which of the world's spawn resources (the names in mods\guerrilla_world\spawn_resource.xtbl starting "rfg_") the
+// game's table holds (0x75EC70 by name), and the people that share a container handle (character +0x60): the table's
+// loader drops a whole entry listing two characters with the same handle (0x75EFA0 → 0x75EC0D), and a zone naming a
+// dropped one has no resource in force (Darius as the player, Armageddon's "Default" asked for the level).
+constexpr DWORD kCharacterContainer = 0x60;
+void ReportOurResources() {
+    std::ifstream file(rfa::RootDir() + L"\\mods\\guerrilla_world\\spawn_resource.xtbl", std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::string held, dropped;
+    for (size_t at = text.find("<Name>rfg_"); at != std::string::npos; at = text.find("<Name>rfg_", at + 1)) {
+        const size_t from = at + 6, to = text.find('<', from);
+        if (to == std::string::npos) break;
+        const std::string name = text.substr(from, to - from);
+        std::string& list = FindSpawnResource(name.c_str()) ? held : dropped;
+        list += (list.empty() ? "" : ", ") + name;
+    }
+    std::vector<std::pair<DWORD, std::string>> containers;
+    for (const std::string& name : g_people)
+        if (void* character = FindCharacter(name.c_str()))
+            containers.emplace_back(*reinterpret_cast<const DWORD*>(static_cast<BYTE*>(character) + kCharacterContainer), name);
+    std::sort(containers.begin(), containers.end());
+    std::string shared;
+    for (size_t i = 1; i < containers.size(); ++i)
+        if (containers[i].first == containers[i - 1].first && shared.size() < 1500) {
+            char line[160];
+            sprintf_s(line, "%s%s & %s (0x%08X)", shared.empty() ? "" : "; ", containers[i - 1].second.c_str(), containers[i].second.c_str(), containers[i].first);
+            shared += line;
+        }
+    rfa::Log("Spawn resources: the game's table holds %s; DROPPED (not in the table): %s; people sharing a container handle: %s",
+             held.empty() ? "none of ours" : held.c_str(), dropped.empty() ? "none" : dropped.c_str(), shared.empty() ? "none" : shared.c_str());
+}
+
 void ReportOurPeople(const char* after) {
     rfa::Log("Squads' names: %lu of their pool's %lu bytes used; spawn resources' names: %lu of %lu",
              *reinterpret_cast<const DWORD*>(kSquadNames + 0x4C), *reinterpret_cast<const DWORD*>(kSquadNames + 0x44),
@@ -1033,6 +1935,8 @@ void RunSpawnResourceChanges() {
 void __cdecl GameplayFrame() {
     g_gameplayFrame();
     RunSpawnResourceChanges();
+    RunFallsWatch();
+    AmbientFrame(InOurWorld());  // Guerrilla's walkers (ambient.cpp)
     const DWORD now = GetTickCount();
     if (now - g_lastCheck < 1000) return;
     g_lastCheck = now;
@@ -1049,12 +1953,15 @@ void __cdecl GameplayFrame() {
         g_reports = 0;
         g_jumpsLogged = 0;
         rfa::Log("World \"%s\": %s", WorldName(), ours ? "Guerrilla's people and sides" : "Armageddon's own");
+        MatchGuerrillaAvoidTime(ours);
     }
     ApplyMasonNanoLight();
     if (!ours) return;
     if (g_resetDispositions) SetGuerrillaDispositions();
+    RunTransitionCells();
     if (!g_people.empty() && g_reports < 2 && now - g_enteredAt >= (g_reports == 0 ? 5000u : 30000u)) {
         ReportOurPeople(g_reports == 0 ? "5 s" : "30 s");
+        if (g_reports == 0) ReportOurResources();
         ++g_reports;
     }
 }
@@ -1074,6 +1981,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MakeRoomForPatrols();
     MakeRoomForSquadMembers();
     MakeRoomForLoadouts();
+    MakeRoomForSpawnResources();
     if (rfa::IniInt(L"GuerrillaPeople", L"Enabled", 1) == 0) {
         rfa::Log("Off ([GuerrillaPeople] Enabled=0)");
         return;
@@ -1081,6 +1989,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_worlds = SplitList(rfa::IniString(L"GuerrillaPeople", L"Worlds", L"rfg"));
     g_skeletons = ReadList(L"rigs.txt");
     g_people = ReadList(L"people.txt");
+    StartAmbient();
     if (!g_skeletons.empty()) {
         g_readCharacters = reinterpret_cast<ReadCharactersFn>(rfa::HookFunction(kReadCharacters, kReadCharactersPrologue, reinterpret_cast<void*>(&ReadCharacters)));
         if (g_readCharacters) rfa::Log("Skeletons: %u of Guerrilla's people's own to load before the character table", static_cast<unsigned>(g_skeletons.size()));
@@ -1108,8 +2017,17 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_nodeSpawn) rfa::Log("Squads: could not hook the squad nodes' spawn; Guerrilla's guard posts' squads aren't leashed to their boxes (they chase the player)");
     g_humanPath = reinterpret_cast<HumanPathFn>(rfa::HookFunction(kHumanPath, kHumanPathPrologue, reinterpret_cast<void*>(&HumanPath)));
     if (!g_humanPath) rfa::Log("Guard posts: could not hook the people's path query; a guard post's squad still asks for ways out of its post (\"Failed pathfind\" where the way is too long)");
+    g_navCheck = reinterpret_cast<NavCheckFn>(rfa::HookFunction(kNavCheck, kNavCheckPrologue, reinterpret_cast<void*>(&NavCheck)));
+    if (!g_navCheck) rfa::Log("Transitions: could not hook the load's navigation check; transitions of the zones round the start may stay without their cell");
+    g_navpointSerialize = reinterpret_cast<NavpointSerializeFn>(
+        rfa::HookFunction(kNavpointSerialize, kNavpointSerializePrologue, reinterpret_cast<void*>(&NavpointSerialize)));
+    if (!g_navpointSerialize)
+        rfa::Log("Navpoints: could not hook the navpoints' serializer; a transition made at a blown hole may keep a stale version and stay without its nav cell");
     g_leftTheWorld = reinterpret_cast<LeftTheWorldFn>(rfa::HookFunction(kLeftTheWorld, kLeftTheWorldPrologue, reinterpret_cast<void*>(&LeftTheWorld)));
     if (!g_leftTheWorld) rfa::Log("Falls: could not hook the game's handling of what leaves the world; who falls out isn't written here");
+    g_groundHeight = reinterpret_cast<GroundHeightFn>(rfa::HookFunction(kGroundHeight, kGroundHeightPrologue, reinterpret_cast<void*>(&BackFromFarGround)));
+    if (!g_groundHeight) rfa::Log("Far people: could not hook the ground's height; a person back from far off more than 1 m under the ground is put at height 0 and falls out of the world");
+    FarModeByRealDistance();
     rfa::Log("Guerrilla's people in world(s) %ls: %u character(s) made by editor\\GuerrillaBuilder.exe", rfa::IniString(L"GuerrillaPeople", L"Worlds", L"rfg").c_str(),
              static_cast<unsigned>(g_people.size()));
 }

@@ -156,8 +156,44 @@ public sealed class GuerrillaSoundBanks
     public WwiseBankWriter Bank(string guerrillaSoundBank)
     {
         string name = BankPrefix + guerrillaSoundBank.ToLowerInvariant();
-        if (!banks.TryGetValue(name, out var bank)) banks[name] = bank = new WwiseBankWriter(name);
+        if (!banks.TryGetValue(name, out var bank)) banks[name] = bank = new WwiseBankWriter(name) { Adpcm = Adpcm };
         return bank;
+    }
+
+    /// <summary>This part's banks hold Wwise ADPCM (see <see cref="WwiseBankWriter.Adpcm"/>).</summary>
+    public bool Adpcm { get; init; }
+
+    /// <summary>The banks made so far (for a part's own log: their media's sizes, an ADPCM bank's check).</summary>
+    public IEnumerable<WwiseBankWriter> Banks => banks.Values;
+
+    /// <summary>
+    /// A clip of music: the cue played once in 2D on <paramref name="bus"/> at the highest priority, as the event
+    /// "RFG_" + the cue + "_MUSIC", with a stop event (+ "_STOP": a fade of half a second) for whoever plays it to
+    /// post. The events' names, the clip's length, rate and channels and its bank; null if the cue can't be had (logged).
+    /// </summary>
+    public (string Event, string StopEvent, double Seconds, int Rate, int Channels, string Bank)? MusicClip(string cueName, uint bus)
+    {
+        var cue = Sounds.FindCue(cueName);
+        if (cue == null) { log.Add($"no cue {cueName} in Guerrilla's foley.aud_pc"); return null; }
+        string eventName = EventName(cueName) + "_MUSIC", stopName = eventName + "_STOP", key = "music:" + cueName;
+        GuerrillaSounds.Wave wave;
+        string soundBank;
+        try
+        {
+            soundBank = Sounds.SoundBankName(cue);
+            var (waveBank, index) = Sounds.SoundOf(cue).Waves[0];
+            wave = Sounds.ReadWave(waveBank, index);
+        }
+        catch (Exception e) when (e is InvalidDataException or NotSupportedException) { log.Add($"{cueName}: {e.Message}"); return null; }
+        var bank = Bank(soundBank);
+        if (!bank.Has(WwiseBankWriter.Id(eventName)))
+        {
+            uint? clip = CueObject(bank, cueName, key, loops: false, new() { Priority = 100 }, output: new(bus, 0, false));
+            if (clip == null) return null;
+            bank.Event(eventName, bank.Play(key, clip.Value));
+            bank.Event(stopName, bank.Stop(key, clip.Value, 500));
+        }
+        return (eventName, stopName, (double)wave.Samples.Length / wave.Channels / wave.Rate, wave.Rate, wave.Channels, bank.Name);
     }
 
     /// <summary>Guerrilla's distances number <paramref name="index"/> as an attenuation in <paramref name="bank"/>: full volume to the nearer, the gain falling in a straight line to nothing at the farther.</summary>
@@ -232,8 +268,12 @@ public sealed class GuerrillaSoundBanks
         catch (Exception e) when (e is InvalidDataException or NotSupportedException) { log.Add($"{cueName}: {e.Message}"); return null; }
         // Left to this: Guerrilla's rank of the cue, as a loop's or a one-shot's priority (see Priority).
         settings ??= new WwiseBankWriter.Settings { Priority = Priority(cue, loops || retriggerMs > 0) };
-        settings.Volume += Db(cue.Volume) + sound.VolumeDb;
-        settings.Pitch += sound.PitchCents;
+        // A sound of several tracks (Guerrilla has one: a Marauder's step, and his gear with it): a layer of them,
+        // each with its own volume.
+        bool layered = sound.Also is { Count: > 0 } && retriggerMs <= 0;
+        if (sound.Also is { Count: > 0 } && !layered) log.Add($"{cueName}: a repeated shot of several tracks; only its first is played");
+        settings.Volume += Db(cue.Volume) + (layered ? 0 : sound.VolumeDb);
+        settings.Pitch += layered ? 0 : sound.PitchCents;
         if (settings.MostAtOnce == 0 && cue.MostAtOnce > 0) settings.MostAtOnce = (ushort)cue.MostAtOnce;
         if (retriggerMs > 0)
         {
@@ -245,17 +285,27 @@ public sealed class GuerrillaSoundBanks
                 shots.Add(bank.Sound($"{key}#{shot++}", bank.Medium(Sounds.ReadWave(waveBank, wave)), false, new WwiseBankWriter.Settings(), repeating));
             return bank.Retriggered(key, shots, settings, retriggerMs, parent, output);
         }
-        if (sound.Waves.Count == 1 || !sound.Picks)
+        // One track: its wave's sound, or a random container of its waves' sounds.
+        uint Track(GuerrillaSounds.Sound track, string trackKey, WwiseBankWriter.Settings trackSettings, uint under, WwiseBankWriter.Output? to)
         {
-            var (waveBank, wave) = sound.Waves[0];
-            return bank.Sound(key, bank.Medium(Sounds.ReadWave(waveBank, wave)), loops, settings, parent, output);
+            if (track.Waves.Count == 1 || !track.Picks)
+            {
+                var (waveBank, wave) = track.Waves[0];
+                return bank.Sound(trackKey, bank.Medium(Sounds.ReadWave(waveBank, wave)), loops, trackSettings, under, to);
+            }
+            uint container = bank.ObjectId("random:" + trackKey);
+            var children = new List<uint>();
+            int n = 0;
+            foreach (var (waveBank, wave) in track.Waves)
+                children.Add(bank.Sound($"{trackKey}#{n++}", bank.Medium(Sounds.ReadWave(waveBank, wave)), loops, new WwiseBankWriter.Settings(), container));
+            return bank.Random(trackKey, children, trackSettings, under, to);
         }
-        uint container = bank.ObjectId("random:" + key);
-        var children = new List<uint>();
-        int n = 0;
-        foreach (var (waveBank, wave) in sound.Waves)
-            children.Add(bank.Sound($"{key}#{n++}", bank.Medium(Sounds.ReadWave(waveBank, wave)), loops, new WwiseBankWriter.Settings(), container));
-        return bank.Random(key, children, settings, parent, output);
+        if (!layered) return Track(sound, key, settings, parent, output);
+        uint layer = bank.ObjectId("layer:" + key);
+        var tracks = new List<uint>();
+        foreach (var track in new[] { sound }.Concat(sound.Also!))
+            tracks.Add(Track(track, $"{key}~{tracks.Count}", new() { Volume = track.VolumeDb, Pitch = track.PitchCents }, layer, null));
+        return bank.Layer(key, tracks, settings, parent, output);
     }
 
     /// <summary>The cue's distances' number (for <see cref="Attenuation"/>), or -1.</summary>
@@ -267,8 +317,11 @@ public sealed class GuerrillaSoundBanks
     /// the cue can't be had (logged).
     /// </summary>
     public string? OneShot(string cueName, uint bus = WwiseBankWriter.VehicleEffectsBus, string suffix = "", WwiseBankWriter.Settings? settings = null,
-                           string? named = null)
+                           string? named = null, string? also = null)
     {
+        // (<paramref name="also"/>: a second cue the event plays with this one, each by its own distances; the
+        // event's name then says both.)
+        if (also != null) suffix += "_WITH_" + also;
         string eventName = named ?? EventName(cueName) + suffix, key = cueName + suffix;
         var cue = Sounds.FindCue(cueName);
         if (cue == null) { log.Add($"no cue {cueName} in Guerrilla's foley.aud_pc"); return null; }
@@ -284,14 +337,24 @@ public sealed class GuerrillaSoundBanks
         if (sound == null) return null;
         // With a far version (foley_settings.xtbl's FarVariants: the big explosions, some NPC guns), that plays too:
         // each is silent where the other is heard, and the silent one ends at once.
+        var actions = new List<uint> { bank.Play(key, sound.Value) };
         if (farVariants.TryGetValue(cueName, out string? farCue) && HeardFarther(cueName, farCue) &&
             FarObject(bank, farCue, key + ":far", false, bus,
                       new() { Priority = settings.Priority, EndsWhenQuiet = true, RefusesWhenFull = settings.RefusesWhenFull }) is { } far)
         {
-            bank.Event(eventName, bank.Play(key, sound.Value), bank.Play(key + ":far", far));
+            actions.Add(bank.Play(key + ":far", far));
             builtFar.Add($"{cueName} + {farCue}");
         }
-        else bank.Event(eventName, bank.Play(key, sound.Value));
+        // The second cue: one object of it in the bank, whichever events play it.
+        if (also != null)
+        {
+            if (Sounds.FindCue(also) is not { } alsoCue) log.Add($"no cue {also} (played with {cueName}) in Guerrilla's foley.aud_pc");
+            else if (CueObject(bank, also, "also:" + also, false,
+                               new() { Priority = Priority(alsoCue, false), EndsWhenQuiet = true, RefusesWhenFull = settings.RefusesWhenFull },
+                               output: new(bus, Attenuation(bank, alsoCue.DistanceIndex), true)) is { } second)
+                actions.Add(bank.Play(key + ":also", second));
+        }
+        bank.Event(eventName, [.. actions]);
         return eventName;
     }
 
@@ -421,6 +484,15 @@ public sealed class GuerrillaSoundBanks
     public (string Event, float? HeardTo)? EffectSound(string cueName, bool explosion)
     {
         const string suffix = "_FX";
+        // "cue+other": the effect's cue and a second one its event plays with it (a footstep and the walker's own
+        // gear, see GuerrillaFootsteps).
+        string? also = null;
+        int plus = cueName.IndexOf('+');
+        if (plus > 0)
+        {
+            also = cueName[(plus + 1)..];
+            cueName = cueName[..plus];
+        }
         // An effect's attack-loop-release set (its sound_alr; a thruster, a generator): the loop as an effect's loop,
         // the attack when the game starts it, the release when the game stops it (past its distance, or at the
         // effect's end).
@@ -445,7 +517,7 @@ public sealed class GuerrillaSoundBanks
             // Where Guerrilla's cue has a number at once (a breaking piece's 3 to 5), one more doesn't start, as in
             // Guerrilla: a collapse posts over a hundred of these a second, and each one started in an older one's
             // place opened a stream (run 2026-11-11 02:45: Wwise's "Source starvation" for 20 destruction cues).
-            return OneShot(cueName, WwiseBankWriter.EffectsBus, suffix, new() { Priority = priority, RefusesWhenFull = true }) is { } once ? (once, null) : null;
+            return OneShot(cueName, WwiseBankWriter.EffectsBus, suffix, new() { Priority = priority, RefusesWhenFull = true }, also: also) is { } once ? (once, null) : null;
         }
         var settings = new WwiseBankWriter.Settings
         {

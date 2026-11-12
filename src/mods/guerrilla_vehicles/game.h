@@ -24,7 +24,10 @@ constexpr DWORD kNone = 0xFFFFFFFF;
 inline void* const kWorld = reinterpret_cast<void*>(0x1870630);
 inline const char* WorldName() { return reinterpret_cast<const char*>(0x1870630 + 0x29EA); }
 inline auto const Player = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
-inline auto const ObjectByHandle = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x424350);
+// Any object by its handle (world::object_from_handle 0x6CB9E0: null for none or one being destroyed). Not 0x424350,
+// the typed lookup for one kind only (type 2, subtype 1: the rfg_movers, the buildings, as 0x4776E0 lists them),
+// which gives null for a person or a vehicle.
+inline auto const ObjectByHandle = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x6CB9E0);
 inline auto const VehicleByHandle = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x42AF10);
 inline auto const HumanByHandle = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x436120);
 inline auto const RemoveObject = reinterpret_cast<int(__fastcall*)(void* world, void* unused, DWORD handle, int flag)>(0x6D56A0);
@@ -137,6 +140,8 @@ void StartEdf();      // edf.cpp
 void EdfFrame();
 void StartChases();   // crews.cpp
 void ChasesFrame();
+void StartSafehouses();  // safehouses.cpp
+void SafehousesFrame();
 void StartFlyers();   // flyers.cpp (its own hook, on the vehicles' presim)
 bool FlyersFly();     // Guerrilla's flight model is on: NPCs can fly Guerrilla's flyers
 

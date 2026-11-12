@@ -10,8 +10,8 @@ namespace RfaFormats.Guerrilla;
 /// Blinn and self-illumination), gw_metal0/1/2 (its metal: the metal lobe), gw_brdf0/1/2 (its BRDF
 /// shaders: their fitted curves or look-up maps), gw_blendmetal0/1/2 (metal and standard mixed by
 /// the specular map's alpha), gw_glass0 (its blended glass), gw_eosglass1 (its mirror glass) and
-/// gw_composite1c (its composite panels), gw_vehiclepaint0/1 (its vehicles' paint) and gw_clearcoat1
-/// (its Oasis roofs), the number the UV sets past the first their meshes have, then
+/// gw_composite1c (its composite panels), gw_vehiclepaint0/1 (its vehicles' paint), gw_clearcoat1
+/// (its Oasis roofs) and gw_fuelgauge0c (rfg-mp_fuel_gauge: the backpacks' fuel gauges, skinned too), the number the UV sets past the first their meshes have, then
 /// "c" for alpha-tested materials (cut-outs) and "b" for blended ones; each as _s (still meshes) and
 /// _bs (instanced ones), and the glass also as _c (skinned: the game draws a pane's flying shards with
 /// its material's _c effect, and won't shatter glass whose shader has none), and gw_brdf0,
@@ -36,7 +36,7 @@ namespace RfaFormats.Guerrilla;
 /// </summary>
 public static class GuerrillaShaders
 {
-    public enum Family { Standard = 1, Metal = 2, Brdf = 3, BlendMetal = 4, Glass = 5, EosGlass = 6, Composite = 7, VehiclePaint = 8, Clearcoat = 9 }
+    public enum Family { Standard = 1, Metal = 2, Brdf = 3, BlendMetal = 4, Glass = 5, EosGlass = 6, Composite = 7, VehiclePaint = 8, Clearcoat = 9, FuelGauge = 10 }
 
     /// <summary>Opaque, alpha-tested (Guerrilla's material flags 2: holes cut by the alpha) or blended (flags 1).</summary>
     public enum Variant { Plain, CutOut, Blended }
@@ -44,7 +44,7 @@ public static class GuerrillaShaders
     /// <summary>The UV sets past the first a family's effects are written for: Guerrilla's glass has one, its mirror glass and composite two.</summary>
     public static int[] LayersOf(Family family) => family switch
     {
-        Family.Glass => [0],
+        Family.Glass or Family.FuelGauge => [0],
         Family.EosGlass or Family.Composite or Family.Clearcoat => [1],
         Family.VehiclePaint => [0, 1],
         _ => [0, 1, 2],
@@ -54,7 +54,7 @@ public static class GuerrillaShaders
     public static Variant[] VariantsOf(Family family) => family switch
     {
         Family.Glass or Family.EosGlass or Family.VehiclePaint or Family.Clearcoat => [Variant.Plain],
-        Family.Composite => [Variant.CutOut],
+        Family.Composite or Family.FuelGauge => [Variant.CutOut],
         _ => [Variant.Plain, Variant.CutOut, Variant.Blended],
     };
 
@@ -84,6 +84,7 @@ public static class GuerrillaShaders
         if (family == Family.Composite) return ["Normal_Map", "Diffuse_Map", "Decal_Map_1", "Alpha_Map"];
         if (family == Family.VehiclePaint) return ["Normal_Map", "Diffuse_Map", "Specular_Map", "Decal_Map_1", "BRDF_Mask_Map"];
         if (family == Family.Clearcoat) return ["Normal_Map", "Specular_Map", "Environment_Map", "Decal_Map_1"];
+        if (family == Family.FuelGauge) return ["Diffuse_Map"];
         string[] uvSets = family == Family.Standard
             ? layers switch { 1 => ["Decal_Map_1"], 2 => ["Decal_Map_1", "Decal_Map_2"], _ => [] }
             : layers switch { 1 => ["Environment_Map"], 2 => ["Environment_Map", "Decal_Map_1"], _ => [] };
@@ -127,7 +128,7 @@ public static class GuerrillaShaders
     /// cut out on some; their depth and G-buffer passes skinned as well, on Armageddon's ir_at_default_c's
     /// layout). Blended skinned materials aren't written yet.
     /// </summary>
-    static bool Skinned(Family family) => family is Family.Glass or Family.EosGlass or Family.Brdf or Family.Standard;
+    static bool Skinned(Family family) => family is Family.Glass or Family.EosGlass or Family.Brdf or Family.Standard or Family.FuelGauge;
     /// <summary>Whether <see cref="WriteSkinned"/> writes the rewrite a skinned material of this family, layers and variant is drawn with.</summary>
     internal static bool CanSkin(Family family, int layers, Variant variant) =>
         Skinned(family) && SkinnedLayersOf(family).Contains(layers) && SkinnedVariantsOf(family).Contains(variant);

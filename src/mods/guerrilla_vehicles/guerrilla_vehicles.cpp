@@ -174,6 +174,7 @@
 #include "rfa_game.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <cwctype>
 #include <fstream>
@@ -841,6 +842,50 @@ int __cdecl SpawnVehicle(void** parameters) {
     return 1;  // not yet: the spot (or spawner) asks again
 }
 
+// ---- A parked vehicle's pick from its group, when none of the group is streamed in
+// A vehicle spawn node makes its car from its group (spawn_child_object 0x7FE5A0 → 0x75E5B0 → 0x762120, cdecl, the
+// group: its table entry, or null), which picks only from the group's vehicles that are streamed in (0x762020,
+// each through 0x764E70). Guerrilla's pick is the same (pick_vehicle_info → srm_pick_loaded_vehicle_info, RM
+// 0xB5CB60), but its spawn resource manager streams the vehicles a node needs in first: the area's ambient group
+// (allocate_ambient_spawn_slots_vehicle, RM 0xB57500, each frame) and the guerrillas' and the EDF's own vehicles
+// for a node of their side (squad_progression_member_vehicle_info, RM 0x78D060, on the node's spawn). Armageddon
+// has no such manager for Guerrilla's groups, so a node of a group none of whose vehicles happened to be about
+// made nothing, ever (the user, 2026-11-11: no parked cars, the Dust safehouse's three spots empty). So for one of
+// Guerrilla's groups (named rfg_...) with none streamed in, the pick gives one of the group to stream: one already
+// asked for (reserved) if any, else one at random. The game's vehicle spawn then refuses it for want of its model,
+// which reserves it (above) and leaves the node to ask again (its flag 2: the game's spawn step every 250-500 ms)
+// until it has streamed in.
+constexpr DWORD kPickFromGroup = 0x762120;
+constexpr size_t kPickFromGroupPrologue = 6;  // push ebp / mov ebp,esp / mov eax,[ebp+8]
+using PickFromGroupFn = BYTE*(__cdecl*)(BYTE* group);
+PickFromGroupFn g_pickFromGroup;
+
+BYTE* __cdecl PickFromGroup(BYTE* group) {
+    BYTE* picked = g_pickFromGroup(group);
+    if (picked || !group) return picked;
+    const char* name = *reinterpret_cast<const char* const*>(group);  // a group: its name, then its vehicles (+4: entries, +0xC how many)
+    if (!name || _strnicmp(name, "rfg_", 4) != 0) return picked;
+    BYTE* const* vehicles = *reinterpret_cast<BYTE* const* const*>(group + 4);
+    const int count = *reinterpret_cast<const int*>(group + 4 + 8);
+    if (!vehicles || count <= 0) return picked;
+    std::vector<BYTE*> asked;
+    for (int i = 0; i < count; ++i)
+        if (void* record = vehicles[i] ? VehicleRecord(vehicles[i]) : nullptr; record && RecordReserved(record, nullptr)) asked.push_back(vehicles[i]);
+    picked = !asked.empty() ? asked[std::rand() % asked.size()] : vehicles[std::rand() % count];
+    const char* vehicle = picked ? *reinterpret_cast<const char* const*>(picked) : nullptr;
+    RFA_LOG_FIRST(60, "Spawning: none of %s's vehicles is streamed in; %s picked to stream (%s)", name, vehicle ? vehicle : "?",
+                  asked.empty() ? "none asked for yet" : "already asked for");
+    return picked;
+}
+
+void PickUnstreamedFromGuerrillasGroups() {
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08};
+    if (memcmp(reinterpret_cast<const void*>(kPickFromGroup), opening, sizeof(opening)) == 0)
+        g_pickFromGroup = reinterpret_cast<PickFromGroupFn>(rfa::HookFunction(kPickFromGroup, kPickFromGroupPrologue, reinterpret_cast<void*>(&PickFromGroup)));
+    rfa::Log(g_pickFromGroup ? "Spawning: a parked vehicle of Guerrilla's groups with none streamed in picks one to stream, as Guerrilla's streams them in"
+                             : "Spawning: the game's pick from a group isn't as expected; a parked vehicle needs one of its group already streamed in");
+}
+
 void ReserveWantedVehicles() {
     const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C};
     if (memcmp(reinterpret_cast<const void*>(kSpawnVehicle), opening, sizeof(opening)) != 0) {
@@ -850,6 +895,7 @@ void ReserveWantedVehicles() {
     g_spawnVehicle = reinterpret_cast<SpawnVehicleFn>(rfa::HookFunction(kSpawnVehicle, kSpawnVehiclePrologue, reinterpret_cast<void*>(&SpawnVehicle)));
     rfa::Log(g_spawnVehicle ? "Spawning: a vehicle refused for want of its model reserves it and waits (parked vehicles, traffic)"
                             : "Spawning: could not hook the game's vehicle spawn");
+    if (g_spawnVehicle) PickUnstreamedFromGuerrillasGroups();
 }
 
 // ---- What the spawn pools hold (for the log)
@@ -1584,6 +1630,7 @@ void ReadSkeletonList() {
 void StartTraffic();  // traffic.cpp (with convoys.cpp, edf.cpp, crews.cpp on its frame)
 namespace gv { void StartFlyers(); }  // flyers.cpp
 namespace gv { void StartTurrets(); }  // turrets.cpp
+namespace gv { void StartEntering(); }  // entering.cpp
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!rfa::game::IsSupportedBuild()) {
@@ -1607,6 +1654,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     HookEngineSounds();
     HookTurretParts();
     gv::StartTurrets();
+    gv::StartEntering();
     HookLights();
     StartTraffic();
     gv::StartFlyers();

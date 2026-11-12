@@ -101,6 +101,7 @@ auto const Driving = reinterpret_cast<bool(__cdecl*)(BYTE* human)>(0x8695D0);
 auto const FirstBelief = reinterpret_cast<BYTE*(__fastcall*)(BYTE* perception, void* unused, int kind)>(0x42DA30);
 auto const NextBelief = reinterpret_cast<BYTE*(__fastcall*)(BYTE* perception, void* unused, BYTE* belief)>(0x476420);
 constexpr int kFirstContact = 5;  // AI_BELIEF_FIRST_CONTACT: someone in sight now
+constexpr int kEnemy = 0;         // AI_BELIEF_ENEMY_EXISTS: someone taken for an enemy
 auto const ObjectKind = reinterpret_cast<int(__fastcall*)(BYTE* object, void* unused)>(0x423530);
 auto const HitPoints = reinterpret_cast<int(__cdecl*)(BYTE* vehicle)>(0x603920);
 auto const MaxHitPoints = reinterpret_cast<int(__cdecl*)(BYTE* vehicle)>(0x603930);
@@ -199,15 +200,7 @@ constexpr float kEngageReach[handles::kAlertLevels] = {30.0f, 40.0f, 60.0f, 80.0
 constexpr float kVehicleReach = 2.0f;
 
 // ai_perception::any_enemy_player_in_los: a first-contact belief about the player.
-bool HasPlayerInSight(BYTE* human, DWORD playerHandle) {
-    BYTE* ai = *reinterpret_cast<BYTE* const*>(human + kAi);
-    if (!ai) return false;
-    BYTE* perception = ai + kPerception;
-    int walked = 0;
-    for (BYTE* belief = FirstBelief(perception, nullptr, kFirstContact); belief && walked < 64; belief = NextBelief(perception, nullptr, belief), ++walked)
-        if (*reinterpret_cast<const DWORD*>(belief) == playerHandle) return true;
-    return false;
-}
+bool HasPlayerInSight(BYTE* human, DWORD playerHandle) { return Believes(human, kFirstContact, playerHandle); }
 
 void LookAtPeople(BYTE* player) {
     const int count = HumanCount(kWorld, nullptr);
@@ -366,6 +359,30 @@ void Frame() {
     LookAtPeople(player);
     LookAtBuildings();
     if (++g_frames % 600 == 0) Tidy();
+}
+
+bool Believes(const void* human, int kind, unsigned about) {
+    BYTE* ai = human ? *reinterpret_cast<BYTE* const*>(static_cast<const BYTE*>(human) + kAi) : nullptr;
+    if (!ai) return false;
+    BYTE* perception = ai + kPerception;
+    int walked = 0;
+    for (BYTE* belief = FirstBelief(perception, nullptr, kind); belief && walked < 64; belief = NextBelief(perception, nullptr, belief), ++walked)
+        if (*reinterpret_cast<const DWORD*>(belief) == about) return true;
+    return false;
+}
+
+int EdfHoldingPlayerForEnemy() {
+    BYTE* player = static_cast<BYTE*>(Player());
+    if (!player) return 0;
+    const DWORD playerHandle = HandleOf(player);
+    int holding = 0;
+    const int count = HumanCount(kWorld, nullptr);
+    for (int i = 0; i < count; ++i) {
+        BYTE* human = HumanAt(kWorld, nullptr, i);
+        if (!human || human == player || IsDead(human) || !WithTheEdf(TeamOf(human))) continue;
+        if (Believes(human, kEnemy, playerHandle)) ++holding;
+    }
+    return holding;
 }
 
 int EdfSeeingPlayer() {
