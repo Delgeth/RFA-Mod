@@ -154,32 +154,18 @@ public partial class LevelEditor
         }
         try
         {
-            // Names new to the game every time: the streaming system keeps a container it was given for good.
-            // (Short: the game keeps names of up to 63 characters.)
-            int session = Environment.ProcessId % 10000;
-            string container = $"rflive{session}_{++liveChunkNumber}.rfgchunkx";
-            string assetList = $"rflive{session}_{liveChunkNumber}.asm_pc";
+            // The chunk's files (its model and textures, each a header and a data file) go loose into
+            // overrides\live\, where the game finds them by name (the loader hands it a file of that name
+            // when the game's archives haven't one). The game is then told to make the chunk's group,
+            // <chunk>.rfgchunkx (.rfgstitchx for level geometry), from those files and load it at once,
+            // as it makes and loads its preload chunks' groups at start-up (editor_chunk_files).
+            string container = bare + (stitch ? ".rfgstitchx" : ".rfgchunkx");
             var files = package.Files;
-            byte[] bytes = RfaFormats.Packfile.CreateContainer(files);
-            var packed = RfaFormats.Packfile.FromBytes(container + ".str2_pc", bytes);
-            // As the game lists its preload chunks (chunk_containers.asm_pc): type 15, flags 0x80, the files
-            // in the chunk preload allocator (2).
-            var entry = new RfaFormats.AsmContainer
-            {
-                Name = container, Type = 15, Flags = 0x80, DataOffset = (uint)packed.DataStart, CompressedSize = packed.CompressedDataSize,
-            };
-            entry.Sizes.AddRange(files.Select(f => f.Data.Length));
-            entry.Primitives.AddRange(package.Primitives.Select(p => new RfaFormats.AsmPrimitive
-            {
-                Name = p.Name, Type = p.Type, Allocator = 2, Flags = p.Flags, SplitIndex = p.SplitIndex, HeaderSize = p.HeaderSize, DataSize = p.DataSize,
-            }));
-            var list = new RfaFormats.AsmFile();
-            list.Containers.Add(entry);
-            string folder = Path.Combine(context.Workspace.OverridesFolder, "live");
+            string folder = Path.Combine(context.Workspace.OverridesFolder, "live", bare);
             Directory.CreateDirectory(folder);
-            File.WriteAllBytes(Path.Combine(folder, container + ".str2_pc"), bytes);
-            File.WriteAllBytes(Path.Combine(folder, assetList), list.ToBytes());
-            if (!gameLink.TrySend(["editor_rescan", $"editor_chunk {assetList} {container}"])) return true;  // the link is busy: asked again next time
+            foreach (var file in files) File.WriteAllBytes(Path.Combine(folder, file.Name), file.Data);
+            string headers = string.Join(" ", package.Primitives.Select(p => p.Name));
+            if (!gameLink.TrySend(["editor_rescan", $"editor_chunk_files {container} {headers}"])) return true;  // the link is busy: asked again next time
             liveChunkLoads[chunk] = (container, liveTicks);
             context.Log($"Live: loading the chunk {chunk} in the game ({files.Sum(f => (long)f.Data.Length) / 1024:N0} KB).");
             return true;

@@ -1783,6 +1783,117 @@ void LoadEditorChunk(const std::string& assetList, const std::string& container)
     }
 }
 
+// editor_chunk_files <group> <file>...: loads a chunk the level hasn't (Live), from its files, which the
+// editor put loose in overrides\live\ (found by name once the loader has looked again: editor_rescan
+// comes first). The chunk's group (<chunk>.rfgchunkx, .rfgstitchx for level geometry: the container
+// the game looks for when it makes an object of the chunk) is made as the game makes its preload
+// chunks' at start-up (0x6AAC00): started (0x909670: the name, the chunk pool, type 15, preload),
+// its model added (0x9097A0: the file, the primitive type's name, allocator 2) and its textures
+// ("chunk_texture", allocator 1), finished (0x909E60) and loaded at once (0x908FC0). (Reading an asset
+// list instead, 0x90A3A0, faults: its temporary allocator is only open while the game starts.) A file
+// the game can't find is fatal there, so each is looked for first (0xC92010).
+auto const StreamContainerStart = reinterpret_cast<bool(__cdecl*)(const char* name, void* pool, BYTE type, BYTE notPreload, BYTE)>(0x909670);
+auto const StreamAddPrimitive = reinterpret_cast<void*(__cdecl*)(const char* file, const char* typeName, BYTE allocator, char split, int, BYTE flags, int)>(0x9097A0);
+auto const StreamContainerFinish = reinterpret_cast<void*(__cdecl*)(BYTE, BYTE)>(0x909E60);
+auto const GameFileExists = reinterpret_cast<bool(__cdecl*)(const char* name)>(0xC92010);
+constexpr DWORD kPrimitiveTypeNames = 0x10FE40C;  // const char*[]: 3 stitch, 4 chunk, 5 chunk_texture
+
+int GuardedFileExists(const char* name) {
+    __try {
+        return GameFileExists(name) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// 1 if the group was made, else a negative step: -1 start, -2 a file, -3 finish.
+int GuardedMakeChunkGroup(const char* group, const std::vector<const char*>& files, int* failedFile) {
+    bool started = false;
+    __try {
+        if (!StreamContainerStart(group, reinterpret_cast<void*>(kChunkPool), 15, 0, 0)) return -1;
+        started = true;
+        const char* const* types = reinterpret_cast<const char* const*>(kPrimitiveTypeNames);
+        for (size_t i = 0; i < files.size(); i++) {
+            *failedFile = static_cast<int>(i);
+            const char* dot = strrchr(files[i], '.');
+            if (!dot) continue;
+            if (_stricmp(dot, ".cchk_pc") == 0) StreamAddPrimitive(files[i], types[4], 2, 2, 1, 0, 0);
+            else if (_stricmp(dot, ".cstch_pc") == 0) StreamAddPrimitive(files[i], types[3], 2, 2, 1, 0, 0);
+            else if (_stricmp(dot, ".cvbm_pc") == 0 || _stricmp(dot, ".cpeg_pc") == 0) StreamAddPrimitive(files[i], types[5], 1, 2, 0, 0, 0);
+        }
+        *failedFile = -1;
+        started = false;
+        return StreamContainerFinish(0, 0) ? 1 : -3;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (started) {
+            __try {
+                StreamContainerFinish(0, 0);  // (the streaming system's group being made is closed)
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        return *failedFile >= 0 ? -2 : -1;
+    }
+}
+
+void LoadEditorChunkFiles(const std::string& line) {
+    std::vector<std::string> words;
+    for (size_t at = 19; at < line.size();) {
+        const size_t end = line.find(' ', at);
+        const std::string word = line.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (!word.empty()) words.push_back(word);
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    if (words.size() < 2) {
+        rfa::Log("Editor link: editor_chunk_files needs a group name and the chunk's files");
+        return;
+    }
+    const std::string group = words[0];
+    const std::wstring answer = L"chunk_" + std::wstring(group.begin(), group.end());
+    auto reply = [&](bool loaded) {
+        rfa::Log("Editor link: chunk %s %s", group.c_str(), loaded ? "loaded" : "NOT loaded");
+        const std::wstring path = LinkFolder() + L"\\" + answer + L".txt";
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+            fputs(loaded ? "loaded" : "failed", file);
+            fclose(file);
+        }
+    };
+    bool faulted = false;
+    void* found = GuardedFindContainer(group.c_str(), &faulted);
+    if (!found && !faulted) {
+        // The names stay with the streaming system: kept for good.
+        std::vector<const char*> files;
+        for (size_t i = 1; i < words.size(); i++) {
+            const char* kept = _strdup(words[i].c_str());
+            if (!kept) return;
+            if (GuardedFileExists(kept) <= 0) {
+                rfa::Log("Editor link: chunk %s: the game can't find its file %s (is the loader up to date?)", group.c_str(), kept);
+                reply(false);
+                return;
+            }
+            files.push_back(kept);
+        }
+        const char* keptGroup = _strdup(group.c_str());
+        int failedFile = -1;
+        rfa::Log("Editor link: chunk %s: making its group of %d files", group.c_str(), static_cast<int>(files.size()));
+        const int made = keptGroup ? GuardedMakeChunkGroup(keptGroup, files, &failedFile) : -1;
+        if (made < 0) {
+            rfa::Log("Editor link: chunk %s: making its group FAILED at %s%s", group.c_str(),
+                     made == -1 ? "the start" : made == -2 ? "the file " : "the finish", made == -2 && failedFile >= 0 ? files[failedFile] : "");
+            reply(false);
+            return;
+        }
+        found = GuardedFindContainer(group.c_str(), &faulted);
+    }
+    int load = 0;
+    if (found) {
+        load = GuardedLoadContainer(found);
+        if (load < 0) rfa::Log("Editor link: loading chunk group %s FAULTED (exception %08X)", group.c_str(), static_cast<unsigned>(-load) | 0x80000000u);
+    }
+    reply(load > 0);
+}
+
 // Level geometry (stitch pieces), live. A zone's stitch list stays in memory as it was read (the
 // loader, 0x6B8710, only turns its offsets into addresses); its terrain record (0x6BBA90, by the
 // zone's .cterrain_pc name) has the terrain data at +0 (the zone object it was made for at +0xA8)
@@ -2158,6 +2269,10 @@ bool RunEditorEdit(const std::string& line) {
     }
     if (line.rfind("editor_stitch_drop ", 0) == 0) {
         EditorDropStitchPiece(line);
+        return true;
+    }
+    if (line.rfind("editor_chunk_files ", 0) == 0) {
+        LoadEditorChunkFiles(line);
         return true;
     }
     if (line.rfind("editor_chunk ", 0) == 0) {
