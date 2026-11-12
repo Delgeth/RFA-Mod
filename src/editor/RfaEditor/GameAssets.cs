@@ -138,9 +138,57 @@ sealed class GameAssets
         return chunkCatalog = entries;
     }
 
+    // Files the editor made (terrain pieces, textures given a zone's layer's name length), found by
+    // name before the game's own: until saved into a level's containers they exist only here.
+    readonly Dictionary<string, byte[]> generated = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> generatedLike = new(StringComparer.OrdinalIgnoreCase);     // a made header file → the game's file whose asset-list kind it takes
+    readonly Dictionary<string, string> generatedTextures = new(StringComparer.OrdinalIgnoreCase); // a made texture's name → its header file
+
+    /// <summary>Adds a file the editor made (see above); <paramref name="like"/>: the game's file whose kind (for the asset lists) it has.</summary>
+    public void AddGenerated(string name, byte[] bytes, string? like = null)
+    {
+        lock (assetLock)
+        {
+            generated[name] = bytes;
+            if (like != null) generatedLike[name] = like;
+            models.Remove(name);
+            if (name.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase))
+                foreach (string texture in PegFile.TextureNames(bytes)) generatedTextures[texture] = name;
+        }
+    }
+
+    /// <summary>Files (header files, each with its data file) as a package to bring into a level's containers, with their primitives for the asset lists; null, with why, if one can't be read.</summary>
+    public ChunkPackage? FilesPackage(string name, IEnumerable<string> headers, out string? why)
+    {
+        ReadAssetLists();
+        return Package(name, headers.ToList(), null, out why);
+    }
+
+    /// <summary>Every ground texture the game's zones (and the Guerrilla world's) use as a layer, with how many zones use it; read once, in the background.</summary>
+    public Task<List<(string Texture, int Zones)>> GroundTextures() => groundTextures ??= Task.Run(() =>
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (string name in NamesWhere(n => n.EndsWith(".cterrain_pc", StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            try
+            {
+                if (ReadAnywhere(name) is { } bytes && RfaFormats.Meshes.ZoneTerrain.Read(bytes) is { } ground)
+                    foreach (string texture in ground.Layers.Select(l => l.Texture).Distinct(StringComparer.OrdinalIgnoreCase))
+                        counts[texture] = counts.GetValueOrDefault(texture) + 1;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException) { }
+        }
+        return counts.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase).Select(kv => (kv.Key, kv.Value)).ToList();
+    });
+    Task<List<(string Texture, int Zones)>>? groundTextures;
+
+    /// <summary>Whether a file is one the editor made (see <see cref="AddGenerated"/>).</summary>
+    public bool IsGenerated(string name) => generated.ContainsKey(name);
+
     /// <summary>A file by name from wherever the index says it is, as the game sees it; null if none has it.</summary>
     public byte[]? ReadAnywhere(string name)
     {
+        if (generated.TryGetValue(name, out byte[]? made)) return made;
         if (files == null || !files.TryGetValue(name, out IndexedFile? found)) return null;
         Packfile pack = Pack(found.Archive, found.Container);
         return pack.Find(name) is { } entry ? pack.Read(entry) : null;
@@ -350,7 +398,8 @@ sealed class GameAssets
             string dataName = DataFileOf(header);
             byte[]? data = dataName.Length > 0 ? ReadAnywhere(dataName) : null;
             if (data != null) found.Add((dataName, data));
-            AsmPrimitive? kind = primitiveKinds!.GetValueOrDefault(header);
+            AsmPrimitive? kind = primitiveKinds!.GetValueOrDefault(header) ??
+                                 (generatedLike.TryGetValue(header, out string? like) ? primitiveKinds!.GetValueOrDefault(like) : null);
             (byte type, byte allocator, byte flags, byte split) = kind != null ? (kind.Type, kind.Allocator, kind.Flags, kind.SplitIndex)
                 : Path.GetExtension(header).ToLowerInvariant() switch
                 {
@@ -427,7 +476,9 @@ sealed class GameAssets
             ModelFile? model = null;
             try
             {
-                if (Find(name, nearArchive, nearContainer) is (Packfile pack, PackfileEntry header) &&
+                if (generated.TryGetValue(name, out byte[]? madeHeader) && generated.TryGetValue(ModelFile.DataFileName(name), out byte[]? madeData))
+                    model = ModelFile.Read(name, madeHeader, madeData);
+                else if (Find(name, nearArchive, nearContainer) is (Packfile pack, PackfileEntry header) &&
                     pack.Find(ModelFile.DataFileName(name)) is PackfileEntry data)
                     model = ModelFile.Read(name, pack.Read(header), pack.Read(data));
             }
@@ -471,6 +522,7 @@ sealed class GameAssets
     /// <summary>The name of the texture file (its header, .cpeg_pc or .cvbm_pc) holding a texture, as <see cref="FindTexture"/> finds it; null if none.</summary>
     public string? TextureFileName(string name, string nearArchive, string? nearContainer)
     {
+        if (generatedTextures.TryGetValue(name, out string? madeHeader)) return madeHeader;
         if (nearContainer != null)
         {
             Packfile pack = workspace.Container(nearArchive, nearContainer);
@@ -484,6 +536,12 @@ sealed class GameAssets
     /// <summary>The texture file holding a texture, and the texture in it.</summary>
     public (PegFile, PegTexture)? FindTexture(string name, string nearArchive, string? nearContainer)
     {
+        if (generatedTextures.TryGetValue(name, out string? madeHeader) && generated.TryGetValue(madeHeader, out byte[]? h) &&
+            PegFile.DataFileName(madeHeader) is { } madeData && generated.TryGetValue(madeData, out byte[]? d))
+        {
+            PegFile made = PegFile.Read(h, d);
+            if (made.Textures.FirstOrDefault(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } texture) return (made, texture);
+        }
         if (nearContainer != null && FindTextureIn(workspace.Container(nearArchive, nearContainer), name) is { } local) return local;
         if (textures != null && textures.TryGetValue(name, out TextureRef? at))
             return ReadTexture(Pack(at.Archive, at.Container), at.PegHeader, name);
@@ -496,6 +554,7 @@ sealed class GameAssets
     /// </summary>
     public (byte[] Data, string Archive, string? Container)? ReadFile(string name, string nearArchive, string? nearContainer)
     {
+        if (generated.TryGetValue(name, out byte[]? made)) return (made, nearArchive, nearContainer);
         if (nearContainer != null && workspace.Container(nearArchive, nearContainer) is var container && container.Find(name) is { } inContainer)
             return (container.Read(inContainer), nearArchive, nearContainer);
         // (A file loose in an archive as the game sees it: its override, or edit, if it has one.)

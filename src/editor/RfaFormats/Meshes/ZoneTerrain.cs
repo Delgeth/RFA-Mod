@@ -67,8 +67,28 @@ public sealed class ZoneTerrain
         return null;
     }
 
+    /// <summary>
+    /// A copy of a terrain file with a layer's texture named <paramref name="texture"/> (with ".tga")
+    /// instead, written over the old name in place: it must be as long, so the file keeps its size.
+    /// </summary>
+    public static byte[] WithLayerTexture(byte[] data, int layer, string texture)
+    {
+        if (layer is < 0 or >= LayerCount) throw new ArgumentOutOfRangeException(nameof(layer));
+        uint blendSlot = NameHashes.PropertyHash("Alpha_Map_0"), slot = NameHashes.PropertyHash($"Diffuse_Map_{layer}");
+        for (int at = 0x28; at + 0x30 <= data.Length; at += 4)
+        {
+            if (Material.Read(data, at) is not { } material || !material.Textures.ContainsKey(blendSlot)) continue;
+            if (!material.Textures.TryGetValue(slot, out string? old) || !material.NameAt.TryGetValue(slot, out int nameAt)) break;
+            if (old.Length != texture.Length) throw new ArgumentException($"{texture} isn't as long as {old}");
+            byte[] copy = (byte[])data.Clone();
+            Encoding.ASCII.GetBytes(texture).CopyTo(copy, nameAt);
+            return copy;
+        }
+        throw new InvalidDataException("the terrain file's ground material wasn't found");
+    }
+
     /// <summary>A material block: its textures (slot hash → texture name) and constants (name hash → value).</summary>
-    sealed record Material(Dictionary<uint, string> Textures, Dictionary<uint, Vector4> Constants)
+    sealed record Material(Dictionary<uint, string> Textures, Dictionary<uint, Vector4> Constants, Dictionary<uint, int> NameAt)
     {
         public static Material? Read(byte[] data, int at)
         {
@@ -85,8 +105,13 @@ public sealed class ZoneTerrain
             var nameOffsets = Enumerable.Range(0, textureCount).Select(t => BitConverter.ToInt32(data, texturesAt + t * 12)).ToList();
             if (NameBlockBefore(data, at, nameOffsets) is not int names) return null;
             var textures = new Dictionary<uint, string>();
+            var nameAt = new Dictionary<uint, int>();
             for (int t = 0; t < textureCount; t++)
-                textures[BitConverter.ToUInt32(data, texturesAt + t * 12 + 4)] = CString(data, names + nameOffsets[t]);
+            {
+                uint slot = BitConverter.ToUInt32(data, texturesAt + t * 12 + 4);
+                textures[slot] = CString(data, names + nameOffsets[t]);
+                nameAt[slot] = names + nameOffsets[t];
+            }
             var constants = new Dictionary<uint, Vector4>();
             for (int c = 0; c < constantCount; c++)
             {
@@ -94,7 +119,7 @@ public sealed class ZoneTerrain
                 constants[BitConverter.ToUInt32(data, hashesAt + c * 4)] = new Vector4(
                     BitConverter.ToSingle(data, v), BitConverter.ToSingle(data, v + 4), BitConverter.ToSingle(data, v + 8), BitConverter.ToSingle(data, v + 12));
             }
-            return new Material(textures, constants);
+            return new Material(textures, constants, nameAt);
         }
 
         /// <summary>

@@ -1865,7 +1865,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         try
         {
             if (context.Assets.ReadFile(zone + ".cterrain_pc", archive, container) is { } file &&
-                ZoneTerrain.Read(file.Data) is { } ground && (PaintedBlend(zone) ?? Decode(ground.BlendMap, 4096)) is { } blend)
+                ZoneTerrain.Read(TerrainAsSwapped(zone, file.Data)) is { } ground && (PaintedBlend(zone) ?? Decode(ground.BlendMap, 4096)) is { } blend)
             {
                 RgbaImage?[] layers = ground.Layers.Select(layer => Decode(layer.Texture, TerrainPainter.DetailNeeded(layer))).ToArray();
                 if (layers.All(layer => layer != null))
@@ -2623,6 +2623,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             message += SaveFoliage();
             message += SaveBarriers();
             message += SaveGroundPaint();
+            message += SaveLayerSwaps();
             batch.Dispose();
             foreach (TerrainSculpt sculpted in sculptZones) sculpted.Saved();
             chunksToAdd.Clear();

@@ -82,6 +82,8 @@
                                       ToolTip="Which of the zone's foliage layers the painter paints or erases" />
                             <ComboBox x:Name="GroundLayerBox" Width="150" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
                                       ToolTip="Which of the zone's four ground texture layers the painter paints" />
+                            <Button x:Name="LayerTextureButton" Content="Layer texture…" Margin="4,0,0,0" Padding="6,1" VerticalAlignment="Center" Click="OnLayerTextureClicked" Visibility="Collapsed"
+                                    ToolTip="Give the chosen layer any ground texture of the game's or the Guerrilla world's" />
                             <Button x:Name="CreateTerrainButton" Content="Create terrain…" Margin="8,0,0,0" Padding="6,1" VerticalAlignment="Center" Click="OnCreateTerrain"
                                     ToolTip="Make new ground over the whole zone: hills, mountains, a canyon, a plateau, dunes or a crater, and paint it by height and slope" />
                             <TextBlock Text="Radius" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="8,0,4,0" />
@@ -155,6 +157,10 @@
                                 </DockPanel>
                             </Border>
                         </Popup>
+                        <Button x:Name="TerrainPieceButton" Style="{StaticResource ToolButton}" Click="OnTerrainPieceClicked"
+                                ToolTip="Terrain piece: make new terrain (a hill, mountain, mesa, ridge, dunes, crater...) as level geometry where the view points, to move, turn and place like any piece. With a terrain piece picked: change its shape or look">
+                            <TextBlock Text="{x:Static local:Icons.Sculpt}" Style="{StaticResource Icon}" />
+                        </Button>
                         <Button x:Name="DuplicateButton" Style="{StaticResource ToolButton}" Click="OnDuplicateClicked" IsEnabled="False"
                                 ToolTip="Duplicate the picked object, in the same place (Ctrl+D)">
                             <TextBlock Text="{x:Static local:Icons.Duplicate}" Style="{StaticResource Icon}" />

@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using RfaFormats.Meshes;
 using RfaFormats.Textures;
 
@@ -59,7 +60,7 @@ public partial class LevelEditor
         string zone = TerrainZone;
         try
         {
-            if (context.Assets.ReadFile(zone + ".cterrain_pc", archive, container) is not { } file || ZoneTerrain.Read(file.Data) is not { } ground)
+            if (context.Assets.ReadFile(zone + ".cterrain_pc", archive, container) is not { } file || ZoneTerrain.Read(TerrainAsSwapped(zone, file.Data)) is not { } ground)
             {
                 context.Log($"Ground paint: {zone} has no terrain file with ground layers, so there is nothing to paint.");
                 return false;
@@ -87,19 +88,225 @@ public partial class LevelEditor
             context.Log($"Ground paint: {zone}'s blend map couldn't be read ({ex.Message}).");
             return false;
         }
-        GroundLayerBox.Items.Clear();
-        for (int l = 0; l < blendGround.Layers.Count; l++)
-            GroundLayerBox.Items.Add(new ComboBoxItem
-            {
-                Content = $"{l + 1}: {System.IO.Path.GetFileNameWithoutExtension(blendGround.Layers[l].Texture)}",
-                ToolTip = l == 0 ? "The base layer (what shows where no other is painted)" : $"Layer {l + 1}, painted over the ones before it",
-            });
-        GroundLayerBox.SelectedIndex = blendGround.Layers.Count > 1 ? 1 : 0;
+        ShowGroundLayers(blendGround.Layers.Count > 1 ? 1 : 0);
         context.Log($"Ground paint: {zone}'s blend map {blendName} ({blendImage.Width} × {blendImage.Height}) and its layers " +
                     string.Join(", ", blendGround.Layers.Select(l => System.IO.Path.GetFileNameWithoutExtension(l.Texture))) +
                     ". Hold the left button to paint the chosen layer (Shift: the base layer back). Paint road: drag along the road, let go to grade and paint it." +
                     (ShowTexturesBox.IsChecked == true ? "" : " Turn textures on to see the paint."));
         return true;
+    }
+
+    /// <summary>The layer box: each layer by its texture (the one swapped in, by the name it came from).</summary>
+    void ShowGroundLayers(int select)
+    {
+        if (blendGround == null) return;
+        GroundLayerBox.Items.Clear();
+        for (int l = 0; l < blendGround.Layers.Count; l++)
+        {
+            string texture = layerSources.TryGetValue(l, out string? source) ? source : blendGround.Layers[l].Texture;
+            GroundLayerBox.Items.Add(new ComboBoxItem
+            {
+                Content = $"{l + 1}: {System.IO.Path.GetFileNameWithoutExtension(texture)}",
+                ToolTip = (l == 0 ? "The base layer (what shows where no other is painted)" : $"Layer {l + 1}, painted over the ones before it") +
+                          ". Layer texture… gives it any ground texture of the game's or the Guerrilla world's.",
+            });
+        }
+        GroundLayerBox.SelectedIndex = Math.Clamp(select, 0, blendGround.Layers.Count - 1);
+    }
+
+    // ---- A layer's texture swapped for any ground texture -------------------------------------
+    //
+    // A zone's ground has four layer slots; the painter can give a slot any ground texture that a zone
+    // of the game's (or the Guerrilla world's) uses. The terrain file names each layer's texture, and
+    // the new name is written over the old one in place: so that the file keeps its size (and no asset
+    // list changes), the texture is copied under a name as long as the old one's ("tx" and a hash),
+    // into a texture file of its own that saving brings into the level's containers.
+
+    readonly Dictionary<int, string> layerSwaps = [];     // layer → the name written in its place (with ".tga")
+    readonly Dictionary<int, string> layerSources = [];   // layer → the texture it is a copy of
+    bool layerSwapsChanged;
+
+    /// <summary>A zone's terrain file with the layers swapped (the bytes given, if it isn't the zone painted or none are).</summary>
+    byte[] TerrainAsSwapped(string zone, byte[] data)
+    {
+        if (layerSwaps.Count == 0 || blendZone == null || !GroundKey(zone).Equals(blendZone, StringComparison.OrdinalIgnoreCase)) return data;
+        try
+        {
+            foreach (var (layer, name) in layerSwaps) data = ZoneTerrain.WithLayerTexture(data, layer, name);
+        }
+        catch (Exception ex) when (ex is System.IO.InvalidDataException or ArgumentException) { }
+        return data;
+    }
+
+    async void OnLayerTextureClicked(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureGroundPaint() || blendGround == null) return;
+        int layer = ChosenGroundLayer;
+        context.Log("Layer texture: finding every ground texture the game's zones use (once)...");
+        List<(string Texture, int Zones)> all;
+        Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+        try { all = await context.Assets.GroundTextures(); }
+        finally { Mouse.OverrideCursor = null; }
+        if (all.Count == 0)
+        {
+            context.Log("Layer texture: no zone's ground textures could be read.");
+            return;
+        }
+        var window = new Window
+        {
+            Title = $"Layer {layer + 1}'s texture",
+            Owner = Window.GetWindow(this),
+            SizeToContent = SizeToContent.WidthAndHeight,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+        };
+        if (TryFindResource("WindowBrush") is System.Windows.Media.Brush back) window.Background = back;
+        if (TryFindResource("TextBrush") is System.Windows.Media.Brush fore) window.Foreground = fore;
+        var panel = new StackPanel { Margin = new Thickness(12), Width = 380 };
+        panel.Children.Add(new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8),
+            Text = $"Any ground texture a zone of the game's or the Guerrilla world's uses ({all.Count:N0}; how many zones use each in brackets). " +
+                   "Type to find one. Layer 1 is the base; the others are painted over it.",
+        });
+        var items = all.Select(t => $"{System.IO.Path.GetFileNameWithoutExtension(t.Texture)}  ({t.Zones})").ToList();
+        var box = new ComboBox { ItemsSource = items, IsEditable = true, IsTextSearchEnabled = true, MaxDropDownHeight = 420 };
+        string now = layerSources.TryGetValue(layer, out string? was) ? was : blendGround.Layers[layer].Texture;
+        int at = all.FindIndex(t => t.Texture.Equals(now, StringComparison.OrdinalIgnoreCase));
+        if (at >= 0) box.SelectedIndex = at;
+        panel.Children.Add(box);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+        var ok = new Button { Content = "Use it", IsDefault = true, MinWidth = 80, Margin = new Thickness(0, 0, 6, 0) };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 80 };
+        ok.Click += (_, _) => window.DialogResult = true;
+        buttons.Children.Add(ok);
+        buttons.Children.Add(cancel);
+        panel.Children.Add(buttons);
+        window.Content = panel;
+        if (window.ShowDialog() != true) return;
+        string typed = (box.Text ?? "").Split("  (")[0].Trim();
+        var chosen = all.FirstOrDefault(t => System.IO.Path.GetFileNameWithoutExtension(t.Texture).Equals(typed, StringComparison.OrdinalIgnoreCase));
+        if (chosen.Texture == null)
+        {
+            context.Log($"Layer texture: {typed} isn't one of the ground textures.");
+            return;
+        }
+        SwapLayerTexture(layer, chosen.Texture);
+    }
+
+    /// <summary>Gives a layer a texture (see above), as one change to undo.</summary>
+    void SwapLayerTexture(int layer, string texture)
+    {
+        if (blendGround == null || blendZone == null) return;
+        // The slot's name as the game's file has it (its length is what the new name must have).
+        if (context.Assets.ReadFile(blendZone + ".cterrain_pc", archive, container) is not { } file || ZoneTerrain.Read(file.Data) is not { } own) return;
+        string old = own.Layers[layer].Texture;
+        string name;
+        if (texture.Equals(old, StringComparison.OrdinalIgnoreCase)) name = old;
+        else
+        {
+            int length = old.Length - 4;  // without ".tga"
+            ulong hash = 14695981039346656037;
+            foreach (char ch in texture.ToLowerInvariant()) hash = unchecked((hash ^ ch) * 1099511628211);
+            string core = "tx" + hash.ToString("x16");
+            if (length < 8)
+            {
+                context.Log($"Layer texture: layer {layer + 1}'s name ({old}) is too short to give it another texture.");
+                return;
+            }
+            string bare = core.Length >= length ? core[..length] : core + new string('_', length - core.Length);
+            name = bare + ".tga";
+            if (!context.Assets.IsGenerated(bare + ".cvbm_pc"))
+            {
+                if (context.Assets.FindTexture(texture, archive, container) is not var (peg, found))
+                {
+                    context.Log($"Layer texture: {texture} isn't in the game's files.");
+                    return;
+                }
+                try
+                {
+                    (byte[] header, byte[] data) = peg.Single(found, name, found.MipLevels);
+                    string? like = context.Assets.TextureFileName(old, archive, container);
+                    context.Assets.AddGenerated(bare + ".cvbm_pc", header, like != null && like.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase) ? like : null);
+                    context.Assets.AddGenerated(bare + ".gvbm_pc", data);
+                }
+                catch (System.IO.InvalidDataException ex)
+                {
+                    context.Log($"Layer texture: {texture} couldn't be copied ({ex.Message}).");
+                    return;
+                }
+            }
+        }
+        var before = (Swaps: new Dictionary<int, string>(layerSwaps), Sources: new Dictionary<int, string>(layerSources));
+        if (name.Equals(old, StringComparison.OrdinalIgnoreCase)) { layerSwaps.Remove(layer); layerSources.Remove(layer); }
+        else { layerSwaps[layer] = name; layerSources[layer] = texture; }
+        var after = (Swaps: new Dictionary<int, string>(layerSwaps), Sources: new Dictionary<int, string>(layerSources));
+        void Put((Dictionary<int, string> Swaps, Dictionary<int, string> Sources) state)
+        {
+            layerSwaps.Clear();
+            foreach (var kv in state.Swaps) layerSwaps[kv.Key] = kv.Value;
+            layerSources.Clear();
+            foreach (var kv in state.Sources) layerSources[kv.Key] = kv.Value;
+            layerSwapsChanged = true;
+            if (blendZone != null && context.Assets.ReadFile(blendZone + ".cterrain_pc", archive, container) is { } f && ZoneTerrain.Read(TerrainAsSwapped(blendZone, f.Data)) is { } g)
+                blendGround = g;
+            ShowGroundLayers(layer);
+            RepaintGround();
+        }
+        Put(after);
+        LiveNeedsReload();
+        Record(new Change(null, $"Layer {layer + 1}'s texture", Undo: () => Put(before), Redo: () => Put(after)));
+        context.Log($"Layer texture: layer {layer + 1} is now {System.IO.Path.GetFileNameWithoutExtension(texture)}" +
+                    (name.Equals(old, StringComparison.OrdinalIgnoreCase) ? " (the zone's own)." : $" (copied as {name}; saving brings it into the level)."));
+    }
+
+    /// <summary>Writes the layers' textures into the terrain file and brings their copies into the level's containers. Returns what was done, for the log.</summary>
+    string SaveLayerSwaps()
+    {
+        if (!layerSwapsChanged || blendZone == null) return "";
+        string name = blendZone + ".cterrain_pc";
+        if (context.Assets.ReadFile(name, archive, container) is not { } file) return $" Layer textures: {name} couldn't be read, so they weren't saved.";
+        try
+        {
+            // The terrain file: each slot as the game had it, then the swaps.
+            byte[] data = file.Data;
+            if (ZoneTerrain.Read(data) is { } now && TryOriginalTerrain(name) is { } original && ZoneTerrain.Read(original) is { } own)
+                for (int l = 0; l < ZoneTerrain.LayerCount; l++)
+                    if (!layerSwaps.ContainsKey(l) && !now.Layers[l].Texture.Equals(own.Layers[l].Texture, StringComparison.Ordinal) && now.Layers[l].Texture.Length == own.Layers[l].Texture.Length)
+                        data = ZoneTerrain.WithLayerTexture(data, l, own.Layers[l].Texture);
+            foreach (var (layer, swapped) in layerSwaps) data = ZoneTerrain.WithLayerTexture(data, layer, swapped);
+            var said = new List<string> { PutTerrainFiles(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase) { [name] = data }) };
+            // The copies, into the level's containers that haven't them.
+            var headers = layerSwaps.Values.Select(n => System.IO.Path.GetFileNameWithoutExtension(n) + ".cvbm_pc").Where(context.Assets.IsGenerated).ToList();
+            if (headers.Count > 0)
+            {
+                if (context.Assets.FilesPackage("terrain_textures", headers, out string? why) is not { } package)
+                    said.Add($"the textures couldn't be brought in ({why})");
+                else
+                    foreach (var to in ChunkContainers())
+                    {
+                        var missing = package.Files.Where(f => Workspace.Container(to.Archive, to.Container).Find(f.Name) == null).ToList();
+                        if (missing.Count == 0) continue;
+                        var names = missing.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        said.Add($"{string.Join(", ", headers)} into {to.Container}: " +
+                                 ContainerEdits.AddFiles(Workspace, to.Archive, to.Container, missing, package.Primitives.Where(p => names.Contains(p.Name)).ToList(), []).TrimEnd('.'));
+                    }
+            }
+            layerSwapsChanged = false;
+            return $" Layer textures: {string.Join("; ", said)}.";
+        }
+        catch (Exception ex) when (ex is System.IO.InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            return $" Layer textures couldn't be saved: {ex.Message}.";
+        }
+    }
+
+    /// <summary>The game's own copy of a loose or contained terrain file (any place it has one), or null.</summary>
+    byte[]? TryOriginalTerrain(string name)
+    {
+        foreach (var (inArchive, inContainer) in context.Assets.PlacesOf(name))
+            if (TryOriginal(inArchive, inContainer, name) is { } original) return original;
+        return null;
     }
 
     int ChosenGroundLayer => Math.Clamp(GroundLayerBox.SelectedIndex, 0, ZoneTerrain.LayerCount - 1);
