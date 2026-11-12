@@ -11,9 +11,11 @@ namespace RfaEditor;
 /// (falling off steeply from the middle); Mountain a rugged rise (the bell broken up by ridged noise,
 /// so strokes build crags and spurs); Valley carves a trough with a wide flat floor and steep sides.
 /// Hill, Peak and Mountain go down instead with the opposite (Shift), Valley up (a ridge);
-/// PaintFoliage and EraseFoliage are the foliage painter's (see LevelEditor.Foliage.cs), not the ground's.
+/// PaintFoliage and EraseFoliage are the foliage painter's (see LevelEditor.Foliage.cs), not the ground's;
+/// PaintGround (the ground's texture layers) and PaintRoad (a graded road, painted) are the ground
+/// painter's (see LevelEditor.GroundPaint.cs).
 /// </summary>
-enum SculptMode { Raise, Lower, Smooth, Flatten, Hill, Peak, Mountain, Valley, PaintFoliage, EraseFoliage }
+enum SculptMode { Raise, Lower, Smooth, Flatten, Hill, Peak, Mountain, Valley, PaintFoliage, EraseFoliage, PaintGround, PaintRoad }
 
 /// <summary>
 /// A zone's ground, held for sculpting: its collision height field (in the terrain file,
@@ -264,6 +266,40 @@ sealed class TerrainSculpt
         return null;
     }
 
+    /// <summary>Where the height field starts (x, z: the zone's corner).</summary>
+    public Vector2 Corner => corner;
+
+    /// <summary>How far the height field reaches from its corner, both ways (metres).</summary>
+    public float Width => (columns - 1) * Step;
+
+    /// <summary>
+    /// Gives every sample of the field a new height: <paramref name="shape"/> (x, z, the height now)
+    /// gives it, held to what the field can store; the ground follows. Returns the parts that changed
+    /// (none if nothing did). The terrain creator and the road painter shape the ground with it.
+    /// </summary>
+    public IReadOnlyList<Part> Reshape(Func<float, float, float, float> shape)
+    {
+        float[] next = (float[])samples.Clone();
+        bool any = false;
+        float low = field.Offset, high = field.Offset + field.Scale * ushort.MaxValue;
+        for (int z = 0; z < rows; z++)
+            for (int x = 0; x < columns; x++)
+            {
+                int i = z * columns + x;
+                float h = Math.Clamp(shape(corner.X + x * Step, corner.Y + z * Step, samples[i]), low, high);
+                if (float.IsNaN(h) || MathF.Abs(h - samples[i]) < 1e-4f) continue;
+                next[i] = h;
+                any = true;
+            }
+        return any ? Restore(next) : [];
+    }
+
+    /// <summary>The lowest and highest heights the field can store.</summary>
+    public (float Low, float High) Range => (field.Offset, field.Offset + field.Scale * ushort.MaxValue);
+
+    /// <summary>Smooth noise from 0 to 1 (see <see cref="ValueNoise"/>), for the terrain creator.</summary>
+    internal static float Noise(float x, float z, int seed) => ValueNoise(x, z, seed);
+
     /// <summary>The height field's samples now (a copy), for undoing a stroke.</summary>
     public float[] Snapshot() => (float[])samples.Clone();
 
@@ -286,8 +322,8 @@ sealed class TerrainSculpt
     public IReadOnlyList<Part> Apply(Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0, Func<float, float, float?>? smoothFrom = null,
                                      bool opposite = false)
     {
-        if (mode is SculptMode.PaintFoliage or SculptMode.EraseFoliage) return [];
         lastApplyMoved = false;
+        if (mode >= SculptMode.PaintFoliage) return [];
         if (radius <= 0 || amount <= 0) return [];
         int xFrom = Math.Max(0, (int)MathF.Floor((centre.X - radius - corner.X) / Step)), xTo = Math.Min(columns - 1, (int)MathF.Ceiling((centre.X + radius - corner.X) / Step));
         int zFrom = Math.Max(0, (int)MathF.Floor((centre.Y - radius - corner.Y) / Step)), zTo = Math.Min(rows - 1, (int)MathF.Ceiling((centre.Y + radius - corner.Y) / Step));

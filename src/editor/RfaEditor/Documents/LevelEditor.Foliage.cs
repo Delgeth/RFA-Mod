@@ -28,6 +28,9 @@ public partial class LevelEditor
         bool painting = ChosenMode is SculptMode.PaintFoliage or SculptMode.EraseFoliage;
         FoliageLayerBox.Visibility = painting ? Visibility.Visible : Visibility.Collapsed;
         if (painting) EnsureFoliagePaint();
+        bool ground = ChosenMode is SculptMode.PaintGround or SculptMode.PaintRoad;
+        GroundLayerBox.Visibility = ground ? Visibility.Visible : Visibility.Collapsed;
+        if (ground) EnsureGroundPaint();
         ShowBrush();
     }
 

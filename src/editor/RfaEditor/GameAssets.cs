@@ -468,6 +468,19 @@ sealed class GameAssets
         return table;
     }
 
+    /// <summary>The name of the texture file (its header, .cpeg_pc or .cvbm_pc) holding a texture, as <see cref="FindTexture"/> finds it; null if none.</summary>
+    public string? TextureFileName(string name, string nearArchive, string? nearContainer)
+    {
+        if (nearContainer != null)
+        {
+            Packfile pack = workspace.Container(nearArchive, nearContainer);
+            foreach (PackfileEntry entry in pack.Entries.Where(e => e.Extension is "cpeg_pc" or "cvbm_pc"))
+                if (PegFile.TextureNames(pack.Read(entry)).Contains(name, StringComparer.OrdinalIgnoreCase))
+                    return entry.Name;
+        }
+        return textures != null && textures.TryGetValue(name, out TextureRef? at) ? at.PegHeader : null;
+    }
+
     /// <summary>The texture file holding a texture, and the texture in it.</summary>
     public (PegFile, PegTexture)? FindTexture(string name, string nearArchive, string? nearContainer)
     {

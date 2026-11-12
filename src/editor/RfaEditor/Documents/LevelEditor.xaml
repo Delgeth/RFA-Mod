@@ -75,9 +75,15 @@
                                 <ComboBoxItem Content="Valley" ToolTip="A trough with a wide flat floor and steep sides (Shift: a ridge)" />
                                 <ComboBoxItem Content="Paint foliage" ToolTip="Grows the chosen foliage layer on the ground under the brush (Shift: erases)" />
                                 <ComboBoxItem Content="Erase foliage" ToolTip="Takes the chosen foliage layer away under the brush (Shift: paints)" />
+                                <ComboBoxItem Content="Paint ground" ToolTip="Paints the chosen ground texture layer under the brush (Shift: paints the base layer back)" />
+                                <ComboBoxItem Content="Paint road" ToolTip="Drag a road: when you let go the ground along it is graded smooth and the chosen layer painted on it, as wide as the brush" />
                             </ComboBox>
                             <ComboBox x:Name="FoliageLayerBox" Width="150" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
                                       ToolTip="Which of the zone's foliage layers the painter paints or erases" />
+                            <ComboBox x:Name="GroundLayerBox" Width="150" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
+                                      ToolTip="Which of the zone's four ground texture layers the painter paints" />
+                            <Button x:Name="CreateTerrainButton" Content="Create terrain…" Margin="8,0,0,0" Padding="6,1" VerticalAlignment="Center" Click="OnCreateTerrain"
+                                    ToolTip="Make new ground over the whole zone: hills, mountains, a canyon, a plateau, dunes or a crater, and paint it by height and slope" />
                             <TextBlock Text="Radius" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="8,0,4,0" />
                             <Slider x:Name="SculptRadiusSlider" Width="90" Minimum="1" Maximum="80" Value="10" VerticalAlignment="Center"
                                     ValueChanged="OnBrushChanged" ToolTip="The brush's radius, in metres ([ and ])" />

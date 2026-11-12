@@ -37,7 +37,7 @@ public partial class LevelEditor
     bool strokeFromPad, padInverse;
     float padStrength = 1;
 
-    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, (int)SculptMode.EraseFoliage);
+    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, (int)SculptMode.PaintRoad);
     float BrushRadius => (float)SculptRadiusSlider.Value;
     bool SculptChanged => sculptZones.Any(z => z.Changed);
 
@@ -152,6 +152,7 @@ public partial class LevelEditor
             SculptMode.Lower or SculptMode.Valley => Color.FromRgb(90, 170, 255), SculptMode.Smooth => Color.FromRgb(140, 230, 140),
             SculptMode.Flatten => Color.FromRgb(230, 200, 90), SculptMode.Mountain => Color.FromRgb(200, 150, 255), SculptMode.Peak => Color.FromRgb(255, 90, 90),
             SculptMode.PaintFoliage => Color.FromRgb(120, 220, 90), SculptMode.EraseFoliage => Color.FromRgb(220, 220, 220),
+            SculptMode.PaintGround => Color.FromRgb(255, 220, 120), SculptMode.PaintRoad => Color.FromRgb(170, 170, 190),
             _ => Color.FromRgb(255, 140, 60),
         };
         var material = new MaterialGroup { Children = { new DiffuseMaterial(new SolidColorBrush(Colors.Black)), new EmissiveMaterial(new SolidColorBrush(colour)) } };
@@ -170,7 +171,8 @@ public partial class LevelEditor
             return false;
         }
         CommitEdit();
-        if (ChosenMode is SculptMode.PaintFoliage or SculptMode.EraseFoliage && !BeginFoliageStroke())
+        if ((ChosenMode is SculptMode.PaintFoliage or SculptMode.EraseFoliage && !BeginFoliageStroke()) ||
+            (ChosenMode is SculptMode.PaintGround or SculptMode.PaintRoad && !BeginGroundStroke(ChosenMode == SculptMode.PaintRoad)))
         {
             strokeFromPad = false;
             return false;
@@ -203,6 +205,13 @@ public partial class LevelEditor
             ShowBrush();
             return;
         }
+        if (mode is SculptMode.PaintGround or SculptMode.PaintRoad)
+        {
+            // The ground painter (LevelEditor.GroundPaint.cs): Shift paints the base layer back.
+            GroundStrokeStep(new Vector2(centre.X, centre.Z), BrushRadius, (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1) * seconds, inverse);
+            ShowBrush();
+            return;
+        }
         if (inverse) mode = mode switch { SculptMode.Raise => SculptMode.Lower, SculptMode.Lower => SculptMode.Raise, _ => mode };
         float strength = (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1);
         bool landform = mode is SculptMode.Hill or SculptMode.Peak or SculptMode.Mountain or SculptMode.Valley;
@@ -221,7 +230,7 @@ public partial class LevelEditor
         bool wasPad = strokeFromPad;
         strokeFromPad = false;
         if (sculpt == null || strokeBefore is not { } before) return;
-        if (EndFoliageStroke())
+        if (EndFoliageStroke() || EndGroundStroke(before))
         {
             strokeBefore = null;
             standing = null;
