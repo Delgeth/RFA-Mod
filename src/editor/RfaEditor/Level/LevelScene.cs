@@ -38,6 +38,7 @@ sealed class LevelScene
     readonly Func<string, uint?, List<(MeshGeometry3D Mesh, Material Material)>?> model;
     readonly Dictionary<ObjectKind, Material> kindMaterials = [];
     Func<ObjectKind, bool> shown = _ => true;
+    Func<ZoneObject, bool> hidden = _ => false;  // objects hidden one by one (the Scene panel's eyes), whatever their kind
 
     public Model3DGroup Root { get; } = new();
     public int ModelsPlaced { get; private set; }
@@ -215,7 +216,7 @@ sealed class LevelScene
         if (batchesOf.Remove(obj, out var inBatches))
             foreach (Batch batch in inBatches) batch.Squash(obj);
         foreach ((GeometryModel3D geometry, _) in Placed(piece, Matrix3D.Identity)) looseGeometry[geometry] = obj;
-        if (shown(kindOf[obj])) Root.Children.Add(piece);
+        if (shown(kindOf[obj]) && !hidden(obj)) Root.Children.Add(piece);
     }
 
     /// <summary>Draws an object added to the zone (or put back), on its own.</summary>
@@ -255,15 +256,21 @@ sealed class LevelScene
     /// <summary>How many objects of a kind the zone has.</summary>
     public int Count(ObjectKind kind) => kindOf.Values.Count(k => k == kind);
 
-    /// <summary>Draws only the objects of the kinds chosen; the others can't be seen or clicked.</summary>
-    public void ShowOnly(Func<ObjectKind, bool> shown)
+    /// <summary>
+    /// Draws only the objects of the kinds chosen, and of those not the ones <paramref name="hidden"/>
+    /// takes; the others can't be seen or clicked. An object hidden on its own is taken out of its
+    /// batch first, to be left out by itself.
+    /// </summary>
+    public void ShowOnly(Func<ObjectKind, bool> shown, Func<ZoneObject, bool>? hidden = null)
     {
         this.shown = shown;
+        if (hidden != null) this.hidden = hidden;
+        foreach (ZoneObject obj in pieceOf.Keys.Where(o => this.hidden(o) && !loose.Contains(o)).ToList()) Loosen(obj);
         Root.Children.Clear();
         foreach (Batch batch in batches)
             if (shown(batch.Kind)) Root.Children.Add(batch.Geometry);
         foreach (ZoneObject obj in loose)
-            if (shown(kindOf[obj])) Root.Children.Add(pieceOf[obj]);
+            if (shown(kindOf[obj]) && !this.hidden(obj)) Root.Children.Add(pieceOf[obj]);
     }
 
     /// <summary>

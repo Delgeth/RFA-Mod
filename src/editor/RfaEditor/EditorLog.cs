@@ -32,10 +32,15 @@ static class EditorLog
         catch (UnauthorizedAccessException) { file = null; }
     }
 
+    static readonly object writing = new();  // (the hang watch writes from a thread of its own)
+
     public static void Write(string line)
     {
-        try { file?.WriteLine(line); }
-        catch (IOException) { }
+        lock (writing)
+        {
+            try { file?.WriteLine(line); }
+            catch (IOException) { }
+        }
     }
 
     /// <summary>Writes down a crash: the error, where it happened, and the memory in use.</summary>

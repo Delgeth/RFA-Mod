@@ -10,6 +10,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        FluentLook.Load(this, new Uri("pack://application:,,,/RfaEditor;component/Theme.xaml"));
         // Nothing here is tied to one PC: the mod folder is wherever the editor was put (next to
         // rfa_mods.ini), and the game is wherever its GameDir says, or that folder itself.
         string modFolder = Workspace.FindModFolder();
@@ -22,6 +23,7 @@ public partial class App : Application
                             "RFA Editor", MessageBoxButton.OK, MessageBoxImage.Error);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, args) => { if (args.ExceptionObject is Exception error) EditorLog.Crash(error); };
+        HangWatch.Start(Dispatcher);  // and if the window stops answering, that is written down too
         string? gameFolder = Workspace.FindGameFolder(modFolder) ?? AskForGameFolder(modFolder);
         if (gameFolder == null)
         {

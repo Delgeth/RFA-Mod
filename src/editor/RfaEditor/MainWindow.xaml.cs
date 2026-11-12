@@ -14,7 +14,7 @@ namespace RfaEditor;
 /// file, tables, levels), the chosen document's outliner and inspector on the right, and a log at
 /// the bottom. The game folder is only ever read.
 /// </summary>
-public partial class MainWindow : Window
+public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 {
     readonly Workspace workspace;
     readonly EditorContext context;
@@ -139,7 +139,11 @@ public partial class MainWindow : Window
         }
     }
 
-    void OnSourceInitialized(object? sender, EventArgs e) => DarkTitleBar.Apply(this);
+    void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        DarkTitleBar.Apply(this);
+        StartShell();  // the workspaces: see MainWindow.Shell.cs
+    }
 
     void OnClosing(object? sender, CancelEventArgs e)
     {

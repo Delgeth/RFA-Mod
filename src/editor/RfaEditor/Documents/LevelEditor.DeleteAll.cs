@@ -4,34 +4,34 @@ using RfaFormats.Zones;
 
 namespace RfaEditor;
 
-// Delete all: every chunk (object placing a model), every piece of level geometry, or every object
-// of the picked one's class, at once, as one step to undo. What other things name (a trigger's
+// Delete all (in the Edit menu): every chunk (object placing a model), every piece of level geometry,
+// or every object of the picked one's class, at once, as one step to undo. What other things name (a trigger's
 // links, a navpoint path, an object in a mission layer or the persistent zone) is left, as Delete
 // leaves it, and the log says how many.
 public partial class LevelEditor
 {
     static bool IsChunk(ZoneObject obj) => !IsGeometry(obj) && LevelScene.ModelOf(obj) is string model && model.EndsWith(".cchk_pc", StringComparison.OrdinalIgnoreCase);
 
-    void OnDeleteAllClicked(object sender, RoutedEventArgs e)
+    /// <summary>Edit > Delete all: its choices, each with how many it would delete, filled in as it opens.</summary>
+    void OnDeleteAllMenuOpened(object sender, RoutedEventArgs e)
     {
-        var menu = new ContextMenu { PlacementTarget = DeleteAllButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        DeleteAllMenu.Items.Clear();
         void Item(string text, Func<ZoneObject, bool> which, string what)
         {
             int count = zone.Objects.Count(o => Editable(o) && which(o) && o.Parent == ZoneObject.None);
             var item = new MenuItem { Header = $"{text} ({count:N0})", IsEnabled = count > 0 };
             item.Click += (_, _) => DeleteAll(which, what);
-            menu.Items.Add(item);
+            DeleteAllMenu.Items.Add(item);
         }
-        Item("Delete all chunks (buildings and props)", IsChunk, "chunk");
-        Item("Delete all level geometry (stitch pieces)", IsGeometry, "piece of level geometry");
-        Item("Delete all chunks and level geometry", o => IsChunk(o) || IsGeometry(o), "chunk or piece of level geometry");
+        Item("Chunks (buildings and props)", IsChunk, "chunk");
+        Item("Level geometry (stitch pieces)", IsGeometry, "piece of level geometry");
+        Item("Chunks and level geometry", o => IsChunk(o) || IsGeometry(o), "chunk or piece of level geometry");
         if (selected != null && Editable(selected))
         {
             uint type = selected.ClassHash;
             string name = names.Class(type);
-            Item($"Delete all {name}", o => o.ClassHash == type, name);
+            Item($"Every {name}", o => o.ClassHash == type, name);
         }
-        menu.IsOpen = true;
     }
 
     /// <summary>Deletes every editable object that <paramref name="which"/> takes (and what is attached to them), as one step, leaving those other things name.</summary>

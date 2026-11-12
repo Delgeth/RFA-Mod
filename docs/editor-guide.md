@@ -24,16 +24,37 @@ files the next time you start it with `RFAModLauncher.exe`. Back to the [README]
    one with `RedFactionArmageddon_DX11.exe`) when it asks; it fills `GameDir=` in for the
    launcher too. It works with any copy of the game, not only the publicbeta branch.
 
-The window is laid out like other game editors (Nanoforge among them):
+The window:
+- **The title bar**: the menus of the tab you are working in, where its file is (in the middle),
+  and the **Overrides folder** button.
+- **What you open** (the middle, as tabs): the preview of the file you pick in the explorer, and
+  every table and zone you open.
 - **Explorer** (left): every archive in the game, and search.
-- **Documents** (middle, as tabs): the preview of the file you pick in the explorer, and every
-  table and level you open.
-- **Outliner** and **Inspector** (right): what is in the open document (a level's objects, a
-  table's entries), and the details of what you picked (an object's properties, a file's details
+- **Scene** (the outliner) and **Inspector** (right): what is in the tab you are working in (a zone's objects,
+  a table's entries), and the details of what you picked (an object's properties, a file's details
   and buttons).
-- **Log** (bottom): everything the editor did, such as each save. It's also written to
-  `logs\editor.log` (the last session's is kept as `editor.prev.log`), with what went wrong if
-  the editor crashes.
+- **Assets** (bottom): what you can add to the zone you are working in, to pick and drag into
+  its view (see [The Assets panel](#the-assets-panel)).
+- **Log** (bottom, beside Assets): everything the editor did, such as each save. It's also written to
+  `logs\editor.log` (the last session's is kept as `editor.prev.log`), with what went wrong if the
+  editor crashes, and, if the window stops answering for 10 seconds or more, what the editor was
+  doing then (and when it answered again). Send that file with a report of a crash or a hang.
+- **The status line** (the foot): what the editor last did; the tab's own status (whose zone it is
+  and where saving puts it); which copy of RFA-Mod this editor belongs to (its folder, shortened:
+  hover for the whole path) and where the game is; how much memory the editor uses. Start the game
+  with `RFAModLauncher.exe` from that same folder to see what you saved.
+
+On Windows 11 the title bar and the status line show your desktop's colours faintly through them.
+
+You can put the panels where you like:
+- Drag a panel by its title, or a tab by its tab. Drop it on one of the arrows that appear to dock
+  it to that side, or on the middle one to make it a tab of the panel under it. Drop it anywhere
+  else and it floats as a window of its own.
+- The pin in a panel's title tucks it away at the side of the window until you point at it.
+- Drag a zone's tab to a side of the other tabs to see two zones next to each other. The panels
+  show the tab you last clicked in.
+- Where you leave the panels is remembered (in `editor\layout\main.xml`). Delete that file while
+  the editor is closed to put them back where they started.
 
 ## Browsing the game's files
 
@@ -141,13 +162,36 @@ What you can do:
 
 The game's world is a grid of zones; each holds the objects placed in that part of a level
 (buildings and props, lights, spawn points, navigation points, triggers, ...). Double-click a zone
-(`.rfgzone_pc`, or a mission's `.layer_pc`), or press **Open in level editor**.
+(`.rfgzone_pc`, or a mission's `.layer_pc`), or press **Open in level editor**. It opens as a tab.
+
+### The zone's tab
+
+- **The menus** (File, Edit, View, Tools, Game, Help), in the window's title bar while the zone is
+  the tab you work in, hold every command, with its key beside it.
+- **The toolbar** over the view, left to right: the tools (Select, Move, Rotate, Sculpt); Snap, the
+  **snap step** and Magnets; **+**, which adds an object; what is drawn (Models, Textures, the
+  Direct3D view, Game light); look at the picked object and show the whole zone; the running game's
+  three (show in game, follow the game, props as in the game). On its right: **undo**, **redo**
+  and **Save**.
+- In the view's bottom right corner, brought up to date every frame: **fps** and **frame** (how often
+  the window draws itself, at most as often as your screen shows a new picture), and with the
+  Direct3D view on, **cpu** and **gpu** (what the last frame of the level took the processor and the
+  graphics card, by the card's own clock) and **drawn** (how many frames of the level the card drew
+  in the last second: the level is drawn again only when something changes, so it is 0 while
+  nothing does).
+- **The status line** at the window's foot: whose zone it is and where saving puts it (hover over it
+  for all of it).
+- **Scene** (the panel on the right): the zone as a tree, with an eye on every row (see below).
+- **Assets** (the panel at the bottom): everything you can add, in folders, with a preview; drag
+  one into the view to put it there (see below).
+- Hover over any button to see what it does. **Help > Mouse and keys** lists every mouse button
+  and key of the view.
 
 ### What you see
 
 - Every building and prop with its model and textures where the zone puts it, with all its parts
   in place.
-- The items and weapons lying about (ammo, salvage, audio logs, guns: the **Pickups** chip).
+- The items and weapons lying about (ammo, salvage, audio logs, guns: the **Pickups** kind).
 - The enemies and allies at squad spawns (each squad's leader), and exos and vehicles (LAVs,
   walkers, flyers, tanks) at their spawns.
 - Turrets, with base, swivel and gun head fitted together.
@@ -164,7 +208,7 @@ The game's world is a grid of zones; each holds the objects placed in that part 
   all over the Guerrilla world) are drawn with their road texture; in the game their edges blend
   into the ground's layers, which the editor doesn't show yet.
 - The zone's **mission layers**: what each mission adds (its enemies at their squad spawns,
-  triggers, force fields, turrets, vehicles), with a chip and an outliner group per mission
+  triggers, force fields, turrets, vehicles), with a row of their own in the Scene panel per mission
   (`Mission_01A` for `world_08_02`). You can pick their objects and read their properties;
   **Open** opens the layer in its own tab to change them. A layer opened on its own is drawn
   with its zone's objects in the same way.
@@ -173,11 +217,53 @@ The game's world is a grid of zones; each holds the objects placed in that part 
   colour maps) and objects' models, so the zone's edges meet what is next to them. You can't pick them; open a zone
   to work on it. **Zones around** hides them.
 
-The **Show** chips above the view hide or show a whole kind at once (say, everything but the
-buildings), and the grid. Level geometry, terrain and foliage can be hidden but not picked or
-changed yet, and clicking them doesn't pick objects behind them. They appear once the editor has
-read every container. The axis widget in the corner shows which way X, Y and Z point. Hover over a
-toolbar icon to see what it does; **?** lists every mouse button and key.
+### The Scene panel
+
+The **Scene** panel shows the zone as a tree:
+- **the zone**: its objects by kind (models, lights, spawns, regions, ...), each kind by class, and
+  under each class its objects;
+- **its mission layers**, each with its objects by class;
+- **the level's parts**: the zones around, the terrain, foliage, decals, level geometry, the links
+  and the grid.
+
+Every row has an **eye** at its right end: click it to hide what the row stands for, and again to
+show it. That hides a whole kind (in the mission layers too), a whole class, one object, a layer
+or a part of the level. What is hidden is drawn dim in the list. Hiding is only how the view draws:
+the zone isn't changed, and you can't click what is hidden. Click a row to pick its object, or pick
+an object in the view to find its row. **+** adds an object (as in the toolbar), and the **Find**
+box narrows the tree to the objects whose name or class has what you type.
+
+Terrain and foliage can be hidden but not picked or changed yet, and clicking them doesn't pick
+objects behind them. They appear once the editor has read every container. The axis widget in the
+view's corner shows which way X, Y and Z point.
+
+### The Assets panel
+
+The **Assets** panel (at the bottom, beside the Log) holds everything you can add to the zone you
+are working in, in folders on its left:
+- **This file**: one of each kind of object the zone has (by class and name), by kind. Adding one
+  adds a copy, with what is joined to it.
+- **Chunks**: every building and prop in the game's files (the Guerrilla world's too, once it is
+  built), whatever level it comes from: **by type** (props, structures, ...; then by category),
+  **by setting** (common, city, EDF, ...) and **by pack** (the archive that has it).
+- **Level geometry**: every stitch piece (rock walls, cliffs, ledges, roads, ...), by category,
+  setting and pack.
+- **New objects**: every class in the game's schema that can be made from it alone (lights,
+  spawns, triggers, effects, items, ...), by kind.
+- **Everything**, at the top, lists all of them at once.
+
+Pick a folder to list what is in it and in the folders under it. The **Find** box narrows the list
+to what has the words you type in its name, category or setting ("crate", "containers"). Pick
+something to see it on the right: its model in 3D (drag to turn it, right-drag to slide it, the
+wheel to come closer), or its kind's icon if it has no model. Then:
+- **double-click** it (or press **Enter**) to add it where the middle of the view points, or
+- **drag** it into the 3D view and let go where you want it: it goes on whatever is under the
+  mouse there (the ground, a building, level geometry), or 15 m ahead if nothing is.
+
+Adding works as the Add list's does (see [Changing objects](#changing-objects)): a chunk is copied
+from a level that places it, or made as a new mover, and its model comes with it when you save;
+the new object is picked, and each addition is one step to undo. Chunks and level geometry show
+once the editor has read the game's files, a few seconds after it starts.
 
 ### Links between objects
 
@@ -185,15 +271,16 @@ Pick an object and its links are drawn as lines: yellow to the objects it names,
 naming it, with an arrow pointing at the one named. They're also listed in the inspector's
 **Links** section; click one to pick it and fly to it. Links tie a level's logic together:
 navpoints' paths, roads, a patrol's first navpoint, a logic handler's triggers and the objects it
-acts on, the objects an animated rig moves, lights attached to buildings. The **Links** chip draws
+acts on, the objects an animated rig moves, lights attached to buildings. The **Links** row's eye in the Scene panel draws
 every link of the zone and its mission layers at once, each in the colour of the object naming
 the other. Lines keep the same width on the screen near and far. You can't edit links yet.
 
 ### Looking like the game
 
-- **Direct3D view** (the monitor icon at the right of the toolbar) draws the level on the graphics
-  card instead of WPF. It shows the same things from the same camera; picking, the gizmo and
-  everything else work as before.
+- **Direct3D view** (the monitor in the toolbar, or View > Direct3D view; on when a
+  zone opens) draws the level on the graphics card. Turn it off to draw with WPF instead; if your graphics card can't
+  draw it, the log says why and WPF draws the level. It shows the same things from the same camera;
+  picking, the gizmo and everything else work the same either way.
 - **Game light** (the sun icon next to it) lights the level as the game does:
   - every lamp of the zone and the zones around, the ambient light, fog and exposure of the area
     the camera is in, and the game's tone curve;
@@ -247,13 +334,15 @@ orange and closed in while holding one.
 
 ### Sculpting the ground
 
-**Sculpt** (T, or the mountain button in the toolbar) shapes the zone's ground. An orange ring shows
-the brush on the ground.
+**Sculpt** (T, the brush in the toolbar, or Tools > Sculpt the ground) shapes the zone's ground. An
+orange ring shows the brush on the ground, and a small **Sculpt** box in the view's top left corner
+has the brush's choices while you sculpt.
 
 - Hold the left mouse button and move it to sculpt. **Raise** and **Lower** push the ground up and
   down (Shift does the opposite), **Smooth** evens it out, and **Flatten** levels it at the height
   where the stroke began. Each stroke is one step to undo.
-- **[** and **]**, or the Radius slider, change the brush's size; Strength is how fast it works.
+- **[** and **]**, or the Sculpt box's Radius, change the brush's size; Strength is how fast it
+  works, and Brush is what a stroke does.
 - Strokes carry on across zones: the sculptor holds the ground of the zones around this one too,
   so a stroke near an edge shapes both sides of it the same (Smooth evens out over the edge), and
   you can sculpt the ground all round the zone.
@@ -287,13 +376,13 @@ the brush on the ground.
 
 ### Changing objects
 
-- **Pick** an object by clicking it (or with a controller: see above), or in the outliner (which lists objects by class, with a Find
+- **Pick** an object by clicking it (or with a controller: see above), or in the Scene panel (which lists objects by kind and class, with a Find
   box). **Q** is just picking.
 - **Move** (W): drag the arrows along X (red), Y (green) or Z (blue). **Rotate** (E): drag the rings
   to turn it. **Snap** moves in steps of the size you choose and turns in 15° steps. What is
   attached to the picked object (a tank on its base, a building's pieces and lights) moves and
   turns with it.
-- **Magnets** (M, or the magnet button beside the snap size; on to start with): a moved object
+- **Magnets** (M, the plug in the toolbar, or Tools > Magnets; on to start with): a moved object
   jumps to touch the models near it, corner to corner, edge to edge or face to face, so chunks line
   up without gaps or overlaps. The points are the corners, the middles of the edges and the
   middles of the faces of each model's box, turned with it; they hold within a reach that grows
@@ -322,14 +411,16 @@ the brush on the ground.
     read-only properties** to see and change them anyway.
   - Properties Volition's tools added that the schema doesn't describe (a navpoint's data, links,
     a building's destruction data) are shown at the end, with their names from the game.
-- **Add** (+ in the toolbar) lists one of each kind of object the file has (a crate, a light, a
+- **Add** (+ in the toolbar, or Edit > Add) lists one of each kind of object the file has (a crate, a light, a
   squad spawn, a building piece, ...), with a Find box. Pick one to add a copy where the middle of
   the view points. Below them are **new objects** of every class in the game's schema that can be
   made from it alone (lights, spawns, triggers, effects, items, ...): a new one gets every
   property at the schema's default, as Volition's tools would have written it, where the middle
   of the view points. Hover over the last line for the classes that can't be made this way and
   why (navpoints, roads and buildings need data Volition's tools made). A few classes, marked
-  *unused*, are in none of the game's levels, so the game may do nothing with them.
+  *unused*, are in none of the game's levels, so the game may do nothing with them. The
+  [Assets panel](#the-assets-panel) offers the same things in folders, with a preview, to drag
+  into the view.
 - **Any chunk from the game**: the Add list's **Browse the game's chunks** section sorts every
   building and prop in the game's files (the Guerrilla world's too, once it is built), whatever level
   it comes from, four ways:
@@ -359,7 +450,7 @@ the brush on the ground.
     which takes a little while.
 - **Level geometry** (the stitch pieces the zone's stitch list places: rock walls, cliffs, cave
   ceilings, ledges, roads, bridges) can be edited like objects: each piece is one, of the kind
-  *Level geometry* (its chip hides them; the outliner lists them under `level_geometry`). Pick one
+  *Level geometry* (its eye in the Scene panel hides them; it lists them under `level_geometry`). Pick one
   and move it, turn it, type its numbers, carry it with the controller, snap it with magnets,
   duplicate or delete it. **Add** lists every stitch piece in the game too, as the type *Level
   geometry* in the chunk browser (by category, setting and pack, or by name): pick one to place it
@@ -374,7 +465,7 @@ the brush on the ground.
 - **Delete** (Del) removes the picked object with the objects attached to it (a building's lights).
   It's refused, saying why, while something else names one of them (another object's links, such
   as navpoints linked in a path, or an object in a mission layer).
-- **Delete all** (the bin marked *All*, beside Delete) deletes every chunk (building and prop), every
+- **Delete all** (Edit > Delete all, which says how many of each) deletes every chunk (building and prop), every
   piece of level geometry, both, or every object of the picked one's class, with what is attached
   to them, in one step to undo. Those something else names are kept, as Delete keeps them, and the
   log says how many.
@@ -406,14 +497,16 @@ the brush on the ground.
 Start the game with `RFAModLauncher.exe` (the console mod links it to the editor through the
 `link\` folder):
 
-- **Show in game** (the controller icon) sends the game's camera to the picked object, in slew mode
+These three are in the **Game** menu, and at the right end of the toolbar.
+
+- **Show in game** (the controller) sends the game's camera to the picked object, in slew mode
   (the free camera), keeping the way it looks, and picks the object there, so the game's debug
   display names it.
-- **Follow the game** (the link icon) moves the editor's view with the game's camera and field of
+- **Follow the game** (the link) moves the editor's view with the game's camera and field of
   view (the same vertical view as your FOV setting, however wide the editor's view is), and picks here what you pick there (Q in slew mode) when it's in the open zone or its
   mission layers. Handles and positions are the game's own, so the same object is at the same
   place in both.
-- **Props as in the game** (the arrow-down icon): clutter (debris, barrels, crates, wreck pieces)
+- **Props as in the game** (the arrow down): clutter (debris, barrels, crates, wreck pieces)
   falls and settles by physics when the level starts, so the game has it somewhere other than
   where the zone file puts it. While this is on, the editor asks the game twice a second where
   each of the zone's clutter props is and draws it there. Only the drawing changes: the zone
