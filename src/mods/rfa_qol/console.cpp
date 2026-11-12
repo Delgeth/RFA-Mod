@@ -1501,6 +1501,7 @@ constexpr wchar_t kSharedName[] = L"Local\\RFAModEditorLink";
 constexpr uint32_t kSharedMagic = 0x4C414652;  // "RFAL"
 
 SharedView* g_shared = nullptr;
+bool g_linkFolderThere = false;  // bin\link is there (the editor's link is set up)
 DWORD g_lastPicked = 0;
 ULONGLONG g_lastCheck = 0;
 
@@ -1541,6 +1542,13 @@ void ShowEditor() {
 bool RunEditorEdit(const std::string& line);  // the editor's live edits (below)
 
 // Runs the commands the editor sent, if any, and deletes them.
+// The renderer's lock (rl_is_locked, 0xD2EC00): set while a frame is drawn on the render thread (the
+// main loop's handshake, 0x521D70: unlocked by 0x76AA50 as the game's update starts, locked again by
+// 0x76AA80). Placing or making draw instances (and objects with models) while it is set fails the
+// game's "rl_is_locked() == false" check and leaves the scene half changed, so the editor's commands
+// run only while it isn't: from the frame hook when it isn't, and right after 0x76AA50 unlocks it.
+bool RenderLocked() { return *reinterpret_cast<volatile BYTE*>(0x2E7A6A9) != 0; }
+
 void RunEditorCommands() {
     const std::wstring path = LinkFolder() + L"\\to_game.txt";
     WIN32_FILE_ATTRIBUTE_DATA info;
@@ -1792,6 +1800,7 @@ void LoadEditorChunk(const std::string& assetList, const std::string& container)
 // ("chunk_texture", allocator 1), finished (0x909E60) and loaded at once (0x908FC0). (Reading an asset
 // list instead, 0x90A3A0, faults: its temporary allocator is only open while the game starts.) A file
 // the game can't find is fatal there, so each is looked for first (0xC92010).
+constexpr bool g_makeChunkGroups = false;  // (see LoadEditorChunkFiles)
 auto const StreamContainerStart = reinterpret_cast<bool(__cdecl*)(const char* name, void* pool, BYTE type, BYTE notPreload, BYTE)>(0x909670);
 auto const StreamAddPrimitive = reinterpret_cast<void*(__cdecl*)(const char* file, const char* typeName, BYTE allocator, char split, int, BYTE flags, int)>(0x9097A0);
 auto const StreamContainerFinish = reinterpret_cast<void*(__cdecl*)(BYTE, BYTE)>(0x909E60);
@@ -1861,6 +1870,14 @@ void LoadEditorChunkFiles(const std::string& line) {
     };
     bool faulted = false;
     void* found = GuardedFindContainer(group.c_str(), &faulted);
+    if (!found && !faulted && !g_makeChunkGroups) {
+        // Making a group the game's asset lists don't name stalls the game for most of a minute and
+        // then fails (its container pool is full once the game has started): not tried.
+        rfa::Log("Editor link: chunk %s: the game's asset lists have no group of that name (a chunk from the Guerrilla world or "
+                 "another archive the game hasn't loaded); it shows after the level is saved and loaded again", group.c_str());
+        reply(false);
+        return;
+    }
     if (!found && !faulted) {
         // The names stay with the streaming system: kept for good.
         std::vector<const char*> files;
@@ -2018,12 +2035,18 @@ int GuardedPlacePiece(BYTE* piece, BYTE* record, BYTE* zone, bool ownBody, const
 int GuardedHidePiece(BYTE* piece, bool ownBody) {
     __try {
         FreeStitchDraw(piece);
-        LivePieceOf(piece).hidden = true;
-        // Its collision: far below the world (a body can't be taken out of the world safely here).
-        float away[12];
-        memcpy(away, piece + kPiecePlace, sizeof(away));
-        away[1] = -20000.0f;
-        PlaceBody(BodyFor(piece, nullptr, ownBody, false), away);
+        LivePiece& live = LivePieceOf(piece);
+        live.hidden = true;
+        // Its collision goes as the level's take-down lets a piece's go (0x7755C0: handle, 0, 1, 1); it
+        // is made again if the piece is put back. (Put far away instead, a body outside the world's
+        // broadphase has the game take the zone down.)
+        if (ownBody) {
+            DWORD& own = *reinterpret_cast<DWORD*>(piece + kPieceBody);
+            if (own != kNoBody && own != 0) FreeBody(own, false, true, true);
+            own = kNoBody;
+        }
+        if (live.body != kNoBody) FreeBody(live.body, false, true, true);
+        live.body = kNoBody;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -5;
@@ -2074,6 +2097,66 @@ bool CombinedCollision(BYTE* header) {
     }
 }
 
+void GuardedFreePiece(BYTE* piece, DWORD body, bool draws);
+
+// Terrain records whose combined collision was swapped for a body per piece (below).
+std::vector<BYTE*> g_ownBodyRecords;
+
+// A level whose pieces share one combined collision (header +0x90 parts, their bodies +0x98) can't
+// have one piece's collision moved. The first time one of its pieces is moved or taken away live,
+// its collision is made as the game makes it when it has no combined one (0x6BBAC0): the combined
+// bodies let go (their handles -1, so the take-down skips them; their shapes stay for the unloader),
+// and each piece given a body of its own (0x6BC270, told its piece, at +0x38, which the take-down
+// lets go). Pieces taken away live get none. Returns the number of bodies made, or -1 if it faulted.
+int GuardedOwnBodies(BYTE* header, BYTE* zone) {
+    int made = 0;
+    __try {
+        const int parts = *reinterpret_cast<int*>(header + 0x90);
+        DWORD* combined = *reinterpret_cast<DWORD**>(header + 0x98);
+        for (int i = 0; combined && i < parts; i++) {
+            if (combined[i] != kNoBody) FreeBody(combined[i], false, true, true);
+            combined[i] = kNoBody;
+        }
+        for (int list = 0; list < 9; list++) {
+            BYTE* pieces = *reinterpret_cast<BYTE**>(header + list * 4);
+            const int count = *reinterpret_cast<int*>(header + 0x24 + list * 4);
+            for (int i = 0; pieces && i < count; i++) {
+                BYTE* piece = pieces + i * kPieceSize;
+                DWORD& own = *reinterpret_cast<DWORD*>(piece + kPieceBody);
+                own = kNoBody;
+                if (!HasDraws(piece)) continue;  // (taken away)
+                BYTE* chunk = ChunkByName(*reinterpret_cast<const char**>(piece));
+                if (!chunk) continue;
+                own = MakeStitchBody(chunk, zone, piece);
+                if (BYTE* body = own != kNoBody ? BodyOf(own) : nullptr) {
+                    SetBodyUserData(body, 0xE, piece);
+                    made++;
+                }
+            }
+        }
+        return made;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// Whether the record's pieces each have a body of their own now (made so if they shared one).
+bool OwnBodies(BYTE* record, BYTE* header, BYTE* zone) {
+    if (!CombinedCollision(header)) return true;
+    if (std::find(g_ownBodyRecords.begin(), g_ownBodyRecords.end(), record) != g_ownBodyRecords.end()) return true;
+    // Bodies made earlier for its pieces (moved before this): let go, the pieces get their own.
+    for (auto& [piece, live] : g_livePieces) {
+        if (live.record != record || live.body == kNoBody) continue;
+        GuardedFreePiece(piece, live.body, false);
+        live.body = kNoBody;
+    }
+    const int made = GuardedOwnBodies(header, zone);
+    g_ownBodyRecords.push_back(record);
+    rfa::Log(made >= 0 ? "Editor link: the level geometry's combined collision swapped for a body per piece (%d), so pieces' collision moves with them"
+                       : "Editor link: swapping the level geometry's combined collision for a body per piece FAULTED", made);
+    return made >= 0;
+}
+
 // editor_stitch <zone>.cterrain_pc <list> <index> <piece name> x y z <9 rotation numbers>: the level's
 // own piece moved (or put back). editor_stitch_hide <zone>.cterrain_pc <list> <index> <piece name>: taken away.
 void EditorStitchPiece(const std::string& line, bool hide) {
@@ -2091,7 +2174,7 @@ void EditorStitchPiece(const std::string& line, bool hide) {
     BYTE *piece = nullptr, *record = nullptr, *header = nullptr, *zone = nullptr;
     int result = GuardedFindPiece(cterrain, list, index, name, &piece, &record, &header, &zone);
     if (result > 0) {
-        const bool ownBody = !CombinedCollision(header);
+        const bool ownBody = OwnBodies(record, header, zone);
         result = hide ? GuardedHidePiece(piece, ownBody) : GuardedPlacePiece(piece, record, zone, ownBody, numbers);
     }
     static int done = 0, problems = 0;
@@ -2254,6 +2337,7 @@ void __cdecl TerrainTakeDown(BYTE* record) {
         if (it->second.body != kNoBody) GuardedFreePiece(it->first, it->second.body, false);
         it = g_livePieces.erase(it);
     }
+    g_ownBodyRecords.erase(std::remove(g_ownBodyRecords.begin(), g_ownBodyRecords.end(), record), g_ownBodyRecords.end());
     if (freed) rfa::Log("Editor link: %d level geometry pieces made live let go with their zone", freed);
     g_terrainTakeDown(record);
 }
@@ -2501,18 +2585,27 @@ void AnswerLightingWanted() {
 using FrameUpdateFn = void(__cdecl*)();
 FrameUpdateFn g_frameUpdate;
 
+// 0x76AA50 (the handshake's "unlock the renderer"), replaced: as the game's, then the editor's commands,
+// in the window where the renderer is unlocked.
+constexpr DWORD kRenderUnlock = 0x76AA50;
+void __cdecl RenderUnlock() {
+    if (RenderLocked()) reinterpret_cast<void(__cdecl*)()>(0xD2EA20)();
+    ++*reinterpret_cast<int*>(0x1973834);
+    if (g_linkFolderThere) RunEditorCommands();
+}
+
 void __cdecl FrameUpdate() {
     g_frameUpdate();
     ShowEditor();
     if (g_drawsConsole && g_settings.gameLog) ReadReports();
     // The editor's commands are looked for every frame (Live sends them as you drag), the rest ten times a second.
     static int linkFolderChecks = 0;
-    static bool linkFolderThere = false;
     if (linkFolderChecks-- <= 0) {
-        linkFolderThere = GetFileAttributesW(LinkFolder().c_str()) != INVALID_FILE_ATTRIBUTES;
+        g_linkFolderThere = GetFileAttributesW(LinkFolder().c_str()) != INVALID_FILE_ATTRIBUTES;
         linkFolderChecks = 60;
     }
-    if (linkFolderThere) RunEditorCommands();
+    const bool linkFolderThere = g_linkFolderThere;
+    if (linkFolderThere && !RenderLocked()) RunEditorCommands();
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastCheck < kCheckEveryMs) return;
     g_lastCheck = now;
@@ -2588,6 +2681,15 @@ void console::Init() {
                  : "Could not hook the game's startup / gameplay points; console.ini is off");
 
     ShareWithEditor();
+    {
+        // (The game's own 0x76AA50 is checked first: push ebp / mov ebp,esp / call 0xD2EC00.)
+        const BYTE expected[] = {0x55, 0x8B, 0xEC, 0xE8};
+        if (memcmp(reinterpret_cast<void*>(kRenderUnlock), expected, sizeof(expected)) == 0 &&
+            rfa::ReplaceFunction(kRenderUnlock, reinterpret_cast<void*>(&RenderUnlock)))
+            rfa::Log("Editor link: the editor's commands run while the renderer is unlocked");
+        else
+            rfa::Log("Editor link: could not take the renderer's unlock; the editor's commands wait for frames it is unlocked in");
+    }
     g_frameUpdate = reinterpret_cast<FrameUpdateFn>(
         rfa::HookFunction(kFrameUpdate, kFrameUpdatePrologue, reinterpret_cast<void*>(&FrameUpdate)));
     rfa::Log(g_frameUpdate ? "Editor link: the camera is shared every frame, and bin\\link is watched for the editor's commands"

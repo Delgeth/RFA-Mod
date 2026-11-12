@@ -457,6 +457,15 @@ public partial class LevelEditor
         List<uint> removed = liveSent.Keys.Where(handle => !here.Contains(handle)).ToList();
         foreach (uint handle in removed)
             if (!liveNotInGame.Contains(handle)) lines.Add(GameLink.RemoveCommand(handle));
+        // An object attached to one of the zone's that the game hasn't yet (its chunk still loading) waits
+        // for it: made before its parent, the game drops the link to it.
+        var zoneHandles = zone.Objects.Select(o => o.Handle).ToHashSet();
+        for (bool held = true; held && made.Count > 0;)
+        {
+            var making = made.Select(o => o.Handle).ToHashSet();
+            held = made.RemoveAll(o => o.Parent != 0 && o.Parent != 0xFFFFFFFF && o.Parent != o.Handle && zoneHandles.Contains(o.Parent) &&
+                                       !liveSent.ContainsKey(o.Parent) && !making.Contains(o.Parent)) > 0;
+        }
         if (made.Count > 0)
         {
             if (gameLink.Waiting) return;  // the game hasn't taken the last lines yet: next time
