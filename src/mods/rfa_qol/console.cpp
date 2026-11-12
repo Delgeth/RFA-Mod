@@ -2282,6 +2282,26 @@ bool RunEditorEdit(const std::string& line) {
             LoadEditorChunk(assetList, container);
         return true;
     }
+    if (line == "editor_level") {
+        // Which level the game has loaded (the name it loads it by, kept in the world at +0x18, which
+        // reload_level loads again: 0x4D4D40 → 0x6C87B0) and where the camera and the player are, for
+        // the editor's "Game's level" (link\level.txt).
+        const char* level = reinterpret_cast<const char*>(kObjectList + 0x18);
+        char name[128] = {};
+        strncpy_s(name, level, _TRUNCATE);
+        BYTE* player = ThePlayer();
+        float at[3] = {};
+        if (player) memcpy(at, player + 4, sizeof(at));
+        const std::wstring path = LinkFolder() + L"\\level.txt";
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+            fprintf(file, "%s\n%.3f %.3f %.3f\n%d %.3f %.3f %.3f\n", name, g_cameraPosition[0], g_cameraPosition[1], g_cameraPosition[2],
+                    player ? 1 : 0, at[0], at[1], at[2]);
+            fclose(file);
+        }
+        rfa::Log("Editor link: the editor asked which level is loaded: %s", name[0] ? name : "(none)");
+        return true;
+    }
     if (line == "editor_reload") {
         StartEditorReload();
         return true;

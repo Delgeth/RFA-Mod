@@ -22,6 +22,13 @@
                         <TextBlock Text="Overrides folder" />
                     </StackPanel>
                 </Button>
+                <Button DockPanel.Dock="Right" Click="OnOpenGameLevel" Margin="0,0,8,0"
+                        ToolTip="Opens the zone the running game has loaded (the one its camera is in), in the level editor">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Zone}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Game's level" />
+                    </StackPanel>
+                </Button>
                 <Button DockPanel.Dock="Right" Click="OnShowGame" Margin="0,0,8,0"
                         ToolTip="Shows the Game panel: the running game, docked in the editor">
                     <StackPanel Orientation="Horizontal">
