@@ -43,3 +43,8 @@ void Menu(const RFAMenu* menu);
 namespace streaming {
 void Init();
 }
+
+// More Ruin maps than the game's five, as wrecking_crew_maps.xtbl gives them (ruin_maps.cpp). No settings.
+namespace ruin_maps {
+void Init();
+}

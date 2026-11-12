@@ -65,6 +65,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_limitsRunning = StartPart(L"limits", limits::Init);
     g_graphicsRunning = StartPart(L"graphics", graphics::Init);
     StartPart(L"streaming", streaming::Init);
+    StartPart(L"ruin_maps", ruin_maps::Init);
 }
 
 // The game's menus changed a setting: only fov listens.

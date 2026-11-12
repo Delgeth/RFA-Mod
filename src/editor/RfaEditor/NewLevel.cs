@@ -75,11 +75,11 @@ sealed class NewLevel
     /// saying why it couldn't be. <paramref name="name"/>: the level's file name (lower case letters,
     /// digits and _); <paramref name="picture"/>: a picture file for its preview, or null for the template's.
     /// </summary>
-    public List<string> Make(Mode mode, string template, string name, string displayName, bool blank, string? picture)
+    public List<string> Make(Mode mode, string template, string name, string displayName, bool blank, string? picture, bool replace = false)
     {
         string archive = Cache + template + ".vpp_pc", newArchive = Cache + name + ".vpp_pc";
         if (File.Exists(Path.Combine(workspace.GameFolder, newArchive))) throw new InvalidDataException($"the game already has a level {name}");
-        if (File.Exists(Path.Combine(workspace.OverridesFolder, newArchive)))
+        if (File.Exists(Path.Combine(workspace.OverridesFolder, newArchive)) && !(replace && workspace.RemoveNewArchive(newArchive)))
             throw new InvalidDataException($"there is already a level {name} in overrides\\ (delete overrides\\{newArchive} to make it again, or choose another name)");
         Packfile source = workspace.Archive(archive);
         var loose = source.Entries.ToDictionary(e => e.Name, e => source.Read(e), StringComparer.OrdinalIgnoreCase);
@@ -139,9 +139,9 @@ sealed class NewLevel
             if (c.Name.Equals("ns_precache", StringComparison.OrdinalIgnoreCase)) c.Primitives.RemoveAll(p => ownNow.Contains(p.Name));
         }
         var baseFiles = inBase.Where(f => !Own(f.Name) && (!blank || !Scenery(f.Name))).ToList();
-        // (its zones stay loose in the archive, as the template's are, unless its ns_base had them too)
-        var baseHad = inBase.Select(f => Renamed(f.Name)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        baseFiles.AddRange(files.Where(f => !f.Key.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase) || baseHad.Contains(f.Key))
+        // (its zone too, as Infestation's levels have theirs: its zone group, 1_c0807, names it, and the
+        // game finds it there; the template's was in its precache archive. Not its persistent zone.)
+        baseFiles.AddRange(files.Where(f => !f.Key.StartsWith("p_", StringComparison.OrdinalIgnoreCase) || !f.Key.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
                                 .Select(f => (f.Key, f.Value)));
         byte[] baseBytes = Packfile.CreateContainer(baseFiles);
         var container = Packfile.FromBytes("ns_base.str2_pc", baseBytes);

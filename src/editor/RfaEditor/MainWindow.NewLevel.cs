@@ -125,10 +125,19 @@ public partial class MainWindow
         if (!Regex.IsMatch(name, "^[a-z][a-z0-9_]{1,30}$")) { Log("New level: the file name has to be lower case letters, digits and _ (2 to 31, a letter first)."); return; }
         if (shown.Length == 0) shown = name;
         var chosenMode = mode.SelectedIndex == 0 ? NewLevel.Mode.Ruin : NewLevel.Mode.Infestation;
+        bool replace = false;
+        if (File.Exists(Path.Combine(workspace.OverridesFolder, $@"build\pc\cache\{name}.vpp_pc")))
+        {
+            if (MessageBox.Show(this, $"There is already a level {name} made by the editor. Make it again, from {start}? Its edits are lost.",
+                                "New level", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+            foreach (var document in documents.Where(d => d.Key.StartsWith($@"level:build\pc\cache\{name}.vpp_pc", StringComparison.OrdinalIgnoreCase)).ToList())
+                document.Value.Tab.Close();
+            replace = true;
+        }
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null);
+            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null, replace);
             Log($"New level {name} ({chosenMode}, from {start}):");
             foreach (string line in report) Log("  " + line);
             Log("  The game reads its map lists at start-up: restart it to see the level in the menu.");
