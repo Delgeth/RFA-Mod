@@ -412,11 +412,11 @@ public partial class LevelEditor
     static string AddStitchCommand(string cterrain, uint id, string name, int flags, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
         $"editor_stitch_add {cterrain} {id:X8} {name} {flags} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
 
-    /// <summary>Saves and has the game load the level again, if Auto reload is on and it is two seconds since the last change that needs it.</summary>
+    /// <summary>Saves and has the game load the level again, if Auto reload is on and it is half a second since the last change that needs it.</summary>
     bool LiveAutoReload()
     {
         if (liveReloadWanted is not DateTime wanted || AutoReloadBox.IsChecked != true) return false;
-        if ((DateTime.Now - wanted).TotalSeconds < 2 || sculpt != null && strokeBefore != null || carrying ||
+        if ((DateTime.Now - wanted).TotalSeconds < 0.5 || sculpt != null && strokeBefore != null || carrying ||
             System.Windows.Input.Mouse.LeftButton == System.Windows.Input.MouseButtonState.Pressed) return false;
         liveReloadWanted = null;
         context.Log("Live: saving and loading the level again in the game, for the changes it can't show otherwise.");

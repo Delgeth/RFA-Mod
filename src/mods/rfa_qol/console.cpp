@@ -1677,8 +1677,8 @@ void MakeEditorObject(DWORD handle) {
 // editor_reload: the level is loaded again (the console's reload_level), and the player then put
 // back where they stood (warp x y z), so a change that needs the level loaded again (new models,
 // the ground, level geometry) doesn't also send you back to the level's start. The player (0x8B92D0)
-// is gone or another while the level loads; once there is one again that has stayed put for a
-// second, the level is taken to be up.
+// is gone or another while the level loads; once there is one again that has stayed put for 0.3
+// seconds, the level is taken to be up.
 auto const ThePlayer = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
 struct ReloadReturn {
     bool waiting = false;
@@ -1719,7 +1719,7 @@ void ContinueEditorReload() {
     memcpy(now, player + 4, sizeof(now));
     r.steady = memcmp(now, r.last, sizeof(now)) == 0 || r.steady == 0 ? r.steady + 1 : 1;
     memcpy(r.last, now, sizeof(now));
-    if (r.steady < 10) return;
+    if (r.steady < 3) return;  // (still for 0.3 seconds)
     r.waiting = false;
     rfa::Log("Editor link: the level is up again; the player goes back to %.1f, %.1f, %.1f", r.position[0], r.position[1], r.position[2]);
     RunConsoleCommand("warp %.3f %.3f %.3f", r.position[0], r.position[1], r.position[2]);
