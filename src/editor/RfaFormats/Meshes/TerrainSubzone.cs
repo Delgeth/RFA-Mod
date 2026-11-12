@@ -800,6 +800,21 @@ public sealed class TerrainSubzone
     public static string HeaderFileName(string zone, int number) => $"{zone}_{number}.ctmesh_pc";
     public static string DataFileName(string zone, int number) => $"{zone}_{number}.gtmesh_pc";
 
+    /// <summary>
+    /// Where a sub-zone's (version 42) data starts in its c-file (after its name block: where the game
+    /// keeps it, at the same place, in the file's memory), and its ground mesh's vertices in the g-file:
+    /// where, how many and how big. Null if it has no ground mesh.
+    /// </summary>
+    public static (int DataAt, int VertexOffset, int VertexCount, int VertexSize)? LiveLayout(byte[] header)
+    {
+        if (header.Length < 0x60 || Encoding.ASCII.GetString(header, 0, 4) != "SUBZ" || BitConverter.ToInt32(header, 4) != Version) return null;
+        int fields = (0x18 + BitConverter.ToInt32(header, 0x14) + 3) & ~3;
+        int block = Enumerable.Range((fields + 0x48) / 4, Math.Max(0, (header.Length - fields - 0x48) / 4)).Select(i => i * 4)
+                              .FirstOrDefault(a => ModelFile.IsMeshBlock(header, a), -1);
+        if (block < 0) return null;
+        return (fields, (int)U32(header, block + 0x3C), (int)U32(header, block + 0x1C), header[block + 0x20]);
+    }
+
     static uint U32(byte[] bytes, int at) => BitConverter.ToUInt32(bytes, at);
     static float F32(byte[] bytes, int at) => BitConverter.ToSingle(bytes, at);
 }

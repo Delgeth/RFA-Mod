@@ -739,7 +739,8 @@ public partial class LevelEditor
                 RepaintGround();
             }
         }
-        LiveNeedsReload();
+        if (painted) LiveNeedsReload();  // (the paint shows once the level is loaded again; the shape at once)
+        else SculptedLive();
         string name = o.Kind switch { Landform.RollingHills => "rolling hills", _ => o.Kind.ToString().ToLowerInvariant() };
         Record(new Change(null, $"Create terrain ({name})", Undo: () => Put(back: true), Redo: () => Put(back: false)));
         context.Log($"Create terrain: {name} over {ground.Zone} ({H:0} m high, features {size:0} m, seed {o.Seed}" +

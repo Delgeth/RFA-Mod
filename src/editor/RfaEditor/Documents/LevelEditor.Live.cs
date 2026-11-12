@@ -444,6 +444,7 @@ public partial class LevelEditor
             liveBarriers = walls;
         }
         TakeLiveChunkAnswers();
+        WatchLiveTerrain();
         if (LiveAutoReload()) return;
         var lines = new List<string>();
         var moved = new List<ZoneObject>();

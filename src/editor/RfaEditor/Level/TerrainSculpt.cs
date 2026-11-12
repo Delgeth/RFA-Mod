@@ -464,6 +464,36 @@ sealed class TerrainSculpt
         return any;
     }
 
+    /// <summary>
+    /// The files as the running game needs them for Live (see LevelEditor.LiveTerrain.cs): the terrain
+    /// file with the heights (not its far-away ground or foliage) and each sub-zone sculpted with its
+    /// ground; the files as read for the rest. Lighter than <see cref="Files"/>, for every few frames.
+    /// </summary>
+    public Dictionary<string, byte[]> LiveFiles()
+    {
+        var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        if (FieldChanged) files[FieldName] = field.WithHeights(fieldFile, samples);
+        foreach (Part part in Parts.Where(p => p.Changed))
+        {
+            (byte[] header, byte[] data) = TerrainSubzone.WithGround(part.Header, part.Data, part.Heights, part.Normals);
+            files[part.HeaderName] = header;
+            files[part.DataName] = data;
+        }
+        return files;
+    }
+
+    /// <summary>A file of this zone's ground as it was read (the game has it so until it is changed live or the level loaded again), or null.</summary>
+    public byte[]? ReadFile(string name)
+    {
+        if (name.Equals(FieldName, StringComparison.OrdinalIgnoreCase)) return fieldFile;
+        foreach (Part part in Parts)
+        {
+            if (name.Equals(part.HeaderName, StringComparison.OrdinalIgnoreCase)) return part.Header;
+            if (name.Equals(part.DataName, StringComparison.OrdinalIgnoreCase)) return part.Data;
+        }
+        return null;
+    }
+
     /// <summary>The changed files, by name: the terrain file and the sub-zones sculpted.</summary>
     public Dictionary<string, byte[]> Files()
     {

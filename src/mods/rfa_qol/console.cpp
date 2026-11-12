@@ -2492,7 +2492,177 @@ void __cdecl TerrainTakeDown(BYTE* record) {
     g_terrainTakeDown(record);
 }
 
+// ---- Terrain edits in the running level (editor_terrain <file> <patch>) -----------------------
+//
+// The game keeps a zone's terrain files in memory as they were read, laid out as in the file
+// (their pointers set in place), and draws and collides with them from there:
+//   <zone>.cterrain_pc (terrain_load_terrain 0x6B9640; its record by name 0x6BBA90): the terrain
+//     data (record +0) inside the file; its ground collision, a Havok compressed height field, is a
+//     Havok packfile loaded in place, so its u16 samples are read from the file's memory as the game
+//     runs. The zone object (data +0xA8) keeps the field's body (zone +0x4C), made at the zone's
+//     corner (zone +0x188) without rotation.
+//   <zone>_N.ctmesh_pc (the sub-zones, 0x6B7A60; record by name: 0x6BCEE0 on 0x1855158): its data
+//     D (record +0) at a known place in the file; D +0x1C its mesh data (rl_mesh_data: +0x0C vertex
+//     count, +0x10 vertex size, +0x2C the vertices, in the g-file's memory), D +0x20 its rl_pc_mesh,
+//     whose vertex buffer (+0x50) the device made at load (immutable: 0x00C2B740).
+// The editor writes the bytes that differ (a patch file in link\): ranges of the c-file (values only:
+// the same layout, so no pointer differs), and for a sub-zone its vertices. They are copied in; a
+// sub-zone gets a new vertex buffer made from them (the old one is kept, not released, in case a
+// frame being drawn still has it), and the height field's body is placed again where it is, so its
+// box in the broad phase holds the new heights. Answers in link\terrain_<file>.txt: done or failed.
+auto const SubzoneRecord = reinterpret_cast<bool(__thiscall*)(void* table, const char* name, BYTE** record)>(0x6BCEE0);
+void* const kSubzones = reinterpret_cast<void*>(0x1855158);
+auto const RenderDevice = reinterpret_cast<void*(__cdecl*)()>(0xC26500);
+int g_terrainBuffersKept = 0;
+
+void AnswerTerrain(const std::string& file, const char* answer) {
+    rfa::Log("Editor link: terrain %s %s", file.c_str(), answer);
+    const std::wstring path = LinkFolder() + L"\\terrain_" + std::wstring(file.begin(), file.end()) + L".txt";
+    FILE* out = nullptr;
+    if (_wfopen_s(&out, path.c_str(), L"w") == 0 && out) {
+        fputs(answer, out);
+        fclose(out);
+    }
+}
+
+// The patch: "RFTP", version 1, kind (0 terrain, 1 sub-zone), where the data is in the c-file (a
+// sub-zone's D), the c-file's size, the range count; each range its offset, length and bytes; then
+// (a sub-zone) the vertex count, size and bytes.
+struct TerrainPatch {
+    unsigned kind = 0, dataAt = 0, size = 0;
+    std::vector<std::pair<unsigned, std::vector<BYTE>>> ranges;
+    unsigned vertexCount = 0, vertexSize = 0;
+    std::vector<BYTE> vertices;
+};
+
+bool ReadTerrainPatch(const std::wstring& path, TerrainPatch& patch) {
+    FILE* in = nullptr;
+    if (_wfopen_s(&in, path.c_str(), L"rb") != 0 || !in) return false;
+    std::vector<BYTE> bytes;
+    BYTE buffer[65536];
+    for (size_t n; (n = fread(buffer, 1, sizeof(buffer), in)) > 0;) bytes.insert(bytes.end(), buffer, buffer + n);
+    fclose(in);
+    size_t at = 0;
+    auto U32 = [&](unsigned& value) {
+        if (at + 4 > bytes.size()) return false;
+        memcpy(&value, bytes.data() + at, 4);
+        at += 4;
+        return true;
+    };
+    unsigned magic = 0, version = 0, count = 0;
+    if (!U32(magic) || magic != 0x50544652 || !U32(version) || version != 1 || !U32(patch.kind) || !U32(patch.dataAt) || !U32(patch.size) || !U32(count)) return false;
+    for (unsigned r = 0; r < count; r++) {
+        unsigned offset = 0, length = 0;
+        if (!U32(offset) || !U32(length) || at + length > bytes.size() || offset + static_cast<unsigned long long>(length) > patch.size) return false;
+        patch.ranges.emplace_back(offset, std::vector<BYTE>(bytes.begin() + at, bytes.begin() + at + length));
+        at += length;
+    }
+    if (patch.kind == 1 && U32(patch.vertexCount) && U32(patch.vertexSize)) {
+        size_t length = static_cast<size_t>(patch.vertexCount) * patch.vertexSize;
+        if (at + length > bytes.size()) return false;
+        patch.vertices.assign(bytes.begin() + at, bytes.begin() + at + length);
+    }
+    return true;
+}
+
+// The terrain file's start in memory, from its data (inside it): "TERR", version 42, going back.
+BYTE* GuardedTerrainBase(BYTE* data, unsigned size) {
+    __try {
+        for (BYTE* at = reinterpret_cast<BYTE*>(reinterpret_cast<uintptr_t>(data) & ~uintptr_t(3)); at + size > data && at > data - 0x800000; at -= 4)
+            if (*reinterpret_cast<DWORD*>(at) == 0x52524554 && *reinterpret_cast<DWORD*>(at + 4) == 42) return at;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
+bool GuardedCopy(BYTE* to, const BYTE* from, size_t length) {
+    __try {
+        memcpy(to, from, length);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// A terrain file's ranges, and the height field's body placed again. A reason if it couldn't be.
+const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
+    __try {
+        BYTE* record = TerrainRecord(name);
+        if (!record) return "failed: the level hasn't that terrain";
+        BYTE* data = *reinterpret_cast<BYTE**>(record);
+        if (!data) return "failed: no terrain data";
+        BYTE* base = GuardedTerrainBase(data, patch.size);
+        if (!base) return "failed: the terrain file wasn't found in memory";
+        for (size_t r = 0; r < patch.ranges.size(); r++)
+            if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
+        if (BYTE* zone = *reinterpret_cast<BYTE**>(data + 0xA8)) {
+            DWORD handle = *reinterpret_cast<DWORD*>(zone + 0x4C);
+            float place[12] = {};
+            memcpy(place, zone + 0x188, 12);
+            place[3] = place[7] = place[11] = 1;
+            if (handle != kNoBody && handle != 0) PlaceBody(handle, place);
+        }
+        return "done";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "failed: the game's code faulted";
+    }
+}
+
+struct BufferDesc { UINT width, usage, bind, cpu, misc, stride; };
+struct InitialData { const void* bytes; UINT pitch, slicePitch; };
+
+const char* GuardedPatchSubzone(const char* name, const TerrainPatch& patch) {
+    __try {
+        BYTE* record = nullptr;
+        if (!SubzoneRecord(kSubzones, name, &record) || !record) return "failed: the level hasn't that sub-zone";
+        BYTE* d = *reinterpret_cast<BYTE**>(record);
+        if (!d) return "failed: no sub-zone data";
+        BYTE* base = d - patch.dataAt;
+        if (*reinterpret_cast<DWORD*>(base) != 0x5A425553) return "failed: the sub-zone file wasn't where expected in memory";
+        for (size_t r = 0; r < patch.ranges.size(); r++)
+            if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
+        if (patch.vertices.empty()) return "done";
+        BYTE* meshData = *reinterpret_cast<BYTE**>(d + 0x1C);
+        BYTE* mesh = *reinterpret_cast<BYTE**>(d + 0x20);
+        if (!meshData || !mesh) return "failed: the sub-zone has no mesh";
+        unsigned count = *reinterpret_cast<unsigned*>(meshData + 0x0C), size = meshData[0x10];
+        BYTE* vertices = *reinterpret_cast<BYTE**>(meshData + 0x2C);
+        if (count != patch.vertexCount || size != patch.vertexSize || !vertices) return "failed: the sub-zone's vertices differ from the editor's";
+        if (!GuardedCopy(vertices, patch.vertices.data(), patch.vertices.size())) return "failed: the vertices couldn't be written";
+        void* device = RenderDevice();
+        if (!device) return "failed: no render device";
+        BufferDesc desc{count * size, 1, 1, 0, 0, 0};
+        InitialData initial{vertices, 0, 0};
+        void* made = nullptr;
+        using CreateBufferFn = long(__stdcall*)(void* self, const BufferDesc*, const InitialData*, void** buffer);
+        auto create = reinterpret_cast<CreateBufferFn>((*reinterpret_cast<void***>(device))[3]);
+        if (create(device, &desc, &initial, &made) < 0 || !made) return "failed: the new vertex buffer couldn't be made";
+        *reinterpret_cast<void**>(mesh + 0x50) = made;  // (the old one is kept: see the top)
+        g_terrainBuffersKept++;
+        return "done";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "failed: the game's code faulted";
+    }
+}
+
+void EditorTerrain(const std::string& line) {
+    char name[128] = {}, patchName[128] = {};
+    if (sscanf_s(line.c_str() + 15, "%127s %127s", name, static_cast<unsigned>(sizeof(name)), patchName, static_cast<unsigned>(sizeof(patchName))) != 2) return;
+    TerrainPatch patch;
+    const std::wstring path = LinkFolder() + L"\\" + std::wstring(patchName, patchName + strlen(patchName));
+    if (!ReadTerrainPatch(path, patch)) {
+        AnswerTerrain(name, "failed: the patch couldn't be read");
+        return;
+    }
+    _wremove(path.c_str());
+    AnswerTerrain(name, patch.kind == 0 ? GuardedPatchTerrain(name, patch) : GuardedPatchSubzone(name, patch));
+}
+
 bool RunEditorEdit(const std::string& line) {
+    if (line.rfind("editor_terrain ", 0) == 0) {
+        EditorTerrain(line);
+        return true;
+    }
     if (line.rfind("editor_stitch ", 0) == 0 || line.rfind("editor_stitch_hide ", 0) == 0) {
         EditorStitchPiece(line, line.rfind("editor_stitch_hide ", 0) == 0);
         return true;

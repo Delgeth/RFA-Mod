@@ -237,7 +237,7 @@ public partial class LevelEditor
             if (!wasPad) ShowBrush();
             return;
         }
-        LiveNeedsReload();  // the game shows the ground as sculpted once the level is loaded again
+        SculptedLive();  // the game has the ground as sculpted at once (LevelEditor.LiveTerrain.cs), or once the level is loaded again
         strokeBefore = null;
         standing = null;
         var changed = new List<(TerrainSculpt Zone, float[] Before, float[] After)>();

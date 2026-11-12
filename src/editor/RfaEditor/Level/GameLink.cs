@@ -93,6 +93,9 @@ sealed class GameLink : IDisposable
     /// <summary>Whether the game is running with the console mod: it wrote in the last few seconds.</summary>
     public static bool IsRecent(GameView? view) => view != null && DateTime.UtcNow - view.Written < TimeSpan.FromSeconds(3);
 
+    /// <summary>A file in the link folder (where the game reads what the editor leaves it), by name.</summary>
+    public string FileIn(string name) => Path.Combine(folder, name);
+
     /// <summary>Hands console commands to the game, which runs them within a tenth of a second.</summary>
     public void Send(IEnumerable<string> commands)
     {
