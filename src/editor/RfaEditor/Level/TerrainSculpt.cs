@@ -5,7 +5,15 @@ using RfaFormats.Meshes;
 namespace RfaEditor;
 
 /// <summary>What a stroke of the terrain sculptor does to the ground under the brush.</summary>
-enum SculptMode { Raise, Lower, Smooth, Flatten }
+/// <summary>
+/// What a stroke does: Raise and Lower move the ground by the brush's soft round fall-off; Smooth and
+/// Flatten even it out; Hill raises a broad, gently rounded rise (a cosine bell); Peak a sharp point
+/// (falling off steeply from the middle); Mountain a rugged rise (the bell broken up by ridged noise,
+/// so strokes build crags and spurs); Valley carves a trough with a wide flat floor and steep sides.
+/// Hill, Peak and Mountain go down instead with the opposite (Shift), Valley up (a ridge);
+/// PaintFoliage and EraseFoliage are the foliage painter's (see LevelEditor.Foliage.cs), not the ground's.
+/// </summary>
+enum SculptMode { Raise, Lower, Smooth, Flatten, Hill, Peak, Mountain, Valley, PaintFoliage, EraseFoliage }
 
 /// <summary>
 /// A zone's ground, held for sculpting: its collision height field (in the terrain file,
@@ -195,7 +203,8 @@ sealed class TerrainSculpt
     /// move the same; Smooth evens each out with its neighbours wherever they are, in this zone or
     /// the next. Returns each zone's parts that moved.
     /// </summary>
-    public static List<(TerrainSculpt Zone, IReadOnlyList<Part> Parts)> ApplyAll(IReadOnlyList<TerrainSculpt> zones, Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0)
+    public static List<(TerrainSculpt Zone, IReadOnlyList<Part> Parts)> ApplyAll(IReadOnlyList<TerrainSculpt> zones, Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0,
+                                                                              bool opposite = false)
     {
         var reached = zones.Where(z => z.Reaches(centre, radius)).ToList();
         Func<float, float, float?>? before = null;
@@ -208,7 +217,7 @@ sealed class TerrainSculpt
         var moved = new List<(TerrainSculpt, IReadOnlyList<Part>)>();
         foreach (TerrainSculpt zone in reached)
         {
-            IReadOnlyList<Part> parts = zone.Apply(centre, radius, mode, amount, flattenTo, before);
+            IReadOnlyList<Part> parts = zone.Apply(centre, radius, mode, amount, flattenTo, before, opposite);
             if (zone.lastApplyMoved) moved.Add((zone, parts));
         }
         return moved;
@@ -274,8 +283,10 @@ sealed class TerrainSculpt
     /// middle; Smooth and Flatten take them that share of the way (0 to 1) to their neighbours'
     /// average or to <paramref name="flattenTo"/>. Returns the parts whose vertices moved.
     /// </summary>
-    public IReadOnlyList<Part> Apply(Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0, Func<float, float, float?>? smoothFrom = null)
+    public IReadOnlyList<Part> Apply(Vector2 centre, float radius, SculptMode mode, float amount, float flattenTo = 0, Func<float, float, float?>? smoothFrom = null,
+                                     bool opposite = false)
     {
+        if (mode is SculptMode.PaintFoliage or SculptMode.EraseFoliage) return [];
         lastApplyMoved = false;
         if (radius <= 0 || amount <= 0) return [];
         int xFrom = Math.Max(0, (int)MathF.Floor((centre.X - radius - corner.X) / Step)), xTo = Math.Min(columns - 1, (int)MathF.Ceiling((centre.X + radius - corner.X) / Step));
@@ -296,6 +307,12 @@ sealed class TerrainSculpt
                 {
                     case SculptMode.Raise: h += amount * weight; break;
                     case SculptMode.Lower: h -= amount * weight; break;
+                    case SculptMode.Hill:
+                    case SculptMode.Peak:
+                    case SculptMode.Mountain:
+                    case SculptMode.Valley:
+                        h += (opposite ^ mode == SculptMode.Valley ? -1 : 1) * amount * Shape(mode, t, px, pz, radius);
+                        break;
                     case SculptMode.Flatten: h += (flattenTo - h) * Math.Clamp(amount * weight, 0, 1); break;
                     case SculptMode.Smooth:
                     {
@@ -330,6 +347,58 @@ sealed class TerrainSculpt
         foreach (Part part in Parts)
             if (Follow(part, area)) moved.Add(part);
         return moved;
+    }
+
+    /// <summary>
+    /// How much of a stroke step the ground gets at a place (0 to 1) for the landform modes, by how far
+    /// out it is (t: 0 in the middle, 1 at the brush's edge): Hill a cosine bell; Peak steep from the
+    /// middle (cubed); Mountain the bell broken up by ridged noise (three octaves, sized to the brush,
+    /// the same at a place every time, so strokes build on each other); Valley a trough, flat across
+    /// most of the brush and steep at its sides.
+    /// </summary>
+    static float Shape(SculptMode mode, float t, float x, float z, float radius)
+    {
+        float bell = 0.5f * (1 + MathF.Cos(MathF.PI * t));
+        switch (mode)
+        {
+            case SculptMode.Peak:
+                return MathF.Pow(1 - t, 3);
+            case SculptMode.Mountain:
+            {
+                float ridges = 0, size = MathF.Max(radius * 0.6f, 2), weight = 0.6f, total = 0;
+                for (int octave = 0; octave < 3; octave++, size *= 0.5f, weight *= 0.5f)
+                {
+                    float n = ValueNoise(x / size, z / size, octave);
+                    ridges += (1 - MathF.Abs(n * 2 - 1)) * weight;
+                    total += weight;
+                }
+                return bell * (0.35f + 0.65f * ridges / total) * (0.6f + 0.4f * MathF.Pow(1 - t, 2));
+            }
+            case SculptMode.Valley:
+            {
+                float side = Math.Clamp((t - 0.55f) / 0.45f, 0, 1);
+                return 0.5f * (1 + MathF.Cos(MathF.PI * side));
+            }
+            default:
+                return bell;
+        }
+    }
+
+    /// <summary>Smooth noise from 0 to 1 at a place (value noise on a 1-unit grid, smoothly blended), different for each seed.</summary>
+    static float ValueNoise(float x, float z, int seed)
+    {
+        int x0 = (int)MathF.Floor(x), z0 = (int)MathF.Floor(z);
+        float tx = x - x0, tz = z - z0;
+        tx = tx * tx * (3 - 2 * tx);
+        tz = tz * tz * (3 - 2 * tz);
+        float Corner(int cx, int cz)
+        {
+            uint h = unchecked((uint)(cx * 374761393 + cz * 668265263 + seed * 2147483647));
+            h = unchecked((h ^ (h >> 13)) * 1274126177);
+            return (h ^ (h >> 16)) / (float)uint.MaxValue;
+        }
+        float a = Corner(x0, z0), b = Corner(x0 + 1, z0), c = Corner(x0, z0 + 1), d = Corner(x0 + 1, z0 + 1);
+        return (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
     }
 
     /// <summary>The part's vertices (within an area, or all) take the field's height and slope where they stand. Returns whether any moved.</summary>

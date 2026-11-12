@@ -63,12 +63,21 @@
                             <TextBlock Text="{x:Static local:Icons.Sculpt}" Style="{StaticResource Icon}" />
                         </ToggleButton>
                         <StackPanel x:Name="SculptPanel" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center" Margin="6,0,0,0">
-                            <ComboBox x:Name="SculptModeBox" Width="80" SelectedIndex="0" VerticalAlignment="Center" ToolTip="What a stroke does to the ground">
+                            <ComboBox x:Name="SculptModeBox" Width="110" SelectedIndex="0" VerticalAlignment="Center" ToolTip="What a stroke does to the ground (or its foliage)"
+                                      SelectionChanged="OnSculptModeChanged">
                                 <ComboBoxItem Content="Raise" />
                                 <ComboBoxItem Content="Lower" />
                                 <ComboBoxItem Content="Smooth" />
                                 <ComboBoxItem Content="Flatten" />
+                                <ComboBoxItem Content="Hill" ToolTip="A broad, gently rounded rise (Shift: a hollow)" />
+                                <ComboBoxItem Content="Peak" ToolTip="A sharp point, steep from the middle (Shift: a pit)" />
+                                <ComboBoxItem Content="Mountain" ToolTip="A rugged rise, broken up into crags and spurs (Shift: a rugged hollow)" />
+                                <ComboBoxItem Content="Valley" ToolTip="A trough with a wide flat floor and steep sides (Shift: a ridge)" />
+                                <ComboBoxItem Content="Paint foliage" ToolTip="Grows the chosen foliage layer on the ground under the brush (Shift: erases)" />
+                                <ComboBoxItem Content="Erase foliage" ToolTip="Takes the chosen foliage layer away under the brush (Shift: paints)" />
                             </ComboBox>
+                            <ComboBox x:Name="FoliageLayerBox" Width="150" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
+                                      ToolTip="Which of the zone's foliage layers the painter paints or erases" />
                             <TextBlock Text="Radius" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="8,0,4,0" />
                             <Slider x:Name="SculptRadiusSlider" Width="90" Minimum="1" Maximum="80" Value="10" VerticalAlignment="Center"
                                     ValueChanged="OnBrushChanged" ToolTip="The brush's radius, in metres ([ and ])" />

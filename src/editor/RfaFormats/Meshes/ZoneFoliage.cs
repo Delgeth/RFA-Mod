@@ -205,6 +205,37 @@ public sealed class ZoneFoliage
         return (moved, lost);
     }
 
+    /// <summary>
+    /// Sets the patches' masks (where each layer grows in each cell: which of its 64 sub-cubes) in a
+    /// terrain file's bytes, in place: those of <paramref name="masks"/>, by cell (x, height, z, counted
+    /// as the keys count them) and layer. Only patches the file has can be set (the cells and patches
+    /// stay as they are, so the file keeps its size). Returns how many patches changed.
+    /// </summary>
+    public static int WithMasks(byte[] file, string zone, IReadOnlyDictionary<(int X, int Y, int Z, int Layer), ulong> masks)
+    {
+        ZoneFoliage? foliage = Read(file, zone);
+        if (foliage == null || foliage.patchCount == 0) return 0;
+        int header = Align4(Align4(Align4(0x28 + I32(file, 0x10)) + I32(file, 0x1C)) + I32(file, 0x18));
+        int cellCount = I32(file, header + 0xB4);
+        int cellsAt = foliage.patchesAt - cellCount * 12, changed = 0;
+        for (int c = 0; c < cellCount; c++)
+        {
+            int at = cellsAt + c * 12;
+            uint key = BitConverter.ToUInt32(file, at);
+            if (key == uint.MaxValue) continue;
+            int x = (int)(key >> 22), y = (int)((key >> 10) & 0xFFF) - 2048, z = (int)(key & 0x3FF);
+            int first = BitConverter.ToUInt16(file, at + 4), count = BitConverter.ToUInt16(file, at + 6);
+            for (int p = first; p < first + count && p < foliage.patchCount; p++)
+            {
+                int maskAt = foliage.patchesAt + p * 16 + 8;
+                if (!masks.TryGetValue((x, y, z, file[foliage.patchesAt + p * 16]), out ulong mask) || BitConverter.ToUInt64(file, maskAt) == mask) continue;
+                BitConverter.TryWriteBytes(file.AsSpan(maskAt), mask);
+                changed++;
+            }
+        }
+        return changed;
+    }
+
     /// <summary>How far from the ground a sub-cube of foliage may be and still move with it (m): further, it is on something else.</summary>
     public const float NearGround = 3;
 

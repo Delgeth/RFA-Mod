@@ -1830,7 +1830,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
             if (context.Assets.ReadFile(zone + ".cterrain_pc", archive, container) is not { } file) continue;
             try
             {
-                if (ZoneFoliage.Read(file.Data, zone) is not { } zoneFoliage) return;
+                byte[] data = FoliageAsPainted(zone, file.Data);  // (with the foliage painter's strokes, see LevelEditor.Foliage.cs)
+                if (ZoneFoliage.Read(data, zone) is not { } zoneFoliage) return;
                 var pieces = zoneFoliage.Scatter().ToList();
                 if (pieces.Count == 0) return;
                 IEnumerable<Model3D> models = (scene?.Models ?? []).Concat(RelatedFiles().SelectMany(f => f.Scene?.Models ?? []));
@@ -2619,6 +2620,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             message += "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
             message += SaveGeometry();
             if (SculptChanged) message += " " + SaveSculpt() + MoveWhatStandsOnGround();
+            message += SaveFoliage();
             message += SaveBarriers();
             batch.Dispose();
             foreach (TerrainSculpt sculpted in sculptZones) sculpted.Saved();

@@ -37,7 +37,7 @@ public partial class LevelEditor
     bool strokeFromPad, padInverse;
     float padStrength = 1;
 
-    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, 3);
+    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, (int)SculptMode.EraseFoliage);
     float BrushRadius => (float)SculptRadiusSlider.Value;
     bool SculptChanged => sculptZones.Any(z => z.Changed);
 
@@ -147,7 +147,13 @@ public partial class LevelEditor
         }
         var mesh = new MeshGeometry3D { Positions = positions, TriangleIndices = triangles };
         mesh.Freeze();
-        Color colour = ChosenMode switch { SculptMode.Lower => Color.FromRgb(90, 170, 255), SculptMode.Smooth => Color.FromRgb(140, 230, 140), SculptMode.Flatten => Color.FromRgb(230, 200, 90), _ => Color.FromRgb(255, 140, 60) };
+        Color colour = ChosenMode switch
+        {
+            SculptMode.Lower or SculptMode.Valley => Color.FromRgb(90, 170, 255), SculptMode.Smooth => Color.FromRgb(140, 230, 140),
+            SculptMode.Flatten => Color.FromRgb(230, 200, 90), SculptMode.Mountain => Color.FromRgb(200, 150, 255), SculptMode.Peak => Color.FromRgb(255, 90, 90),
+            SculptMode.PaintFoliage => Color.FromRgb(120, 220, 90), SculptMode.EraseFoliage => Color.FromRgb(220, 220, 220),
+            _ => Color.FromRgb(255, 140, 60),
+        };
         var material = new MaterialGroup { Children = { new DiffuseMaterial(new SolidColorBrush(Colors.Black)), new EmissiveMaterial(new SolidColorBrush(colour)) } };
         material.Freeze();
         brushVisual.Content = new GeometryModel3D(mesh, material) { BackMaterial = material };
@@ -164,6 +170,11 @@ public partial class LevelEditor
             return false;
         }
         CommitEdit();
+        if (ChosenMode is SculptMode.PaintFoliage or SculptMode.EraseFoliage && !BeginFoliageStroke())
+        {
+            strokeFromPad = false;
+            return false;
+        }
         strokeBefore = sculptZones.ToDictionary(z => z, z => z.Snapshot());
         standing = StandingOnGround(zone, GroundHeight, z => sculptZones.Any(s => s.Covers(z.X, z.Z)))
             .Where(o => Editable(o)).ToDictionary(o => o, o => o.Placement.Position.Y - GroundHeight(o.Placement.Position.X, o.Placement.Position.Z));
@@ -185,10 +196,19 @@ public partial class LevelEditor
         if (BrushPoint() is not Vector3 centre) return;
         SculptMode mode = ChosenMode;
         bool inverse = strokeFromPad ? padInverse : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        if (mode is SculptMode.PaintFoliage or SculptMode.EraseFoliage)
+        {
+            // The foliage painter (LevelEditor.Foliage.cs): the opposite (Shift) erases while painting, and paints while erasing.
+            PaintFoliage(new Vector2(centre.X, centre.Z), BrushRadius, erase: (mode == SculptMode.EraseFoliage) ^ inverse);
+            ShowBrush();
+            return;
+        }
         if (inverse) mode = mode switch { SculptMode.Raise => SculptMode.Lower, SculptMode.Lower => SculptMode.Raise, _ => mode };
         float strength = (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1);
-        float amount = mode is SculptMode.Raise or SculptMode.Lower ? strength * seconds : Math.Min(1, strength * seconds * 0.5f);
-        foreach (var (ground, parts) in TerrainSculpt.ApplyAll(sculptZones, new Vector2(centre.X, centre.Z), BrushRadius, mode, amount, flattenTo))
+        bool landform = mode is SculptMode.Hill or SculptMode.Peak or SculptMode.Mountain or SculptMode.Valley;
+        float amount = mode is SculptMode.Raise or SculptMode.Lower || landform ? strength * seconds : Math.Min(1, strength * seconds * 0.5f);
+        foreach (var (ground, parts) in TerrainSculpt.ApplyAll(sculptZones, new Vector2(centre.X, centre.Z), BrushRadius, mode, amount, flattenTo,
+                                                               opposite: inverse && landform))
             ShowSculptedGround(ground, parts);
         FollowGround(new Vector2(centre.X, centre.Z), BrushRadius + 2);
         ShowBrush();
@@ -201,6 +221,13 @@ public partial class LevelEditor
         bool wasPad = strokeFromPad;
         strokeFromPad = false;
         if (sculpt == null || strokeBefore is not { } before) return;
+        if (EndFoliageStroke())
+        {
+            strokeBefore = null;
+            standing = null;
+            if (!wasPad) ShowBrush();
+            return;
+        }
         LiveNeedsReload();  // the game shows the ground as sculpted once the level is loaded again
         strokeBefore = null;
         standing = null;
