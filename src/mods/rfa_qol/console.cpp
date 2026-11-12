@@ -1920,9 +1920,29 @@ void AnswerChunk(const std::string& group, bool loaded) {
     }
 }
 
+// Whether the game's files are locked for reading now (cf_open's flag, 0x290A67D: see below).
+bool CfileLocked() { return *reinterpret_cast<volatile BYTE*>(0x290A67D) != 0; }
+struct WaitingGroup { std::string line; ULONGLONG since; };
+std::vector<WaitingGroup> g_groupsWaiting;
+void LoadEditorChunkGroup(const std::string& line);
+
 // Every frame: chunks asked to load that have (or failed, or are taking more than 30 seconds) are
 // answered.
 void WatchEditorChunks() {
+    // Chunk groups waiting for the game's files to be free (LoadEditorChunkGroup): one at a time.
+    if (!g_groupsWaiting.empty()) {
+        WaitingGroup next = g_groupsWaiting.front();
+        if (!CfileLocked()) {
+            g_groupsWaiting.erase(g_groupsWaiting.begin());
+            LoadEditorChunkGroup(next.line);
+        } else if (GetTickCount64() - next.since > 30000) {
+            g_groupsWaiting.erase(g_groupsWaiting.begin());
+            char group[128] = {};
+            sscanf_s(next.line.c_str() + 19, "%127s", group, static_cast<unsigned>(sizeof(group)));
+            rfa::Log("Editor link: chunk %s: the game's files stayed locked for 30 seconds", group);
+            AnswerChunk(group, false);
+        }
+    }
     for (auto it = g_chunksLoading.begin(); it != g_chunksLoading.end();) {
         const int state = GuardedContainerState(it->container);
         const bool late = GetTickCount64() - it->since > 30000;
@@ -1962,6 +1982,17 @@ void LoadEditorChunkGroup(const std::string& line) {
         return;
     }
     const std::string group = groupText;
+    // The game's files are locked for reading as it runs now and then (streaming): reading the asset
+    // list then stops at the game's check (cf_open 0xC91470: "Someone is accessing cfile synchronously,
+    // but it is locked!", int3), part way, and the game then can't find a level's files any more
+    // ("vdir_restore: Vdir file 'vdir_pc' not found", "Could not find territory"). So it waits.
+    if (CfileLocked()) {
+        if (std::none_of(g_groupsWaiting.begin(), g_groupsWaiting.end(), [&](const WaitingGroup& w) { return w.line == line; })) {
+            g_groupsWaiting.push_back({line, GetTickCount64()});
+            rfa::Log("Editor link: chunk %s waits for the game's files to be free", groupText);
+        }
+        return;
+    }
     bool faulted = false;
     void* found = GuardedFindContainer(groupText, &faulted);
     if (!found && !faulted) {
@@ -2508,8 +2539,7 @@ void __cdecl TerrainTakeDown(BYTE* record) {
 // The editor writes the bytes that differ (a patch file in link\): ranges of the c-file (values only:
 // the same layout, so no pointer differs), and for a sub-zone its vertices. They are copied in; a
 // sub-zone gets a new vertex buffer made from them (the old one is kept, not released, in case a
-// frame being drawn still has it), and the height field's body is placed again where it is, so its
-// box in the broad phase holds the new heights. Answers in link\terrain_<file>.txt: done or failed.
+// frame being drawn still has it). Answers in link\terrain_<file>.txt: done or failed.
 auto const SubzoneRecord = reinterpret_cast<bool(__thiscall*)(void* table, const char* name, BYTE** record)>(0x6BCEE0);
 void* const kSubzones = reinterpret_cast<void*>(0x1855158);
 auto const RenderDevice = reinterpret_cast<void*(__cdecl*)()>(0xC26500);
@@ -2595,13 +2625,10 @@ const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
         if (!base) return "failed: the terrain file wasn't found in memory";
         for (size_t r = 0; r < patch.ranges.size(); r++)
             if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
-        if (BYTE* zone = *reinterpret_cast<BYTE**>(data + 0xA8)) {
-            DWORD handle = *reinterpret_cast<DWORD*>(zone + 0x4C);
-            float place[12] = {};
-            memcpy(place, zone + 0x188, 12);
-            place[3] = place[7] = place[11] = 1;
-            if (handle != kNoBody && handle != 0) PlaceBody(handle, place);
-        }
+        // (The height field's body is left where it is: placing it again, at the zone's corner, put it
+        // outside the world, "Tried to delete a zone (ruin01) which has dimensions outside the
+        // broadphase", and the ground lost its collision. Its box already holds every height the
+        // field can store: see TerrainHeightField.)
         return "done";
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "failed: the game's code faulted";
