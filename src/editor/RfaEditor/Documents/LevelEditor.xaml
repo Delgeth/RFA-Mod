@@ -174,14 +174,14 @@
                             <TextBlock Text="{x:Static local:Icons.Link}" Style="{StaticResource Icon}" />
                         </ToggleButton>
                         <ToggleButton x:Name="LiveBox" Checked="OnLiveChanged" Unchecked="OnLiveChanged"
-                                      ToolTip="Live: objects you move, turn or delete here are moved, turned and removed in the running game as you do it. Objects you add and other changes show there after Save and reload">
+                                      ToolTip="Live: objects and level geometry you move, turn, delete or add here are moved, turned, removed and made in the running game as you do it. Other changes (the ground) show there after Save and reload">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" Margin="0,0,5,0" />
                                 <TextBlock Text="Live" VerticalAlignment="Center" />
                             </StackPanel>
                         </ToggleButton>
                         <ToggleButton x:Name="AutoReloadBox"
-                                      ToolTip="Auto reload (with Live): what the game can't be shown as you do it (the ground sculpted, level geometry changed, a chunk the level hasn't loaded) is shown two seconds after: the zone is saved and the game loads the level again, the player put back where they stood">
+                                      ToolTip="Auto reload (with Live): what the game can't be shown as you do it (the ground sculpted, a chunk the game can't load as it runs) is shown two seconds after: the zone is saved and the game loads the level again, the player put back where they stood">
                             <TextBlock Text="Auto reload" VerticalAlignment="Center" />
                         </ToggleButton>
                         <ToggleButton x:Name="SettledBox" Checked="OnSettledChanged" Unchecked="OnSettledChanged"

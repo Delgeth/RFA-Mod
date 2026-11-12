@@ -20,8 +20,9 @@ namespace RfaEditor;
 ///     of the zone had when Live went on is loaded first (see LoadLiveChunk), then the object made.
 /// About 30 times a second the zone's objects are compared with what the game was last sent, so whatever
 /// changed them (the gizmo, the inspector, the controller, magnets, undo and redo) is sent alike.
+/// The level geometry's pieces are moved, taken away and added in the game too (see WatchLiveGeometry).
 /// What the game can't be shown this way needs the zone saved and the level loaded again (Save and
-/// reload): objects whose model the level hasn't loaded, the ground and level geometry. With Auto
+/// reload): objects whose model can't be loaded as the game runs, and the ground. With Auto
 /// reload on as well, that is done for you: two seconds after the last such change the zone is
 /// saved and the game loads the level again, the player put back where they stood. Without it,
 /// nothing is saved by Live itself.
@@ -37,6 +38,11 @@ public partial class LevelEditor
     DateTime? liveReloadWanted;  // when a change was last made that the game only shows after the level is loaded again
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveGeometry = [];  // the level geometry's pieces, as the game has them
     readonly Dictionary<uint, (int List, int Index, string Name)> liveGeometryAt = [];      // where each piece is in the game's stitch list
+    readonly HashSet<uint> liveGeometryHidden = [];                // pieces taken away in the game (deleted here)
+    readonly Dictionary<uint, string> liveGeometryMade = [];       // pieces added here and made in the game (or asked to be), by name
+    readonly Dictionary<uint, int> liveGeometryAsked = [];         // ... whose answer hasn't come yet: since which tick
+    readonly HashSet<uint> liveGeometryFailed = [];                // pieces the game couldn't make: shown after Save and reload
+    readonly HashSet<string> liveGeometryChunksRetried = new(StringComparer.OrdinalIgnoreCase);  // chunks loaded again as the game hadn't them
     readonly HashSet<string> liveChunks = new(StringComparer.OrdinalIgnoreCase);  // the chunks the game has loaded for this zone
     readonly Dictionary<string, (string Container, int Since)> liveChunkLoads = new(StringComparer.OrdinalIgnoreCase);  // asked of the game, not answered yet
     readonly HashSet<string> liveChunksFailed = new(StringComparer.OrdinalIgnoreCase);  // the game couldn't load them: they need a reload
@@ -81,6 +87,11 @@ public partial class LevelEditor
         liveChunksFailed.Clear();
         liveGeometry.Clear();
         liveGeometryAt.Clear();
+        liveGeometryHidden.Clear();
+        liveGeometryMade.Clear();
+        liveGeometryAsked.Clear();
+        liveGeometryFailed.Clear();
+        liveGeometryChunksRetried.Clear();
         // The pieces were made objects in their stitch list's order (list by list), with rising handles:
         // a piece's place in the game's list is its place among its list's pieces, by handle.
         var perList = new Dictionary<int, int>();
@@ -92,6 +103,7 @@ public partial class LevelEditor
             int index = perList.GetValueOrDefault(list);
             perList[list] = index + 1;
             liveGeometryAt[piece.Handle] = (list, index, PieceOf(piece));
+            liveChunks.Add(PieceChunk(PieceOf(piece)));  // (the level loaded it)
         }
         foreach (ZoneObject obj in zone.Objects.Where(LiveKind))
         {
@@ -217,37 +229,145 @@ public partial class LevelEditor
         if (LiveBox.IsChecked == true) liveReloadWanted = DateTime.Now;
     }
 
-    /// <summary>Notes changes to the level geometry's pieces (moved, added, deleted): the game has them as one mesh, made when the level loads.</summary>
     /// <summary>
-    /// The level geometry's pieces: one the game has that was moved or turned here is moved there at
-    /// once (editor_stitch: where it draws it; its collision stays where the level loaded it until the
-    /// level loads again). Pieces added or deleted here need the level loaded again.
+    /// The level geometry's pieces, live: one the game has that was moved or turned here is moved
+    /// there (editor_stitch: its drawing and its collision); one deleted here is taken away there
+    /// (editor_stitch_hide), and put back if undo brings it back; one added here (a duplicate, one
+    /// from the asset browser) is made there as the game makes the level's (editor_stitch_add),
+    /// its chunk loaded first if the level hasn't it (as for objects). What the game can't do (a
+    /// chunk it can't load, a piece of several sub-chunks, the zone's stitch list unknown) needs the
+    /// level loaded again. With a level whose pieces share one combined collision, a moved piece's
+    /// collision is at both places (the old in the combined one) until the level loads again.
     /// </summary>
     void WatchLiveGeometry()
     {
+        TakeLiveGeometryAnswers();
         var pieces = zone.Objects.Where(IsGeometry).ToList();
-        bool addedOrRemoved = pieces.Count != liveGeometry.Count || pieces.Any(p => !liveGeometry.ContainsKey(p.Handle));
+        if (stitchListName == null)
+        {
+            // Where the game has the pieces isn't known: any change needs a reload.
+            bool changed = pieces.Count != liveGeometry.Count || pieces.Any(p => !liveGeometry.TryGetValue(p.Handle, out var had) || had != p.Placement);
+            if (!changed) return;
+            liveGeometry.Clear();
+            foreach (ZoneObject piece in pieces) liveGeometry[piece.Handle] = piece.Placement;
+            LiveNeedsReload();
+            return;
+        }
+        string cterrain = Path.GetFileNameWithoutExtension(stitchListName) + ".cterrain_pc";
         var lines = new List<string>();
-        var moved = new List<ZoneObject>();
+        var done = new List<Action>();  // noted once the game has been sent the lines
+        var here = new HashSet<uint>();
         foreach (ZoneObject piece in pieces)
         {
+            uint handle = piece.Handle;
+            here.Add(handle);
             var now = piece.Placement;
-            if (!liveGeometry.TryGetValue(piece.Handle, out var had) || had.Position == now.Position && had.Rotation == now.Rotation) continue;
-            moved.Add(piece);
-            if (liveGeometryAt.TryGetValue(piece.Handle, out var at) && stitchListName != null)
-                lines.Add(StitchCommand(Path.GetFileNameWithoutExtension(stitchListName) + ".cterrain_pc", at.List, at.Index, at.Name, now.Position, now.Rotation));
-            else addedOrRemoved = true;
+            string name = PieceOf(piece);
+            bool hidden = liveGeometryHidden.Contains(handle);
+            bool same = liveGeometry.TryGetValue(handle, out var had) && had == now;
+            if (liveGeometryAt.TryGetValue(handle, out var at))
+            {
+                // One of the level's own.
+                if (same && !hidden) continue;
+                if (!string.Equals(name, at.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Another chunk in its place: the game's list has the old one.
+                    if (!same) LiveNeedsReload();
+                    liveGeometry[handle] = now;
+                    continue;
+                }
+                lines.Add(StitchCommand(cterrain, at.List, at.Index, at.Name, now.Position, now.Rotation));
+                done.Add(() => { liveGeometry[handle] = now; liveGeometryHidden.Remove(handle); });
+                continue;
+            }
+            // Added here.
+            if (liveGeometryFailed.Contains(handle) || liveGeometryAsked.ContainsKey(handle)) continue;
+            bool made = liveGeometryMade.TryGetValue(handle, out string? madeAs) && string.Equals(madeAs, name, StringComparison.OrdinalIgnoreCase);
+            if (made && same && !hidden) continue;
+            if (!made)
+            {
+                if (madeAs != null)
+                {
+                    // Turned into another chunk here: the one made goes.
+                    lines.Add($"editor_stitch_drop {handle:X8}");
+                    liveGeometryMade.Remove(handle);
+                }
+                string chunk = PieceChunk(name);
+                if (!liveChunks.Contains(chunk))
+                {
+                    if (LoadLiveChunk(chunk)) continue;  // made once it is loaded
+                    liveGeometryFailed.Add(handle);
+                    context.Log($"Live: the level geometry piece {name} was added here, but its chunk can't be loaded in the game as it runs; it shows after Save and reload.");
+                    LiveNeedsReload();
+                    continue;
+                }
+            }
+            lines.Add(AddStitchCommand(cterrain, handle, name, IntOf(piece, "stitch_flags", 4), now.Position, now.Rotation));
+            done.Add(() =>
+            {
+                liveGeometry[handle] = now;
+                liveGeometryHidden.Remove(handle);
+                liveGeometryMade[handle] = name;
+                if (!made) liveGeometryAsked[handle] = liveTicks;
+            });
         }
-        if (lines.Count > 0 && !gameLink.TrySend(lines)) return;  // the link is busy: next time
-        foreach (ZoneObject piece in moved) liveGeometry[piece.Handle] = piece.Placement;
-        if (!addedOrRemoved) return;
-        liveGeometry.Clear();
-        foreach (ZoneObject piece in pieces) liveGeometry[piece.Handle] = piece.Placement;
-        LiveNeedsReload();
+        // Deleted here: taken away in the game (and put back above if undo brings them back).
+        foreach (uint handle in liveGeometry.Keys.Where(h => !here.Contains(h) && !liveGeometryHidden.Contains(h)).ToList())
+        {
+            if (liveGeometryAt.TryGetValue(handle, out var at))
+                lines.Add($"editor_stitch_hide {cterrain} {at.List} {at.Index} {at.Name}");
+            else if (liveGeometryMade.ContainsKey(handle))
+                lines.Add($"editor_stitch_drop {handle:X8}");
+            else
+            {
+                liveGeometry.Remove(handle);  // the game never had it
+                continue;
+            }
+            done.Add(() => liveGeometryHidden.Add(handle));
+        }
+        // Added and deleted again before the game made them: forgotten.
+        liveGeometryFailed.RemoveWhere(h => !here.Contains(h));
+        if (lines.Count == 0) return;
+        if (!gameLink.TrySend(lines)) return;  // the link is busy: next time
+        foreach (Action note in done) note();
     }
+
+    /// <summary>The game's answers about pieces it was asked to make: made, or not (then they need a reload, or their chunk loaded first).</summary>
+    void TakeLiveGeometryAnswers()
+    {
+        foreach (var (handle, since) in liveGeometryAsked.ToList())
+        {
+            string? answer = gameLink.Answer($"stitch_{handle:X8}");
+            if (answer == null && liveTicks - since < 100) continue;  // (3 seconds)
+            liveGeometryAsked.Remove(handle);
+            string name = liveGeometryMade.GetValueOrDefault(handle) ?? "";
+            if (answer is "made" or "moved")
+            {
+                if (liveCreates++ < 20) context.Log($"Live: level geometry piece {name} made in the game.");
+                continue;
+            }
+            liveGeometryMade.Remove(handle);
+            liveGeometry.Remove(handle);
+            string chunk = PieceChunk(name);
+            if (answer == "nochunk" && liveGeometryChunksRetried.Add(chunk))
+            {
+                liveChunks.Remove(chunk);  // the game hasn't its chunk after all: loaded, then made (next time)
+                continue;
+            }
+            liveGeometryFailed.Add(handle);
+            context.Log($"Live: the game couldn't make the level geometry piece {name}{(answer == null ? " (no answer)" : "")}; it shows after Save and reload.");
+            LiveNeedsReload();
+        }
+    }
+
+    /// <summary>The chunk a piece is of, named as objects name theirs (chunk.cchk_pc).</summary>
+    static string PieceChunk(string piece) => piece.EndsWith(".cchk_pc", StringComparison.OrdinalIgnoreCase) ? piece : piece + ".cchk_pc";
 
     static string StitchCommand(string cterrain, int list, int index, string name, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
         $"editor_stitch {cterrain} {list} {index} {name} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
+
+    static string AddStitchCommand(string cterrain, uint id, string name, int flags, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
+        $"editor_stitch_add {cterrain} {id:X8} {name} {flags} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
 
     /// <summary>Saves and has the game load the level again, if Auto reload is on and it is two seconds since the last change that needs it.</summary>
     bool LiveAutoReload()

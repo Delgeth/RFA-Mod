@@ -119,9 +119,12 @@ sealed class GameLink : IDisposable
     }
 
     /// <summary>What the game answered about a chunk container it was asked to load (editor_chunk): "loaded", "failed", or null (not yet).</summary>
-    public string? ChunkAnswer(string container)
+    public string? ChunkAnswer(string container) => Answer($"chunk_{container}");
+
+    /// <summary>The game's answer named so (link\&lt;name&gt;.txt), taken (the file deleted); null if there's none yet.</summary>
+    public string? Answer(string name)
     {
-        string path = Path.Combine(folder, $"chunk_{container}.txt");
+        string path = Path.Combine(folder, $"{name}.txt");
         try
         {
             if (!File.Exists(path)) return null;

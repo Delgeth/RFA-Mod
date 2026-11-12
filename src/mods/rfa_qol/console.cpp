@@ -1783,65 +1783,376 @@ void LoadEditorChunk(const std::string& assetList, const std::string& container)
     }
 }
 
-// editor_stitch <zone>.cterrain_pc <list> <index> <piece name> x y z <9 rotation numbers>: moves one of
-// the level geometry's pieces where the game has it. A zone's stitch list stays in memory as it was
-// read (the loader, 0x6B8710, only turns its offsets into addresses); its terrain record (0x6BBA90,
-// by the zone's .cterrain_pc name) points at its header (+4), whose first 9 words are each list's
-// pieces (100 bytes each: name +0, position +4, rotation +0x10) and next 9 the lists' counts. The
-// piece is checked by its name before it is changed. Whether the game draws it moved depends on
-// whether it reads the piece each frame; its collision stays where it was until the level loads again.
+// Level geometry (stitch pieces), live. A zone's stitch list stays in memory as it was read (the
+// loader, 0x6B8710, only turns its offsets into addresses); its terrain record (0x6BBA90, by the
+// zone's .cterrain_pc name) has the terrain data at +0 (the zone object it was made for at +0xA8)
+// and the list's header at +4: its first 9 words are each list's pieces, the next 9 their counts,
+// and +0x94 the combined collision's parts (0 when each piece has its own body). A piece is 100 bytes:
+// name +0, position +4, rotation +0x10 (3 rows), flags +0x34, its collision body +0x38 (when it has
+// its own), its draw instances +0x3C (one per sub-chunk, +0x40 of them).
+// When the level is made (0x6BBAC0) each piece gets its draw instances (0x76F280: an
+// rl_stitch_mesh_instance per sub-chunk, placed with the instance's set position 0x602710 and set
+// rotation 0x602740 and put in the scene, 0x768460) and, unless the level has one combined
+// collision for all its pieces, a collision body of its own (0x6BC270, from the piece's chunk
+// 0x6AC740 and the zone; the body told its piece, 0x776240). The same calls move, take away and
+// make pieces now:
+//   moved: its draw instances placed again, and its body (havok set position and rotation, 0x7765C0;
+//     a body handle is the body). With a combined collision the piece has no body: one is made for
+//     it where it now is (the combined one still has it where it was, until the level loads again);
+//   deleted: its draw instances let go (0x76F8B0), its body put far below the world;
+//   put back (undo): made again as the level made it;
+//   new (a piece added in the editor): a piece of our own, outside the level's lists, made the
+//     same way. Its chunk has to be loaded (the editor loads it first if the level hasn't).
 auto const TerrainRecord = reinterpret_cast<BYTE*(__cdecl*)(const char* cterrainName)>(0x6BBA90);
+auto const ChunkByName = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x6AC740);
+auto const MakeStitchDraw = reinterpret_cast<void(__cdecl*)(BYTE* piece)>(0x76F280);
+auto const FreeStitchDraw = reinterpret_cast<void(__cdecl*)(BYTE* piece)>(0x76F8B0);
+auto const MakeStitchBody = reinterpret_cast<DWORD(__cdecl*)(BYTE* chunk, BYTE* zone, BYTE* piece)>(0x6BC270);
+auto const BodyOf = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);
+auto const SetBodyUserData = reinterpret_cast<void(__cdecl*)(BYTE* body, int what, void* data)>(0x776240);
+auto const SetBodyPlace = reinterpret_cast<void(__cdecl*)(BYTE* body, const float* position, const float* rotation)>(0x7765C0);
+auto const SetDrawPosition = reinterpret_cast<void(__thiscall*)(void* instance, const float* position)>(0x602710);
+auto const SetDrawRotation = reinterpret_cast<void(__thiscall*)(void* instance, const float* rotation)>(0x602740);
+auto const UpdateInScene = reinterpret_cast<void(__cdecl*)(void* instance)>(0x768460);
+auto const FreeBody = reinterpret_cast<void(__cdecl*)(DWORD handle, bool, bool, bool)>(0x7755C0);  // as the level frees its pieces' (handle, 0, 1, 1)
+constexpr int kPieceSize = 100, kPiecePlace = 4, kPieceFlags = 0x34, kPieceBody = 0x38, kPieceDraws = 0x3C, kPieceDrawCount = 0x40;
+constexpr int kChunkSubChunks = 0x158;
+constexpr DWORD kNoBody = 0xFFFFFFFF;
 
-int GuardedMoveStitchPiece(const char* cterrain, int list, int index, const char* name, const float* numbers) {
+// What we did to a piece beyond its own data: a body made for it (the level's collision being
+// combined, or a new piece), and whether it is taken away now.
+struct LivePiece {
+    BYTE* record = nullptr;  // the terrain record it is of
+    DWORD body = kNoBody;
+    bool hidden = false;
+};
+std::vector<std::pair<BYTE*, LivePiece>> g_livePieces;  // by piece
+struct SpawnedPiece {
+    DWORD id = 0;
+    BYTE* piece = nullptr;
+    BYTE* record = nullptr;
+    std::string name;
+};
+std::vector<SpawnedPiece> g_spawnedPieces;
+
+LivePiece& LivePieceOf(BYTE* piece, BYTE* record = nullptr) {
+    for (auto& [at, live] : g_livePieces)
+        if (at == piece) return live;
+    g_livePieces.push_back({piece, LivePiece{record}});
+    return g_livePieces.back().second;
+}
+
+bool HasDraws(BYTE* piece) {
+    void** draws = *reinterpret_cast<void***>(piece + kPieceDraws);
+    const int count = *reinterpret_cast<int*>(piece + kPieceDrawCount);
+    for (int i = 0; draws && i < count; i++)
+        if (draws[i]) return true;
+    return false;
+}
+
+// The piece's draw instances where its data puts it now.
+void PlaceDraws(BYTE* piece) {
+    void** draws = *reinterpret_cast<void***>(piece + kPieceDraws);
+    const int count = *reinterpret_cast<int*>(piece + kPieceDrawCount);
+    const float* place = reinterpret_cast<float*>(piece + kPiecePlace);
+    for (int i = 0; draws && i < count; i++) {
+        if (!draws[i]) continue;
+        SetDrawPosition(draws[i], place);
+        SetDrawRotation(draws[i], place + 3);
+        UpdateInScene(draws[i]);
+    }
+}
+
+// The body the piece collides with as we can move it: its own, else one we made for it (made now
+// if `make`; the chunk's collision model is needed).
+DWORD BodyFor(BYTE* piece, BYTE* zone, bool ownBody, bool make) {
+    if (ownBody) {
+        const DWORD own = *reinterpret_cast<DWORD*>(piece + kPieceBody);
+        if (own != kNoBody && own != 0) return own;
+    }
+    LivePiece& live = LivePieceOf(piece);
+    if (live.body != kNoBody || !make || !zone) return live.body;
+    BYTE* chunk = ChunkByName(*reinterpret_cast<const char**>(piece));
+    if (!chunk) return kNoBody;
+    live.body = MakeStitchBody(chunk, zone, piece);
+    if (BYTE* body = live.body != kNoBody ? BodyOf(live.body) : nullptr) SetBodyUserData(body, 0xE, piece);
+    return live.body;
+}
+
+void PlaceBody(DWORD handle, const float* place) {
+    if (BYTE* body = handle != kNoBody ? BodyOf(handle) : nullptr) SetBodyPlace(body, place, place + 3);
+}
+
+// Puts a piece where `numbers` (position, 3 rotation rows) say, its drawing and its collision; makes
+// its drawing again if it was taken away. 1 if done, else a reason (see the callers).
+int GuardedPlacePiece(BYTE* piece, BYTE* record, BYTE* zone, bool ownBody, const float* numbers) {
     __try {
-        BYTE* record = TerrainRecord(cterrain);
-        if (!record) return -1;
-        BYTE* header = *reinterpret_cast<BYTE**>(record + 4);
-        if (!header || list < 0 || list >= 9) return -2;
-        BYTE* pieces = *reinterpret_cast<BYTE**>(header + list * 4);
-        const int count = *reinterpret_cast<int*>(header + 0x24 + list * 4);
-        if (!pieces || index < 0 || index >= count) return -3;
-        BYTE* piece = pieces + index * 100;
-        const char* pieceName = *reinterpret_cast<const char**>(piece);
-        if (!pieceName || _stricmp(pieceName, name) != 0) return -4;
-        memcpy(piece + 4, numbers, 12 * sizeof(float));
+        memcpy(piece + kPiecePlace, numbers, 12 * sizeof(float));
+        LivePiece& live = LivePieceOf(piece, record);
+        if (!HasDraws(piece)) {
+            if (!ChunkByName(*reinterpret_cast<const char**>(piece))) return -6;
+            MakeStitchDraw(piece);  // made where the piece is
+        } else {
+            PlaceDraws(piece);
+        }
+        live.hidden = false;
+        PlaceBody(BodyFor(piece, zone, ownBody, true), numbers);
+        return HasDraws(piece) ? 1 : -7;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+int GuardedHidePiece(BYTE* piece, bool ownBody) {
+    __try {
+        FreeStitchDraw(piece);
+        LivePieceOf(piece).hidden = true;
+        // Its collision: far below the world (a body can't be taken out of the world safely here).
+        float away[12];
+        memcpy(away, piece + kPiecePlace, sizeof(away));
+        away[1] = -20000.0f;
+        PlaceBody(BodyFor(piece, nullptr, ownBody, false), away);
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -5;
     }
 }
 
-void MoveEditorStitchPiece(const std::string& line) {
-    char cterrain[96] = {}, name[96] = {};
-    int list = -1, index = -1, used = 0;
-    if (sscanf_s(line.c_str() + 14, "%95s %d %d %95s%n", cterrain, static_cast<unsigned>(sizeof(cterrain)), &list, &index, name,
-                 static_cast<unsigned>(sizeof(name)), &used) != 4) {
-        rfa::Log("Editor link: editor_stitch needs a terrain name, list, index, piece name and 12 numbers");
-        return;
-    }
-    const char* rest = line.c_str() + 14 + used;
-    float numbers[12];
-    for (float& number : numbers) {
-        char* next = nullptr;
-        number = strtof(rest, &next);
-        if (next == rest) return;
-        rest = next;
-    }
-    static int moved = 0, problems = 0;
-    const int result = GuardedMoveStitchPiece(cterrain, list, index, name, numbers);
-    static const char* const why[] = {"", "the game has no terrain record of that name", "no such list", "no such piece",
-                                      "the piece there has another name (the stitch list changed since the level loaded)",
-                                      "reading the game's stitch list faulted"};
-    if (result > 0) {
-        if (++moved <= 5) rfa::Log("Editor link: moved level geometry piece %s (%s list %d #%d)", name, cterrain, list, index);
-    } else if (++problems <= 10) {
-        rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) not moved: %s", name, cterrain, list, index, why[-result]);
+// The level's own piece (list, index) of the zone whose .cterrain_pc is named, checked by its name;
+// with its list's header and the zone object. A reason (below 0) if there's none.
+int GuardedFindPiece(const char* cterrain, int list, int index, const char* name, BYTE** piece, BYTE** record, BYTE** header, BYTE** zone) {
+    __try {
+        *record = TerrainRecord(cterrain);
+        if (!*record) return -1;
+        *header = *reinterpret_cast<BYTE**>(*record + 4);
+        BYTE* data = *reinterpret_cast<BYTE**>(*record);
+        *zone = data ? *reinterpret_cast<BYTE**>(data + 0xA8) : nullptr;
+        if (!*header || list < 0 || list >= 9) return -2;
+        BYTE* pieces = *reinterpret_cast<BYTE**>(*header + list * 4);
+        const int count = *reinterpret_cast<int*>(*header + 0x24 + list * 4);
+        if (!pieces || index < 0 || index >= count) return -3;
+        *piece = pieces + index * kPieceSize;
+        const char* pieceName = *reinterpret_cast<const char**>(*piece);
+        if (!pieceName || _stricmp(pieceName, name) != 0) return -4;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
     }
 }
 
+const char* const kPieceWhy[] = {"", "the game has no terrain record of that name", "no such list", "no such piece",
+                                 "the piece there has another name (the stitch list changed since the level loaded)",
+                                 "the game's code faulted", "its chunk isn't loaded in the game", "the game made no drawing for it"};
+
+bool ReadNumbers(const char* rest, float* numbers, int count) {
+    for (int i = 0; i < count; i++) {
+        char* next = nullptr;
+        numbers[i] = strtof(rest, &next);
+        if (next == rest) return false;
+        rest = next;
+    }
+    return true;
+}
+
+bool CombinedCollision(BYTE* header) {
+    __try {
+        return *reinterpret_cast<void**>(header + 0x94) != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
+// editor_stitch <zone>.cterrain_pc <list> <index> <piece name> x y z <9 rotation numbers>: the level's
+// own piece moved (or put back). editor_stitch_hide <zone>.cterrain_pc <list> <index> <piece name>: taken away.
+void EditorStitchPiece(const std::string& line, bool hide) {
+    const size_t skip = hide ? 19 : 14;
+    char cterrain[96] = {}, name[96] = {};
+    int list = -1, index = -1, used = 0;
+    if (sscanf_s(line.c_str() + skip, "%95s %d %d %95s%n", cterrain, static_cast<unsigned>(sizeof(cterrain)), &list, &index, name,
+                 static_cast<unsigned>(sizeof(name)), &used) != 4) {
+        rfa::Log("Editor link: %s needs a terrain name, list, index and piece name%s", hide ? "editor_stitch_hide" : "editor_stitch",
+                 hide ? "" : ", and 12 numbers");
+        return;
+    }
+    float numbers[12];
+    if (!hide && !ReadNumbers(line.c_str() + skip + used, numbers, 12)) return;
+    BYTE *piece = nullptr, *record = nullptr, *header = nullptr, *zone = nullptr;
+    int result = GuardedFindPiece(cterrain, list, index, name, &piece, &record, &header, &zone);
+    if (result > 0) {
+        const bool ownBody = !CombinedCollision(header);
+        result = hide ? GuardedHidePiece(piece, ownBody) : GuardedPlacePiece(piece, record, zone, ownBody, numbers);
+    }
+    static int done = 0, problems = 0;
+    if (result > 0) {
+        if (++done <= 5) rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) %s", name, cterrain, list, index, hide ? "taken away" : "moved");
+    } else if (++problems <= 10) {
+        rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) not %s: %s", name, cterrain, list, index, hide ? "taken away" : "moved",
+                 kPieceWhy[-result]);
+    }
+}
+
+void AnswerEditor(const std::string& name, const char* answer) {
+    const std::wstring path = LinkFolder() + L"\\" + std::wstring(name.begin(), name.end()) + L".txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+        fputs(answer, file);
+        fclose(file);
+    }
+}
+
+// A new piece of our own: its data (as a stitch list's), an array for its draw instances, its name
+// kept. Never freed (its body knows it).
+BYTE* NewPiece(const char* name, int flags) {
+    BYTE* piece = static_cast<BYTE*>(calloc(1, kPieceSize));
+    char* kept = _strdup(name);
+    void** draws = static_cast<void**>(calloc(8, sizeof(void*)));
+    if (!piece || !kept || !draws) return nullptr;
+    *reinterpret_cast<char**>(piece) = kept;
+    piece[kPieceFlags] = static_cast<BYTE>(flags);
+    *reinterpret_cast<DWORD*>(piece + kPieceBody) = kNoBody;
+    *reinterpret_cast<void***>(piece + kPieceDraws) = draws;
+    return piece;
+}
+
+int GuardedSubChunks(const char* name) {
+    __try {
+        BYTE* chunk = ChunkByName(name);
+        return chunk ? *reinterpret_cast<int*>(chunk + kChunkSubChunks) : -1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+int GuardedZoneOf(const char* cterrain, BYTE** record, BYTE** zone) {
+    __try {
+        *record = TerrainRecord(cterrain);
+        if (!*record) return -1;
+        BYTE* data = *reinterpret_cast<BYTE**>(*record);
+        *zone = data ? *reinterpret_cast<BYTE**>(data + 0xA8) : nullptr;
+        return *zone ? 1 : -1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+// editor_stitch_add <zone>.cterrain_pc <id> <piece name> <flags> x y z <9 rotation numbers>: a piece
+// added in the editor made (or, made already, moved). The answer (link\stitch_<id>.txt: made, moved,
+// nochunk or failed) tells the editor whether to fall back on a reload.
+void EditorAddStitchPiece(const std::string& line) {
+    char cterrain[96] = {}, name[96] = {};
+    unsigned id = 0;
+    int flags = 4, used = 0;
+    if (sscanf_s(line.c_str() + 18, "%95s %x %95s %d%n", cterrain, static_cast<unsigned>(sizeof(cterrain)), &id, name,
+                 static_cast<unsigned>(sizeof(name)), &flags, &used) != 4) {
+        rfa::Log("Editor link: editor_stitch_add needs a terrain name, id, piece name, flags and 12 numbers");
+        return;
+    }
+    float numbers[12];
+    if (!ReadNumbers(line.c_str() + 18 + used, numbers, 12)) return;
+    char answerName[32];
+    sprintf_s(answerName, "stitch_%08X", id);
+    BYTE *record = nullptr, *zone = nullptr;
+    if (GuardedZoneOf(cterrain, &record, &zone) <= 0) {
+        rfa::Log("Editor link: new level geometry piece %s: the game has no zone for %s", name, cterrain);
+        AnswerEditor(answerName, "failed");
+        return;
+    }
+    SpawnedPiece* spawned = nullptr;
+    for (SpawnedPiece& s : g_spawnedPieces)
+        if (s.id == id && s.record == record && _stricmp(s.name.c_str(), name) == 0) spawned = &s;
+    const bool made = spawned != nullptr;
+    if (!spawned) {
+        const int subChunks = GuardedSubChunks(name);
+        if (subChunks < 0) {
+            rfa::Log("Editor link: new level geometry piece %s: its chunk isn't loaded in the game", name);
+            AnswerEditor(answerName, "nochunk");
+            return;
+        }
+        if (subChunks > 1) {  // (the game doesn't make those as stitch pieces either)
+            rfa::Log("Editor link: new level geometry piece %s: its chunk has %d sub-chunks; stitch pieces have one", name, subChunks);
+            AnswerEditor(answerName, "failed");
+            return;
+        }
+        BYTE* piece = NewPiece(name, flags);
+        if (!piece) {
+            AnswerEditor(answerName, "failed");
+            return;
+        }
+        *reinterpret_cast<int*>(piece + kPieceDrawCount) = subChunks;
+        g_spawnedPieces.push_back({id, piece, record, name});
+        spawned = &g_spawnedPieces.back();
+    }
+    // Pieces of our own always have a body of their own (made for them, as for a combined collision).
+    const int result = GuardedPlacePiece(spawned->piece, record, zone, false, numbers);
+    static int count = 0;
+    if (result > 0 && (!made && ++count <= 10)) rfa::Log("Editor link: made level geometry piece %s (0x%08X)", name, id);
+    if (result <= 0) rfa::Log("Editor link: new level geometry piece %s not %s: %s", name, made ? "moved" : "made", kPieceWhy[-result]);
+    AnswerEditor(answerName, result > 0 ? (made ? "moved" : "made") : result == -6 ? "nochunk" : "failed");
+}
+
+// editor_stitch_drop <id>: a piece added in the editor (made by editor_stitch_add) deleted there.
+void EditorDropStitchPiece(const std::string& line) {
+    const DWORD id = static_cast<DWORD>(strtoul(line.c_str() + 19, nullptr, 16));
+    for (SpawnedPiece& s : g_spawnedPieces) {
+        if (s.id != id || LivePieceOf(s.piece).hidden) continue;
+        if (GuardedHidePiece(s.piece, false) > 0) rfa::Log("Editor link: level geometry piece %s (0x%08X) taken away", s.name.c_str(), static_cast<unsigned>(id));
+    }
+}
+
+// The game takes a zone's terrain and level geometry away (0x6BC900, the terrain record: when the level
+// unloads or loads again): first the pieces we made and the bodies we made for its pieces go, while
+// the chunks they are made of are still there.
+constexpr DWORD kTerrainTakeDown = 0x6BC900;
+constexpr size_t kTerrainTakeDownPrologue = 6;  // push ebp / mov ebp,esp / sub esp,34h
+using TerrainTakeDownFn = void(__cdecl*)(BYTE* record);
+TerrainTakeDownFn g_terrainTakeDown;
+
+void GuardedFreePiece(BYTE* piece, DWORD body, bool draws) {
+    __try {
+        if (draws) FreeStitchDraw(piece);
+        if (body != kNoBody) FreeBody(body, false, true, true);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        rfa::Log("Editor link: letting go of a level geometry piece made live faulted");
+    }
+}
+
+void __cdecl TerrainTakeDown(BYTE* record) {
+    int freed = 0;
+    for (auto it = g_spawnedPieces.begin(); it != g_spawnedPieces.end();) {
+        if (it->record != record) {
+            ++it;
+            continue;
+        }
+        DWORD body = kNoBody;
+        for (auto& [at, live] : g_livePieces)
+            if (at == it->piece) std::swap(body, live.body);  // (not freed again below)
+        GuardedFreePiece(it->piece, body, true);
+        freed++;
+        it = g_spawnedPieces.erase(it);
+    }
+    for (auto it = g_livePieces.begin(); it != g_livePieces.end();) {
+        if (it->second.record != record) {
+            ++it;
+            continue;
+        }
+        if (it->second.body != kNoBody) GuardedFreePiece(it->first, it->second.body, false);
+        it = g_livePieces.erase(it);
+    }
+    if (freed) rfa::Log("Editor link: %d level geometry pieces made live let go with their zone", freed);
+    g_terrainTakeDown(record);
+}
+
 bool RunEditorEdit(const std::string& line) {
-    if (line.rfind("editor_stitch ", 0) == 0) {
-        MoveEditorStitchPiece(line);
+    if (line.rfind("editor_stitch ", 0) == 0 || line.rfind("editor_stitch_hide ", 0) == 0) {
+        EditorStitchPiece(line, line.rfind("editor_stitch_hide ", 0) == 0);
+        return true;
+    }
+    if (line.rfind("editor_stitch_add ", 0) == 0) {
+        EditorAddStitchPiece(line);
+        return true;
+    }
+    if (line.rfind("editor_stitch_drop ", 0) == 0) {
+        EditorDropStitchPiece(line);
         return true;
     }
     if (line.rfind("editor_chunk ", 0) == 0) {
@@ -2127,6 +2438,9 @@ void console::Init() {
 
     g_runScriptFile = reinterpret_cast<RunScriptFileFn>(
         rfa::HookFunction(kRunScriptFile, kRunScriptFilePrologue, reinterpret_cast<void*>(&RunScriptFile)));
+    g_terrainTakeDown = reinterpret_cast<TerrainTakeDownFn>(
+        rfa::HookFunction(kTerrainTakeDown, kTerrainTakeDownPrologue, reinterpret_cast<void*>(&TerrainTakeDown)));
+    if (!g_terrainTakeDown) rfa::Log("Could not hook the game's terrain take-down; level geometry made live may outlive its level");
     g_gameplayStart = reinterpret_cast<GameplayStartFn>(
         rfa::HookFunction(kGameplayStart, kGameplayStartPrologue, reinterpret_cast<void*>(&GameplayStart)));
     rfa::Log(g_runScriptFile && g_gameplayStart
