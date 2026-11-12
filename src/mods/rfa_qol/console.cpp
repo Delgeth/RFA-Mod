@@ -2605,6 +2605,11 @@ BYTE* GuardedTerrainBase(BYTE* data, unsigned size) {
     return nullptr;
 }
 
+auto const BodySetPosition = reinterpret_cast<void(__thiscall*)(BYTE* body, const float* position)>(0xACAFF0);
+auto const MakeBox = reinterpret_cast<void*(__thiscall*)(void* box, const float* min, const float* max)>(0x4FAA20);
+auto const SetMeshBounds = reinterpret_cast<void(__thiscall*)(BYTE* mesh, void* box)>(0x6BDB90);
+auto const FreeBox = reinterpret_cast<void(__thiscall*)(void* box)>(0x926130);
+
 bool GuardedCopy(BYTE* to, const BYTE* from, size_t length) {
     __try {
         memcpy(to, from, length);
@@ -2625,10 +2630,21 @@ const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
         if (!base) return "failed: the terrain file wasn't found in memory";
         for (size_t r = 0; r < patch.ranges.size(); r++)
             if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
-        // (The height field's body is left where it is: placing it again, at the zone's corner, put it
-        // outside the world, "Tried to delete a zone (ruin01) which has dimensions outside the
-        // broadphase", and the ground lost its collision. Its box already holds every height the
-        // field can store: see TerrainHeightField.)
+        // The height field's body set where it already is (hkpRigidBody::setPosition, 0xACAFF0, with
+        // its own position: its motion at +0xE0, the transform's translation at +0x120), so the world
+        // works its box out again from the new heights: else ground raised above, or lowered below,
+        // what the level loaded with isn't solid. (Placing it at the zone's corner instead put it
+        // outside the world: "Tried to delete a zone ... outside the broadphase".)
+        if (BYTE* zone = *reinterpret_cast<BYTE**>(data + 0xA8)) {
+            DWORD handle = *reinterpret_cast<DWORD*>(zone + 0x4C);
+            if (BYTE* body = handle != kNoBody && handle != 0 ? BodyOf(handle) : nullptr) {
+                alignas(16) float position[4];
+                memcpy(position, body + 0x120, sizeof(position));
+                bool sane = true;
+                for (int i = 0; i < 3; i++) sane = sane && position[i] == position[i] && position[i] > -100000 && position[i] < 100000;
+                if (sane) BodySetPosition(body, position);
+            }
+        }
         return "done";
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return "failed: the game's code faulted";
@@ -2648,10 +2664,18 @@ const char* GuardedPatchSubzone(const char* name, const TerrainPatch& patch) {
         if (*reinterpret_cast<DWORD*>(base) != 0x5A425553) return "failed: the sub-zone file wasn't where expected in memory";
         for (size_t r = 0; r < patch.ranges.size(); r++)
             if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
-        if (patch.vertices.empty()) return "done";
         BYTE* meshData = *reinterpret_cast<BYTE**>(d + 0x1C);
         BYTE* mesh = *reinterpret_cast<BYTE**>(d + 0x20);
         if (!meshData || !mesh) return "failed: the sub-zone has no mesh";
+        // Its bounds for drawing (the mesh's, +0x10, from the sub-zone's box, D +0x24 and +0x30, as the
+        // load sets them: 0x6B7E20): else ground raised above, or lowered below, the box the level
+        // loaded with is left out of view now and then (it flickers).
+        alignas(16) BYTE box[0x40] = {};
+        if (void* made = MakeBox(box, reinterpret_cast<float*>(d + 0x24), reinterpret_cast<float*>(d + 0x30))) {
+            SetMeshBounds(mesh, made);
+            FreeBox(box);
+        }
+        if (patch.vertices.empty()) return "done";
         unsigned count = *reinterpret_cast<unsigned*>(meshData + 0x0C), size = meshData[0x10];
         BYTE* vertices = *reinterpret_cast<BYTE**>(meshData + 0x2C);
         if (count != patch.vertexCount || size != patch.vertexSize || !vertices) return "failed: the sub-zone's vertices differ from the editor's";
