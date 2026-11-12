@@ -2632,6 +2632,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
             ShowSource();
             context.Log(message + " The game uses it from its next start through RFAModLauncher.");
             context.OverridesChanged();
+            // A running game looks for files saved for the first time now (a loose file new in
+            // overrides\ isn't used until it does: the level then read the game's own, smaller stitch
+            // list into the room its asset list gave the saved one, and never finished loading).
+            if (GameLink.IsRecent(gameLink.Read())) gameLink.TrySend(["editor_rescan"]);
             return true;
         }
         catch (Exception ex)

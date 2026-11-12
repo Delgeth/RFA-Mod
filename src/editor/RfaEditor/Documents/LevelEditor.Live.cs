@@ -167,23 +167,29 @@ public partial class LevelEditor
             string data = $"rflive{session}_{++liveChunkNumber}";
             string assetList = data + ".asm_pc";
             string container = bare + (stitch ? ".rfgstitchx" : ".rfgchunkx");
-            var files = package.Files;
+            // Only what the level hasn't loaded already: a texture file it has (a look borrowed from one of
+            // its own pieces) listed again made the game's asset list reader stop (int3).
+            string own = bare + (stitch ? ".cstch_pc" : ".cchk_pc");
+            var files = package.Files.Where(f => f.Name.Equals(own, StringComparison.OrdinalIgnoreCase) ||
+                                                 f.Name.Equals(RfaFormats.Meshes.ModelFile.DataFileName(own), StringComparison.OrdinalIgnoreCase) ||
+                                                 !LevelHasFile(f.Name)).ToList();
+            var primitives = package.Primitives.Where(p => files.Any(f => f.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase))).ToList();
             byte[] bytes = RfaFormats.Packfile.CreateContainer(files);
             var packed = RfaFormats.Packfile.FromBytes(data + ".str2_pc", bytes);
             RfaFormats.AsmPrimitive Copy(RfaFormats.AsmPrimitive p) => new()
             {
                 Name = p.Name, Type = p.Type, Allocator = p.Allocator, Flags = p.Flags, SplitIndex = p.SplitIndex, HeaderSize = p.HeaderSize, DataSize = p.DataSize,
             };
-            var own = new RfaFormats.AsmContainer
+            var ownContainer = new RfaFormats.AsmContainer
             {
                 Name = data, Type = 17, Flags = 0x480, DataOffset = (uint)packed.DataStart, CompressedSize = packed.CompressedDataSize,
             };
-            own.Sizes.AddRange(files.Select(f => f.Data.Length));
-            own.Primitives.AddRange(package.Primitives.Select(Copy));
+            ownContainer.Sizes.AddRange(files.Select(f => f.Data.Length));
+            ownContainer.Primitives.AddRange(primitives.Select(Copy));
             var group = new RfaFormats.AsmContainer { Name = container, Type = 14, Flags = 0x300 };
-            group.Primitives.AddRange(package.Primitives.Select(Copy));
+            group.Primitives.AddRange(primitives.Select(Copy));
             var list = new RfaFormats.AsmFile();
-            list.Containers.Add(own);
+            list.Containers.Add(ownContainer);
             list.Containers.Add(group);
             string folder = Path.Combine(context.Workspace.OverridesFolder, "live");
             Directory.CreateDirectory(folder);
@@ -201,6 +207,10 @@ public partial class LevelEditor
             return false;
         }
     }
+
+    /// <summary>Whether one of the level's containers (the zone's, its stitch list's) has a file already.</summary>
+    bool LevelHasFile(string name) =>
+        ChunkContainers().Concat(StitchContainers()).Distinct().Any(c => Workspace.Container(c.Archive, c.Container).Find(name) != null);
 
     /// <summary>Takes the game's answers about chunks it was asked to load.</summary>
     void TakeLiveChunkAnswers()
