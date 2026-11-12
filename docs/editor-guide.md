@@ -215,6 +215,16 @@ the other. Lines keep the same width on the screen near and far. You can't edit 
 - **Show the whole zone** frames the zone's objects, leaving out the few far-off ones some zones
   have.
 
+### What the game doesn't draw
+
+The light-bulb button in the toolbar (on to start with) shows, in the editor only, what the game
+keeps invisible: each **spot light's cone** (yellow: as far as it reaches, as wide as its hotspot and
+falloff), each **spectator camera's view** (blue: the MP markers of type *Spectator camera* and
+*Spectator intro camera*), the **invisible walls** (red: from each wall point to the next, 40 m
+high, and 20 m down where the wall extends downward) and the **invisible collision boxes**
+(orange). They follow the objects as you move them, from this zone's files and those shown with it.
+Nothing of them is saved.
+
 ### With an Xbox controller
 
 Any XInput controller (Xbox 360, One or Series; plugged in or wireless) works while the level
@@ -365,8 +375,10 @@ the brush on the ground.
   geometry* in the chunk browser (by category, setting and pack, or by name): pick one to place it
   where the middle of the view points. Saving writes them into the zone's stitch list (every copy),
   with its decals as they were and a collision tree made again to reach every piece; pieces from
-  elsewhere have their model and textures brought into the list's container. They are never saved
-  in the zone file itself. Sculpting moves the pieces standing on the ground with it.
+  elsewhere (another level's, or the Guerrilla world's: their shaders load everywhere) have their
+  model and textures brought into the list's container, or for a level whose list is loose in its
+  archive (the Ruin maps), into the zone's level container. They are never saved in the zone file
+  itself. Sculpting moves the pieces standing on the ground with it.
 - **Duplicate** (Ctrl+D) copies the picked object beside it (to the view's right, clear of it). A
   copy is a whole breakable object, as the game's own are: copying a loose piece (the tank of an
   explosive tanker) copies the part it hangs from too (the tanker's base), with everything
@@ -374,6 +386,15 @@ the brush on the ground.
 - **Delete** (Del) removes the picked object with the objects attached to it (a building's lights).
   It's refused, saying why, while something else names one of them (another object's links, such
   as navpoints linked in a path, or an object in a mission layer).
+- **Effects follow objects into any level.** What an object shows when it breaks, is hit or burns,
+  and the explosion it dies in, come from its level object (its `Props`: `level_objects.xtbl`, its
+  effects in `effects.xtbl`, their visuals in `vfx.xtbl`, its explosion in `explosions.xtbl`, as the
+  game reads them, the `guerrilla_world` mod's with Guerrilla's added). Most visuals load with a
+  level, from files its archives hold, so a prop moved to another level (or a Guerrilla building in
+  one of Armageddon's) broke without them. On saving, the effect files the objects added to the zone
+  need and the level hasn't (each `.cefct_pc` and `.gefct_pc`, and a converted Guerrilla effect's
+  textures) are brought into its containers with their models. Effects loaded at start-up, and
+  Armageddon's effect textures, are everywhere already.
 - **Delete all** (the bin marked *All*, beside Delete) deletes every chunk (building and prop), every
   piece of level geometry, both, or every object of the picked one's class, with what is attached
   to them, in one step to undo. Those something else names are kept, as Delete keeps them, and the

@@ -374,6 +374,39 @@ public static class GuerrillaEffectTables
         return string.Concat(entry.Nodes().Select(n => Write(n, 2)));
     }
 
+    /// <summary>
+    /// The effect files an object needs in its level, by its level object (Props): the files of the
+    /// visuals its effects show (its Death_Effect, impacts, custom effects...) and its explosions'
+    /// effects show (Death_Explosion), those loaded with the level (Streaming_Category other than
+    /// Preload: Preload ones come from effects.vpp_pc at start-up, everywhere). From the four tables
+    /// as the game reads them (Armageddon's, or the guerrilla_world mod's with Guerrilla's added).
+    /// For the level editor: an object brought into another level brings its effects' files.
+    /// </summary>
+    public sealed class EffectLookup(string levelObjects, string effects, string visuals, string explosions)
+    {
+        readonly Dictionary<string, string> objects = Entries(levelObjects, "Level_Object"), effectEntries = Entries(effects, "Effect"),
+                                            visualEntries = Entries(visuals, "Effect"), explosionEntries = Entries(explosions, "Explosion");
+
+        /// <summary>The effect files (names without extension, as vfx.xtbl's Filename) a level object's effects need in the level.</summary>
+        public IEnumerable<string> FilesOf(string levelObject)
+        {
+            if (!objects.TryGetValue(levelObject, out string? entry)) yield break;
+            var names = EffectFields.SelectMany(f => Leaves(entry, f)).ToList();
+            foreach (string explosion in Leaves(entry, "Death_Explosion"))
+                if (explosionEntries.TryGetValue(explosion, out string? x))
+                    names.AddRange(Leaves(x, "Name").Skip(1).Concat(Leaves(x, "Element")));  // its effects (the first Name is its own)
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string effect in names)
+            {
+                if (!effectEntries.TryGetValue(effect, out string? e) || Field(e, "visual") is not { Length: > 0 } visual ||
+                    !visualEntries.TryGetValue(visual, out string? v) || Field(v, "Filename") is not { Length: > 0 } file) continue;
+                if (string.Equals(Field(v, "Streaming_Category"), "Preload", StringComparison.OrdinalIgnoreCase)) continue;
+                string name = Path.GetFileNameWithoutExtension(file);
+                if (seen.Add(name)) yield return name;
+            }
+        }
+    }
+
     /// <summary>A visual's file (its Filename without ".effectx").</summary>
     static string FileOf(string visualEntry) =>
         Path.GetFileNameWithoutExtension(Field(visualEntry, "Filename") ?? throw new InvalidDataException("a visual effect without a file"));

@@ -190,6 +190,10 @@
                         </ToggleButton>
 
                         <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                        <ToggleButton x:Name="ShowHelpersBox" IsChecked="True" Checked="OnHelpersChanged" Unchecked="OnHelpersChanged"
+                                      ToolTip="Show what the game doesn't draw (in the editor only): spot lights' cones, spectator cameras' views, invisible walls and invisible collision boxes">
+                            <TextBlock Text="{x:Static local:Icons.Light}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
                         <ToggleButton x:Name="ShowModelsBox" IsChecked="True" Checked="OnViewOptionChanged" Unchecked="OnViewOptionChanged"
                                       ToolTip="Draw objects with their models (buildings, props); when off, every object is a small cube">
                             <TextBlock Text="{x:Static local:Icons.Model}" Style="{StaticResource Icon}" />

@@ -155,6 +155,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
         SceneViewport.Children.Add(brushVisual);
         SceneViewport.Children.Add(magnetVisual);
+        SceneViewport.Children.Add(helpersVisual);  // light and camera cones, invisible walls (LevelEditor.Helpers.cs)
         SetTool(LevelTool.Move);
         CompositionTarget.Rendering += PadFrame;
         GamePanel.ControllerChanged += ShowControllerOwner;
@@ -552,6 +553,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
     void AfterMoveOrTurn(bool fromInspector)
     {
+        RefreshHelpers();
         scene?.Place(selected!);
         foreach (Carried c in carried) scene?.Place(c.Object);
         ShowSelection();
@@ -1023,6 +1025,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// <summary>After objects were added or deleted: the outliner and the chips' counts again.</summary>
     void ObjectsChanged()
     {
+        RefreshHelpers();
         links = null;  // before the chips: they count the links
         BuildObjectTree(FilterBox.Text.Trim());
         BuildKindChips();
@@ -1427,6 +1430,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// </summary>
     void CommitEdit(string what = "Edit")
     {
+        RefreshHelpers();  // (a property such as a light's angle may have changed)
         if (selected == null || editStart == null) return;
         byte[] now = selected.Snapshot();
         var others = carried.Select(c => (c.Object, Before: c.Start, Now: c.Object.Snapshot()))
@@ -1474,6 +1478,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
     void AfterUndoOrRedo(Change change, string done)
     {
+        RefreshHelpers();
         if (change.AddsOrRemoves)
         {
             if (selected != null && Editable(selected) && !zone.Objects.Contains(selected)) Select(null, focus: false);
@@ -1555,6 +1560,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             EnsureGeometryObjects();
             if (geometryLoaded && !hadGeometry) BuildObjectTree(FilterBox.Text.Trim());
             scene = new LevelScene(zone, names, showModels, objectModels.Of, (file, uid) => ModelParts(file, archive, container, uid: uid));
+            RefreshHelpers();
             sceneContent.Content = scene.Root;
             foreach (RelatedFile file in RelatedFiles())
                 file.Scene = new LevelScene(file.Zone, names, showModels, objectModels.Of, (model, uid) => ModelParts(model, file.Archive, file.Container, uid: uid));
@@ -2596,6 +2602,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
                                                    here.SelectMany(p => p.Primitives).ToList(),
                                                    here.Select(p => p.Group).ToList()).TrimEnd('.') + ". ";
             }
+            message += BringEffects();
             byte[] bytes = ZoneBytesWithoutGeometry();  // (the level geometry goes into the stitch list: SaveGeometry)
             message += "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
             message += SaveGeometry();

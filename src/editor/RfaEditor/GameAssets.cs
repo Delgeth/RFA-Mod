@@ -18,6 +18,7 @@ namespace RfaEditor;
 sealed class GameAssets
 {
     readonly Workspace workspace;
+    readonly object assetLock = new();   // guards models, bitmaps, tables for parallel reads
     Dictionary<string, IndexedFile>? files;     // every file in an archive or container, by name
     ILookup<string, IndexedFile>? places;       // ...and every place each name is in
     Dictionary<string, TextureRef>? textures;   // every texture, by name
@@ -267,6 +268,71 @@ sealed class GameAssets
         return Package(piece, headers, null, out why);
     }
 
+    RfaFormats.Guerrilla.GuerrillaEffectTables.EffectLookup? effectLookup;
+
+    /// <summary>
+    /// The effect tables as the game reads them (the guerrilla_world mod's, Armageddon's with
+    /// Guerrilla's added, where the mod has them; else Armageddon's own), for following an object's
+    /// level object to its effects' files. Null if they can't be read.
+    /// </summary>
+    RfaFormats.Guerrilla.GuerrillaEffectTables.EffectLookup? EffectLookup()
+    {
+        if (effectLookup != null) return effectLookup;
+        string? Text(string table)
+        {
+            string mods = Path.Combine(workspace.ModFolder, "mods", "guerrilla_world", table);
+            byte[]? bytes = File.Exists(mods) ? File.ReadAllBytes(mods) : ReadAnywhere(table);
+            return bytes == null ? null : System.Text.Encoding.Latin1.GetString(bytes);
+        }
+        if (Text("level_objects.xtbl") is not string objects || Text("effects.xtbl") is not string effects ||
+            Text("vfx.xtbl") is not string visuals || Text("explosions.xtbl") is not string explosions) return null;
+        try { return effectLookup = new(objects, effects, visuals, explosions); }
+        catch (InvalidDataException) { return null; }
+    }
+
+    /// <summary>
+    /// The files the effects of these level objects (objects' Props) need in a level, those
+    /// <paramref name="present"/> says the level hasn't: each effect's .cefct_pc and .gefct_pc, and
+    /// the textures it names that are files of their own (a converted Guerrilla effect's .cvbm_pc and
+    /// .gvbm_pc; Armageddon's own effects' textures are all in effects.vpp_pc, loaded everywhere). As a
+    /// package to bring into a level's containers; null if there is nothing to bring.
+    /// </summary>
+    public ChunkPackage? EffectPackageFor(IEnumerable<string> levelObjects, Func<string, bool> present, out List<string> effects)
+    {
+        effects = [];
+        ReadAssetLists();
+        if (files == null || EffectLookup() is not { } lookup) return null;
+        var headers = new List<string>();
+        foreach (string file in levelObjects.Distinct(StringComparer.OrdinalIgnoreCase).SelectMany(lookup.FilesOf).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            string header = file + ".cefct_pc";
+            if (present(header) || ReadAnywhere(header) is not byte[] bytes) continue;
+            effects.Add(file);
+            headers.Add(header);
+            foreach (string texture in EffectTextures(bytes))
+            {
+                string textureHeader = Path.GetFileNameWithoutExtension(texture) + ".cvbm_pc";
+                if (files.ContainsKey(textureHeader) && !present(textureHeader) && !headers.Contains(textureHeader, StringComparer.OrdinalIgnoreCase))
+                    headers.Add(textureHeader);
+            }
+        }
+        return headers.Count == 0 ? null : Package("effects", headers, null, out _);
+    }
+
+    /// <summary>The textures a version-36 effect file names (its bitmaps: a count at +0x1C, a list of their names' offsets at +0x20).</summary>
+    static IEnumerable<string> EffectTextures(byte[] effect)
+    {
+        if (effect.Length < 0x24) yield break;
+        int count = BitConverter.ToInt32(effect, 0x1C), list = BitConverter.ToInt32(effect, 0x20);
+        for (int i = 0; i < count && list + i * 4 + 4 <= effect.Length; i++)
+        {
+            int at = BitConverter.ToInt32(effect, list + i * 4);
+            if (at <= 0 || at >= effect.Length) continue;
+            int end = Array.IndexOf(effect, (byte)0, at);
+            if (end > at) yield return System.Text.Encoding.Latin1.GetString(effect, at, end - at);
+        }
+    }
+
     /// <summary>The files, primitives and own group (see <see cref="PackageOf"/>) of a chunk or stitch piece, from its header files.</summary>
     ChunkPackage? Package(string chunk, List<string> headers, AsmContainer? own, out string? why)
     {
@@ -289,6 +355,7 @@ sealed class GameAssets
                 : Path.GetExtension(header).ToLowerInvariant() switch
                 {
                     ".cchk_pc" or ".cstch_pc" => ((byte)2, (byte)1, (byte)6, (byte)0),
+                    ".cefct_pc" => ((byte)13, (byte)1, (byte)6, (byte)0),
                     ".cpeg_pc" or ".cvbm_pc" => ((byte)1, (byte)1, (byte)6, (byte)1),
                     _ => ((byte)0, (byte)0, (byte)0, (byte)0),
                 };
@@ -354,18 +421,21 @@ sealed class GameAssets
     /// <summary>A model by its c-file name, or null if it can't be found or read.</summary>
     public ModelFile? Model(string name, string nearArchive, string? nearContainer)
     {
-        if (models.TryGetValue(name, out ModelFile? known) && known != null) return known;
-        ModelFile? model = null;
-        try
+        lock (assetLock)
         {
-            if (Find(name, nearArchive, nearContainer) is (Packfile pack, PackfileEntry header) &&
-                pack.Find(ModelFile.DataFileName(name)) is PackfileEntry data)
-                model = ModelFile.Read(name, pack.Read(header), pack.Read(data));
+            if (models.TryGetValue(name, out ModelFile? known) && known != null) return known;
+            ModelFile? model = null;
+            try
+            {
+                if (Find(name, nearArchive, nearContainer) is (Packfile pack, PackfileEntry header) &&
+                    pack.Find(ModelFile.DataFileName(name)) is PackfileEntry data)
+                    model = ModelFile.Read(name, pack.Read(header), pack.Read(data));
+            }
+            catch (InvalidDataException) { }
+            catch (NotSupportedException) { }
+            if (model != null || IndexReady) models[name] = model;  // a miss is only final once the index is ready
+            return model;
         }
-        catch (InvalidDataException) { }
-        catch (NotSupportedException) { }
-        if (model != null || IndexReady) models[name] = model;  // a miss is only final once the index is ready
-        return model;
     }
 
     /// <summary>
@@ -375,13 +445,16 @@ sealed class GameAssets
     /// </summary>
     public BitmapSource? Texture(string name, string nearArchive, string? nearContainer, int maxSize, bool alpha = false)
     {
-        string key = $"{name}@{maxSize}{(alpha ? "+alpha" : "")}";
-        if (bitmaps.TryGetValue(key, out BitmapSource? known) && known != null) return known;
-        BitmapSource? bitmap = FindTexture(name, nearArchive, nearContainer) is var (peg, texture)
-            ? Bitmaps.FromRgba(peg.Decode(texture, maxSize), alpha)
-            : null;
-        if (bitmap != null || IndexReady) bitmaps[key] = bitmap;
-        return bitmap;
+        lock (assetLock)
+        {
+            string key = $"{name}@{maxSize}{(alpha ? "+alpha" : "")}";
+            if (bitmaps.TryGetValue(key, out BitmapSource? known) && known != null) return known;
+            BitmapSource? bitmap = FindTexture(name, nearArchive, nearContainer) is var (peg, texture)
+                ? Bitmaps.FromRgba(peg.Decode(texture, maxSize), alpha)
+                : null;
+            if (bitmap != null || IndexReady) bitmaps[key] = bitmap;
+            return bitmap;
+        }
     }
 
     /// <summary>A game table (.xtbl) by name, read once; null if it can't be found (or the index isn't ready yet).</summary>

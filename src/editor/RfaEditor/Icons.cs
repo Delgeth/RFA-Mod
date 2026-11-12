@@ -51,7 +51,13 @@ public static class Icons
     public const string Settled = "\uE896";    // Download (an arrow down to a line): props where the running game has them
     public const string Display = "\uE7F4";    // A monitor: the Direct3D view
     public const string Sculpt = "\uE771";     // Personalize (a brush): sculpt the ground
+    public const string Navmesh = "\uE76C";    // A network: paint navmesh cells on/off
+    public const string NavmeshGenerate = "\uE773";  // A plus inside a square: generate navmesh from ground
     public const string GameLight = "\uE793";  // A sun (Brightness): light the level as the game does
+    public const string TopView = "\uE749";    // A wall: top-down view
+    public const string FrontView = "\uE74B";  // A cone: front view
+    public const string SideView = "\uE74C";   // A cone side: side view
+    public const string IsoView = "\uE74D";    // A cone 3D: isometric view
 
     // Kinds of objects in a level
     public const string Light = "";
@@ -63,6 +69,17 @@ public static class Icons
     public const string Mission = "\uE7C1";  // Flag: a mission layer shown with its zone
     public const string Locked = "\uE72E";   // Lock: a property Volition's editor kept read-only
     public const string Marker = "";
+
+    // Additional object kinds
+    public const string Constraint = "";  // Link (chain link)
+    public const string Rig = "";         // Animation (person/skeleton)
+    public const string Logic = "";       // Script (code)
+    public const string Camera = "";      // Preview (camera)
+    public const string Mover = "";       // Model (cube/box)
+    public const string Debris = "";      // Archive (broken pieces)
+    public const string Dummy = "";       // Container (empty box)
+    public const string ForceField = "";  // Zone (shield-like)
+    public const string ClipShape = "";   // Link (clip/boundary)
 }
 
 /// <summary>A kind of file, by its extension: its name, icon and colour in the explorer.</summary>

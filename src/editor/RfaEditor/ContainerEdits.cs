@@ -205,7 +205,7 @@ static class ContainerEdits
     }
 
     /// <summary>Whether two archives are one level's: the same, or the same world's (rfg_l0 and rfg_l1, world_l0 and world_l1, x and x_precache) in one folder.</summary>
-    static bool SameLevel(string a, string b)
+    internal static bool SameLevel(string a, string b)
     {
         if (a.Equals(b, StringComparison.OrdinalIgnoreCase)) return true;
         static string World(string archive)

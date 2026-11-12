@@ -155,8 +155,13 @@ public partial class LevelEditor
     }
 
     /// <summary>The containers holding the zone's stitch list (where pieces brought in go).</summary>
-    List<(string Archive, string Container)> StitchContainers() => stitchListName == null ? [] :
-        context.Assets.PlacesOf(stitchListName).Where(p => p.Container != null).Select(p => (p.Archive, p.Container!)).Distinct().ToList();
+    /// <remarks>A stitch list loose in its archive (Ruin maps') has none: then the zone's level containers (see ChunkContainers).</remarks>
+    List<(string Archive, string Container)> StitchContainers()
+    {
+        if (stitchListName == null) return [];
+        var holding = context.Assets.PlacesOf(stitchListName).Where(p => p.Container != null).Select(p => (p.Archive, p.Container!)).Distinct().ToList();
+        return holding.Count > 0 ? holding : ChunkContainers();
+    }
 
     /// <summary>The zone's bytes without the level geometry (which goes in the stitch list).</summary>
     byte[] ZoneBytesWithoutGeometry()
