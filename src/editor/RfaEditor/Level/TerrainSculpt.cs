@@ -295,7 +295,7 @@ sealed class TerrainSculpt
     }
 
     /// <summary>The lowest and highest heights the field can store.</summary>
-    public (float Low, float High) Range => (field.Offset, field.Offset + field.Scale * ushort.MaxValue);
+    public (float Low, float High) Range => (this.field.Offset, this.field.Offset + this.field.Scale * ushort.MaxValue);
 
     /// <summary>Smooth noise from 0 to 1 (see <see cref="ValueNoise"/>), for the terrain creator.</summary>
     internal static float Noise(float x, float z, int seed) => ValueNoise(x, z, seed);
