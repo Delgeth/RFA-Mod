@@ -334,6 +334,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             Log($"{ex.GetType().Name}: {ex.Message}");
+            EditorLog.Write($"  where: {ex}");  // the whole error, with where it happened, for the log file only
         }
     }
 }

@@ -38,6 +38,9 @@ public partial class LevelEditor
 
     void ShowHelpers()
     {
+        // The box starts checked, so this is called while the view is being built, before the
+        // zone is read: nothing to draw yet (BuildScene draws the helpers once it is).
+        if (zone == null) return;
         if (ShowHelpersBox.IsChecked != true)
         {
             helpersVisual.Content = null;
