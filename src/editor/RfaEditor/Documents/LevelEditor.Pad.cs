@@ -294,7 +294,7 @@ public partial class LevelEditor
     /// building, a crate or a navpoint, not a lamp on a pole or a light in a ceiling.
     /// </summary>
     static IEnumerable<ZoneObject> StandingOnGround(ZoneFile file, Func<float, float, float> ground, Func<Vector3, bool> over) =>
-        file.Objects.Where(o => o.Parent == ZoneObject.None && over(o.Placement.Position) &&
+        file.Objects.Where(o => o.Parent == ZoneObject.None && !IsBarrier(o) && over(o.Placement.Position) &&
                                 o.BoundsMin.Y - ground(o.Placement.Position.X, o.Placement.Position.Z) is >= -3 and <= 2);
 
     /// <summary>During a stroke: this zone's objects on the ground near the brush keep their height over it (with what is attached to them).</summary>
@@ -423,10 +423,19 @@ public partial class LevelEditor
             {
                 if (inContainer == null)
                 {
-                    bool own = TryOriginal(inArchive, null, name) is byte[] original && original.AsSpan().SequenceEqual(bytes);
+                    // Loose in its archive: the asset lists give its size (the game sets memory aside by it,
+                    // and a level whose terrain file is bigger or smaller than its list says never finishes
+                    // loading), so they follow it: from its size now, and from the game's own size (lists an
+                    // earlier save left behind).
+                    byte[]? original = TryOriginal(inArchive, null, name);
+                    int sizeNow = Workspace.Read(inArchive, name).Length;
+                    var lists = ContainerEdits.UpdateLooseSize(Workspace, name, sizeNow, bytes.Length);
+                    if (original != null && original.Length != sizeNow) lists.AddRange(ContainerEdits.UpdateLooseSize(Workspace, name, original.Length, bytes.Length));
+                    bool own = original != null && original.AsSpan().SequenceEqual(bytes);
                     if (own) Workspace.DeleteOverride(inArchive, name);
                     else Workspace.WriteOverride(inArchive, name, bytes);
-                    done.Add(own ? $"{name} is the game's own again" : name);
+                    string sized = lists.Count > 0 ? $" (its size updated in {string.Join(", ", lists.Distinct(StringComparer.OrdinalIgnoreCase))})" : "";
+                    done.Add((own ? $"{name} is the game's own again" : name) + sized);
                     continue;
                 }
                 if (!inContainers.TryGetValue((inArchive, inContainer), out var group)) inContainers[(inArchive, inContainer)] = group = new(StringComparer.OrdinalIgnoreCase);
@@ -466,6 +475,9 @@ public partial class LevelEditor
                 if (!Workspace.IsChanged(inArchive, inContainer ?? name)) continue;
                 if (inContainer == null)
                 {
+                    // (Its size in the asset lists back to the game's own too.)
+                    int sizeNow = Workspace.Read(inArchive, name).Length;
+                    if (TryOriginal(inArchive, null, name) is byte[] own) ContainerEdits.UpdateLooseSize(Workspace, name, sizeNow, own.Length);
                     Workspace.DeleteOverride(inArchive, name);
                     notes.Add($"{name} is the game's own again");
                     continue;
