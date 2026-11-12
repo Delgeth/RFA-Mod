@@ -1073,6 +1073,15 @@ public partial class LevelEditor : UserControl, IEditorDocument
             AddList.Items.Add(AddListRow(kind, label.Length > 0 ? label : className, label.Length > 0 ? className : null, count.ToString("N0"),
                                          $"{className}: {count:N0} in this file. A copy of one is added where the middle of the view points.", example));
 
+        // An invisible wall (see LevelEditor.Barriers.cs).
+        if (barrierFile != null && (filter.Length == 0 || "invisible wall barrier collision".Contains(filter, StringComparison.OrdinalIgnoreCase)))
+        {
+            AddList.Items.Add(AddListHeading("INVISIBLE WALL"));
+            AddList.Items.Add(AddListRow(ObjectKind.Regions, "Invisible wall", "invisible_barrier", "",
+                                         "A wall the player can't go through and nobody sees: a box 10 m wide, 10 m high and 1 m thick, standing where the " +
+                                         "middle of the view points (its bb resizes it). It goes into the zone's terrain file on saving.", new BarrierChoice()));
+        }
+
         // Any chunk of the game's (or the Guerrilla world's): buildings and props from every level, to browse (see LevelEditor.ChunkBrowser.cs).
         FillChunkBrowser(filter);
 
@@ -1162,6 +1171,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (chosen is SchemaClass type) { if (CanPlaceAt(at, $"The new {type.Name}")) AddNew(type, at); }
         else if (chosen is ChunkChoice chunk) { if (CanPlaceAt(at, chunk.Chunk)) AddChunk(chunk.Chunk, at); }
         else if (chosen is GeometryChoice piece) AddGeometry(piece.Piece, at);
+        else if (chosen is BarrierChoice) AddBarrier(at);
         ViewArea.Focus();
     }
 
@@ -1557,8 +1567,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
             bool showModels = ShowModelsBox.IsChecked == true;
             // The level geometry as objects (see LevelEditor.Geometry.cs), before the scene is made of them.
             bool hadGeometry = geometryLoaded;
+            bool hadBarriers = barriersLoaded;
             EnsureGeometryObjects();
-            if (geometryLoaded && !hadGeometry) BuildObjectTree(FilterBox.Text.Trim());
+            EnsureBarrierObjects();  // (the invisible walls, see LevelEditor.Barriers.cs)
+            if ((geometryLoaded && !hadGeometry) || (barriersLoaded && !hadBarriers)) BuildObjectTree(FilterBox.Text.Trim());
             scene = new LevelScene(zone, names, showModels, objectModels.Of, (file, uid) => ModelParts(file, archive, container, uid: uid));
             RefreshHelpers();
             sceneContent.Content = scene.Root;
@@ -2607,6 +2619,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             message += "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
             message += SaveGeometry();
             if (SculptChanged) message += " " + SaveSculpt() + MoveWhatStandsOnGround();
+            message += SaveBarriers();
             batch.Dispose();
             foreach (TerrainSculpt sculpted in sculptZones) sculpted.Saved();
             chunksToAdd.Clear();

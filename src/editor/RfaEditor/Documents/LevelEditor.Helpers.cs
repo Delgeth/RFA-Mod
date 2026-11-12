@@ -57,6 +57,11 @@ public partial class LevelEditor
         {
             (Vector3 at, Matrix4x4 r) = o.Placement;
             var forward = Vector3.Normalize(new Vector3(r.M31, r.M32, r.M33));
+            if (IsBarrier(o))
+            {
+                AddBarrierFaces(walls, BarrierShapeNow(o));
+                continue;
+            }
             if (o.ClassHash == LightClass && o.Property("type_enum")?.Text == "spot")
             {
                 float range = Math.Clamp((Number(o, "atten_start") ?? 0) + (Number(o, "atten_range") ?? 5), 0.5f, 80);

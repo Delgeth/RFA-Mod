@@ -192,7 +192,7 @@ public partial class LevelEditor
     /// <summary>The zone's bytes without the level geometry (which goes in the stitch list).</summary>
     byte[] ZoneBytesWithoutGeometry()
     {
-        var geometry = zone.Objects.Where(IsGeometry).ToList();
+        var geometry = zone.Objects.Where(o => IsGeometry(o) || IsBarrier(o)).ToList();  // (and the invisible walls: SaveBarriers)
         if (geometry.Count == 0) return zone.ToBytes();
         RemovedObjects taken = zone.Remove(geometry);
         try { return zone.ToBytes(); }

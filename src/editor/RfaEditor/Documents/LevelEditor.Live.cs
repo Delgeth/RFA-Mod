@@ -39,7 +39,8 @@ public partial class LevelEditor
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveGeometry = [];  // the level geometry's pieces, as the game has them
     readonly Dictionary<uint, GamePiece> liveGeometryAt = [];      // the level's own pieces: where each is in the game's stitch list
     readonly HashSet<uint> liveGeometryHidden = [];                // ... taken away in the game (deleted here, or made another piece)
-    bool liveGeometryNoted;                                        // the above are known (the zone's geometry may be read after Live goes on)
+    bool liveGeometryNoted;
+    string? liveBarriers;                                          // the invisible walls as the game has them (BarrierSignature)                                        // the above are known (the zone's geometry may be read after Live goes on)
     readonly Dictionary<uint, string> liveGeometryMade = [];       // pieces made in the game for pieces added here: as "name|flags"
     readonly Dictionary<uint, (Vector3 Position, Matrix4x4 Rotation)> liveGeometryMadeAt = [];  // ... where the game has them
     readonly HashSet<uint> liveGeometryDropped = [];               // ... taken away again (deleted here)
@@ -90,6 +91,7 @@ public partial class LevelEditor
         liveChunksFailed.Clear();
         liveGeometryNoted = false;
         NoteLiveGeometry();
+        liveBarriers = null;
         foreach (ZoneObject obj in zone.Objects.Where(LiveKind))
         {
             liveSent[obj.Handle] = obj.Placement;
@@ -238,7 +240,7 @@ public partial class LevelEditor
     }
 
     /// <summary>Objects the game has as objects of its own (level geometry pieces are parts of one mesh there).</summary>
-    static bool LiveKind(ZoneObject obj) => !IsGeometry(obj);
+    static bool LiveKind(ZoneObject obj) => !IsGeometry(obj) && !IsBarrier(obj);
 
     /// <summary>
     /// A change was made that the game only shows once the level is loaded again (the ground was
@@ -424,6 +426,13 @@ public partial class LevelEditor
     {
         if (!GameLink.IsRecent(gameLink.Read())) return;  // the game isn't running: it is told when it is
         WatchLiveGeometry();
+        // The invisible walls are in the terrain file: the game has them changed once the level is loaded again.
+        if (barriersLoaded)
+        {
+            string walls = BarrierSignature();
+            if (liveBarriers != null && walls != liveBarriers) LiveNeedsReload();
+            liveBarriers = walls;
+        }
         TakeLiveChunkAnswers();
         if (LiveAutoReload()) return;
         var lines = new List<string>();
