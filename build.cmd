@@ -5,7 +5,8 @@ rem   build.cmd             into bin\, the copy you play
 rem   build.cmd <folder>    into another folder instead, such as a staging copy of bin\ that
 rem                         tools\stage.ps1 makes (stage\<name>\): its build leftovers go to
 rem                         build\stage-<name>\, so several builds can run at once.
-rem What the compilers say goes to build\build.log (shown if the build fails).
+rem What the compilers say goes to build\build.log (shown if the build fails); a build into another
+rem folder keeps its own, build\stage-<name>\build.log, so two builds at once don't share one.
 rem
 rem The project folder is reached through a drive letter of its own (subst) while it builds: MSBuild
 rem can't copy into a folder whose path has an apostrophe (C:\Users\Jo's PC\...), and Visual Studio's
@@ -18,8 +19,10 @@ set "SHOWN=%~dp0bin"
 if not "%~1"=="" set "SHOWN=%~f1"
 set "STAGENAME=%~nx1"
 if not "%STAGE%"=="" set "STAGE=%~f1"
-if not exist "%HERE%build" mkdir "%HERE%build"
-set "LOG=%HERE%build\build.log"
+set "LOGDIR=%HERE%build"
+if not "%STAGE%"=="" set "LOGDIR=%HERE%build\stage-%STAGENAME%"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+set "LOG=%LOGDIR%\build.log"
 echo Build %DATE% %TIME% > "%LOG%"
 
 rem Visual Studio's C++ tools: vswhere (any edition, Build Tools too, previews too), else the usual folders.
@@ -44,8 +47,13 @@ if not "%STAGE%"=="" set "OBJ=%ROOT%build\stage-%STAGENAME%"
 cd /d %ROOT%
 
 rem vcvarsall x86 in a cmd of its own; its settings (set) into a file, then into this one.
-set "ENVFILE=%ROOT%build\vcvars-env.txt"
-cmd /d /c ""%VCVARS%" x86 >> "%LOG%" 2>&1 && set > "%ENVFILE%""
+rem What vcvarsall says goes to a file of its own first, and it is told not to start its usage
+rem report: that helper keeps running with the file it was writing to still open, and the log must
+rem stay free for the compilers below.
+set "VSCMD_SKIP_SENDTELEMETRY=1"
+set "ENVFILE=%LOGDIR%\vcvars-env.txt"
+cmd /d /c ""%VCVARS%" x86 > "%LOGDIR%\vcvars.log" 2>&1 && set > "%ENVFILE%""
+type "%LOGDIR%\vcvars.log" >> "%LOG%" 2>nul
 if not exist "%ENVFILE%" (echo vcvarsall failed >> "%LOG%" & goto :fail_unmapped)
 for /f "usebackq tokens=1* delims==" %%a in ("%ENVFILE%") do set "%%a=%%b"
 del "%ENVFILE%" >nul 2>&1
@@ -74,6 +82,8 @@ cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_hud\guerrilla_hud.cpp" /Fe"%OUT%\mods\
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\*.cpp" /Fe"%OUT%\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\guerrilla_people.cpp" /Fe"%OUT%\mods\guerrilla_people.dll" /link /IMPLIB:guerrilla_people.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_save\guerrilla_save.cpp" /Fe"%OUT%\mods\guerrilla_save.dll" /link /IMPLIB:guerrilla_save.lib >> "%LOG%" 2>&1 || goto :fail
+rem guerrilla_campaign.dll: Guerrilla's alert level (and, being made, the rest of its campaign's systems).
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_campaign\*.cpp" /Fe"%OUT%\mods\guerrilla_campaign.dll" /link /IMPLIB:guerrilla_campaign.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_gear.dll: Guerrilla's weapons' room, hammer and movement, and its upgrades' F7 window (ImGui).
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_gear\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_gear.dll" /link /IMPLIB:guerrilla_gear.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_hud's scripts, which editor\GuerrillaBuilder.exe packs with Guerrilla's HUD documents.

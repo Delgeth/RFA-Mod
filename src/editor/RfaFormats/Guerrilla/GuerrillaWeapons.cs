@@ -40,12 +40,16 @@ namespace RfaFormats.Guerrilla;
 public static class GuerrillaWeapons
 {
     /// <summary>
-    /// The bus Guerrilla's weapon sounds play on: Armageddon's own weapons' (the bus, in init.bnk_pc, that its
-    /// weapons' actor-mixer 0x09B587DD in wep_shared.bnk_pc outputs to), so the game's sound settings take them
-    /// as its own guns. It must be a bus of init.bnk_pc: a bank whose sounds name anything else (the mixer
-    /// itself, as the first build did) is refused whole by Wwise at start-up ("Failed to load soundbank").
+    /// The bus Guerrilla's weapon sounds play on: one of Armageddon's own weapons' buses (in init.bnk_pc; 14 of
+    /// its weapon banks play sounds straight on it), so the game's sound settings take them as its own guns. It
+    /// has no limit of its own; the weapons' bus above it lets 30 sounds play at once. It must be a bus of
+    /// init.bnk_pc: a bank whose sounds name anything else is refused whole by Wwise at start-up ("Failed to load
+    /// soundbank").
+    /// Not 0x19F76996, the bus of Armageddon's shared weapon sounds and its hammer, where these first played: it
+    /// lets 12 play at once and the bus above it 4, the oldest ending for the next. Every one of Guerrilla's guns
+    /// shared those 4, so in a fight a gun's sound was cut off, a held gun's loop for good.
     /// </summary>
-    const uint WeaponBus = 0x19F76996;
+    const uint WeaponBus = 0x3020AD03;
 
     /// <summary>The weapons' sound banks' part name and prefix (GuerrillaSoundBanks; the vehicles' are "vehicles", rfg_).</summary>
     const string SoundPart = "weapons", SoundBankPrefix = "rfgw_";
@@ -116,7 +120,7 @@ public static class GuerrillaWeapons
         var items = Read(gameMisc, "items_3d.xtbl");
         var weapons = Read(gameMisc, "weapons.xtbl");
         return (PickupItems.ToDictionary(n => n, n => Ours(n, items), StringComparer.OrdinalIgnoreCase),
-                PickupWeapons.ToDictionary(n => n, n => Ours(n, weapons), StringComparer.OrdinalIgnoreCase));
+                PickupWeapons.ToDictionary(n => n, n => OurWeapon(n, weapons, items), StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -210,7 +214,49 @@ public static class GuerrillaWeapons
     public const string RigList = "rigs.txt";
     public static readonly string[] TableFiles =
         ["weapons.xtbl", "items_3d.xtbl", "items_inventory.xtbl", "ammo.xtbl", "weapon_firing_patterns.xtbl", "aim_drift.xtbl", "camera_shake.xtbl", "projectiles.xtbl",
-         "melee.xtbl"];
+         "melee.xtbl", MeleeGroupTable, BulletGroupTable];
+
+    /// <summary>
+    /// Both games' melee groups' and bullet groups' tables: a group, then for a material and a kind of piece (solid,
+    /// sheet, pole, fence) the effect a melee hit or a shot plays there (a shot's hole too, a decal). Ours are
+    /// Armageddon's with Guerrilla's groups added (see Builder.HitGroup).
+    /// </summary>
+    public const string MeleeGroupTable = "rfg_melee_groups.xtbl", BulletGroupTable = "rfg_bullet_groups.xtbl";
+
+    /// <summary>
+    /// The game's memory pool for what plays on each material (its "Effect candidate event pool"): 64 KB of its own,
+    /// which the guerrilla_world mod makes <see cref="MaterialEffectRoom"/> (its kMaterialEffectRoom). The game takes
+    /// from it while it starts and stops on a request that doesn't fit. Every group added costs each material's lists
+    /// bytes (see <see cref="GroupPoolBytes"/>), so the build counts them and fails if they may not fit.
+    /// </summary>
+    public const int GameMaterialEffectRoom = 0x10000, MaterialEffectRoom = 0x40000;
+
+    /// <summary>Left free of that pool for what the count doesn't cover (rows other parts add to footsteps.xtbl, a DLC's tables).</summary>
+    const int MaterialEffectSpare = 0x4000;
+
+    /// <summary>
+    /// The bytes the melee and bullet groups take of the game's pool for the materials' effects, as its code asks for
+    /// them (each request rounded up to 16 bytes): a table of 4 bytes a group and each group's name; for each material
+    /// a group names, a list object (0x18 bytes) and its lists (melee: two of 20 bytes a group, the player's and the
+    /// NPCs'; bullets: one of 20 and one of 4 bytes a group); and for each level object with a Melee_impact or a
+    /// Bullet_impact of its own (<paramref name="levelObjects"/>: level_objects.xtbl's text), 4 bytes a group.
+    /// </summary>
+    static int GroupPoolBytes(XtblFile melee, XtblFile bullets, string levelObjects)
+    {
+        static int Take(int bytes) => (bytes + 15) & ~15;
+        static int Lists(XtblFile table, Func<int, int> perMaterial)
+        {
+            var groups = table.Entries.ToList();
+            int materials = groups.SelectMany(g => g.Element("Effects")?.Elements ?? Enumerable.Empty<XtblElement>())
+                                  .Select(row => row.ValueOf("Material")?.Trim() ?? "").Where(m => m.Length > 0)
+                                  .Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            return Take(4 * groups.Count) + groups.Sum(g => Take(XtblFile.EntryName(g).Length + 1)) + materials * (Take(0x18) + perMaterial(groups.Count));
+        }
+        int meleeGroups = melee.Entries.Count(), bulletGroups = bullets.Entries.Count();
+        return Lists(melee, n => 2 * Take(20 * n)) + Lists(bullets, n => Take(20 * n) + Take(4 * n))
+             + Regex.Matches(levelObjects, "<Melee_impact>").Count * Take(4 * meleeGroups)
+             + Regex.Matches(levelObjects, "<Bullet_impact>").Count * Take(4 * bulletGroups);
+    }
 
     /// <summary>Armageddon's item container types: a preloaded item's model (General (preloaded)); an item's big textures and material file.</summary>
     const byte ItemContainer = 22, HighContainer = 25;
@@ -300,6 +346,11 @@ public static class GuerrillaWeapons
                 foreach (string field in EffectFields)
                     foreach (var element in Descendants(entry).Where(e => e.Name.Equals(field, StringComparison.OrdinalIgnoreCase)))
                         if (element.Value is { Length: > 0 } effect && !effects.Contains(effect, StringComparer.OrdinalIgnoreCase)) effects.Add(effect);
+        // What their melee hits and their shots play where they land: every effect of Guerrilla's melee groups (the
+        // hammer's hits on each material, a gun's butt's) and bullet groups (a bullet's on each material, the rail driver's).
+        foreach (var group in Read(guerrillaMisc, MeleeGroupTable).Entries.Concat(Read(guerrillaMisc, BulletGroupTable).Entries))
+            foreach (var element in Descendants(group).Where(e => e.Name.Equals("Effect", StringComparison.OrdinalIgnoreCase)))
+                if (element.Value?.Trim() is { Length: > 0 } effect && !effects.Contains(effect, StringComparer.OrdinalIgnoreCase)) effects.Add(effect);
         return effects;
     }
 
@@ -340,23 +391,27 @@ public static class GuerrillaWeapons
         File.WriteAllBytes(listFile, b.ItemAssets.ToBytes());
         Directory.CreateDirectory(modFolder);
         KeepPeoplesItems(b.Tables.First(t => t.File == GuerrillaPeople.ItemTable).Table, modFolder);
+        // Whether the groups' lists fit the game's pool for the materials' effects (a build that may not stops here).
+        yield return b.MaterialEffectUse(modFolder);
         foreach (var (file, table) in b.Tables) File.WriteAllBytes(Path.Combine(modFolder, file), table.ToBytes());
         // The player's animations for them (Guerrilla's), with the guerrilla_gear mod's files, and their sounds (Builder.AnimationSound).
         var otherEvents = OtherPartsEvents(overrides, modFolder);
         foreach (string line in GuerrillaPlayerAnimations.Build(guerrilla, game, overrides, modFolder, GearFolder(modFolder), b.PlayerWeapons,
                                                                 (cue, looping) => b.AnimationSound(cue, looping, otherEvents))) yield return line;
+        foreach (string line in b.HitGroupLines) yield return line;
         // The sounds, the guns' and their animations': Guerrilla's cues as banks of Armageddon's kind (rfgw_<Guerrilla's bank>), listed for the game.
         foreach (string line in b.Sounds.Log.Distinct()) yield return $"sounds: {line}";
         foreach (string line in b.Sounds.Write(game, overrides, modFolder)) yield return $"sounds: {line}";
         if (b.AnimationSoundsLeft.Count > 0)
-            yield return $"sounds: the player's animations' cues left out until their banks are built: {string.Join(", ", b.AnimationSoundsLeft)}";
+            yield return $"sounds: the player's animations' cues Guerrilla's files haven't (left out): {string.Join(", ", b.AnimationSoundsLeft)}";
         // What Guerrilla scales the rounds of a gun an NPC drops by, at each difficulty (guerrilla_gear's dropped guns).
         yield return WriteAmmoPickup(guerrilla, GearFolder(modFolder));
         // Guerrilla's upgrades (guerrilla_gear's F7 window), naming the weapons as this build did.
         var armageddonWeapons = Read(Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc")), "weapons.xtbl");
         var made = b.Tables.First(t => t.File == "weapons.xtbl").Table.Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var guerrillaMisc = Packfile.Open(Path.Combine(guerrilla, "build", "pc", "cache", "misc.vpp_pc"));
-        yield return GuerrillaUpgrades.Write(guerrillaMisc, name => Ours(name, armageddonWeapons) is { } ours && made.Contains(ours) ? ours : null, GearFolder(modFolder));
+        var armageddonItems = Read(Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc")), "items_3d.xtbl");
+        yield return GuerrillaUpgrades.Write(guerrillaMisc, name => OurWeapon(name, armageddonWeapons, armageddonItems) is { } ours && made.Contains(ours) ? ours : null, GearFolder(modFolder));
         // Its backpacks' numbers (guerrilla_gear's backpacks).
         yield return GuerrillaUpgrades.WriteBackpacks(guerrillaMisc, GearFolder(modFolder));
         yield return b.Built.Count == 0 ? "No weapons built." : $"Weapons: {string.Join(", ", b.Built)}";
@@ -491,7 +546,9 @@ public static class GuerrillaWeapons
         readonly Packfile guerrillaMisc, guerrillaItems, gameItems, gameMisc;
         readonly Packfile? guerrillaItemsMp;  // items_mp.vpp_pc: the multiplayer's items (six of the backpacks)
         readonly XtblFile rfgWeapons, rfgItems, rfgInventory, rfgPatterns, rfgDrift, rfgShakes, gameShakes;
-        readonly XtblFile weapons, items, inventory, ammo, patterns, drift, projectiles, meleeMoves, rfgMelee;
+        readonly XtblFile weapons, items, inventory, ammo, patterns, drift, projectiles, meleeMoves, rfgMelee, meleeGroups, rfgMeleeGroups, bulletGroups, rfgBulletGroups;
+        readonly HashSet<string> effectMaterials;  // the materials Armageddon's rfg_effect_materials.xtbl has
+        readonly HashSet<string> emptyEffects;     // Guerrilla's effects with neither a visual nor a sound
         readonly HashSet<string> meleeRoom;  // Guerrilla's melee moves that fit in the game's table
         readonly HashSet<string> worldExplosions;
         readonly Dictionary<XtblFile, IReadOnlySet<string>> commonFields = [];  // each table's fields all of Armageddon's entries have
@@ -499,6 +556,60 @@ public static class GuerrillaWeapons
         readonly HashSet<string> worldEffects;
         readonly PegFile lowTextures;
         readonly List<PegFile> lowPegs;  // the items' shared low-detail textures: items.vpp_pc's, and items_mp.vpp_pc's (mp_items_containers)
+        /// <summary>
+        /// The files Armageddon's own item containers list. The game finds a model by its file's name, in whichever
+        /// container lists it first: one of ours under a name of Armageddon's would never be drawn, Armageddon's would
+        /// (its propane_tank, a cut item's model whose textures are gone, drew Guerrilla's tank bright red: the user's
+        /// 2026-11-10; so with rpg_projectile, hmg_body, shotgun_clip). Such a model takes a name of ours (<see cref="OurModel"/>).
+        /// </summary>
+        readonly HashSet<string> gameModels;
+
+        /// <summary>The names of Armageddon's own items_3d entries (before ours are added): see <see cref="OurWeapon"/>.</summary>
+        readonly HashSet<string> gameItemNames;
+
+        string OurModel(string model, string headerExtension) => gameModels.Contains(model + headerExtension) ? "rfg_" + model : model;
+
+        readonly string guerrillaWorldFile;                 // Guerrilla's world archive (terr01_l0.vpp_pc)
+        Packfile? guerrillaWorld;                           // opened when a texture is first asked of it
+        Dictionary<string, List<string>>? worldTextures;    // a texture's file there (<texture>.cvbm_pc) -> the containers that list it
+
+        /// <summary>
+        /// A texture one of Guerrilla's items wears that neither its own container nor the items' shared textures
+        /// hold, from Guerrilla's world: its weapon locker's container has only the model, and wears four textures
+        /// of the safehouse buildings it stands in (mtl_wep_locker_ext_panels, mtl_no_corpHousing02_N / _S,
+        /// gur_weapons_decal), each a file of its own (<texture>.cvbm_pc / .gvbm_pc) in those buildings' containers,
+        /// which the world's list (terr01_l0.asm_pc) names. Without them the locker was drawn bright red (the user's
+        /// 2026-11-10). Null if the world has none of that name.
+        /// </summary>
+        (string Name, byte[] Data)[]? WorldTexture(string texture, Func<string, string> rename, int maxSize)
+        {
+            if (worldTextures == null)
+            {
+                worldTextures = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                if (File.Exists(guerrillaWorldFile))
+                {
+                    guerrillaWorld = Packfile.Open(guerrillaWorldFile);
+                    if (guerrillaWorld.Find("terr01_l0.asm_pc") is { } list)
+                        foreach (var container in AsmFile.Read(guerrillaWorld.Read(list)).Containers)
+                            foreach (var primitive in container.Primitives)
+                                if (primitive.Name.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    if (!worldTextures.TryGetValue(primitive.Name, out var listedIn)) worldTextures[primitive.Name] = listedIn = [];
+                                    listedIn.Add(container.Name);
+                                }
+                }
+            }
+            if (guerrillaWorld == null || !worldTextures.TryGetValue(texture + ".cvbm_pc", out var containers)) return null;
+            // The list names a texture under every container that uses it; not each is a file of this archive.
+            foreach (string containerName in containers)
+            {
+                if (guerrillaWorld.Find(containerName + ".str2_pc") is not { } containerEntry) continue;
+                var pack = guerrillaWorld.OpenContainer(containerEntry);
+                if (pack.Find(texture + ".cvbm_pc") is not { } header || pack.Find(texture + ".gvbm_pc") is not { } data) continue;
+                if (Single([PegFile.Read(pack.Read(header), pack.Read(data))], texture, rename, maxSize) is { } made) return made;
+            }
+            return null;
+        }
         readonly Dictionary<string, string> itemsDone = new(StringComparer.OrdinalIgnoreCase);  // Guerrilla's item → ours
         readonly HashSet<string> heldItems = new(StringComparer.OrdinalIgnoreCase);  // items a weapon is held by (they need a weapon_handle tag)
         readonly Dictionary<string, string?> supportDone = new(StringComparer.OrdinalIgnoreCase); // "table:name" → ours (null: none)
@@ -512,11 +623,12 @@ public static class GuerrillaWeapons
         public IEnumerable<(string File, XtblFile Table)> Tables =>
             [("weapons.xtbl", weapons), ("items_3d.xtbl", items), ("items_inventory.xtbl", inventory), ("ammo.xtbl", ammo),
              ("weapon_firing_patterns.xtbl", patterns), ("aim_drift.xtbl", drift), ("camera_shake.xtbl", gameShakes), ("projectiles.xtbl", projectiles),
-             ("melee.xtbl", meleeMoves)];
+             ("melee.xtbl", meleeMoves), (MeleeGroupTable, meleeGroups), (BulletGroupTable, bulletGroups)];
 
         public Builder(string guerrilla, string game, string modFolder)
         {
             string guerrillaCache = Path.Combine(guerrilla, "build", "pc", "cache"), gameCache = Path.Combine(game, "build", "pc", "cache");
+            guerrillaWorldFile = Path.Combine(guerrillaCache, "terr01_l0.vpp_pc");
             guerrillaMisc = Packfile.Open(Path.Combine(guerrillaCache, "misc.vpp_pc"));
             guerrillaItems = Packfile.Open(Path.Combine(guerrillaCache, "items.vpp_pc"));
             guerrillaItemsMp = File.Exists(Path.Combine(guerrillaCache, "items_mp.vpp_pc")) ? Packfile.Open(Path.Combine(guerrillaCache, "items_mp.vpp_pc")) : null;
@@ -531,6 +643,7 @@ public static class GuerrillaWeapons
             gameShakes = Read(gameMisc, "camera_shake.xtbl");
             weapons = Read(gameMisc, "weapons.xtbl");
             items = Read(gameMisc, "items_3d.xtbl");
+            gameItemNames = items.Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
             inventory = Read(gameMisc, "items_inventory.xtbl");
             ammo = Read(gameMisc, "ammo.xtbl");
             patterns = Read(gameMisc, "weapon_firing_patterns.xtbl");
@@ -538,6 +651,14 @@ public static class GuerrillaWeapons
             projectiles = Read(gameMisc, "projectiles.xtbl");
             meleeMoves = Read(gameMisc, "melee.xtbl");
             rfgMelee = Read(guerrillaMisc, "melee.xtbl");
+            meleeGroups = Read(gameMisc, MeleeGroupTable);
+            rfgMeleeGroups = Read(guerrillaMisc, MeleeGroupTable);
+            bulletGroups = Read(gameMisc, BulletGroupTable);
+            rfgBulletGroups = Read(guerrillaMisc, BulletGroupTable);
+            effectMaterials = Read(gameMisc, "rfg_effect_materials.xtbl").Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            emptyEffects = Read(guerrillaMisc, "effects.xtbl").Entries
+                .Where(e => string.IsNullOrWhiteSpace(e.ValueOf("visual")) && string.IsNullOrWhiteSpace(e.ValueOf("sound")))
+                .Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
             meleeRoom = MeleePriority.Take(Math.Max(0, GameMeleeMoves - meleeMoves.Entries.Count())).ToHashSet(StringComparer.OrdinalIgnoreCase);
             strings = guerrillaMisc.Find("weapons_us.le_strings") is { } stringsFile ? GuerrillaHud.ReadStrings(guerrillaMisc.Read(stringsFile)) : [];
             // The effects the world built has added (the world builder's effects.xtbl, beside these tables).
@@ -556,19 +677,20 @@ public static class GuerrillaWeapons
             if (guerrillaItemsMp?.Find("mp_items_containers.cpeg_pc") is { } mpHeader && guerrillaItemsMp.Find("mp_items_containers.gpeg_pc") is { } mpData)
                 lowPegs.Add(PegFile.Read(guerrillaItemsMp.Read(mpHeader), guerrillaItemsMp.Read(mpData)));
             ItemAssets = AsmFile.Read(gameItems.Read(gameItems.Find("items_containers.asm_pc") ?? throw new InvalidDataException("no items_containers.asm_pc in Armageddon's items.vpp_pc")));
+            gameModels = new HashSet<string>(ItemAssets.Containers.SelectMany(c => c.Primitives.Select(p => p.Name)), StringComparer.OrdinalIgnoreCase);
             Sounds = new GuerrillaSoundBanks(guerrillaCache, guerrillaMisc, SoundPart, SoundBankPrefix);
         }
 
-        /// <summary>The player's animations' cues not made: their Guerrilla banks aren't among the guns' yet.</summary>
+        /// <summary>The player's animations' cues not made: Guerrilla's own files haven't them.</summary>
         public readonly SortedSet<string> AnimationSoundsLeft = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// A sound of one of the player's animations (Guerrilla's: the hammer's whoosh, WEP_MELEE_SWING_FAST_PC on
         /// plyr_hmr_mele; the charge's click; ...): an event another part's banks already hold (<paramref name="otherEvents"/>)
-        /// named as it is, so none is made twice; else made in the guns' banks, on the weapons' bus, when its Guerrilla
-        /// bank is a weapons' one (wep_*: the swings' whooshes are in wep_shared_melee) or one the guns' sounds already
-        /// make; else null (left out, listed: the movement foley, reloads and cloth, waits for its bank, mov_foley,
-        /// which the people's part builds for its own).
+        /// named as it is, so none is made twice; else made in the guns' banks, on the weapons' bus, whichever of
+        /// Guerrilla's banks it is in (the swings' whooshes are in wep_shared_melee; the reloads' clips and slides, the
+        /// guns' handling and the cloth in mov_foley, built here as rfgw_mov_foley). Null (left out, listed) only for a
+        /// cue Guerrilla's own files haven't.
         /// </summary>
         public string? AnimationSound(string cue, bool looping, IReadOnlySet<uint> otherEvents)
         {
@@ -577,7 +699,7 @@ public static class GuerrillaWeapons
             string? bank = null;
             if (Sounds.Sounds.FindCue(cue) is { } found)
                 try { bank = Sounds.Sounds.SoundBankName(found); } catch (InvalidDataException) { }
-            if (bank == null || !(bank.StartsWith("wep_", StringComparison.OrdinalIgnoreCase) || Sounds.Builds(bank))) { AnimationSoundsLeft.Add(cue); return null; }
+            if (bank == null) { AnimationSoundsLeft.Add(cue); return null; }
             string? made = looping ? Sounds.Loop(cue, WeaponBus) : Sounds.OneShot(cue, WeaponBus);
             if (made == null) AnimationSoundsLeft.Add(cue);
             return made;
@@ -602,7 +724,8 @@ public static class GuerrillaWeapons
                              "the Guerrilla weapons' built before this one fill it)";
                 yield break;
             }
-            string ours = Ours(name, weapons);
+            // (Armageddon's own items' names: `items` has ours added by now, and a weapon named as its own item keeps its name.)
+            string ours = Ours(name, weapons) is var renamed && renamed != name ? renamed : gameItemNames.Contains(name) ? "rfg_" + name : name;
             var notes = new List<string>();
 
             heldItems.Add(g.ValueOf("Item_3d")?.Trim() ?? "");
@@ -693,6 +816,8 @@ public static class GuerrillaWeapons
             // (human::set_equipped_inv_item, RM 0xAB4D20, by the weapon): Armageddon's "xray zoom", as its own rail driver has.
             if (XtblFile.EntryName(g).Equals("rail_driver", StringComparison.OrdinalIgnoreCase)) flags.AddElement("Flag", "xray zoom");
             w.AddElement("Sound_Data");
+            // What its melee hits play on each material (the hammer's blows, a gun's butt): Guerrilla's group.
+            if (MeleeGroup(G("Melee_Group"), notes) is { } meleeGroup) w.AddElement("Melee_Group", meleeGroup);
             bool melee = weaponClass.StartsWith("melee", StringComparison.OrdinalIgnoreCase);
             string? Attack(string field) => MeleeMove(g.Element("MeleeAttacks")?.ValueOf(field), notes);
             // Where the weapon goes when put away (the hammer on Mason's back).
@@ -716,15 +841,27 @@ public static class GuerrillaWeapons
             var shot = f.AddElement("Shot_Type");
             if (projectile != null)
             {
-                // A thrown weapon throws its projectile as Armageddon's own throwables (flare_throw, nano_grenade)
-                // launch theirs: Guerrilla's start speed, its projectile's own fuse and explosion.
-                var launcher = shot.AddElement("Launcher");
+                // What Mason throws by hand (his charges, mines, singularity bombs, the tank he carries) is thrown by
+                // the game's own throw, Guerrilla's code kept in Armageddon behind the shot "Thrown" (the player's
+                // attack 0x8BAAF0 takes that shot to 0x8A3FC0: the throw's animation by name, the thing let go at the
+                // animation's "impact start" trigger, 0x8A1E50 -> the weapon's launch 0x7323C0). As a "Launcher" (what
+                // these were until 2026-11-10, as Armageddon's own charge launcher and flares are) the game fired them
+                // like a gun: out of the hand the moment the trigger was pulled, the weapon's "fire" animation after,
+                // and a carried tank never left his hands. The grenades (thrown by Guerrilla's soldiers only) stay
+                // launched until their sets carry the throw's names.
+                bool byHand = (G("Weapon_Class") ?? "").Trim().ToLowerInvariant() is "thrown" or "thrown_charge" or "thrown_mine" or "singularity_bomb";
+                var launcher = shot.AddElement(byHand ? "Thrown" : "Launcher");
+                if (byHand) launcher.AddElement("Type", "Throw");
                 launcher.AddElement("Projectile", projectile);
-                launcher.AddElement("Launch_Speed", Descendant(g, "Start_Speed") ?? Descendant(g, "Max_Speed") ?? "20");
+                launcher.AddElement(byHand ? "Throw_Speed" : "Launch_Speed", Descendant(g, "Start_Speed") ?? Descendant(g, "Max_Speed") ?? "20");
+                if (byHand) launcher.AddElement("Max_Throw_Distance", G("Range_Max") ?? "0.0");
                 launcher.AddElement("Delete_Old_Projectiles", "False");
-                launcher.AddElement("Force_Muzzle_Orient", "False");
-                launcher.AddElement("Launch_To_Aim_Position", "True");
-                launcher.AddElement("Autoaim_With_Lockon", "False");
+                if (!byHand)
+                {
+                    launcher.AddElement("Force_Muzzle_Orient", "False");
+                    launcher.AddElement("Launch_To_Aim_Position", "True");
+                    launcher.AddElement("Autoaim_With_Lockon", "False");
+                }
                 // Guerrilla lets Mason have only so many remote charges out (can_fire_charge, RM 0xA953B0: none thrown
                 // past upgrade_get_max_charges, its upgrade remote_charge_count's level, 2 to start with).
                 if (charge) launcher.AddElement("Max_Simultaneous_Projectiles", MaxCharges().ToString(CultureInfo.InvariantCulture));
@@ -763,6 +900,8 @@ public static class GuerrillaWeapons
                 if (Effect(g, "Tracer_Effect", notes) is { } tracer) bullet.AddElement("Tracer_Effect", tracer);
                 if (Descendant(g, "Tracer_Frequency") is { } frequency) bullet.AddElement("Tracer_Frequency", frequency);
             }
+            // What its shots play where they land, on each material, and the holes they leave: Guerrilla's bullet group.
+            if (BulletGroup(G("Bullet_Group"), notes) is { } bulletGroup) f.AddElement("Bullet_Group", bulletGroup);
             string trigger = (G("Trigger_Type") ?? "single").ToLowerInvariant();
             if (arc) f.AddElement("Trigger_Type").AddElement("Continuous").AddElement("Round_Discharge_Time_ms", G("Default_Refire_Delay") ?? "100");
             else f.AddElement("Trigger_Type").AddElement(trigger == "automatic" ? "Automatic" : "Single");
@@ -838,9 +977,18 @@ public static class GuerrillaWeapons
             if (G("NPC_autoaim") is { } npcAutoaim) f.AddElement("NPC_Autoaim", npcAutoaim);
             var sounds = f.AddElement("Sounds");
             // Its shot, the player's and an NPC's (Guerrilla's Fire_Sound and first NPC_Fire_Sound cues), each Guerrilla's
-            // own wave, volume and distances.
-            if (Descendant(g, "Fire_Sound") is { } fire && FireSound(fire) is { } fireEvent) sounds.AddElement("sound_event", fireEvent);
-            if (Descendant(g, "NPC_Fire_Sound") is { } npcFire && FireSound(npcFire) is { } npcEvent) sounds.AddElement("Npc_sound_event", npcEvent);
+            // own wave, volume and distances; the player's with Guerrilla's dry-fire cue (No_Ammo_Sound). The sound goes on
+            // while the weapon fires if Guerrilla's weapon says so ("looping effects": its machine-gun turrets, arc
+            // welder and repair tool, whose cues don't loop by themselves) or either cue loops (the m16's).
+            string? fire = Descendant(g, "Fire_Sound"), npcFire = Descendant(g, "NPC_Fire_Sound");
+            bool heldSound = guerrillaFlags.Contains("looping effects", StringComparer.OrdinalIgnoreCase) || CueLoops(fire) || CueLoops(npcFire);
+            // (A held weapon's cue that doesn't loop is its single shot: played again at the weapon's time between shots.)
+            int playerRefire = int.TryParse(G("Default_Refire_Delay"), out int playersDelay) ? playersDelay : 0;
+            int npcRefire = int.TryParse(G("NPC_Refire_Delay"), out int npcsDelay) ? npcsDelay : playerRefire;
+            if (fire != null && Sounds.WeaponSound(fire, WeaponBus, heldSound, players: true, Descendant(g, "No_Ammo_Sound"), playerRefire) is { } fireEvent)
+                sounds.AddElement("sound_event", fireEvent);
+            if (npcFire != null && Sounds.WeaponSound(npcFire, WeaponBus, heldSound, players: false, refireMs: npcRefire) is { } npcEvent)
+                sounds.AddElement("Npc_sound_event", npcEvent);
             if (Descendant(g, "Sound_Radius") is { } radius) sounds.AddElement("Sound_Radius", radius);
             var visuals = f.AddElement("Visuals");
             foreach (string field in new[] { "Muzzle_Flash", "Muzzle_Smoke", "Overheated_effect" })
@@ -858,6 +1006,8 @@ public static class GuerrillaWeapons
             var modeFlags = f.AddElement("Flags");
             foreach (string flag in guerrillaFlags)
                 if (FiringModeFlags.TryGetValue(flag, out var ourFlag)) modeFlags.AddElement("Flag", ourFlag);
+            // The game plays a looping sound right (once, stopped when the firing ends) only for a weapon with this flag.
+            if (heldSound && !guerrillaFlags.Contains("looping effects", StringComparer.OrdinalIgnoreCase)) modeFlags.AddElement("Flag", "looping fire effects");
             if (charge)
             {
                 // How Armageddon's engine runs a detonator (its own charge_placer's firing mode): the charge in hand
@@ -869,8 +1019,7 @@ public static class GuerrillaWeapons
             // A melee weapon's second swing (Guerrilla's tertiary move: the hammer's overhead), its alt fire.
             if (melee && Attack("StandingTertiary") is { } second) SwingSlot(slots, second, Attack("CrouchingTertiary") ?? second, pattern);
 
-            notes.Add("not yet: its other sounds (reloading, dry fire, its projectile's), its melee hits' effects (Guerrilla's melee group " + (G("Melee_Group") ?? "none") + "), " +
-                      "its bullets' impact effects (Guerrilla's bullet group " + (G("Bullet_Group") ?? "Standard") + "; Armageddon's default group's play)");
+            notes.Add("not yet: its other sounds (reloading, dry fire, its projectile's)");
             foreach (string field in new[] { "Special_Effect", "Secondary_Special_Effect", "Special_Hit_Effect" })
                 if (!(arc && field == "Special_Effect") && Descendant(g, field) is { } special) notes.Add($"{field} {special}: Armageddon's firing modes have no such field; left out until its code is ported");
             return w;
@@ -906,13 +1055,8 @@ public static class GuerrillaWeapons
                       "electrocution effects: not yet");
         }
 
-        /// <summary>
-        /// A weapon's firing sound: a looping cue (an automatic gun's: Guerrilla's m16 plays WEP_ASSAULT_PC_LOOP while the
-        /// trigger is held) as a loop with its stop event, paired in the game's loop list as Armageddon's own automatic
-        /// guns' are (its WEP_ENFORCER_PC: the game posts the pair's stop when the firing stops); any other, a one-shot.
-        /// </summary>
-        string? FireSound(string cue) =>
-            Sounds.Sounds.FindCue(cue) is { LoopCount: not 0 } ? Sounds.Loop(cue, WeaponBus) : Sounds.OneShot(cue, WeaponBus);
+        /// <summary>Whether Guerrilla's cue loops by itself (an automatic gun's: the m16's WEP_ASSAULT_PC_LOOP).</summary>
+        bool CueLoops(string? cue) => cue != null && Sounds.Sounds.FindCue(cue) is { LoopCount: not 0 };
 
         /// <summary>A melee weapon's second swing, a second firing mode (as Armageddon's own sledgehammer's overhead).</summary>
         static void SwingSlot(XtblElement slots, string standing, string crouching, string? pattern)
@@ -949,6 +1093,106 @@ public static class GuerrillaWeapons
         /// data for our sets (<see cref="OurSets"/>), its damage to buildings put on Armageddon's scale (Guerrilla's × 100).
         /// Only <see cref="MeleeRoom"/> fit in the game's table; the rest are left out (noted). Null if it can't be made.
         /// </summary>
+        /// <summary>
+        /// Our melee group for Guerrilla's <paramref name="name"/> (its rfg_melee_groups.xtbl): what a melee hit plays on
+        /// each material (the hammer's blows, a gun's butt). See <see cref="HitGroup"/>. The NPCs' effect, which only
+        /// Armageddon's table has, is the same one, as Guerrilla plays one effect whoever hits.
+        /// </summary>
+        string? MeleeGroup(string? name, List<string> notes) => HitGroup(meleeGroups, rfgMeleeGroups, "Melee_Group", "melee group", MeleeGroupTable, name, notes, npcEffect: true);
+
+        /// <summary>
+        /// Our bullet group for Guerrilla's <paramref name="name"/> (its rfg_bullet_groups.xtbl): what a shot plays where
+        /// it lands on each material, and the hole it leaves (a decal: Armageddon's table has every one Guerrilla's
+        /// groups name, under the same names). See <see cref="HitGroup"/>.
+        /// </summary>
+        string? BulletGroup(string? name, List<string> notes) => HitGroup(bulletGroups, rfgBulletGroups, "Bullet_Group", "bullet group", BulletGroupTable, name, notes, npcEffect: false);
+
+        /// <summary>
+        /// Our group for Guerrilla's group <paramref name="name"/> of <paramref name="theirs"/> (none named: its default
+        /// group, which a weapon naming none hits with): Guerrilla's, as "rfg_" + its name, added to Armageddon's table
+        /// <paramref name="ours"/> (made once). Each of its rows (a material, a kind of piece, the effect, a shot's hole)
+        /// names the effect the world's effect tables added, with its sound. Never the default group: Armageddon's stays
+        /// that for its own weapons. The game makes room for as many groups as the table has. Null if Guerrilla has no
+        /// such group.
+        /// </summary>
+        string? HitGroup(XtblFile ours, XtblFile theirs, string tag, string what, string file, string? name, List<string> notes, bool npcEffect)
+        {
+            var g = string.IsNullOrEmpty(name)
+                ? theirs.Entries.FirstOrDefault(e => "True".Equals(e.ValueOf("Default")?.Trim(), StringComparison.OrdinalIgnoreCase))
+                : theirs.Entries.FirstOrDefault(e => XtblFile.EntryName(e).Equals(name.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (g == null)
+            {
+                if (!string.IsNullOrEmpty(name)) notes.Add($"{what} {name}: Guerrilla's {file} has none; Armageddon's default group's effects play");
+                return null;
+            }
+            name = XtblFile.EntryName(g);
+            string key = tag + ":" + name;
+            if (supportDone.TryGetValue(key, out var done)) return done;
+            string ourName = "rfg_" + name;
+            var entry = new XtblElement(tag);
+            entry.AddElement("Name", ourName);
+            entry.AddElement("Default", "False");
+            var rows = entry.AddElement("Effects");
+            var left = new List<string>();
+            int made = 0;
+            foreach (var row in g.Element("Effects")?.Elements ?? Enumerable.Empty<XtblElement>())
+            {
+                string material = row.ValueOf("Material")?.Trim() ?? "", type = row.ValueOf("Type")?.Trim() ?? "";
+                string effect = row.ValueOf("Effect")?.Trim() ?? "", hole = row.ValueOf("Bullet_Hole")?.Trim() ?? "";
+                if (material.Length == 0 || type.Length == 0) continue;
+                // An effect that is nothing in Guerrilla's own table (neither a visual nor a sound: the hammer's on a
+                // wooden sheet, the grinder's on plastic) plays nothing there; the world's tables haven't it. The row
+                // then says only the hole, or isn't written.
+                if (emptyEffects.Contains(effect))
+                {
+                    if (hole.Length == 0) left.Add($"{material} {type} ({effect} is nothing in Guerrilla's own table: neither a visual nor a sound)");
+                    effect = "";
+                }
+                if (effect.Length == 0 && hole.Length == 0) continue;
+                string ourEffect = GuerrillaEffectTables.Added(effect);
+                // (A material Armageddon hasn't would be taken for its default one, and change that one's effect.)
+                if (!effectMaterials.Contains(material)) { left.Add($"{material} {type} (Armageddon has no such material)"); continue; }
+                if (effect.Length > 0 && !worldEffects.Contains(ourEffect)) { left.Add($"{material} {type} ({effect} isn't in the world's effect tables: build the world again)"); continue; }
+                var ourRow = rows.AddElement("Group");
+                ourRow.AddElement("Material", material);
+                ourRow.AddElement("Type", type);
+                if (effect.Length > 0) ourRow.AddElement("Effect", ourEffect);
+                if (effect.Length > 0 && npcEffect) ourRow.AddElement("NPC_Effect", ourEffect);
+                if (hole.Length > 0) ourRow.AddElement("Bullet_Hole", hole);
+                made++;
+            }
+            Editor(entry, g);
+            ours.Table!.AddElement(entry);
+            HitGroupLines.Add($"{what} {name}: Guerrilla's, as {ourName}, {made} rows" + (left.Count > 0 ? $"; left out: {string.Join(", ", left)}" : ""));
+            return supportDone[key] = ourName;
+        }
+
+        /// <summary>
+        /// What the groups take of the game's pool for the materials' effects (see <see cref="MaterialEffectRoom"/>), as
+        /// a line for the log; a build whose groups may not fit stops here. Armageddon's own tables fit its 64 KB, how
+        /// closely isn't known (the mod's log says: "Material effects: N of M bytes in use"), so the count takes the
+        /// game's pool for full with them and adds what ours take over Armageddon's.
+        /// </summary>
+        public string MaterialEffectUse(string modFolder)
+        {
+            string gameObjects = System.Text.Encoding.Latin1.GetString(
+                gameMisc.Read(gameMisc.Find("level_objects.xtbl") ?? throw new InvalidDataException("no level_objects.xtbl in Armageddon's misc.vpp_pc")));
+            string built = Path.Combine(modFolder, "level_objects.xtbl");
+            string ourObjects = File.Exists(built) ? File.ReadAllText(built, System.Text.Encoding.Latin1) : gameObjects;
+            int game = GroupPoolBytes(Read(gameMisc, MeleeGroupTable), Read(gameMisc, BulletGroupTable), gameObjects);
+            int ours = GroupPoolBytes(meleeGroups, bulletGroups, ourObjects);
+            int atMost = GameMaterialEffectRoom - game + ours;
+            if (atMost + MaterialEffectSpare > MaterialEffectRoom)
+                throw new InvalidDataException($"the melee and bullet groups' lists take {ours:N0} bytes of the game's pool for the materials' effects " +
+                    $"(Armageddon's own {game:N0}): with the rest that may be {atMost:N0}, and the guerrilla_world mod gives the pool {MaterialEffectRoom:N0} " +
+                    $"({MaterialEffectSpare:N0} of it kept free). The game would stop while it starts; the pool needs more room first");
+            return $"materials' effects: the melee and bullet groups' lists take {ours:N0} bytes of the game's pool for them (Armageddon's own {game:N0}); " +
+                   $"with the rest at most {atMost:N0} of the {MaterialEffectRoom:N0} bytes the guerrilla_world mod gives it (the game's own {GameMaterialEffectRoom:N0})";
+        }
+
+        /// <summary>What <see cref="HitGroup"/> made, a line a group.</summary>
+        public readonly List<string> HitGroupLines = [];
+
         string? MeleeMove(string? name, List<string> notes)
         {
             name = name?.Trim();
@@ -1685,17 +1929,20 @@ public static class GuerrillaWeapons
             }
             var ownPegs = pack.Entries.Where(e => e.Name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase))
                               .Select(e => PegFile.Read(pack.Read(e), pack.Read(pack.Find(PegFile.DataFileName(e.Name)!)!))).ToList();
-            var files = new List<(string Name, byte[] Data)> { (mesh + cExt, header), (mesh + gExt, pack.Read(gFile)) };
+            string ourMesh = OurModel(mesh, cExt);
+            var files = new List<(string Name, byte[] Data)> { (ourMesh + cExt, header), (ourMesh + gExt, pack.Read(gFile)) };
             var missing = new List<string>();
             foreach (string texture in textures)
             {
-                var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName, baseSize);
+                var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName, baseSize) ??
+                               WorldTexture(texture, baseName, baseSize);
                 if (made == null) missing.Add(texture);
                 else if (!files.Any(x => x.Name.Equals(made[0].Name, StringComparison.OrdinalIgnoreCase))) files.AddRange(made);
             }
             // The model it is on the ground (pickup_static_mesh), if it has one of its own and it converts; else
             // the item shows its hand model there too (Armageddon's draws Mesh where there is no pickup model).
             bool pickupKept = false;
+            string? ourPickup = null;
             if (g.Element("pickup_static_mesh") is { } pickupField && (pickupField.ValueOf("Filename") ?? pickupField.Value).Trim() is { Length: > 0 } pickupFile)
             {
                 string pickup = Path.GetFileNameWithoutExtension(pickupFile);
@@ -1704,15 +1951,17 @@ public static class GuerrillaWeapons
                 byte[]? pBytes = pc == null ? null : pack.Read(pc);
                 string? pickupWhy = pc == null || pg == null ? $"its container has no {pickup}.csmesh_pc" : GuerrillaStaticMeshes.NotYet(pBytes!);
                 if (pickupWhy != null) notes.Add($"item {name}: its ground model {pickup} left out ({pickupWhy}); the hand model shows there");
-                else if (pickup.Equals(mesh, StringComparison.OrdinalIgnoreCase)) pickupKept = true;
+                else if (pickup.Equals(mesh, StringComparison.OrdinalIgnoreCase)) { pickupKept = true; ourPickup = ourMesh; }
                 else
                 {
                     var (pHeader, pTextures) = GuerrillaStaticMeshes.Convert(pBytes!, baseName);
-                    files.Add((pickup + ".csmesh_pc", pHeader));
-                    files.Add((pickup + ".gsmesh_pc", pack.Read(pg!)));
+                    ourPickup = OurModel(pickup, ".csmesh_pc");
+                    files.Add((ourPickup + ".csmesh_pc", pHeader));
+                    files.Add((ourPickup + ".gsmesh_pc", pack.Read(pg!)));
                     foreach (string texture in pTextures)
                     {
-                        var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName, baseSize);
+                        var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName, baseSize) ??
+                               WorldTexture(texture, baseName, baseSize);
                         if (made == null) missing.Add(texture);
                         else if (!files.Any(x => x.Name.Equals(made[0].Name, StringComparison.OrdinalIgnoreCase))) files.AddRange(made);
                     }
@@ -1729,6 +1978,20 @@ public static class GuerrillaWeapons
             GuerrillaTableFit.Set(entry, "Name", ours);
             Editor(entry, g);
             if (!pickupKept) entry.Element("pickup_static_mesh")?.Remove();
+            // A model renamed for a clash with one of Armageddon's (OurModel) is named so in its entry too.
+            if (!ourMesh.Equals(mesh, StringComparison.OrdinalIgnoreCase))
+            {
+                var meshField = characterMesh != null ? entry.Element("character_mesh")?.Element("character_mesh") : entry.Element("Mesh");
+                if (meshField != null) GuerrillaTableFit.Set(meshField, "Filename", ourMesh + Path.GetExtension(meshFile));
+                notes.Add($"item {name}: its model {mesh} is named {ourMesh} (Armageddon has a model file of that name: the game would draw its own)");
+            }
+            if (pickupKept && ourPickup != null && entry.Element("pickup_static_mesh") is { } ourPickupField &&
+                (ourPickupField.ValueOf("Filename") ?? ourPickupField.Value).Trim() is { Length: > 0 } ourPickupFile &&
+                !ourPickup.Equals(Path.GetFileNameWithoutExtension(ourPickupFile), StringComparison.OrdinalIgnoreCase))
+            {
+                if (ourPickupField.Element("Filename") != null) GuerrillaTableFit.Set(ourPickupField, "Filename", ourPickup + Path.GetExtension(ourPickupFile));
+                else ourPickupField.Value = ourPickup + Path.GetExtension(ourPickupFile);
+            }
             if (entry.Element("character_mesh") is { } ourCharacterMesh && ourRig != null)
             {
                 if (ourCharacterMesh.Element("rig") is { } rigField) GuerrillaTableFit.Set(rigField, "Filename", Path.ChangeExtension(ourRig, ".rigx"));
@@ -1980,6 +2243,18 @@ public static class GuerrillaWeapons
     }
 
     /// <summary>Guerrilla's name, or with "rfg_" before it where Armageddon's table has an entry of that name.</summary>
+    /// <summary>
+    /// Our name for one of Guerrilla's weapons: its own, or "rfg_" + it where Armageddon's weapons table has the
+    /// name, or its items_3d table has it. The game draws a weapon lying in the world with the item of the
+    /// WEAPON's name, not with the weapon's Item_3d (in Armageddon's own tables a weapon, its item and its
+    /// inventory item always share one name): Guerrilla's propane_tank, a weapon name Armageddon hasn't but an
+    /// item name it has (a cut item whose model's shader, rf4-fr-default, the game no longer loads), lay and was
+    /// carried as that item, flat red, while its projectile (Object_Item rfg_propane_tank) drew right (the
+    /// user's 2026-11-10 and 11; the log's "Red: a material with no shader at all").
+    /// </summary>
+    static string OurWeapon(string name, XtblFile weapons, XtblFile items) =>
+        Ours(name, weapons) is var ours && ours != name ? ours : Ours(name, items);
+
     static string Ours(string name, XtblFile table) =>
         table.Entries.Any(e => XtblFile.EntryName(e).Equals(name, StringComparison.OrdinalIgnoreCase)) ? "rfg_" + name : name;
 

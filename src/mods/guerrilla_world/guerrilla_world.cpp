@@ -350,6 +350,11 @@ BuiltTable g_builtTables[] = {
     {"camera_shake.xtbl", "Camera shakes", {}},  // Guerrilla's weapons' where they differ from Armageddon's of the name
     {"projectiles.xtbl", "Projectiles", {}},     // Guerrilla's thrown and launched weapons'; Armageddon holds 100, its own 91
     {"melee.xtbl", "Melee moves", {}},           // Guerrilla's (the hammer's swings, ...), each rfg_; Armageddon holds 32, its own 22
+    // Guerrilla's melee groups and bullet groups (what a melee hit or a shot shows and sounds like on each material:
+    // the hammer's, the gutter's, a gun's butt; a bullet's, the rail driver's), each rfg_, which its weapons name;
+    // Armageddon's own kept. The game makes room for as many as each table has.
+    {"rfg_melee_groups.xtbl", "Melee groups", {}},
+    {"rfg_bullet_groups.xtbl", "Bullet groups", {}},
     // Guerrilla's people (GuerrillaBuilder.exe's people; Armageddon's characters with Guerrilla's added). Their
     // animation sets go into the four animation lists above, which it shares with the vehicles.
     {"character.xtbl", "Characters", {}},
@@ -1225,7 +1230,8 @@ void __cdecl ReportError(int level, int flag, const char* format, va_list argume
 // The renderer's warnings: when one of its pools runs out it sets a bit in a word (the renderer,
 // [0x11BA7F0], +0x60, then +4) and draws a "RENDER_LIB WARNINGS" box with a line a bit, a message for
 // each but two (0x40 and 0x400 show as an empty line). The box only shows on the screen; each bit is
-// named in the log the first time it is seen in our worlds.
+// named in the log the first time it is seen in our worlds. 0x400 has its name here from the one place
+// that sets it: the batched pass's list of materials (0x1000 of them, the check at 0xD72108) is full.
 constexpr DWORD kRenderer = 0x11BA7F0;
 constexpr size_t kRendererMetrics = 0x60, kMetricsWarnings = 0x04;
 struct RenderWarning { DWORD bit; const char* text; };
@@ -1233,15 +1239,33 @@ constexpr RenderWarning kRenderWarnings[] = {
     {0x1, "out of dynamic indices"}, {0x2, "out of instance buffer space"}, {0x4, "out of instance blocks"},
     {0x8, "out of dynamic render groups"}, {0x10, "out of decals"}, {0x20, "out of decal blocks"},
     {0x80, "out of buffer space on the hardware"}, {0x100, "out of morph weight memory"},
-    {0x200, "out of unbatched renderable trackers"}, {0x800, "out of render calls"}, {0x1000, "out of visibility list entries"},
+    {0x200, "out of unbatched renderable trackers"}, {0x400, "out of batched materials"}, {0x800, "out of render calls"},
+    {0x1000, "out of visibility list entries"},
     {0x2000, "out of GPU visibility queue entries"}, {0x4000, "out of GPU occlusion queries"}, {0x8000, "out of Edge geometry jobs"},
     {0x10000, "out of light volume buffer space"}, {0x20000, "out of batched visibility entries"}, {0x40000, "dynamic vertices stall"},
     {0x80000, "dynamic clone vertices stall"}, {0x100000, "dynamic indices stall"}, {0x200000, "dynamic instance vertices stall"},
 };
 DWORD g_renderWarningsLogged = 0;
 
+// The list behind the warning 0x200, what the batched pass draws one by one (see "Room for what the game
+// draws one by one"): how many the last frame asked for (0x316B0B4, kept as the pass is finished, before
+// its count is cut to the list's size, so it goes on past it) and the list's size, the value in the game's
+// check as it adds one (0xD7205E: 384, or what the mod made it). The count is one frame's, so the most
+// seen in our worlds is kept, and logged from 256 up each time it has grown by a quarter.
+constexpr DWORD kUnbatchedWarning = 0x200;
+constexpr DWORD kUnbatchedAsked = 0x316B0B4;
+constexpr DWORD kUnbatchedAddValue = 0xD7205E;  // the add's cmp [ebp-4],180h (81 7D FC, then it)
+DWORD g_unbatchedMost = 0, g_unbatchedMostLogged = 0;
+
 void NoteRenderWarnings() {
     if (!InOurWorld()) return;
+    const DWORD asked = *reinterpret_cast<const DWORD*>(kUnbatchedAsked);
+    if (asked > g_unbatchedMost) g_unbatchedMost = asked;
+    if (g_unbatchedMost >= 256 && g_unbatchedMost >= g_unbatchedMostLogged + g_unbatchedMostLogged / 4) {
+        g_unbatchedMostLogged = g_unbatchedMost;
+        rfa::Log("Unbatched renderables: %lu asked for in one frame, the most so far (the list holds %lu)", g_unbatchedMost,
+                 rfa::CodeValue(kUnbatchedAddValue));
+    }
     const BYTE* renderer = *reinterpret_cast<BYTE* const*>(kRenderer);
     const BYTE* metrics = renderer ? *reinterpret_cast<const BYTE* const*>(renderer + kRendererMetrics) : nullptr;
     const DWORD warnings = metrics ? *reinterpret_cast<const DWORD*>(metrics + kMetricsWarnings) : 0;
@@ -1253,7 +1277,10 @@ void NoteRenderWarnings() {
         const char* text = nullptr;
         for (const RenderWarning& warning : kRenderWarnings)
             if (warning.bit == bit) text = warning.text;
-        if (text) rfa::Log("Render warning (0x%X): %s", bit, text);
+        if (bit == kUnbatchedWarning && text)
+            rfa::Log("Render warning (0x%X): %s (the most asked for in one frame so far %lu, the list holds %lu)", bit, text, g_unbatchedMost,
+                     rfa::CodeValue(kUnbatchedAddValue));
+        else if (text) rfa::Log("Render warning (0x%X): %s", bit, text);
         else rfa::Log("Render warning (0x%X): one the game shows with no message", bit);
     }
 }
@@ -1459,7 +1486,24 @@ auto const PlayCount = reinterpret_cast<PlayCountFn>(0xD15220);
 int g_ourPlaysLogged = 0;
 std::vector<std::string> g_visualsFailing, g_visualsPlayed;
 
+// The materials' effects' memory pool (see "Room for the materials' effects"): its size and the bytes taken.
+constexpr DWORD kMaterialEffectPool = 0x155E148;
+constexpr DWORD kMemoryPoolSize = 0x44, kMemoryPoolTaken = 0x4C;
+
+// Whether the Guerrilla world's pieces play Guerrilla's own event effects (see "Guerrilla's material events").
+bool g_materialEventsOn = false;
+
 int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWORD a5, DWORD a6, DWORD a7, DWORD a8, DWORD a9, DWORD a10) {
+    // The tenth argument is Armageddon's destruction sound for the event (its own event, its material switches,
+    // the event's size), which the effect object plays beside the effect. In the Guerrilla world the effect is
+    // Guerrilla's and has Guerrilla's sound in it, so Armageddon's is left out there.
+    if (g_materialEventsOn && a10 && InOurWorld()) {
+        RFA_LOG_FIRST(1, "Material events: Armageddon's destruction sound is left out in the Guerrilla world (Guerrilla's effects have their own)");
+        a10 = 0;
+    }
+    // That pool is filled while the game starts; by the first effect played its use is final.
+    RFA_LOG_FIRST(1, "Material effects: %lu of %lu bytes in use", *reinterpret_cast<const DWORD*>(kMaterialEffectPool + kMemoryPoolTaken),
+                  *reinterpret_cast<const DWORD*>(kMaterialEffectPool + kMemoryPoolSize));
     const int handle = g_playEffect(effect, where, a3, a4, a5, a6, a7, a8, a9, a10);
     BYTE* visual = effect ? Visual(*reinterpret_cast<int*>(effect + 0x44)) : nullptr;
     const char* name = visual ? reinterpret_cast<const char*>(visual) : "";
@@ -1480,6 +1524,246 @@ int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWO
                  *reinterpret_cast<int*>(effect + 0x48), PlayCount());
     }
     return handle;
+}
+
+// ---- What becomes of the effects' sounds (a look, not a change)
+//
+// The user, 2026-11-10: a hammer hit's sound is "a small snippet or sometimes the full", and sounds in general
+// "still need work"; other vehicles' engines and NPCs' rifle loops end by themselves in a fight. The game doesn't
+// stop a sound that plays once when its effect ends (0x4F5B10: only a loop's, or with kill_sound_when_done), and
+// the hits' cues have no limit of their own, so what ends them isn't known. Two things are written to the log:
+//
+// Wwise's own messages. The game hands Wwise a function for its errors (AK::Monitor::SetLocalOutput at 0xB97D62,
+// level 3, the function 0xB97750: the error's number, its text in 16-bit letters, its level), which copies the
+// text and drops it. Wrapped, they go to the log ("Wwise: ...": the first few of each text, then its count): a
+// stream that can't start for want of memory, a source or a voice starving, a file not found. (The game gives all its streams 2.25 MB in
+// pieces of 26 KB, 0xB9783F / 0xB97848: 88 pieces. A piece is two seconds of Armageddon's Vorbis and 0.15-0.4 s
+// of Guerrilla's sound as we keep it, uncompressed.)
+//
+// How long an effect's sound played. The effect object's sound (0x4F8430, thiscall, 1 = the effect starts) posts
+// the event (+0x1A4) and keeps the sound's handle (+0x1A8); 0xB84D20 gives a handle's game object, 0 once the
+// game knows the sound ended (Wwise's end-of-event). For the sounds of the visuals the world builder added that
+// play once: "Effect sounds: <visual>'s sound (event N) ended M ms after it started; ..." (the first 200), with
+// how far from the camera it started, how far its effect moved meanwhile (the game moves the sound with it) and
+// what Wwise said of that sound's game object. A hammer hit's waves are 0.6-1.3 s long. (The first run, 2026-11-11
+// 00:16: four hits in five lasted their wave's length; one in five ended after 60-280 ms, with nothing else
+// starting then.)
+constexpr DWORD kWwiseOutput = 0xB97750;
+constexpr size_t kWwiseOutputPrologue = 9;  // push ebp / mov ebp,esp / sub esp,80Ch
+// (Wwise's own declaration, from the exe's export of SetLocalOutput: the error, its text, its level, the playing
+// sound's number and its game object.)
+using WwiseOutputFn = void(__cdecl*)(int code, const wchar_t* message, int level, DWORD playing, DWORD gameObject);
+WwiseOutputFn g_wwiseOutput;
+
+constexpr DWORD kEffectSound = 0x4F8430;
+constexpr size_t kEffectSoundPrologue = 6;  // push ebp / mov ebp,esp / sub esp,40h
+constexpr DWORD kEffectPosition = 0x4, kEffectSoundEvent = 0x1A4, kEffectSoundHandle = 0x1A8, kEffectObjectVisual = 0x134;
+using EffectSoundFn = void(__fastcall*)(BYTE* effect, void* unused, DWORD start);
+EffectSoundFn g_effectSound;
+auto const SoundGameObject = reinterpret_cast<DWORD(__cdecl*)(DWORD handle)>(0xB84D20);  // 0 once the sound has ended
+auto const EventIsLoop = reinterpret_cast<bool(__cdecl*)(DWORD event)>(0xB82FD0);       // whether it has a stop event
+
+// A sound being watched: one an added effect plays once. Its handle, event and Wwise game object; when it
+// started, how far from the camera, where its effect was then and how far the effect has moved since (the game
+// moves the sound with its effect); and what Wwise said of it, if anything.
+struct WatchedSound {
+    DWORD handle, event, gameObject, started;
+    BYTE* effect;
+    float at[3], fromCamera, moved;
+    char visual[48], wwise[96];
+    DWORD wwiseAfter;
+};
+WatchedSound g_watchedSounds[32];
+constexpr int kSoundEndsLogged = 200;
+int g_soundEndsLogged = 0;
+
+// Each of Wwise's messages by its text: how often it has come.
+struct WwiseMessage {
+    char text[96];
+    int count;
+};
+WwiseMessage g_wwiseMessages[24];
+constexpr int kWwiseEachLogged = 5;
+
+// Wwise's message: for a watched sound, kept with it (its end's line says it); else the first few of each text,
+// then its count at 100 and 1,000, so one that comes all the time (a far footstep's voice ended as too quiet to
+// hear: Armageddon's own setting, 300 in 13 s of the first run) can't hide the others.
+// Wwise's "Source starvation" (a playing stream had no data when the mixer asked for it).
+constexpr int kSourceStarvation = 28;
+void LogStreamMemoryAtStarvation();
+
+void __cdecl WwiseOutput(int code, const wchar_t* message, int level, DWORD playing, DWORD gameObject) {
+    if (code == kSourceStarvation) LogStreamMemoryAtStarvation();
+    char text[96] = "";
+    for (size_t i = 0; message && message[i] && i + 1 < sizeof(text); ++i) {
+        text[i] = static_cast<char>(message[i] & 0xFF);
+        text[i + 1] = 0;
+    }
+    bool watched = false;
+    for (WatchedSound& sound : g_watchedSounds) {
+        if (!sound.handle || !gameObject || sound.gameObject != gameObject) continue;
+        strncpy_s(sound.wwise, text, _TRUNCATE);
+        sound.wwiseAfter = GetTickCount() - sound.started;
+        watched = true;
+    }
+    if (!watched)
+        for (WwiseMessage& known : g_wwiseMessages) {
+            if (known.count && strcmp(known.text, text) != 0) continue;
+            if (!known.count) strncpy_s(known.text, text, _TRUNCATE);
+            ++known.count;
+            if (known.count <= kWwiseEachLogged)
+                rfa::Log("Wwise: %s (code %d, level %d, playing %lu, game object %lu)", text, code, level, playing, gameObject);
+            else if (known.count == 100 || known.count == 1000)
+                rfa::Log("Wwise: %s: %d times so far", text, known.count);
+            break;
+        }
+    g_wwiseOutput(code, message, level, playing, gameObject);
+}
+
+// Each watched sound that has ended since the last look: how long it played, and what is known of it.
+void LogEndedSounds() {
+    const DWORD now = GetTickCount();
+    for (WatchedSound& watched : g_watchedSounds) {
+        if (!watched.handle || SoundGameObject(watched.handle) != 0) continue;
+        // The first 200, and after them (300 more) only those that ended at once: what a sound engine that has
+        // stopped playing would give every one of them.
+        const bool atOnce = now - watched.started < 150;
+        if (g_soundEndsLogged < kSoundEndsLogged || (atOnce && g_soundEndsLogged < kSoundEndsLogged + 300)) {
+            ++g_soundEndsLogged;
+            char wwise[160] = "Wwise said nothing of it";
+            if (watched.wwise[0]) snprintf(wwise, sizeof(wwise), "Wwise after %lu ms: %s", watched.wwiseAfter, watched.wwise);
+            // (The effect lets go of the handle when it ends itself; the effects are in a pool, so its place can be read.)
+            const bool held = *reinterpret_cast<const DWORD*>(watched.effect + kEffectSoundHandle) == watched.handle;
+            rfa::Log("Effect sounds: %s's sound (event %lu) ended %lu ms after it started; %.1f m from the camera at its start, its effect moved %.1f m "
+                     "and %s; %s",
+                     watched.visual, watched.event, now - watched.started, watched.fromCamera, watched.moved,
+                     held ? "still held the sound" : "had ended or let go of it", wwise);
+        }
+        watched.handle = 0;
+    }
+}
+
+// Wwise's memory pools, every ten seconds (the first 90 times). It has no count of the sounds playing to read (its
+// limits end sounds without a message, and the exe exports nothing for it); its pools' use is the only gauge the
+// exe offers (AK::MemoryMgr::GetMaxPools, GetPoolName, GetPoolStats: bytes reserved, bytes used, ...): what every
+// playing sound takes of the sound engine's pools, and whether any is near full.
+auto const WwiseMaxPools = reinterpret_cast<long(__cdecl*)()>(0xE3CD40);
+auto const WwisePoolName = reinterpret_cast<const wchar_t*(__cdecl*)(long pool)>(0xE3CCC0);
+auto const WwisePoolStats = reinterpret_cast<int(__cdecl*)(long pool, DWORD* stats)>(0xE3D000);
+// The audio thread's own time in ms (AK::Monitor::GetTimeStamp: a value its mixing loop writes, 0xE664C4, for
+// every buffer it makes). It going on by ten seconds between two lines says the thread still runs; standing
+// still, that it has stopped. (The run of 2026-11-11 01:20: all sound gone from 01:25:15 on, no voice or stream in
+// any pool after, the game still posting and Wwise saying nothing: whether its thread ran wasn't known.)
+auto const WwiseAudioTime = reinterpret_cast<long(__cdecl*)()>(0xE5AEA0);
+
+void LogWwiseMemory() {
+    static DWORD last = 0;
+    static int logged = 0;
+    const DWORD now = GetTickCount();
+    if (logged >= 90 || now - last < 10000) return;
+    last = now;
+    ++logged;
+    char line[1200] = "";
+    size_t at = 0;
+    for (long pool = 0, pools = WwiseMaxPools(); pool < pools && pool < 64 && at < sizeof(line) - 100; ++pool) {
+        DWORD stats[16] = {};  // reserved, used, the largest free block, allocations, frees, the most used
+        if (WwisePoolStats(pool, stats) != 1 || stats[0] == 0) continue;
+        char name[40] = "";
+        const wchar_t* wide = WwisePoolName(pool);
+        for (size_t i = 0; wide && wide[i] && i + 1 < sizeof(name); ++i) {
+            name[i] = static_cast<char>(wide[i] & 0xFF);
+            name[i + 1] = 0;
+        }
+        at += snprintf(line + at, sizeof(line) - at, "%s%s %lu of %lu KB", at ? "; " : "", name[0] ? name : "a pool", stats[1] / 1024, stats[0] / 1024);
+        // The pool everything the banks hold and every playing sound's own record come from: its largest free piece
+        // too (a request larger than that fails though the pool isn't full), and how often it has been asked.
+        if (strcmp(name, "Default") == 0)
+            at += snprintf(line + at, sizeof(line) - at, " (the most ever used %lu KB, largest free piece %lu KB, %lu requests, %lu given back)",
+                           stats[5] / 1024, stats[2] / 1024, stats[3], stats[4]);
+        // The streams' two pools: the most each has held (the samples are ten seconds apart).
+        else if (strncmp(name, "Stream", 6) == 0)
+            at += snprintf(line + at, sizeof(line) - at, " (the most ever used %lu KB)", stats[5] / 1024);
+    }
+    // The game's own audio memory beside Wwise's: its pool "audio" (0x26AF858; cut up at start-up into the banks'
+    // slots and, with all that is left, the cache of stream pieces), and that cache's counts (the object 0x2745E98:
+    // how often a piece a stream asked for was in it, and how often it had to come from the disk).
+    const BYTE* audioPool = reinterpret_cast<const BYTE*>(0x26AF858);
+    const DWORD* audioCache = reinterpret_cast<const DWORD*>(0x2745E98);
+    rfa::Log("Wwise memory: %s; the audio thread's time %ld ms; the game's audio pool %lu of %lu KB; its stream cache %lu hits, %lu misses", line,
+             WwiseAudioTime(), *reinterpret_cast<const DWORD*>(audioPool + 0x4C) / 1024, *reinterpret_cast<const DWORD*>(audioPool + 0x44) / 1024,
+             audioCache[3], audioCache[4]);
+}
+
+// The streams' memory at the instant Wwise says a source starved: its Stream I/O pool (the pieces of 26 KB every
+// stream reads into: with all of them in hand a stream waits for one) and its Stream Manager pool (the streams'
+// own records). Full there, the starvation is the memory's; with room there, the reading didn't keep up. At most
+// four lines a second, 60 in all.
+void LogStreamMemoryAtStarvation() {
+    static DWORD last = 0;
+    static int logged = 0;
+    const DWORD now = GetTickCount();
+    if (logged >= 60 || now - last < 250) return;
+    last = now;
+    ++logged;
+    char line[400] = "";
+    size_t at = 0;
+    for (long pool = 0, pools = WwiseMaxPools(); pool < pools && pool < 64 && at < sizeof(line) - 120; ++pool) {
+        DWORD stats[16] = {};
+        if (WwisePoolStats(pool, stats) != 1 || stats[0] == 0) continue;
+        const wchar_t* wide = WwisePoolName(pool);
+        char name[40] = "";
+        for (size_t i = 0; wide && wide[i] && i + 1 < sizeof(name); ++i) {
+            name[i] = static_cast<char>(wide[i] & 0xFF);
+            name[i + 1] = 0;
+        }
+        if (strncmp(name, "Stream", 6) != 0) continue;
+        at += snprintf(line + at, sizeof(line) - at, "%s%s %lu of %lu KB (the most ever %lu KB, %lu requests, %lu given back)", at ? "; " : "", name,
+                       stats[1] / 1024, stats[0] / 1024, stats[5] / 1024, stats[3], stats[4]);
+    }
+    const DWORD* audioCache = reinterpret_cast<const DWORD*>(0x2745E98);
+    rfa::Log("Wwise: a source starved with %s; the game's stream cache %lu hits, %lu misses", line, audioCache[3], audioCache[4]);
+}
+
+void __fastcall EffectSound(BYTE* effect, void* unused, DWORD start) {
+    g_effectSound(effect, unused, start);
+    LogEndedSounds();
+    LogWwiseMemory();
+    if (!effect) return;
+    const DWORD handle = *reinterpret_cast<const DWORD*>(effect + kEffectSoundHandle), event = *reinterpret_cast<const DWORD*>(effect + kEffectSoundEvent);
+    const float* at = reinterpret_cast<const float*>(effect + kEffectPosition);
+    // A watched sound's effect, on a later frame: how far it has moved from where the sound started.
+    for (WatchedSound& watched : g_watchedSounds) {
+        if (!watched.handle || watched.effect != effect || watched.handle != handle) continue;
+        float moved = 0;
+        for (int i = 0; i < 3; ++i) moved += (at[i] - watched.at[i]) * (at[i] - watched.at[i]);
+        moved = sqrtf(moved);
+        if (moved > watched.moved) watched.moved = moved;
+        return;
+    }
+    if ((start & 0xFF) == 0 || g_soundEndsLogged >= kSoundEndsLogged + 300) return;
+    if (!handle || !event || EventIsLoop(event)) return;
+    BYTE* visual = Visual(*reinterpret_cast<int*>(effect + kEffectObjectVisual));
+    const char* name = visual ? reinterpret_cast<const char*>(visual) : "an effect without a visual";
+    if (visual && _strnicmp(name, "rfg_", 4) != 0) return;
+    for (WatchedSound& watched : g_watchedSounds) {
+        if (watched.handle) continue;
+        watched.event = event;
+        watched.gameObject = SoundGameObject(handle);
+        watched.started = GetTickCount();
+        watched.effect = effect;
+        float away = 0;
+        for (int i = 0; i < 3; ++i) {
+            watched.at[i] = at[i];
+            away += (at[i] - g_cameraPosition[i]) * (at[i] - g_cameraPosition[i]);
+        }
+        watched.fromCamera = sqrtf(away);
+        watched.moved = 0;
+        watched.wwise[0] = 0;
+        watched.wwiseAfter = 0;
+        strncpy_s(watched.visual, name, _TRUNCATE);
+        watched.handle = handle;  // last: Wwise's messages come on another thread
+        return;
+    }
 }
 
 // Making an object in the world (0x6D44E0; the world in ECX, then its type, its zone and one more):
@@ -6976,6 +7260,394 @@ void MoreEmitterRoom() {
     rfa::Log("Effect emitters: the game holds %lu (its own %lu)", kEmitters, kGameEmitters);
 }
 
+// ---- Guerrilla's material events
+//
+// What a breaking piece plays. The game asks one function for it (0x684090, cdecl: the event's kind, its size 0-2,
+// the kind of piece 0-4, the piece's effect material and the other one's (their numbers; 0xFF none), and two
+// more), which answers with an effect's number from the materials' lists (rfg_effect_materials.xtbl's
+// event_effects) or -1; its callers (0x665DA0, 0x672760) then play that effect with Armageddon's destruction
+// sound beside it. The kinds (the game's names at 0x10FDBA4): 0 load_balance, 1 stress, 2 detach, 3 groan,
+// 4 shatter, 5 collapse, 6 melee, 7 bullet, 8 impact, 9 shift, 10 roll, 11 slide; the pieces: Solid, Sheet, Pole,
+// Fence, Catwalk. A material's name is the start of its entry (0x9C bytes each from the pointer at 0x155E108,
+// how many at 0x155E114).
+//
+// Guerrilla's table has the same materials and the same sizes' thresholds (all 44 the same), with its own
+// effects, most of them a DES_ sound alone. They can't go into Armageddon's table (read once, for every level),
+// so the world builder writes them to mods\guerrilla_world\material_events.txt (GuerrillaMaterialEvents) and the
+// mod answers from that while the Guerrilla world is loaded: for a material Guerrilla has, Guerrilla's row for the
+// event, the kind of piece and the other material, else its row without another material, else the other
+// material's own row, else nothing (as Guerrilla). Kinds 6 and 7 and materials Guerrilla hasn't are the game's.
+constexpr DWORD kMaterialEffect = 0x684090;
+constexpr size_t kMaterialEffectPrologue = 6;  // push ebp / mov ebp,esp / sub esp,14h
+using MaterialEffectFn = int(__cdecl*)(int kind, int size, int type, DWORD material, DWORD other, DWORD a6, DWORD a7);
+MaterialEffectFn g_materialEffect;
+constexpr DWORD kEffectMaterials = 0x155E108, kEffectMaterialCount = 0x155E114, kEffectMaterialSize = 0x9C;
+constexpr int kMeleeKind = 6, kBulletKind = 7, kEventKinds = 12, kEventSizes = 3;
+const char* const kEventKindNames[kEventKinds] = {"load_balance", "stress", "detach", "groan", "shatter", "collapse",
+                                                   "melee", "bullet", "impact", "shift", "roll", "slide"};
+
+struct MaterialEvent {
+    int kind, type;
+    std::string other;                 // the other material, or empty: against anything
+    std::string names[kEventSizes];    // the effect for each size (empty: none)
+    int numbers[kEventSizes];          // their numbers in effects.xtbl, once asked for
+    bool numbered;
+};
+struct MaterialEvents {
+    std::string material;
+    std::vector<MaterialEvent> events;
+};
+std::vector<MaterialEvents> g_materialEvents;
+
+const char* EffectMaterialName(DWORD number) {
+    const BYTE* materials = *reinterpret_cast<BYTE* const*>(kEffectMaterials);
+    const DWORD count = *reinterpret_cast<const DWORD*>(kEffectMaterialCount);
+    return materials && number < count ? reinterpret_cast<const char*>(materials + number * kEffectMaterialSize) : nullptr;
+}
+
+MaterialEvents* GuerrillaMaterial(const char* name) {
+    if (!name) return nullptr;
+    for (MaterialEvents& m : g_materialEvents)
+        if (_stricmp(m.material.c_str(), name) == 0) return &m;
+    return nullptr;
+}
+
+// A material's effect for an event of this kind, piece and size against the other material (null: none), or -1.
+int GuerrillaEventEffect(MaterialEvents& material, int kind, int type, int size, const char* other) {
+    for (int pass = 0; pass < 2; ++pass) {
+        const char* against = pass == 0 ? other : "";
+        if (!against) continue;
+        if (pass == 0 && !*against) continue;
+        for (MaterialEvent& e : material.events) {
+            if (e.kind != kind || e.type != type || _stricmp(e.other.c_str(), against) != 0) continue;
+            if (!e.numbered) {
+                for (int i = 0; i < kEventSizes; ++i) e.numbers[i] = e.names[i].empty() ? -1 : EffectNumber(e.names[i].c_str());
+                e.numbered = true;
+            }
+            return e.numbers[size];
+        }
+    }
+    return -1;
+}
+
+int __cdecl MaterialEffect(int kind, int size, int type, DWORD material, DWORD other, DWORD a6, DWORD a7) {
+    if (kind < 0 || kind >= kEventKinds || kind == kMeleeKind || kind == kBulletKind || size < 0 || size >= kEventSizes || !InOurWorld())
+        return g_materialEffect(kind, size, type, material, other, a6, a7);
+    const char* name = EffectMaterialName(material & 0xFF);
+    const char* otherName = (other & 0xFF) == 0xFF ? nullptr : EffectMaterialName(other & 0xFF);
+    MaterialEvents* ours = GuerrillaMaterial(name);
+    MaterialEvents* theirs = GuerrillaMaterial(otherName);
+    if (!ours && !theirs) return g_materialEffect(kind, size, type, material, other, a6, a7);
+    int effect = ours ? GuerrillaEventEffect(*ours, kind, type, size, otherName) : -1;
+    if (effect == -1 && theirs) effect = GuerrillaEventEffect(*theirs, kind, type, size, name);
+    RFA_LOG_FIRST(80, "Material events: %s, size %d, piece %d, %s on %s: effect %d", kEventKindNames[kind], size, type, name ? name : "?",
+                  otherName ? otherName : "nothing", effect);
+    return effect;
+}
+
+void LoadMaterialEvents() {
+    std::vector<BYTE> file;
+    if (!ReadWholeFile(DataFolder() + L"material_events.txt", file) || file.empty()) {
+        rfa::Log("Material events: no material_events.txt from the world builder; the pieces play Armageddon's own");
+        return;
+    }
+    size_t rows = 0;
+    const std::string text(file.begin(), file.end());
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::vector<std::string> words;
+        for (size_t from = 0; from <= line.size();) {
+            size_t tab = line.find('\t', from);
+            if (tab == std::string::npos) tab = line.size();
+            words.push_back(line.substr(from, tab - from));
+            from = tab + 1;
+        }
+        if (words.size() == 2 && words[0] == "material") g_materialEvents.push_back({words[1], {}});
+        else if (words.size() == 7 && words[0] == "event" && !g_materialEvents.empty()) {
+            MaterialEvent e{};
+            e.kind = atoi(words[1].c_str());
+            e.type = atoi(words[2].c_str());
+            if (words[3] != "-") e.other = words[3];
+            for (int i = 0; i < kEventSizes; ++i)
+                if (words[4 + i] != "-") e.names[i] = words[4 + i];
+            g_materialEvents.back().events.push_back(e);
+            ++rows;
+        }
+    }
+    if (g_materialEvents.empty()) {
+        rfa::Log("Material events: material_events.txt names no material; the pieces play Armageddon's own");
+        return;
+    }
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14};
+    if (memcmp(reinterpret_cast<const void*>(kMaterialEffect), opening, sizeof(opening)) == 0)
+        g_materialEffect = reinterpret_cast<MaterialEffectFn>(rfa::HookFunction(kMaterialEffect, kMaterialEffectPrologue, reinterpret_cast<void*>(&MaterialEffect)));
+    if (!g_materialEffect) {
+        g_materialEvents.clear();
+        rfa::Log("Material events: could not answer for the game's event effects (its code isn't as expected); the pieces play Armageddon's own");
+        return;
+    }
+    g_materialEventsOn = true;
+    rfa::Log("Material events: %zu of Guerrilla's materials, %zu rows; in the Guerrilla world the pieces play Guerrilla's effects and sounds",
+             g_materialEvents.size(), rows);
+}
+
+// ---- Room for the materials' effects
+//
+// What plays on each material is kept in one memory pool, the "Effect candidate event pool" (0x155E148; its size
+// +0x44, the bytes taken +0x4C), laid over a buffer of 64 KB (0x154E108) by a start-up constructor (0xF25A90:
+// push 10000h, push 154E108h; nothing else names the buffer). The game takes from it, while it starts and never
+// gives back: the effect materials (rfg_effect_materials.xtbl, 0x681550: 0x9C bytes each, and their events'
+// effects), the materials (rfg_materials.xtbl), each melee group's and bullet group's name, and for each material
+// a group names a list sized by the number of groups (0x682590: two lists of 20 bytes a melee group; 0x682790: 20
+// and 4 bytes a bullet group); for each level object with a Melee_impact or Bullet_impact a list of 4 bytes a
+// group (0x7AF1A0, 0x7AF2B0); footsteps.xtbl (0x8862A0) and audio_destruction_event_sizes.xtbl (0x534940). A
+// request that doesn't fit stops the game ("Failed aligned alloc of 144 bytes in Effect candidate event pool",
+// the user's start of 2026-11-10 22:3x: Guerrilla's five melee groups and four bullet groups, added to
+// Armageddon's eleven and seven, made every material's lists longer by about 11 KB in all, in a pool that was
+// at least 85% full). The mod gives the constructor a buffer of its own of 256 KB (the user's OK asked through
+// the main session), both values checked first, all or nothing; the weapons builder counts what the groups take
+// (GuerrillaWeapons.MaterialEffectRoom), and the first effect played logs the pool's use.
+constexpr DWORD kMaterialEffectSizeValue = 0xF25A9D;    // push 10000h
+constexpr DWORD kMaterialEffectMemoryValue = 0xF25AA2;  // push 154E108h
+constexpr DWORD kGameMaterialEffectRoom = 0x10000, kGameMaterialEffectMemory = 0x154E108;
+constexpr DWORD kMaterialEffectRoom = 0x40000;          // the weapons builder's GuerrillaWeapons.MaterialEffectRoom
+alignas(16) BYTE g_materialEffectMemory[kMaterialEffectRoom];
+
+void MoreMaterialEffectRoom() {
+    if (*reinterpret_cast<const DWORD*>(kMaterialEffectPool + kMemoryPoolSize) != 0) {
+        rfa::Log("Material effects: the game has already made its pool; it keeps its %lu bytes", kGameMaterialEffectRoom);
+        return;
+    }
+    const BYTE push = 0x68;
+    if (*reinterpret_cast<const BYTE*>(kMaterialEffectSizeValue - 1) != push || rfa::CodeValue(kMaterialEffectSizeValue) != kGameMaterialEffectRoom ||
+        *reinterpret_cast<const BYTE*>(kMaterialEffectMemoryValue - 1) != push || rfa::CodeValue(kMaterialEffectMemoryValue) != kGameMaterialEffectMemory) {
+        rfa::Log("Material effects: the pool's constructor (0x00F25A90) isn't as expected; the game keeps its %lu bytes", kGameMaterialEffectRoom);
+        return;
+    }
+    const DWORD size = kMaterialEffectRoom, memory = reinterpret_cast<DWORD>(&g_materialEffectMemory[0]);
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kMaterialEffectSizeValue), &size, sizeof(size))) {
+        rfa::Log("Material effects: could not change the game's code; it keeps its %lu bytes", kGameMaterialEffectRoom);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kMaterialEffectMemoryValue), &memory, sizeof(memory))) {
+        rfa::PatchCode(reinterpret_cast<void*>(kMaterialEffectSizeValue), &kGameMaterialEffectRoom, sizeof(kGameMaterialEffectRoom));
+        rfa::Log("Material effects: could not change the game's code; it keeps its %lu bytes", kGameMaterialEffectRoom);
+        return;
+    }
+    rfa::Log("Material effects: the pool holds %lu bytes (the game's %lu)", kMaterialEffectRoom, kGameMaterialEffectRoom);
+}
+
+// ---- Room for what the game draws one by one
+//
+// Each frame the game builds its batched pass anew (the constructor 0xD71B20, from 0xEFC7BA) and goes through what
+// is visible (0xD51F70). A renderable with +0x108 set or the flag 0x20 (its flags at +0x40) is queued at once, and
+// one that can go into batches (the flag 0x80) does; any other (people, vehicles' parts, the ground's cover, the
+// terrain's skirts, ...) has its render groups queued and is noted in a list of pointers, one each, to be drawn
+// by itself (0xD72040, from 0xD52785): the pass's count (+0x10) goes up by one and, while it is no more than
+// 0x180 (384), the pointer is written into the list (+0x14); past that the render warning 0x200 "out of unbatched
+// renderable trackers" is set and the thing isn't drawn that frame. As the pass is finished (0xD71E90) the count is
+// kept at 0x316B0B4 (what the frame asked for, past the size too) and then cut to 0x180; the drawing's and the
+// decals' loops run to the count and the sort is in place, so nothing else knows the size.
+// The list is 0x180 pointers of the exe's own memory (0x30AAAB0), right between the pass's decals (0x30A8AB0) and
+// its batched instances (0x30AB0B0), so it can't grow where it is, and only the constructor names it. The Guerrilla
+// world asks for more than 384 (the warning in the run of 2026-11-11 02:41). The user's OK was asked through the
+// main session: 4,096, the size Guerrilla Re-Mars-tered has for the same list. No more than 10,000 could ever be
+// asked for, the visible list's own size ([0x1123650]).
+// The mod gives the pass a list of its own and changes five values, each checked first with its instruction's
+// bytes, all or nothing, and only before the game has made its renderer (the pass is built every frame, so there
+// is nothing to copy): the list's address in the constructor, then the size in the add's check, in the finish's
+// test and the value it cuts to, and in a stats function nothing calls. In that order each step is safe alone:
+// with the size raised over the game's own list the adds would run on into the batched instances, and a count cut
+// to more than the adds may write would draw pointers no one wrote. F7 Limits shows the last frame's count; the
+// log has the most asked for (NoteRenderWarnings).
+constexpr DWORD kGameUnbatchedRenderables = 0x180, kUnbatchedRenderables = 4096;
+constexpr DWORD kGameUnbatchedList = 0x30AAAB0;
+constexpr DWORD kUnbatchedListValue = 0xD71B7C;       // the constructor's mov [ecx+14h],30AAAB0h (C7 41 14, then it)
+constexpr DWORD kUnbatchedClampTestValue = 0xD71ECE;  // the finish's cmp [edx+10h],180h (81 7A 10, then it)
+constexpr DWORD kUnbatchedClampValue = 0xD71EE2;      // the finish's mov [ebp-38h],180h (C7 45 C8, then it)
+constexpr DWORD kUnbatchedStatsValue = 0xD72293;      // the stats' mov [edx],180h (C7 02, then it)
+alignas(16) void* g_unbatchedList[kUnbatchedRenderables];  // the pass's list, filled by the game each frame
+
+void MoreUnbatchedRenderableRoom() {
+    if (*reinterpret_cast<void* const*>(kRenderer) != nullptr) {
+        rfa::Log("Unbatched renderables: the game has already made its renderer; it keeps its %lu a frame", kGameUnbatchedRenderables);
+        return;
+    }
+    struct Value {
+        DWORD at;            // the value's place in the game's code
+        BYTE opening[3];     // its instruction's bytes before it
+        size_t openingSize;  // how many of them
+        DWORD game, ours;
+    };
+    const Value values[] = {
+        {kUnbatchedListValue, {0xC7, 0x41, 0x14}, 3, kGameUnbatchedList, reinterpret_cast<DWORD>(&g_unbatchedList[0])},
+        {kUnbatchedAddValue, {0x81, 0x7D, 0xFC}, 3, kGameUnbatchedRenderables, kUnbatchedRenderables},
+        {kUnbatchedClampTestValue, {0x81, 0x7A, 0x10}, 3, kGameUnbatchedRenderables, kUnbatchedRenderables},
+        {kUnbatchedClampValue, {0xC7, 0x45, 0xC8}, 3, kGameUnbatchedRenderables, kUnbatchedRenderables},
+        {kUnbatchedStatsValue, {0xC7, 0x02}, 2, kGameUnbatchedRenderables, kUnbatchedRenderables},
+    };
+    for (const Value& value : values) {
+        if (memcmp(reinterpret_cast<const void*>(value.at - value.openingSize), value.opening, value.openingSize) != 0 ||
+            rfa::CodeValue(value.at) != value.game) {
+            rfa::Log("Unbatched renderables: the game's code at 0x%08lX isn't as expected; it keeps its %lu a frame", value.at, kGameUnbatchedRenderables);
+            return;
+        }
+    }
+    for (size_t i = 0; i < std::size(values); ++i) {
+        if (rfa::PatchCode(reinterpret_cast<void*>(values[i].at), &values[i].ours, sizeof(values[i].ours))) continue;
+        // Not changed: the ones before it go back as they were, the last changed first.
+        bool back = true;
+        for (size_t k = i; k-- > 0;)
+            back = rfa::PatchCode(reinterpret_cast<void*>(values[k].at), &values[k].game, sizeof(values[k].game)) && back;
+        if (back)
+            rfa::Log("Unbatched renderables: could not change the game's code at 0x%08lX; it keeps its %lu a frame", values[i].at, kGameUnbatchedRenderables);
+        else
+            rfa::Log("Unbatched renderables: could not change the game's code at 0x%08lX, nor put back what was changed before it", values[i].at);
+        return;
+    }
+    rfa::Log("Unbatched renderables: %lu a frame (the game's %lu), in the mod's own list", kUnbatchedRenderables, kGameUnbatchedRenderables);
+}
+
+// ---- Room in the sound engine's own memory
+//
+// Wwise keeps what its banks describe (every sound, container, event and curve) and a record for every sound
+// playing or virtual in one pool of its own, "Default", whose size the game hands it when it starts: 0x2C8000 bytes
+// (2.78 MB; 0x536626 `mov dword ptr [ebp-54h],2C8000h` in the audio set-up's values, copied to 0x27454E0 and
+// given to Wwise as its default pool's size at 0xB978D1). Wwise takes its pools' memory from the process itself
+// (its memory hooks are the game's 0xB975A0, the C runtime's aligned allocation, and 0xB975E0, VirtualAlloc), not
+// from the game's audio pool (0x26AF858, 0xF80000 bytes, of which 15,701,808 are still free once Wwise has
+// started), so the audio cache, made of what that pool has left, keeps its size. With Guerrilla's 31 banks'
+// objects in it the pool stood at 2,680-2,720 of 2,844 KB all through the run of 2026-11-11 01:20 (95%), which
+// ended with all sound gone. The user's OK for the sound limits was asked through the main session. The mod makes
+// the size 6 MB (the value checked first, and that the audio hasn't started): 3.2 MB more of the process's
+// memory. The log's "Wwise memory:" lines and F7 Limits show its use.
+constexpr DWORD kSoundEngineMemoryValue = 0x536629;  // the value of the mov at 0x536626 (C7 45 AC, then it)
+constexpr DWORD kGameSoundEngineMemory = 0x2C8000, kSoundEngineMemory = 0x600000;
+constexpr DWORD kSoundEngineMemoryInUse = 0x27454E0;  // where the audio set-up keeps the size once it has run
+
+void MoreSoundEngineRoom() {
+    if (*reinterpret_cast<const DWORD*>(kSoundEngineMemoryInUse) != 0) {
+        rfa::Log("Sound engine memory: the game's audio has already started; it keeps its %lu bytes", kGameSoundEngineMemory);
+        return;
+    }
+    const BYTE opening[] = {0xC7, 0x45, 0xAC};
+    if (memcmp(reinterpret_cast<const void*>(kSoundEngineMemoryValue - sizeof(opening)), opening, sizeof(opening)) != 0 ||
+        rfa::CodeValue(kSoundEngineMemoryValue) != kGameSoundEngineMemory) {
+        rfa::Log("Sound engine memory: the game's code (0x00536626) isn't as expected; it keeps its %lu bytes", kGameSoundEngineMemory);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kSoundEngineMemoryValue), &kSoundEngineMemory, sizeof(kSoundEngineMemory))) {
+        rfa::Log("Sound engine memory: could not change the game's code; it keeps its %lu bytes", kGameSoundEngineMemory);
+        return;
+    }
+    rfa::Log("Sound engine memory: %lu bytes (the game's %lu)", kSoundEngineMemory, kGameSoundEngineMemory);
+}
+
+// ---- Room for the sound engine's streams
+//
+// Wwise reads every streamed sound through one pool of fixed pieces, "Stream I/O": the game gives it 0x240000 bytes
+// (2.25 MB; 0x53661F `mov dword ptr [ebp-58h],240000h` in the audio set-up's values, copied to 0x27454DC and
+// handed over as the stream device's memory at 0xB9783F) in pieces of 0x6800 bytes (0xB97848): 88 pieces for all
+// streams at once. That was sized for Armageddon's Vorbis, where a piece is two seconds of sound. Guerrilla's
+// sounds are all streams of uncompressed sound (a mono one-shot plays a piece in 0.42 s, a stereo engine loop in
+// 0.15 s), and the top bus lets 256 play. In the run of 2026-11-11 02:41 the pool read full (2,288 of 2,288 KB),
+// and a building's collapse gave Wwise's "Source starvation" for twenty destruction sounds and an engine.
+// Each open stream also has a record in a second pool, "Stream Manager": 0x10000 bytes (0xB97801
+// `mov dword ptr [ebp-7Ch],10000h`, the stream manager's own settings, just before it is made). 18 of its 60 KB
+// were in use with 81 pieces out, so the pieces can't be raised alone: 315 pieces would need about 70 KB, and a
+// full record pool is "Not enough memory to start stream".
+// The user's OK for the sound limits was asked through the main session ("you have the okay to raise the limits
+// more"); both numbers were told to them. The mod makes the pieces' memory 8 MB (315 pieces) and the records'
+// 256 KB, both or neither (each value and its opcode checked first, and that the audio hasn't started): about
+// 6 MB more of the process's memory, none of the game's audio pool (Wwise's pools are the process's own, see "Room
+// in the sound engine's own memory"). The log's "Wwise memory:" lines and F7 Limits show both pools' use.
+constexpr DWORD kStreamMemoryValue = 0x536622;   // the value of the mov at 0x53661F (C7 45 A8, then it)
+constexpr DWORD kGameStreamMemory = 0x240000, kStreamMemory = 0x800000;
+constexpr DWORD kStreamMemoryInUse = 0x27454DC;  // where the audio set-up keeps the size once it has run
+constexpr DWORD kStreamRecordsValue = 0xB97804;  // the value of the mov at 0xB97801 (C7 45 84, then it)
+constexpr DWORD kGameStreamRecords = 0x10000, kStreamRecords = 0x40000;
+
+void MoreStreamRoom() {
+    if (*reinterpret_cast<const DWORD*>(kStreamMemoryInUse) != 0) {
+        rfa::Log("Stream memory: the game's audio has already started; it keeps its %lu bytes for the streams' pieces and %lu for their records",
+                 kGameStreamMemory, kGameStreamRecords);
+        return;
+    }
+    const BYTE memoryOpening[] = {0xC7, 0x45, 0xA8}, recordsOpening[] = {0xC7, 0x45, 0x84};
+    if (memcmp(reinterpret_cast<const void*>(kStreamMemoryValue - sizeof(memoryOpening)), memoryOpening, sizeof(memoryOpening)) != 0 ||
+        rfa::CodeValue(kStreamMemoryValue) != kGameStreamMemory ||
+        memcmp(reinterpret_cast<const void*>(kStreamRecordsValue - sizeof(recordsOpening)), recordsOpening, sizeof(recordsOpening)) != 0 ||
+        rfa::CodeValue(kStreamRecordsValue) != kGameStreamRecords) {
+        rfa::Log("Stream memory: the game's code (0x0053661F, 0x00B97801) isn't as expected; it keeps its %lu bytes for the streams' pieces and %lu for their records",
+                 kGameStreamMemory, kGameStreamRecords);
+        return;
+    }
+    // Both or neither: more pieces without more records would only move the shortage.
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kStreamRecordsValue), &kStreamRecords, sizeof(kStreamRecords))) {
+        rfa::Log("Stream memory: could not change the game's code; it keeps its %lu bytes for the streams' pieces and %lu for their records",
+                 kGameStreamMemory, kGameStreamRecords);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kStreamMemoryValue), &kStreamMemory, sizeof(kStreamMemory))) {
+        const bool back = rfa::PatchCode(reinterpret_cast<void*>(kStreamRecordsValue), &kGameStreamRecords, sizeof(kGameStreamRecords));
+        rfa::Log("Stream memory: could not change the game's code; it keeps its %lu bytes for the streams' pieces, and for their records %lu",
+                 kGameStreamMemory, back ? kGameStreamRecords : kStreamRecords);
+        return;
+    }
+    rfa::Log("Stream memory: %lu bytes for the streams' pieces (the game's %lu: %lu pieces where it had %lu) and %lu for their records (the game's %lu)",
+             kStreamMemory, kGameStreamMemory, kStreamMemory / 0x6800, kGameStreamMemory / 0x6800, kStreamRecords, kGameStreamRecords);
+}
+
+// ---- How many sounds the game plays at once
+//
+// Armageddon's top bus over its effects, vehicles, weapons and destruction (0x1001382D, in init.bnk_pc) lets 128
+// sounds play at once, silent and virtual ones counted, and ends the oldest of the lowest priority for one more,
+// without a word from Wwise. Guerrilla had no such cap and its world filled this one (other vehicles' engines and
+// held guns ended in a fight, hits were cut short: the run of 2026-11-11 00:43). The user: "you have the okay to
+// raise the limits more". The Guerrilla builder writes an override of the player's own init.bnk_pc with that one
+// number made 256 (GuerrillaSoundBanks.WriteBusLimit; the game's code isn't touched); this says in the log what
+// the override holds (a bus: an object of type 8, its limit 25 bytes after its id).
+constexpr DWORD kTopSoundBus = 0x1001382D;
+constexpr DWORD kGameSoundsAtOnce = 128;
+
+void LogSoundLimit() {
+    std::vector<BYTE> bank;
+    if (!ReadWholeFile(rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\soundboot.vpp_pc\\init.bnk_pc", bank)) {
+        rfa::Log("Sounds at once: the game's own %lu (there is no override of its init.bnk_pc)", kGameSoundsAtOnce);
+        return;
+    }
+    for (size_t at = 0; at + 8 <= bank.size();) {
+        DWORD size = 0;
+        memcpy(&size, &bank[at + 4], sizeof(size));
+        if (size > bank.size() || at + 8 + size > bank.size()) break;
+        if (memcmp(&bank[at], "HIRC", 4) == 0 && size >= 4) {
+            DWORD count = 0;
+            memcpy(&count, &bank[at + 8], sizeof(count));
+            size_t object = at + 12;
+            for (DWORD k = 0; k < count && object + 12 <= at + 8 + size; ++k) {
+                DWORD type = 0, length = 0, id = 0;
+                memcpy(&type, &bank[object], sizeof(type));
+                memcpy(&length, &bank[object + 4], sizeof(length));
+                memcpy(&id, &bank[object + 8], sizeof(id));
+                if (length < 4 || object + 8 + length > bank.size()) break;
+                if (type == 8 && id == kTopSoundBus && length >= 27) {
+                    WORD limit = 0;
+                    memcpy(&limit, &bank[object + 8 + 25], sizeof(limit));
+                    rfa::Log("Sounds at once: %u (the game's own %lu), the top bus's limit in the override of init.bnk_pc", limit, kGameSoundsAtOnce);
+                    return;
+                }
+                object += 8 + length;
+            }
+        }
+        at += 8 + size;
+    }
+    rfa::Log("Sounds at once: the override of init.bnk_pc has no bus 0x%08lX; the limit isn't known", kTopSoundBus);
+}
+
 // ---- Room for more visual effects
 
 // The game keeps every visual effect vfx.xtbl describes (and a DLC level's, while it's loaded) in a
@@ -7728,7 +8400,13 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreParticleRoom();
     MoreEffectTemplateRoom();
     MoreEmitterRoom();
-    g_loadShaders = reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
+    MoreMaterialEffectRoom();
+    LoadMaterialEvents();
+    MoreSoundEngineRoom();
+    MoreStreamRoom();
+    LogSoundLimit();
+    MoreUnbatchedRenderableRoom();
+    g_loadShaders =reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
     if (!g_loadShaders) rfa::Log("Could not add Guerrilla's material shaders to the game's; materials using them draw red");
     // Guerrilla's undergrowth: its random scatter with the pieces on the ground (see RandomlyPlace).
     if (!rfa::HookFunction(kRandomlyPlace, kRandomlyPlacePrologue, reinterpret_cast<void*>(&RandomlyPlace)))
@@ -7815,6 +8493,11 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
             rfa::HookFunction(kEffectFileLoad, kEffectFileLoadPrologue, reinterpret_cast<void*>(&EffectFileLoad)));
         if (!g_effectFileLoad) rfa::Log("Could not watch the game's effect files loading (the log won't say which load)");
         g_playEffect = reinterpret_cast<PlayEffectFn>(rfa::HookFunction(kPlayEffect, kPlayEffectPrologue, reinterpret_cast<void*>(&PlayEffect)));
+        // What becomes of the effects' sounds: Wwise's own messages, and how long each sound played (see there).
+        g_wwiseOutput = reinterpret_cast<WwiseOutputFn>(rfa::HookFunction(kWwiseOutput, kWwiseOutputPrologue, reinterpret_cast<void*>(&WwiseOutput)));
+        g_effectSound = reinterpret_cast<EffectSoundFn>(rfa::HookFunction(kEffectSound, kEffectSoundPrologue, reinterpret_cast<void*>(&EffectSound)));
+        if (!g_wwiseOutput || !g_effectSound) rfa::Log("Could not watch the effects' sounds (Wwise's messages %s, the sounds' lengths %s)",
+                                                       g_wwiseOutput ? "watched" : "not", g_effectSound ? "watched" : "not");
         g_makeObject = reinterpret_cast<MakeObjectFn>(rfa::HookFunction(kMakeObject, kMakeObjectPrologue, reinterpret_cast<void*>(&MakeObject)));
         if (!g_playEffect || !g_makeObject) rfa::Log("Could not watch the game's effects playing (the log won't say why one doesn't)");
     }

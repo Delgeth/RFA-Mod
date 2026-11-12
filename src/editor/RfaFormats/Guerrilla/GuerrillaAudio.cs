@@ -21,10 +21,12 @@ public sealed class GuerrillaSounds
     /// <summary>
     /// A cue of foley.aud_pc: its XACT sound bank (by its name's CRC), its index there, its volume (a gain), loop
     /// count (255: for ever) and channels, its distances (an index into foley_settings.xtbl's Min_Max_Distances,
-    /// in order) and how many may play at once (0: any).
+    /// in order), how many may play at once (0: any) and its rank: Guerrilla's priority for it, 0 (footsteps, small
+    /// debris), 4 (other vehicles' engines, middling things), 7 (large destruction, most vehicle sounds) or 10 (the
+    /// player's engine and guns, the hammer's hits); its music has 11.
     /// </summary>
     public sealed record Cue(string Name, uint SoundBankCrc, uint WaveBankCrc, int Index, float Volume, int LoopCount, int Channels,
-                             int DistanceIndex = 0, int MostAtOnce = 0);
+                             int DistanceIndex = 0, int MostAtOnce = 0, int Rank = 0);
 
     /// <summary>A wave: 16-bit samples (channels interleaved), its rate, and whether Guerrilla loops it.</summary>
     public sealed record Wave(string Bank, int Index, short[] Samples, int Channels, int Rate, bool Loops, int LoopStart = 0);
@@ -60,7 +62,7 @@ public sealed class GuerrillaSounds
             int o = start + 228 * i;
             uint crc = BitConverter.ToUInt32(b, o);
             cues[crc] = new Cue("", BitConverter.ToUInt32(b, o + 12), BitConverter.ToUInt32(b, o + 16), BitConverter.ToUInt16(b, o + 24),
-                                BitConverter.ToSingle(b, o + 20), b[o + 30], (sbyte)b[o + 31], b[o + 27], b[o + 28]);
+                                BitConverter.ToSingle(b, o + 20), b[o + 30], (sbyte)b[o + 31], b[o + 27], b[o + 28], b[o + 26]);
         }
     }
 
@@ -183,7 +185,7 @@ public sealed class GuerrillaSounds
     /// <summary>
     /// An XACT wave bank ("WBND" version 44): five segments (offset, size) from 12: the bank's data (flags,
     /// count, name, an entry's size), the entries (flags and length, format, where its data is and how long,
-    /// its loop's start and length in samples), seek tables, names, the waves' data. A format: tag (2 = ADPCM),
+    /// its loop's start and length in samples), seek tables, names, the waves' data. A format: tag (0 = PCM, 2 = ADPCM),
     /// channels, rate, block size (ADPCM: bytes a channel's block, less 22), 8 or 16 bits.
     /// </summary>
     static class Xwb
@@ -199,8 +201,24 @@ public sealed class GuerrillaSounds
             int offset = BitConverter.ToInt32(b, e + 8), length = BitConverter.ToInt32(b, e + 12);
             int loopStart = BitConverter.ToInt32(b, e + 16), loopLength = BitConverter.ToInt32(b, e + 20);
             int tag = (int)(format & 3), channels = (int)((format >> 2) & 7), rate = (int)((format >> 5) & 0x3FFFF), block = (int)((format >> 23) & 0xFF);
-            if (tag != 2) throw new NotSupportedException($"{bank} wave {index}: format {tag} (only ADPCM read)");
-            short[] samples = MsAdpcm.Decode(b.AsSpan(waves + offset, length), channels, (block + 22) * channels);
+            short[] samples;
+            if (tag == 2) samples = MsAdpcm.Decode(b.AsSpan(waves + offset, length), channels, (block + 22) * channels);
+            else if (tag == 0)
+            {
+                // Plain PCM (a few of Guerrilla's waves: wep_rfg's gun loops): the format's top bit says 16 bits, else 8 (unsigned).
+                var pcm = b.AsSpan(waves + offset, length);
+                if ((format >> 31) != 0)
+                {
+                    samples = new short[length / 2];
+                    for (int i = 0; i < samples.Length; i++) samples[i] = BitConverter.ToInt16(pcm[(2 * i)..]);
+                }
+                else
+                {
+                    samples = new short[length];
+                    for (int i = 0; i < length; i++) samples[i] = (short)((pcm[i] - 128) << 8);
+                }
+            }
+            else throw new NotSupportedException($"{bank} wave {index}: format {tag} (only PCM and ADPCM read)");
             bool loops = loopLength > 0;
             if (loops && (loopStart + loopLength) * channels <= samples.Length) samples = samples[..((loopStart + loopLength) * channels)];
             return new Wave(bank, index, samples, channels, rate, loops, loops && loopStart * channels < samples.Length ? loopStart : 0);
@@ -275,8 +293,42 @@ public sealed class WwiseBankWriter
     const int BankVersion = 48;
     const uint PcmPlugin = 0x00010001;  // Wwise's PCM codec (Armageddon's own media are Vorbis, 0x00040001)
 
-    /// <summary>Armageddon's buses (in init.bnk_pc): its vehicles' engines' (−12 dB), and its walkers' and flyers' sounds' (−4 dB).</summary>
-    public const uint EngineBus = 0x03ECF678, VehicleEffectsBus = 0x1BDA12A2;
+    /// <summary>
+    /// Armageddon's bus (in init.bnk_pc) for its walkers' and flyers' sounds: −4 dB, −8 dB with its parents', and no
+    /// limit on how many sounds play on it at once. Guerrilla's vehicles' sounds all go here, the engines too.
+    /// A bus may limit its sounds: past the limit the game ends the oldest one (or the newest) for good. The
+    /// limits are set for Armageddon's own sounds, so check a bus's before sending Guerrilla's sounds to it.
+    /// </summary>
+    public const uint VehicleEffectsBus = 0x1BDA12A2;
+
+    /// <summary>
+    /// How much quieter Armageddon's own engines' bus (0x03ECF678: −12 dB, −16 dB with its parents') is than
+    /// <see cref="VehicleEffectsBus"/>. Guerrilla's engines are turned down by this much, to sound as loud as they
+    /// would on Armageddon's engines' bus. They can't be on that bus itself: it lets 10 sounds play at once and
+    /// ends the oldest for the next, and one of Guerrilla's engines is five or six loops, twice (the player's
+    /// stereo ones and the others' mono ones). On it, an engine went silent for good as soon as another one started.
+    /// </summary>
+    public const float EngineBusDifference = -8f;
+
+    /// <summary>
+    /// Armageddon's bus for its effects' sounds (what its own effects.xtbl names: its objects' deaths and hums, and,
+    /// on buses under it, its explosions and fires): −4 dB, −8 dB with its parents'. It lets 15 sounds play at once,
+    /// its buses' under it counted in; for one more, the one of the lowest priority ends, the oldest of those.
+    /// Guerrilla's effects' sounds that play once go here. Not on its explosions' own bus under it (0x332BCA77),
+    /// which lets 4 play: Guerrilla sets off more than that at once.
+    /// </summary>
+    public const uint EffectsBus = 0x2785E1AB;
+
+    /// <summary>
+    /// The bus of Armageddon's destruction sounds: 0 dB, −4 dB with its parents', and no limit of its own (the
+    /// effects' top bus over it lets 128 play). Guerrilla's effects' looping sounds (a fire burning, a machine
+    /// humming) go here, turned down by <see cref="EffectLoopBusDifference"/> to the level of <see cref="EffectsBus"/>:
+    /// on that bus a burst of 15 sounds would end a loop for good, and 15 loops would leave no room for anything else.
+    /// </summary>
+    public const uint EffectLoopsBus = 0x3108D6B1;
+
+    /// <summary>How much quieter <see cref="EffectsBus"/> is than <see cref="EffectLoopsBus"/>.</summary>
+    public const float EffectLoopBusDifference = -4f;
 
     /// <summary>The game parameters the game sets on a vehicle's engine sound each frame, and the mod's own (1 while the player is in that vehicle).</summary>
     public static readonly uint Rpm = Id("RPM"), EngineLoad = Id("ENGINE_LOAD"), Speed = Id("SPEED"), Damage = Id("DAMAGE"),
@@ -291,13 +343,38 @@ public sealed class WwiseBankWriter
     /// <summary>A curve: a game parameter's value (x) → a property (y), straight lines between the points.</summary>
     public sealed record Curve(uint Parameter, Property Property, IReadOnlyList<(float X, float Y)> Points);
 
-    /// <summary>A sound's or container's settings: its volume (dB) and pitch (cents), its curves, how many may play at once (0 any), and whether one too quiet to hear goes virtual.</summary>
+    /// <summary>
+    /// A sound's or container's settings: its volume (dB) and pitch (cents), its curves, how many may play at once
+    /// (0 any), its priority (Armageddon's sounds have 50; where a bus is full, the lowest goes first), and whether
+    /// one too quiet to hear goes virtual: it stops playing, takes no voice, and starts again from its beginning
+    /// when it can be heard (as Guerrilla stops an engine's layer out of its range and starts it again).
+    /// </summary>
     public sealed class Settings
     {
         public float Volume, Pitch;
         public List<Curve> Curves = [];
         public ushort MostAtOnce;
+        public byte Priority = 50;
+
+        /// <summary>The priority is this object's own though it hangs from another (else it takes its parent's).</summary>
+        public bool OwnPriority;
         public bool VirtualWhenQuiet;
+
+        /// <summary>
+        /// One too quiet to hear is ended, for good (a sound that plays once, out of earshot): it then holds none of
+        /// the places the game's buses count, where one playing on unheard held its place for its whole length.
+        /// Armageddon sets a good part of its own one-shot sounds so (700 in the banks loaded at start-up).
+        /// </summary>
+        public bool EndsWhenQuiet;
+
+        /// <summary>
+        /// With <see cref="MostAtOnce"/> playing, one more doesn't start (Wwise's "kill newest"; else the oldest is
+        /// ended for it). Guerrilla's own rule for a cue's number at once (its audiolib_cue_play gives up with an
+        /// error where the cue's count has reached max_simultaneous), and what Armageddon's own banks set on most
+        /// of their limited sounds. A sound that doesn't start opens no stream, where one started in the oldest's
+        /// place reads its first piece from the disk only to be ended by the next.
+        /// </summary>
+        public bool RefusesWhenFull;
     }
 
     /// <summary>Where an object hanging from nothing goes: its bus, and 3D with an attenuation, or 2D.</summary>
@@ -395,6 +472,33 @@ public sealed class WwiseBankWriter
         return id;
     }
 
+    /// <summary>
+    /// A container that goes on playing while its event plays: one of its children (made with this one's id as their
+    /// parent: <see cref="ObjectId"/>("retriggered:" + key)) every <paramref name="intervalMs"/>, each to its end, so
+    /// they overlap: a gun's single shot at its rate of fire. A random container laid out as Armageddon's own automatic
+    /// guns' (wep_enforcer_pc's: loop count 0 for ever, continuous, transition mode 5 "trigger rate", shuffled), but
+    /// with the interval in it; Armageddon's take theirs from the game parameter WEP_REFIRE_DELAY_SEC. A Break action
+    /// (<see cref="Break"/>) ends it after the child that is playing.
+    /// </summary>
+    public uint Retriggered(string key, IReadOnlyList<uint> children, Settings settings, float intervalMs, uint parent = 0, Output? output = null)
+    {
+        uint id = ObjectId("retriggered:" + key);
+        if (taken.Contains(id)) return id;
+        var w = new Writer();
+        NodeBase(w, settings, parent, output);
+        w.S16(0);                                   // for ever
+        w.F32(intervalMs); w.F32(0); w.F32(0);      // the time between two, never varied
+        w.U16(Math.Min(3, children.Count - 1));     // not one of the last few again
+        // trigger rate, shuffle (when there are several), random, ..., reset, ..., continuous, global
+        foreach (byte b in new byte[] { 5, (byte)(children.Count > 1 ? 1 : 0), 0, 0, 1, 0, 1, 1 }) w.U8(b);
+        w.U32((uint)children.Count);
+        foreach (uint c in children) w.U32(c);
+        w.U16(children.Count);
+        foreach (uint c in children) { w.U32(c); w.U8(50); }
+        Add(objects, 5, id, w);
+        return id;
+    }
+
     /// <summary>A layer container: all its children (made with <see cref="ObjectId"/>("layer:" + key) as their parent) play at once.</summary>
     public uint Layer(string key, IReadOnlyList<uint> children, Settings settings, uint parent = 0, Output? output = null)
     {
@@ -406,6 +510,59 @@ public sealed class WwiseBankWriter
         foreach (uint c in children) w.U32(c);
         w.U32(0);  // no crossfade groups: each child's own curves do it
         Add(objects, 9, id, w);
+        return id;
+    }
+
+    /// <summary>
+    /// The switch the game sets on a weapon's sound before it posts the weapon's event, and its values: the same
+    /// event is posted for a shot, a pull of the trigger with no ammunition, an overheated gun, and a turret turning
+    /// fast (that one is stopped when the turret slows).
+    /// </summary>
+    /// <summary>
+    /// Which of an engine's two sets plays, a switch the guerrilla_vehicles mod sets on each engine's sound object:
+    /// the player's own vehicle's (2D, stereo) or another's (3D, mono). Unset, the other's.
+    /// </summary>
+    public static readonly uint EngineListener = Id("RFG_ENGINE_LISTENER"), ListenerPlayer = Id("player"), ListenerOther = Id("other");
+
+    public static readonly uint WeaponSoundType = Id("WEAPON_SOUND_TYPE"), PrimaryFire = Id("primary_fire"), NoAmmo = Id("no_ammo"),
+                                Overheat = Id("overheat"), TurretTurn = Id("turret_turn");
+
+    /// <summary>
+    /// A switch container: it plays the child chosen for the value the switch <paramref name="group"/> has on the
+    /// game object (children made with this one's id as their parent: <see cref="ObjectId"/>("switch:" + key)), and
+    /// nothing for a value with no child or one not listed. Laid out as Armageddon's weapons' own (each of its
+    /// weapon events plays one, on WEAPON_SOUND_TYPE).
+    /// </summary>
+    public uint Switch(string key, uint group, IReadOnlyList<(uint Value, uint? Child)> choices, Settings settings, uint parent = 0, Output? output = null,
+                       uint defaultValue = 0, bool followsChanges = false, int fadeMs = 0)
+    {
+        uint id = ObjectId("switch:" + key);
+        if (taken.Contains(id)) return id;
+        var children = choices.Where(c => c.Child != null).Select(c => c.Child!.Value).Distinct().ToList();
+        var w = new Writer();
+        NodeBase(w, settings, parent, output);
+        w.U32(0);                                   // a switch (1: a state)
+        w.U32(group);
+        w.U32(defaultValue);                        // what plays while the switch isn't set on the game object (0: nothing)
+        w.U8(followsChanges ? (byte)1 : (byte)0);   // checked again while it plays: a change of the switch stops one child and starts the other
+        w.U32((uint)children.Count);
+        foreach (uint c in children) w.U32(c);
+        w.U32((uint)choices.Count);
+        foreach (var (value, child) in choices)
+        {
+            w.U32(value);
+            w.U32(child == null ? 0u : 1u);
+            if (child != null) w.U32(child.Value);
+        }
+        w.U32((uint)children.Count);
+        foreach (uint c in children)
+        {
+            w.U32(c);
+            w.U8(0); w.U8(0);                       // not only the first time, not carried on
+            w.U32(1);                               // a change of the switch stops it
+            w.S32(fadeMs); w.S32(fadeMs);           // fading out, and the one it changes to fading in
+        }
+        Add(objects, 6, id, w);
         return id;
     }
 
@@ -426,6 +583,23 @@ public sealed class WwiseBankWriter
         uint id = ObjectId("stop:" + key);
         if (taken.Contains(id)) return id;
         Add(objects, 3, id, ActionHead(0x1011, target, 0, fadeMs));
+        return id;
+    }
+
+    /// <summary>
+    /// An action ending <paramref name="target"/>'s repeating on the event's game object: what is playing plays to its
+    /// end and nothing follows it. As Armageddon's own automatic guns' stop events have it (type 0x90011: the type, the
+    /// target, 16 bytes of zero).
+    /// </summary>
+    public uint Break(string key, uint target)
+    {
+        uint id = ObjectId("break:" + key);
+        if (taken.Contains(id)) return id;
+        var w = new Writer();
+        w.U32(0x90011);
+        w.U32(target);
+        for (int i = 0; i < 4; i++) w.U32(0);
+        Add(objects, 3, id, w);
         return id;
     }
 
@@ -461,12 +635,12 @@ public sealed class WwiseBankWriter
     static void NodeBase(Writer w, Settings s, uint parent, Output? output)
     {
         w.U8(0); w.U8(0);                                        // no effects
-        w.U32(parent == 0 ? output?.Bus ?? EngineBus : 0);       // its bus, when it hangs from nothing
+        w.U32(parent == 0 ? output?.Bus ?? VehicleEffectsBus : 0);  // its bus, when it hangs from nothing
         w.U32(parent);
-        w.U8(50); w.U8(0); w.U8(0); w.S8(-10);                   // priority, ..., distance offset
+        w.U8(s.Priority); w.U8(s.OwnPriority ? (byte)1 : (byte)0); w.U8(0); w.S8(-10);  // priority, its own or its parent's, ..., distance offset
         foreach (float f in new[] { s.Volume, 0f, 0f, 0f, 0f, 0f, s.Pitch, 0f, 0f, 0f, 0f, 0f }) w.F32(f);
         w.U32(0);                                                // no state group
-        if (parent != 0 || output == null) w.U8(0);              // positioned as its parent
+        if (output == null) w.U8(0);                             // positioned as its parent (a child given an output is placed by it: its bus stays its parent's)
         else if (output.ThreeD)
         {
             w.U8(1); w.S32(0); w.F32(0); w.F32(100); w.U8(1);
@@ -475,7 +649,13 @@ public sealed class WwiseBankWriter
             w.U8(1); w.U8(1);
         }
         else { w.U8(1); w.S32(0); w.F32(0); w.F32(100); w.U8(0); w.U8(0); }
-        w.U8(0); w.U8(0); w.U16(s.MostAtOnce); w.U8(s.VirtualWhenQuiet ? (byte)2 : (byte)0); w.U8(0); w.U8(0); w.U8(0);
+        // When it's too quiet to hear: 0 it plays on, 2 it goes virtual (and starts from its beginning again: the
+        // first byte, 0). The byte before the last says these are its own settings, not its parent's: Armageddon's
+        // own virtual loops (sfx_streaming.bnk_pc's) have 0, 0, ..., 2, 0, 1, 0.
+        // (Or 1: it is ended, EndsWhenQuiet.)
+        byte whenQuiet = s.VirtualWhenQuiet ? (byte)2 : s.EndsWhenQuiet ? (byte)1 : (byte)0;
+        // (The second byte: with the most at once playing, 0 the oldest is ended for a new one, 1 the new one doesn't start.)
+        w.U8(0); w.U8(s.RefusesWhenFull ? (byte)1 : (byte)0); w.U16(s.MostAtOnce); w.U8(whenQuiet); w.U8(0); w.U8(whenQuiet != 0 ? (byte)1 : (byte)0); w.U8(0);
         w.U16(0);                                                // no states
         w.U16(s.Curves.Count);
         int n = 0;
@@ -545,11 +725,11 @@ public sealed class WwiseBankWriter
         return ([.. bank], [.. container]);
     }
 
-    /// <summary>How many objects (by type: 2 sounds, 3 actions, 4 events, 5 random, 9 layer, 14 attenuations) and media the bank has.</summary>
+    /// <summary>How many objects (by type: 2 sounds, 3 actions, 4 events, 5 random, 6 switch, 9 layer, 14 attenuations) and media the bank has.</summary>
     public string Counts() =>
         string.Join(", ", attenuations.Concat(objects).GroupBy(o => o.Type).OrderBy(g => g.Key).Select(g => $"{g.Count()} {TypeName(g.Key)}")) + $", {media.Count} media";
 
-    static string TypeName(uint type) => type switch { 2 => "sounds", 3 => "actions", 4 => "events", 5 => "random containers", 9 => "layer containers", 14 => "attenuations", _ => $"type {type}" };
+    static string TypeName(uint type) => type switch { 2 => "sounds", 3 => "actions", 4 => "events", 5 => "random containers", 6 => "switch containers", 9 => "layer containers", 14 => "attenuations", _ => $"type {type}" };
 
     static int Align(int n) => (n + 2047) & ~2047;
 

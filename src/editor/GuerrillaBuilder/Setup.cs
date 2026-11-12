@@ -24,6 +24,7 @@ sealed class Setup
     public string WorldFolder => Path.Combine(ModFolder, "mods", "guerrilla_world");
     public string HudFolder => Path.Combine(ModFolder, "mods", "guerrilla_hud");
     public string PeopleFolder => Path.Combine(ModFolder, "mods", "guerrilla_people");
+    public string CampaignFolder => Path.Combine(ModFolder, "mods", "guerrilla_campaign");
     public string LogFile => Path.Combine(ModFolder, "logs", "guerrilla_builder.log");
 
     /// <summary>Armageddon's folder, or null if it can't be found.</summary>

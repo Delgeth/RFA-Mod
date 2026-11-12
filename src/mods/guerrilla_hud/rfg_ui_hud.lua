@@ -19,13 +19,18 @@
 --     every 85 1/3 pixels, under everything, for the zones whose own pictures aren't loaded) and
 --     up to nine zones' own pictures, and over them Guerrilla's map icons near the player (its
 --     safehouses and its missions' and activities' starts, from map_icons.txt), each kept upright;
+--     under the icons, Guerrilla's blips for the people and vehicles near the player (a dot a person,
+--     a marker turned as the vehicle is; who shows and in which colour is Guerrilla's, in the mod:
+--     rfg_map_blips);
 --   - the frame on top: the document's own map element, which GuerrillaBuilder.exe made a picture.
 -- How far the minimap shows is Guerrilla's: 40 metres from the player to the frame's edge, and half
 -- the vehicle's speed more while driving. Where the player is, which way the camera looks and which
 -- zone pictures are loaded, the mod tells this script through rfg_map_view() and rfg_map_tiles().
 --
 -- The district's name is shown as Guerrilla's HUD shows it when the player enters another district
--- (its own animation). Guerrilla's alert level, EDF control and morale meters, new action banner
+-- (its own animation). Guerrilla's alert level shows above the map while the guerrilla_campaign mod
+-- runs it (rfg_alert()): its light green, yellow, orange or red, pulsing faster and wider the higher
+-- it is, as Guerrilla's script set it. Guerrilla's EDF control and morale meters, new action banner
 -- and radio have nothing behind them in Armageddon yet, so they stay hidden.
 
 local FRAME = 170                       -- the frame picture's size (ui_map_overlay)
@@ -42,6 +47,18 @@ local TILES = 9
 local ICONS = 24                        -- icons shown at once (the nearest first come first)
 local ICON_SCALE = 0.55                 -- Guerrilla's map icons are 40 x 40 pictures
 local ICON_REACH = 1.5                  -- icons drawn this many radii out (the octagon's corners are 1.41)
+-- Guerrilla's blips (its render_humans and render_vehicles): a person is its dot picture drawn 12 units
+-- across, smaller as the minimap zooms out (down to 0.75 of that at its widest, 80 metres); a vehicle is
+-- its marker picture drawn as a square 9.75 metres wide in the world, turned as the vehicle is.
+local BLIPS = 40                        -- people and vehicles shown at once (the mod sends the nearest)
+local BLIP_PIXELS = 32                  -- both pictures' size
+local HUMAN_BLIP = 12
+local HUMAN_BLIP_LEAST = 0.75
+local WIDEST_RADIUS = 80
+local VEHICLE_BLIP_METRES = 9.75
+-- Guerrilla's blip colours (0 to 255), by the number the mod gives: grey (nobody's, or no one in it), the
+-- Red Faction's yellow, the EDF's red, the Marauders' purple.
+local BLIP_COLOURS = { [0] = { 200, 200, 200 }, { 240, 200, 52 }, { 148, 13, 0 }, { 120, 80, 130 } }
 -- The game's Lua has no math or string library (its globals are checked: reading a missing one is
 -- an error), so these are written out.
 local QUARTER_TURN = 1.5707963267949
@@ -56,11 +73,26 @@ end
 -- Parts of this document with nothing behind them in Armageddon yet.
 local HIDDEN = { "control_meter", "morale_meter", "action_group", "radio_main", "radio_subtitle_group", "alert_level_group" }
 
+-- Guerrilla's alert light by level (its script's alert_level): the light's and its shine's colour (0 to 1,
+-- as Guerrilla's script gives them; Armageddon's scripts set a tint in 0 to 255), and the shine's pulse (how
+-- long, how strong, how wide); green has none.
+local ALERT = {
+	{ 0.01, 0.64, 0.01 },
+	{ 0.98, 0.90, 0.02, 1.0, 0.33, 1.0 },
+	{ 1.0, 0.40, 0.0, 0.75, 0.50, 1.2 },
+	{ 0.70, 0.08, 0.08, 0.50, 0.75, 1.5 },
+}
+local Alert_shown = false               -- the alert light is up
+local Alert_band = 0                    -- which of ALERT it shows (0: none yet)
+
 local Map_handles = {}                  -- the elements this script made
 local Tile_handles = {}
 local Icons = {}                        -- Guerrilla's map icons: { picture, x, y } on its world map picture
 local Icon_handles = {}
 local Icon_shown = {}                   -- the picture each icon element shows, or nil while hidden
+local Blip_handles = {}
+local Blip_shown = {}                   -- what each blip element shows (its kind and colour), or nil while hidden
+local Blips_on = true
 local Tile_shown = {}                   -- "column_row" each tile element shows, or nil
 local In_vehicle = false
 local Shown_district = nil
@@ -182,6 +214,65 @@ local function build_map()
 		vint_set_property(Icon_handles[i], "depth", -5)
 	end
 	log(#Icons .. " map icons")
+
+	-- Guerrilla's blips: under its icons, the people over the vehicles (the order Guerrilla draws them in).
+	for i = 1, BLIPS do
+		Blip_handles[i] = make("rfg_minimap_blip" .. i, "bitmap", turn)
+		vint_set_property(Blip_handles[i], "visible", false)
+		vint_set_property(Blip_handles[i], "auto_offset", "c")
+		vint_set_property(Blip_handles[i], "depth", -2)
+	end
+end
+
+-- Guerrilla's blips for the people and vehicles within reach (the mod picks them and their colours).
+local function place_blips(map_x, map_y, heading, radius, scale, world_scale)
+	local count = 0
+	if rfg_map_blips ~= nil then
+		count = rfg_map_blips(radius * ICON_REACH)
+		if count > BLIPS then
+			count = BLIPS
+		end
+	end
+	local zoomed_out = (radius - RADIUS) / (WIDEST_RADIUS - RADIUS)
+	if zoomed_out < 0 then
+		zoomed_out = 0
+	elseif zoomed_out > 1 then
+		zoomed_out = 1
+	end
+	local human_size = HUMAN_BLIP * (1 - (1 - HUMAN_BLIP_LEAST) * zoomed_out) / BLIP_PIXELS
+	local vehicle_size = VEHICLE_BLIP_METRES * scale / BLIP_PIXELS
+	for i = 1, count do
+		local vehicle, x, y, colour, facing = rfg_map_blip(i)
+		local handle = Blip_handles[i]
+		local look = colour
+		if vehicle then
+			look = look + 10
+		end
+		if Blip_shown[i] ~= look then
+			local tint = BLIP_COLOURS[colour] or BLIP_COLOURS[0]
+			vint_set_property(handle, "image", vehicle and "rfg_ui_map_icon_vehicle" or "rfg_ui_map_icon_blip_human")
+			vint_set_property(handle, "tint", tint[1], tint[2], tint[3])
+			vint_set_property(handle, "depth", vehicle and -2 or -3)
+			if Blip_shown[i] == nil then
+				vint_set_property(handle, "visible", true)
+			end
+			Blip_shown[i] = look
+		end
+		vint_set_property(handle, "anchor", (x - map_x) * world_scale, (y - map_y) * world_scale)
+		if vehicle then
+			vint_set_property(handle, "scale", vehicle_size, vehicle_size)
+			vint_set_property(handle, "rotation", facing)
+		else
+			vint_set_property(handle, "scale", human_size, human_size)
+			vint_set_property(handle, "rotation", heading)
+		end
+	end
+	for i = count + 1, BLIPS do
+		if Blip_shown[i] ~= nil then
+			vint_set_property(Blip_handles[i], "visible", false)
+			Blip_shown[i] = nil
+		end
+	end
 end
 
 -- Guerrilla's icons within reach of the player, upright (the map group turns by -heading).
@@ -248,6 +339,14 @@ local function place_map(map_x, map_y, heading, speed)
 	end
 
 	place_icons(map_x, map_y, heading, radius, world_scale)
+	-- The blips on their own: should they fail, the map goes on without them.
+	if Blips_on then
+		local ok, problem = pcall(place_blips, map_x, map_y, heading, radius, scale, world_scale)
+		if not ok then
+			Blips_on = false
+			log("the minimap's blips stopped: " .. tostring(problem), true)
+		end
+	end
 end
 
 -- Guerrilla's set_district_info: shows the name with its animation, the text fitted to its box.
@@ -283,6 +382,53 @@ local function show(visible)
 	vint_set_property(find("scale_group"), "visible", visible)
 end
 
+-- Guerrilla's alert_level: the light's colour and pulse for the value its HUD is given (0 to 25 green,
+-- to 50 yellow, to 75 orange, above red); hidden while nothing runs the alert level.
+local function show_alert()
+	local known, value = false, 0
+	if rfg_alert ~= nil then
+		known, value = rfg_alert()
+	end
+	if known ~= Alert_shown then
+		vint_set_property(find("alert_level_group"), "visible", known)
+		Alert_shown = known
+		Alert_band = 0
+	end
+	if not known then
+		return
+	end
+	local band = 4
+	if value <= 25 then
+		band = 1
+	elseif value <= 50 then
+		band = 2
+	elseif value <= 75 then
+		band = 3
+	end
+	if band == Alert_band then
+		return
+	end
+	Alert_band = band
+	local look = ALERT[band]
+	local light, shine, anim = find("mini_map_alert_level"), find("mini_map_alert_shine"), find("mini_map_alert_anim")
+	vint_set_property(light, "tint", look[1] * 255, look[2] * 255, look[3] * 255)
+	vint_set_property(shine, "tint", look[1] * 255, look[2] * 255, look[3] * 255)
+	if band == 1 then
+		vint_set_child_tween_state(anim, TWEEN_STATE_DISABLED)
+		vint_set_property(shine, "alpha", 0)
+		vint_set_property(shine, "scale", 0.8, 0.8)
+	else
+		local alpha_tween, scale_tween = find("mini_map_alert_alpha_tween"), find("mini_map_alert_scale_tween")
+		vint_set_property(alpha_tween, "duration", look[4])
+		vint_set_property(scale_tween, "duration", look[4])
+		vint_set_property(alpha_tween, "end_value", look[5])
+		vint_set_property(scale_tween, "end_value", look[6], look[6])
+		vint_set_property(anim, "start_time", vint_get_time_index())
+		vint_set_child_tween_state(anim, TWEEN_STATE_RUNNING)
+	end
+	log("alert light " .. band .. " (value " .. tostring(value) .. ")")
+end
+
 -- One frame: follows the player and the camera.
 local function frame()
 	local active, map_x, map_y, heading, speed, column, row, district, map_open = rfg_map_view()
@@ -294,6 +440,7 @@ local function frame()
 			show_district(district)
 			Shown_district = district
 		end
+		show_alert()
 	end
 	if Log_on and active and (Frames_logged < 3 or Frames_logged == 60) then
 		log("frame " .. Frames_logged .. ": map " .. values(map_x, map_y) .. ", heading " .. tostring(heading) .. ", speed " ..
@@ -335,6 +482,8 @@ function rfg_ui_hud_init()
 	if not hidden then
 		log("hiding the unused parts: " .. tostring(problem), true)
 	end
+	Alert_shown = false
+	Alert_band = 0
 
 	vint_dataitem_add_subscription("health_hud", "update", "rfg_ui_hud_health_target")
 	vint_dataitem_add_subscription("hud_hide", "update", "rfg_ui_hud_hide")

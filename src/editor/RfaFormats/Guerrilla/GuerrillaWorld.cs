@@ -66,12 +66,15 @@ public static class GuerrillaWorld
     /// 3 (v0.5.8-beta): Guerrilla's people, guard boxes, turret parts and looping sounds; the mods
     /// size the game's tables for what the world's zones and tables now name.
     /// </summary>
-    public const int Format = 3;
+    public const int Format = 4;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
     /// <summary>The stamp's file name, in the mod's folder (mods\guerrilla_world\).</summary>
     public const string StampFile = "world.txt";
+
+    /// <summary>The effects' sounds' banks: the part's name (its list file in the mod's folder) and what its banks' names start with.</summary>
+    public const string EffectSoundPart = "effects", EffectSoundBankPrefix = "rfge_";
 
     /// <summary>The start zone: in a part of the grid no precache group names (so its area is the world's).</summary>
     public static readonly (int Col, int Row) DefaultStart = (12, 11);
@@ -541,11 +544,24 @@ public static class GuerrillaWorld
                       .Where(n => n.Length > 0).ToList()
             : [];
         var vehicleEffects = GuerrillaArsenal.VehicleEffects(rfgTables, misc);
+        // The effects' sounds (an explosion's bang, a hit's knock, a breaking piece, a fire's burning): Guerrilla's
+        // cues as events in banks of Armageddon's kind (rfge_<Guerrilla's bank>), which the effects name.
+        var effectSounds = new GuerrillaSoundBanks(rfgCache, rfgTables, EffectSoundPart, EffectSoundBankPrefix);
         var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"),
-                                                       [.. dustEffects, .. vehicleEffects.Effects, .. GuerrillaWeapons.Effects(rfgTables)],
-                                                       DlcExplosions(game), [.. vehicleEffects.Explosions, .. GuerrillaWeapons.Explosions(rfgTables)]);
+                                                       [.. dustEffects, .. vehicleEffects.Effects, .. GuerrillaWeapons.Effects(rfgTables),
+                                                        .. GuerrillaMaterialEvents.Effects(rfgTables)],
+                                                       DlcExplosions(game), [.. vehicleEffects.Explosions, .. GuerrillaWeapons.Explosions(rfgTables)],
+                                                       (cue, explosion) => effectSounds.EffectSound(cue, explosion) is { } sound
+                                                           ? new GuerrillaEffectTables.Sound(sound.Event, sound.HeardTo) : null);
+        foreach (string line in effectSounds.Write(game, overrides, modFolder)) log("Effect sounds: " + line);
+        log($"Effect sounds: {effectTables.SoundsAdded} of the added effects sound, {effectTables.SoundOnly} of them without a visual" +
+            (effectTables.SoundsLeft.Count > 0 ? $"; cues that couldn't be had, their effects silent: {string.Join(", ", effectTables.SoundsLeft)}" : "") +
+            (effectSounds.Log.Count > 0 ? $" ({string.Join("; ", effectSounds.Log.Distinct())})" : ""));
         File.WriteAllBytes(Path.Combine(modFolder, "vfx.xtbl"), effectTables.Visuals);
         File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
+        // What Guerrilla's pieces play as they break, fall and groan (see GuerrillaMaterialEvents): the mod's file.
+        log("Material events: " + GuerrillaMaterialEvents.Write(rfgTables,
+            XtblFile.FromBytes(effectTables.Effects).Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase), modFolder));
         File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
         File.WriteAllBytes(Path.Combine(modFolder, "explosions.xtbl"), effectTables.Explosions);
         var effectFiles = new Dictionary<string, List<(string Name, byte[] Data)>>(StringComparer.OrdinalIgnoreCase);

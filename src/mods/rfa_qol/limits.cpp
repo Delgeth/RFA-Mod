@@ -34,7 +34,12 @@
 //   permanent mempool  the "Permanent mempool" 0x26AEE78 (+0x4C of +0x44; 12 MB, guerrilla_gear 24 MB)
 //   item preload       the "item_preload" pool 0x26AF1A0 (+0x4C of +0x44; 17 MB, guerrilla_gear 32 MB): the
 //                      preloaded items' containers, then Armageddon's items_containers.gpeg_pc (8.8 MB)
-//   melee moves        the melee moves' pool 0x21AFEF0, a pool as the projectiles' (32, guerrilla_gear 64)
+//   material effects   the "Effect candidate event pool" 0x155E148 (+0x4C of +0x44; 64 KB, guerrilla_world 256 KB):
+//                      the effect materials, the melee and bullet groups' lists, level objects' own hits, footsteps
+//   unbatched          what the batched pass draws one by one: how many the last frame asked for, 0x316B0B4 (it
+//   renderables        counts on past the size), size in `cmp [ebp-4],180h` at 0xD7205B: the value at 0xD7205E
+//                      (384; guerrilla_world gives the pass a list of 4,096)
+//   melee moves       the melee moves' pool 0x21AFEF0, a pool as the projectiles' (32, guerrilla_gear 64)
 //   squad members      the squad members' pool 0x12EFEF0, a pool as the projectiles' (64, guerrilla_people 256)
 //   squad names        the "Squad Def String Pool" 0x12F2E38 (+0x4C of +0x44; 1,280 bytes, guerrilla_people 16 KB)
 //   resource names     the "Spawn Resource Data" pool 0x19706E0 (+0x4C of +0x44; 1,024 bytes, guerrilla_people 8 KB)
@@ -94,6 +99,10 @@ const Limit kLimits[] = {
      "What the game keeps for good from start-up: its tables, pegs and effects, and the mods' raised tables"},
     {"Item preload (bytes)", 0x26AF1A0 + 0x4C, 0x26AF1A0 + 0x44, 0, 0x1100000,
      "Every preloaded item's own container (guns, clips, pickups), then Armageddon's items' low-detail textures (8.8 MB)"},
+    {"Material effects (bytes)", 0x155E148 + 0x4C, 0x155E148 + 0x44, 0, 0x10000,
+     "What plays on each material: the effect materials, the melee and bullet groups (Armageddon's and Guerrilla's), level objects' own hits, footsteps; full, the game stops while it starts"},
+    {"Unbatched renderables", 0x316B0B4, 0xD7205E, 0, 384,
+     "What the last frame drew one by one (people, vehicles' parts, ground cover, terrain skirts); it counts what was asked for, so it can pass the size: what's past it isn't drawn that frame"},
 };
 
 // The projectile types', melee moves' and the world's object pools: how many places each holds (a word at
@@ -104,6 +113,24 @@ constexpr DWORD kVehicleGroupPool = 0x19691C0;  // the vehicle spawn groups (32,
 constexpr DWORD kEmitterPool = 0x26BF650;       // the effects' emitters (2,200, guerrilla_world 6,600)
 
 void Row(const char* what, int used, int size, int game, const char* about);
+
+// One of Wwise's own memory pools by its name (AK::MemoryMgr's GetMaxPools, GetPoolName and GetPoolStats, which the
+// exe exports: bytes reserved, then bytes used): its "Default" pool holds everything the sound banks describe and
+// a record for each sound playing (2.78 MB, guerrilla_world 6 MB).
+auto const WwiseMaxPools = reinterpret_cast<long(__cdecl*)()>(0xE3CD40);
+auto const WwisePoolName = reinterpret_cast<const wchar_t*(__cdecl*)(long pool)>(0xE3CCC0);
+auto const WwisePoolStats = reinterpret_cast<int(__cdecl*)(long pool, DWORD* stats)>(0xE3D000);
+
+void WwisePoolRow(const char* what, const wchar_t* name, int game, const char* about) {
+    for (long pool = 0, pools = WwiseMaxPools(); pool < pools && pool < 64; ++pool) {
+        DWORD stats[16] = {};
+        if (WwisePoolStats(pool, stats) != 1 || stats[0] == 0) continue;
+        const wchar_t* poolName = WwisePoolName(pool);
+        if (!poolName || wcscmp(poolName, name) != 0) continue;
+        Row(what, static_cast<int>(stats[1]), static_cast<int>(stats[0]), game, about);
+        return;
+    }
+}
 
 void PoolRow(const char* what, DWORD pool, int game, const char* about) {
     const int holds = *reinterpret_cast<const volatile WORD*>(pool + kPoolHolds);
@@ -159,6 +186,12 @@ void DrawWindow() {
         PoolRow("Projectiles", kProjectilePool, 100,
                 "projectiles.xtbl: Armageddon's, a DLC's, and Guerrilla's thrown and launched weapons' and turrets'");
         PoolRow("Melee moves", kMeleePool, 32, "melee.xtbl: Armageddon's, and Guerrilla's swings and bashes (rfg_)");
+        WwisePoolRow("Sound engine memory (bytes)", L"Default", 0x2C8000,
+                     "Wwise's own pool: every sound, container and event of the banks (Armageddon's and Guerrilla's), and each sound playing; full, sounds stop");
+        WwisePoolRow("Stream memory (bytes)", L"Stream I/O", 0x240000,
+                     "Wwise's pieces of sound read from the disk (26 KB each) for all streams at once; Guerrilla's sounds are all streams (guerrilla_world 8 MB). Full, playing sounds run dry");
+        WwisePoolRow("Stream records (bytes)", L"Stream Manager", 0x10000,
+                     "Wwise's record of each open stream (guerrilla_world 256 KB); full, a sound can't start");
         PoolRow("Patrols", kPatrolPool, 24, "Patrol routes in the zones loaded now (Guerrilla's world places up to 29 in one 3 x 3 block)");
         PoolRow("People (NPCs)", kNpcPool, 100, "Everyone but the player: squads, people dropped in, crews (Guerrilla holds 100 too)");
         PoolRow("Squads", kSquadPool, 100, "Squads made from the loaded zones' squad spawn nodes, and those dropped in");

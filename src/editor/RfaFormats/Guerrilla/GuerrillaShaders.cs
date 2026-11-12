@@ -131,7 +131,10 @@ public static class GuerrillaShaders
     /// <summary>Whether <see cref="WriteSkinned"/> writes the rewrite a skinned material of this family, layers and variant is drawn with.</summary>
     internal static bool CanSkin(Family family, int layers, Variant variant) =>
         Skinned(family) && SkinnedLayersOf(family).Contains(layers) && SkinnedVariantsOf(family).Contains(variant);
-    static int[] SkinnedLayersOf(Family family) => family is Family.Brdf or Family.Standard ? [0] : LayersOf(family);
+    // The standard ones with their decal layers too (UV sets past the first): Guerrilla's weapon locker is a character
+    // mesh on rfg-singledecal (its vertices carry three UV sets), and with no gw_standard1_c it was drawn red (the
+    // user's 2026-11-10; the log's "Red: a material on gw_standard1 is drawn as a mesh of the kind _c").
+    static int[] SkinnedLayersOf(Family family) => family is Family.Brdf ? [0] : LayersOf(family);
     static Variant[] SkinnedVariantsOf(Family family) => family switch
     {
         Family.Brdf or Family.Standard => [Variant.Plain, Variant.CutOut],
