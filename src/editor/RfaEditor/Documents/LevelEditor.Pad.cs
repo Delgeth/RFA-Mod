@@ -37,7 +37,7 @@ public partial class LevelEditor
     bool strokeFromPad, padInverse;
     float padStrength = 1;
 
-    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, (int)SculptMode.PaintRoad);
+    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, (int)SculptMode.EraseChunks);
     float BrushRadius => (float)SculptRadiusSlider.Value;
     bool SculptChanged => sculptZones.Any(z => z.Changed);
 
@@ -156,6 +156,7 @@ public partial class LevelEditor
             SculptMode.Mesa or SculptMode.Terrace or SculptMode.Cliff => Color.FromRgb(230, 120, 70),
             SculptMode.Canyon or SculptMode.Erode or SculptMode.Crater => Color.FromRgb(120, 140, 255), SculptMode.Dunes => Color.FromRgb(240, 210, 140),
             SculptMode.Roughen => Color.FromRgb(180, 160, 140),
+            SculptMode.PaintChunks => Color.FromRgb(90, 230, 230), SculptMode.EraseChunks => Color.FromRgb(230, 90, 160),
             _ => Color.FromRgb(255, 140, 60),
         };
         var material = new MaterialGroup { Children = { new DiffuseMaterial(new SolidColorBrush(Colors.Black)), new EmissiveMaterial(new SolidColorBrush(colour)) } };
@@ -175,7 +176,8 @@ public partial class LevelEditor
         }
         CommitEdit();
         if ((ChosenMode is SculptMode.PaintFoliage or SculptMode.EraseFoliage && !BeginFoliageStroke()) ||
-            (ChosenMode is SculptMode.PaintGround or SculptMode.PaintRoad && !BeginGroundStroke(ChosenMode == SculptMode.PaintRoad)))
+            (ChosenMode is SculptMode.PaintGround or SculptMode.PaintRoad && !BeginGroundStroke(ChosenMode == SculptMode.PaintRoad)) ||
+            (ChosenMode is SculptMode.PaintChunks or SculptMode.EraseChunks && !BeginChunkStroke()))
         {
             strokeFromPad = false;
             return false;
@@ -208,6 +210,14 @@ public partial class LevelEditor
             ShowBrush();
             return;
         }
+        if (mode is SculptMode.PaintChunks or SculptMode.EraseChunks)
+        {
+            // The chunk painter (LevelEditor.ChunkPainter.cs): Shift erases while painting, and paints while erasing.
+            ChunkStrokeStep(new Vector2(centre.X, centre.Z), BrushRadius, (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1) * seconds,
+                            (mode == SculptMode.EraseChunks) ^ inverse);
+            ShowBrush();
+            return;
+        }
         if (mode is SculptMode.PaintGround or SculptMode.PaintRoad)
         {
             // The ground painter (LevelEditor.GroundPaint.cs): Shift paints the base layer back.
@@ -235,7 +245,7 @@ public partial class LevelEditor
         bool wasPad = strokeFromPad;
         strokeFromPad = false;
         if (sculpt == null || strokeBefore is not { } before) return;
-        if (EndFoliageStroke() || EndGroundStroke(before))
+        if (EndFoliageStroke() || EndGroundStroke(before) || EndChunkStroke())
         {
             strokeBefore = null;
             standing = null;

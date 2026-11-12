@@ -22,7 +22,7 @@ namespace RfaEditor;
 /// painter's (see LevelEditor.GroundPaint.cs).
 /// </summary>
 enum SculptMode { Raise, Lower, Smooth, Flatten, Hill, Peak, Mountain, Valley, Mesa, Terrace, Cliff, Erode, Canyon, Dunes, Crater, Roughen,
-                 PaintFoliage, EraseFoliage, PaintGround, PaintRoad }
+                 PaintFoliage, EraseFoliage, PaintGround, PaintRoad, PaintChunks, EraseChunks }
 
 /// <summary>
 /// A zone's ground, held for sculpting: its collision height field (in the terrain file,

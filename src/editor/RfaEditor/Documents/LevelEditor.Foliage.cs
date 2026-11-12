@@ -31,6 +31,9 @@ public partial class LevelEditor
         bool ground = ChosenMode is SculptMode.PaintGround or SculptMode.PaintRoad;
         GroundLayerBox.Visibility = LayerTextureButton.Visibility = ground ? Visibility.Visible : Visibility.Collapsed;
         if (ground) EnsureGroundPaint();
+        bool chunks = ChosenMode is SculptMode.PaintChunks or SculptMode.EraseChunks;
+        ChunkStyleBox.Visibility = chunks ? Visibility.Visible : Visibility.Collapsed;
+        if (chunks) EnsureChunkStyles();
         ShowBrush();
     }
 

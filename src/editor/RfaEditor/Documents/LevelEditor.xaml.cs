@@ -1261,6 +1261,83 @@ public partial class LevelEditor : UserControl, IEditorDocument
         context.Assets.WorldHasChunk(chunk, at.Archive) || Workspace.Container(at.Archive, at.Container).Find(chunk + ".cchk_pc") != null;
 
     /// <summary>
+    /// The objects of a chunk added where given (see <see cref="AddChunk"/>): a copy of where the
+    /// game's levels place it, else a new mover; its files noted to bring in on saving (said in
+    /// <paramref name="needs"/>). Not yet in the scene or the undo list. Throws InvalidOperationException
+    /// if it can't be. (The chunk painter adds many with it.)
+    /// </summary>
+    readonly Dictionary<string, ZoneFile> chunkSourceZones = new(StringComparer.OrdinalIgnoreCase);  // zones copied from, read once (the chunk painter adds many)
+
+    IReadOnlyList<ZoneObject> MakeChunkObjects(string chunk, Vector3 at, string targetContainer, List<string> needs, out string how)
+    {
+        IReadOnlyList<ZoneObject> added;
+        // Where the game's levels place it, if they do: copy that object (and its pieces).
+        ZoneFile? from = null;
+        ZoneObject? template = null;
+        ChunkPlacement? place = null;
+        var placements = context.Assets.ChunkPlacements();
+        if (!placements.IsCompleted)
+        {
+            context.Log($"Looking through the game's levels for where they place {chunk} (once)...");
+            placements.Wait(TimeSpan.FromSeconds(60));
+        }
+        if (placements.IsCompletedSuccessfully && placements.Result.TryGetValue(chunk, out ChunkPlacement? found))
+        {
+            place = found;
+            try
+            {
+                Packfile pack = place.Container == null ? Workspace.Archive(place.Archive) : Workspace.Container(place.Archive, place.Container);
+                string sourceKey = $"{place.Archive}|{place.Container}|{place.Zone}";
+                if (chunkSourceZones.TryGetValue(sourceKey, out ZoneFile? known)) from = known;
+                else if (pack.Find(place.Zone) is { } entry) from = chunkSourceZones[sourceKey] = ZoneFile.Read(pack.Read(entry));
+                template = from?.Objects.FirstOrDefault(o => o.Handle == place.Handle);
+            }
+            catch (InvalidDataException) { }
+        }
+
+        if (from != null && template != null)
+        {
+            IReadOnlyList<ZoneObject> group = from.PiecesWith(template);
+            added = zone.AddCopiesFrom(from, group, TakenHandles(), at - group[0].Placement.Position);
+            how = $"a copy of {place!.Zone}'s ({names.Class(template.ClassHash)}, handle {template.Handle:X8}" +
+                  (group.Count > 1 ? $", with the {group.Count - 1} object(s) joined to it" : "") + ")";
+        }
+        else
+        {
+            string modelName = chunk + ".cchk_pc";
+            byte[]? header = context.Assets.ReadAnywhere(modelName), data = context.Assets.ReadAnywhere(ModelFile.DataFileName(modelName));
+            if (header == null || data == null) throw new InvalidOperationException($"{modelName} isn't in the game's files");
+            if (context.Assets.ZoneSchema is not { } schema) throw new InvalidOperationException("the game's zone schema couldn't be read");
+            ModelFile model = ModelFile.Read(modelName, header, data);
+            IReadOnlyList<ChunkObject> parts = model.Objects?.Objects ?? [];
+            bool breaks = parts.Any(o => o.Breakable);
+            uint uid = parts.Count > 0 ? parts[0].Uid : 0;
+            uint checksum = header.Length >= 0x28 ? BitConverter.ToUInt32(header, 0x24) : 0;
+            (Vector3 min, Vector3 max) = ChunkBounds(model, parts.Count > 0 ? parts[0].Uid : null);
+            string className = breaks ? "rfg_mover" : "general_mover";
+            var properties = RfaFormats.Guerrilla.GuerrillaMovers.NewMover(schema, breaks, chunk, checksum, uid, at);
+            added = [zone.AddNew(NameHashes.ClassHash(className), properties, at + min, at + max, TakenHandles())];
+            how = $"a new {className} (no level of the game's places it to copy)";
+        }
+
+        // The chunks the new objects name that this zone's world doesn't have: brought in on saving.
+        foreach (string named in added.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
+                                      .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (chunksToAdd.ContainsKey(named) || ChunkContainers().All(c => HasChunk(named, c)))
+                continue;
+            if (context.Assets.PackageOf(named, out string? why) is { } package)
+            {
+                chunksToAdd[named] = package;
+                needs.Add($"{named} ({package.Files.Count} files, {package.Files.Sum(f => (long)f.Data.Length) / 1024:N0} KB)");
+            }
+            else
+                context.Log($"Add: {named}'s files can't be brought into {targetContainer}: {why}. The game will show its stand-in for it.");
+        }
+        return added;
+    }
+
+    /// <summary>
     /// Adds any chunk of the game's (a building or prop from another level, or from the Guerrilla
     /// world) where the view points, and picks it. If the game's levels place it somewhere, that
     /// object is copied (with its properties, and the pieces joined to it, with the destruction links
@@ -1291,70 +1368,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         var needs = new List<string>();
         try
         {
-            // Where the game's levels place it, if they do: copy that object (and its pieces).
-            ZoneFile? from = null;
-            ZoneObject? template = null;
-            ChunkPlacement? place = null;
-            var placements = context.Assets.ChunkPlacements();
-            if (!placements.IsCompleted)
-            {
-                context.Log($"Looking through the game's levels for where they place {chunk} (once)...");
-                placements.Wait(TimeSpan.FromSeconds(60));
-            }
-            if (placements.IsCompletedSuccessfully && placements.Result.TryGetValue(chunk, out ChunkPlacement? found))
-            {
-                place = found;
-                try
-                {
-                    Packfile pack = place.Container == null ? Workspace.Archive(place.Archive) : Workspace.Container(place.Archive, place.Container);
-                    if (pack.Find(place.Zone) is { } entry)
-                    {
-                        from = ZoneFile.Read(pack.Read(entry));
-                        template = from.Objects.FirstOrDefault(o => o.Handle == place.Handle);
-                    }
-                }
-                catch (InvalidDataException) { }
-            }
-
-            if (from != null && template != null)
-            {
-                IReadOnlyList<ZoneObject> group = from.PiecesWith(template);
-                added = zone.AddCopiesFrom(from, group, TakenHandles(), at - group[0].Placement.Position);
-                how = $"a copy of {place!.Zone}'s ({names.Class(template.ClassHash)}, handle {template.Handle:X8}" +
-                      (group.Count > 1 ? $", with the {group.Count - 1} object(s) joined to it" : "") + ")";
-            }
-            else
-            {
-                string modelName = chunk + ".cchk_pc";
-                byte[]? header = context.Assets.ReadAnywhere(modelName), data = context.Assets.ReadAnywhere(ModelFile.DataFileName(modelName));
-                if (header == null || data == null) throw new InvalidOperationException($"{modelName} isn't in the game's files");
-                if (context.Assets.ZoneSchema is not { } schema) throw new InvalidOperationException("the game's zone schema couldn't be read");
-                ModelFile model = ModelFile.Read(modelName, header, data);
-                IReadOnlyList<ChunkObject> parts = model.Objects?.Objects ?? [];
-                bool breaks = parts.Any(o => o.Breakable);
-                uint uid = parts.Count > 0 ? parts[0].Uid : 0;
-                uint checksum = header.Length >= 0x28 ? BitConverter.ToUInt32(header, 0x24) : 0;
-                (Vector3 min, Vector3 max) = ChunkBounds(model, parts.Count > 0 ? parts[0].Uid : null);
-                string className = breaks ? "rfg_mover" : "general_mover";
-                var properties = RfaFormats.Guerrilla.GuerrillaMovers.NewMover(schema, breaks, chunk, checksum, uid, at);
-                added = [zone.AddNew(NameHashes.ClassHash(className), properties, at + min, at + max, TakenHandles())];
-                how = $"a new {className} (no level of the game's places it to copy)";
-            }
-
-            // The chunks the new objects name that this zone's world doesn't have: brought in on saving.
-            foreach (string named in added.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
-                                          .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (chunksToAdd.ContainsKey(named) || ChunkContainers().All(c => HasChunk(named, c)))
-                    continue;
-                if (context.Assets.PackageOf(named, out string? why) is { } package)
-                {
-                    chunksToAdd[named] = package;
-                    needs.Add($"{named} ({package.Files.Count} files, {package.Files.Sum(f => (long)f.Data.Length) / 1024:N0} KB)");
-                }
-                else
-                    context.Log($"Add: {named}'s files can't be brought into {targetContainer}: {why}. The game will show its stand-in for it.");
-            }
+            added = MakeChunkObjects(chunk, at, targetContainer, needs, out how);
         }
         catch (InvalidOperationException ex)
         {

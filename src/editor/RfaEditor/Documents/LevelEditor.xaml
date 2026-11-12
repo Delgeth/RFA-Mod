@@ -85,9 +85,13 @@
                                 <ComboBoxItem Content="Erase foliage" ToolTip="Takes the chosen foliage layer away under the brush (Shift: paints)" />
                                 <ComboBoxItem Content="Paint ground" ToolTip="Paints the chosen ground texture layer under the brush (Shift: paints the base layer back)" />
                                 <ComboBoxItem Content="Paint road" ToolTip="Drag a road: when you let go the ground along it is graded smooth and the chosen layer painted on it, as wide as the brush" />
+                                <ComboBoxItem Content="Paint chunks" ToolTip="Scatters chunks of the chosen style over the ground under the brush, set on the ground where they land (Shift: erases them)" />
+                                <ComboBoxItem Content="Erase chunks" ToolTip="Takes the chosen style's chunks away under the brush (Shift: paints)" />
                             </ComboBox>
                             <ComboBox x:Name="FoliageLayerBox" Width="150" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
                                       ToolTip="Which of the zone's foliage layers the painter paints or erases" />
+                            <ComboBox x:Name="ChunkStyleBox" Width="200" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed" IsEditable="True" IsTextSearchEnabled="True"
+                                      MaxDropDownHeight="420" ToolTip="What the chunk painter scatters: a preset (rocks, crates, debris, fences, lights; colonist, EDF, Marauder, ruins; the Guerrilla world's props), or the layout of any zone of the game's or the Guerrilla world's (its chunks, as often and as far apart as it has them)" />
                             <ComboBox x:Name="GroundLayerBox" Width="150" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
                                       ToolTip="Which of the zone's four ground texture layers the painter paints" />
                             <Button x:Name="LayerTextureButton" Content="Layer texture…" Margin="4,0,0,0" Padding="6,1" VerticalAlignment="Center" Click="OnLayerTextureClicked" Visibility="Collapsed"
