@@ -1320,7 +1320,13 @@ public partial class LevelEditor : UserControl, IEditorDocument
             how = $"a new {className} (no level of the game's places it to copy)";
         }
 
-        // The chunks the new objects name that this zone's world doesn't have: brought in on saving.
+        NoteChunksToBring(added, targetContainer, needs);
+        return added;
+    }
+
+    /// <summary>The chunks new objects name that this zone's world doesn't have: brought in on saving (said in <paramref name="needs"/>).</summary>
+    void NoteChunksToBring(IEnumerable<ZoneObject> added, string targetContainer, List<string> needs)
+    {
         foreach (string named in added.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
                                       .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -1334,7 +1340,6 @@ public partial class LevelEditor : UserControl, IEditorDocument
             else
                 context.Log($"Add: {named}'s files can't be brought into {targetContainer}: {why}. The game will show its stand-in for it.");
         }
-        return added;
     }
 
     /// <summary>

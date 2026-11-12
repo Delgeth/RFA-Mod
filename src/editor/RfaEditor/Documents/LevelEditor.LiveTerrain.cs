@@ -50,14 +50,14 @@ public partial class LevelEditor
                 Dictionary<string, byte[]> files = ground.LiveFiles();
                 foreach (var (name, bytes) in files)
                 {
-                    if (name.EndsWith(".gtmesh_pc", StringComparison.OrdinalIgnoreCase)) continue;  // (with its c-file, below)
+                    if (name.EndsWith(".gtmesh_pc", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".gterrain_pc", StringComparison.OrdinalIgnoreCase)) continue;  // (with its c-file, below)
                     byte[]? was = liveTerrainSent.GetValueOrDefault(name) ?? ground.ReadFile(name);
                     if (was == null || was.Length != bytes.Length) continue;
                     bool subzone = name.EndsWith(".ctmesh_pc", StringComparison.OrdinalIgnoreCase);
-                    string dataName = subzone ? name[..^".ctmesh_pc".Length] + ".gtmesh_pc" : "";
-                    byte[]? data = subzone ? files.GetValueOrDefault(dataName) : null;
-                    byte[]? dataWas = subzone ? liveTerrainSent.GetValueOrDefault(dataName) ?? ground.ReadFile(dataName) : null;
-                    if (TerrainPatch(name, was, bytes, data, dataWas) is not byte[] patch) continue;
+                    string dataName = subzone ? name[..^".ctmesh_pc".Length] + ".gtmesh_pc" : ground.FarName;
+                    byte[]? data = files.GetValueOrDefault(dataName);
+                    byte[]? dataWas = data == null ? null : liveTerrainSent.GetValueOrDefault(dataName) ?? ground.ReadFile(dataName);
+                    if ((subzone ? TerrainPatch(name, was, bytes, data, dataWas) : FieldPatch(was, bytes, data, dataWas)) is not byte[] patch) continue;
                     string patchName = $"terrain_patch_{++liveTerrainPatch}.bin";
                     File.WriteAllBytes(gameLink.FileIn(patchName), patch);
                     written.Add(gameLink.FileIn(patchName));
@@ -83,8 +83,74 @@ public partial class LevelEditor
         foreach (var (name, bytes) in sending)
         {
             liveTerrainSent[name] = bytes;
-            if (!name.EndsWith(".gtmesh_pc", StringComparison.OrdinalIgnoreCase)) liveTerrainWaiting.Add(name);
+            if (!name.EndsWith(".gtmesh_pc", StringComparison.OrdinalIgnoreCase) && !name.EndsWith(".gterrain_pc", StringComparison.OrdinalIgnoreCase)) liveTerrainWaiting.Add(name);
         }
+    }
+
+    /// <summary>The bytes of a c-file that differ, as runs (offset, length).</summary>
+    static List<(int Offset, int Length)> Differences(byte[] was, byte[] now)
+    {
+        var ranges = new List<(int Offset, int Length)>();
+        for (int i = 0; i < now.Length;)
+        {
+            if (now[i] == was[i]) { i++; continue; }
+            int start = i;
+            while (i < now.Length && now[i] != was[i]) i++;
+            ranges.Add((start, i - start));
+        }
+        return ranges;
+    }
+
+    /// <summary>
+    /// A patch for the game's terrain file (kind 0): its bytes that differ, then each far-away mesh
+    /// whose vertices changed (its number, vertex count and size, the vertices from the .gterrain_pc,
+    /// where its mesh block, in the terrain file, says). Null if nothing differs.
+    /// </summary>
+    static byte[]? FieldPatch(byte[] was, byte[] now, byte[]? far, byte[]? farWas)
+    {
+        var ranges = Differences(was, now);
+        var meshes = new List<(int Index, int Count, int Size, int Offset)>();
+        if (far != null)
+        {
+            try
+            {
+                RfaFormats.Meshes.TerrainFile terrain = RfaFormats.Meshes.TerrainFile.Read(now);
+                for (int i = 0; i < terrain.FarBlocks.Count && i < 9; i++)
+                {
+                    byte[] block = terrain.FarBlocks[i];
+                    int count = BitConverter.ToInt32(block, 0x1C), size = block[0x20], offset = BitConverter.ToInt32(block, 0x3C);
+                    if (count <= 0 || offset < 0 || offset + count * size > far.Length) continue;
+                    if (farWas != null && farWas.Length == far.Length && far.AsSpan(offset, count * size).SequenceEqual(farWas.AsSpan(offset, count * size))) continue;
+                    meshes.Add((i, count, size, offset));
+                }
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException) { }
+        }
+        if (ranges.Count == 0 && meshes.Count == 0) return null;
+        using var stream = new MemoryStream();
+        using var w = new BinaryWriter(stream);
+        w.Write(0x50544652u);  // "RFTP"
+        w.Write(1);
+        w.Write(0);
+        w.Write(0);
+        w.Write(now.Length);
+        w.Write(ranges.Count);
+        foreach (var (offset, length) in ranges)
+        {
+            w.Write(offset);
+            w.Write(length);
+            w.Write(now, offset, length);
+        }
+        w.Write(meshes.Count);
+        foreach (var (index, count, size, offset) in meshes)
+        {
+            w.Write(index);
+            w.Write(count);
+            w.Write(size);
+            w.Write(far!, offset, count * size);
+        }
+        w.Flush();
+        return stream.ToArray();
     }
 
     /// <summary>
@@ -94,14 +160,7 @@ public partial class LevelEditor
     static byte[]? TerrainPatch(string name, byte[] was, byte[] now, byte[]? data, byte[]? dataWas)
     {
         bool subzone = data != null;
-        var ranges = new List<(int Offset, int Length)>();
-        for (int i = 0; i < now.Length;)
-        {
-            if (now[i] == was[i]) { i++; continue; }
-            int start = i;
-            while (i < now.Length && now[i] != was[i]) i++;
-            ranges.Add((start, i - start));
-        }
+        var ranges = Differences(was, now);
         int dataAt = 0, vertexOffset = 0, vertexCount = 0, vertexSize = 0;
         bool vertices = false;
         if (subzone)

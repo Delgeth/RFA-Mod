@@ -1922,6 +1922,7 @@ void AnswerChunk(const std::string& group, bool loaded) {
 
 // Whether the game's files are locked for reading now (cf_open's flag, 0x290A67D: see below).
 bool CfileLocked() { return *reinterpret_cast<volatile BYTE*>(0x290A67D) != 0; }
+auto const SetCfileLocked = reinterpret_cast<void(__cdecl*)(bool locked)>(0xC96450);
 struct WaitingGroup { std::string line; ULONGLONG since; };
 std::vector<WaitingGroup> g_groupsWaiting;
 void LoadEditorChunkGroup(const std::string& line);
@@ -1982,27 +1983,27 @@ void LoadEditorChunkGroup(const std::string& line) {
         return;
     }
     const std::string group = groupText;
-    // The game's files are locked for reading as it runs now and then (streaming): reading the asset
-    // list then stops at the game's check (cf_open 0xC91470: "Someone is accessing cfile synchronously,
-    // but it is locked!", int3), part way, and the game then can't find a level's files any more
-    // ("vdir_restore: Vdir file 'vdir_pc' not found", "Could not find territory"). So it waits.
-    if (CfileLocked()) {
-        if (std::none_of(g_groupsWaiting.begin(), g_groupsWaiting.end(), [&](const WaitingGroup& w) { return w.line == line; })) {
-            g_groupsWaiting.push_back({line, GetTickCount64()});
-            rfa::Log("Editor link: chunk %s waits for the game's files to be free", groupText);
-        }
-        return;
-    }
     bool faulted = false;
     void* found = GuardedFindContainer(groupText, &faulted);
     if (!found && !faulted) {
-        if (GuardedFileExists(listText) <= 0) {
+        const bool lockedForCheck = CfileLocked();
+        if (lockedForCheck) SetCfileLocked(false);
+        const int exists = GuardedFileExists(listText);
+        if (lockedForCheck) SetCfileLocked(true);
+        if (exists <= 0) {
             rfa::Log("Editor link: chunk %s: the game can't find the asset list %s (is the loader up to date?)", groupText, listText);
             AnswerChunk(group, false);
             return;
         }
         rfa::Log("Editor link: chunk %s: reading its asset list %s", groupText, listText);
+        // As the game itself reads a file while it runs (0x501C30): its "no reading now" flag (cf_open,
+        // 0xC91470, stops at "Someone is accessing cfile synchronously, but it is locked!" while it is
+        // set, part way, after which the game couldn't find a level's files) cleared for the read and
+        // set back after.
+        const bool locked = CfileLocked();
+        if (locked) SetCfileLocked(false);
         const int read = GuardedReadOwnAssetList(listText);
+        if (locked) SetCfileLocked(true);
         if (read <= 0) {
             rfa::Log(read < 0 ? "Editor link: chunk %s: reading its asset list FAULTED (exception %08X)" : "Editor link: chunk %s: its asset list wasn't read%s",
                      groupText, read < 0 ? static_cast<unsigned>(-read) | 0x80000000u : 0u);
@@ -2563,6 +2564,8 @@ struct TerrainPatch {
     std::vector<std::pair<unsigned, std::vector<BYTE>>> ranges;
     unsigned vertexCount = 0, vertexSize = 0;
     std::vector<BYTE> vertices;
+    struct FarMesh { unsigned index, count, size; std::vector<BYTE> vertices; };
+    std::vector<FarMesh> far;  // (the terrain file's far-away meshes: their vertices from the .gterrain_pc)
 };
 
 bool ReadTerrainPatch(const std::wstring& path, TerrainPatch& patch) {
@@ -2587,6 +2590,17 @@ bool ReadTerrainPatch(const std::wstring& path, TerrainPatch& patch) {
         patch.ranges.emplace_back(offset, std::vector<BYTE>(bytes.begin() + at, bytes.begin() + at + length));
         at += length;
     }
+    unsigned farCount = 0;
+    if (patch.kind == 0 && U32(farCount))
+        for (unsigned f = 0; f < farCount && f < 9; f++) {
+            TerrainPatch::FarMesh mesh{};
+            if (!U32(mesh.index) || !U32(mesh.count) || !U32(mesh.size)) return false;
+            size_t length = static_cast<size_t>(mesh.count) * mesh.size;
+            if (at + length > bytes.size()) return false;
+            mesh.vertices.assign(bytes.begin() + at, bytes.begin() + at + length);
+            at += length;
+            patch.far.push_back(std::move(mesh));
+        }
     if (patch.kind == 1 && U32(patch.vertexCount) && U32(patch.vertexSize)) {
         size_t length = static_cast<size_t>(patch.vertexCount) * patch.vertexSize;
         if (at + length > bytes.size()) return false;
@@ -2610,6 +2624,36 @@ auto const MakeBox = reinterpret_cast<void*(__thiscall*)(void* box, const float*
 auto const SetMeshBounds = reinterpret_cast<void(__thiscall*)(BYTE* mesh, void* box)>(0x6BDB90);
 auto const FreeBox = reinterpret_cast<void(__thiscall*)(void* box)>(0x926130);
 
+struct BufferDesc { UINT width, usage, bind, cpu, misc, stride; };
+struct InitialData { const void* bytes; UINT pitch, slicePitch; };
+
+// A mesh's vertices replaced (in its g-file's memory: its mesh data +0x2C, +0x0C count, +0x10 size),
+// a new vertex buffer made from them (the old one kept: a frame being drawn may still have it), and
+// its bounds set from a box (min, max) as the load does. A reason if it couldn't be; null if done.
+const char* NewVertices(BYTE* meshData, BYTE* mesh, unsigned count, unsigned size, const BYTE* bytes, const BYTE* boxMin, const BYTE* boxMax) {
+    if (!meshData || !mesh) return "failed: a mesh is missing";
+    if (*reinterpret_cast<unsigned*>(meshData + 0x0C) != count || meshData[0x10] != size) return "failed: a mesh's vertices differ from the editor's";
+    BYTE* vertices = *reinterpret_cast<BYTE**>(meshData + 0x2C);
+    if (!vertices) return "failed: a mesh has no vertices";
+    memcpy(vertices, bytes, static_cast<size_t>(count) * size);
+    void* device = RenderDevice();
+    if (!device) return "failed: no render device";
+    BufferDesc desc{count * size, 1, 1, 0, 0, 0};
+    InitialData initial{vertices, 0, 0};
+    void* made = nullptr;
+    using CreateBufferFn = long(__stdcall*)(void* self, const BufferDesc*, const InitialData*, void** buffer);
+    auto create = reinterpret_cast<CreateBufferFn>((*reinterpret_cast<void***>(device))[3]);
+    if (create(device, &desc, &initial, &made) < 0 || !made) return "failed: a new vertex buffer couldn't be made";
+    *reinterpret_cast<void**>(mesh + 0x50) = made;
+    g_terrainBuffersKept++;
+    alignas(16) BYTE box[0x40] = {};
+    if (void* built = MakeBox(box, reinterpret_cast<const float*>(boxMin), reinterpret_cast<const float*>(boxMax))) {
+        SetMeshBounds(mesh, built);
+        FreeBox(box);
+    }
+    return nullptr;
+}
+
 bool GuardedCopy(BYTE* to, const BYTE* from, size_t length) {
     __try {
         memcpy(to, from, length);
@@ -2630,6 +2674,18 @@ const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
         if (!base) return "failed: the terrain file wasn't found in memory";
         for (size_t r = 0; r < patch.ranges.size(); r++)
             if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
+        // The far-away meshes (terrain data +0x40: nine records of 0x30, +4 its mesh data, +8 its
+        // rl_pc_mesh, +0x0C and +0x18 its box: 0x770030), as the sub-zones below: their vertices, a new
+        // vertex buffer, their bounds.
+        if (BYTE* farRecords = *reinterpret_cast<BYTE**>(data + 0x40))
+            for (size_t f = 0; f < patch.far.size(); f++) {
+                const TerrainPatch::FarMesh& far = patch.far[f];
+                if (far.index >= 9) continue;
+                BYTE* record = farRecords + far.index * 0x30;
+                if (const char* why = NewVertices(*reinterpret_cast<BYTE**>(record + 4), *reinterpret_cast<BYTE**>(record + 8),
+                                                  far.count, far.size, far.vertices.data(), record + 0x0C, record + 0x18))
+                    return why;
+            }
         // The height field's body set where it already is (hkpRigidBody::setPosition, 0xACAFF0, with
         // its own position: its motion at +0xE0, the transform's translation at +0x120), so the world
         // works its box out again from the new heights: else ground raised above, or lowered below,
@@ -2651,8 +2707,6 @@ const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
     }
 }
 
-struct BufferDesc { UINT width, usage, bind, cpu, misc, stride; };
-struct InitialData { const void* bytes; UINT pitch, slicePitch; };
 
 const char* GuardedPatchSubzone(const char* name, const TerrainPatch& patch) {
     __try {

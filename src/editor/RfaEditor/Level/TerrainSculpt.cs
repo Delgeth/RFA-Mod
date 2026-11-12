@@ -571,7 +571,27 @@ sealed class TerrainSculpt
     public Dictionary<string, byte[]> LiveFiles()
     {
         var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        if (FieldChanged) files[FieldName] = field.WithHeights(fieldFile, samples);
+        if (FieldChanged)
+        {
+            byte[] withHeights = field.WithHeights(fieldFile, samples);
+            files[FieldName] = withHeights;
+            // The far-away ground with it (as Files does), so it doesn't show the old shape between the near ground's edges.
+            if (FarProblem == null && farFile != null)
+            {
+                try
+                {
+                    TerrainFile terrain = TerrainFile.Read(withHeights);
+                    (byte[] far, _) = RfaFormats.Guerrilla.FarGround.Reheight(terrain, farFile, (x, z) => HeightIn(readSamples, x, z), HeightAt);
+                    byte[] written = terrain.Write();
+                    if (written.Length == withHeights.Length)
+                    {
+                        files[FieldName] = written;
+                        files[FarName] = far;
+                    }
+                }
+                catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException or IndexOutOfRangeException) { }
+            }
+        }
         foreach (Part part in Parts.Where(p => p.Changed))
         {
             (byte[] header, byte[] data) = TerrainSubzone.WithGround(part.Header, part.Data, part.Heights, part.Normals);
@@ -585,6 +605,7 @@ sealed class TerrainSculpt
     public byte[]? ReadFile(string name)
     {
         if (name.Equals(FieldName, StringComparison.OrdinalIgnoreCase)) return fieldFile;
+        if (name.Equals(FarName, StringComparison.OrdinalIgnoreCase)) return farFile;
         foreach (Part part in Parts)
         {
             if (name.Equals(part.HeaderName, StringComparison.OrdinalIgnoreCase)) return part.Header;
