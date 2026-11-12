@@ -2565,7 +2565,7 @@ struct TerrainPatch {
     unsigned vertexCount = 0, vertexSize = 0;
     std::vector<BYTE> vertices;
     struct FarMesh { unsigned index, count, size; std::vector<BYTE> vertices; };
-    std::vector<FarMesh> far;  // (the terrain file's far-away meshes: their vertices from the .gterrain_pc)
+    std::vector<FarMesh> farMeshes;  // (the terrain file's far-away meshes: their vertices from the .gterrain_pc)
 };
 
 bool ReadTerrainPatch(const std::wstring& path, TerrainPatch& patch) {
@@ -2599,7 +2599,7 @@ bool ReadTerrainPatch(const std::wstring& path, TerrainPatch& patch) {
             if (at + length > bytes.size()) return false;
             mesh.vertices.assign(bytes.begin() + at, bytes.begin() + at + length);
             at += length;
-            patch.far.push_back(std::move(mesh));
+            patch.farMeshes.push_back(std::move(mesh));
         }
     if (patch.kind == 1 && U32(patch.vertexCount) && U32(patch.vertexSize)) {
         size_t length = static_cast<size_t>(patch.vertexCount) * patch.vertexSize;
@@ -2678,12 +2678,12 @@ const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
         // rl_pc_mesh, +0x0C and +0x18 its box: 0x770030), as the sub-zones below: their vertices, a new
         // vertex buffer, their bounds.
         if (BYTE* farRecords = *reinterpret_cast<BYTE**>(data + 0x40))
-            for (size_t f = 0; f < patch.far.size(); f++) {
-                const TerrainPatch::FarMesh& far = patch.far[f];
-                if (far.index >= 9) continue;
-                BYTE* record = farRecords + far.index * 0x30;
+            for (size_t f = 0; f < patch.farMeshes.size(); f++) {
+                const TerrainPatch::FarMesh& mesh = patch.farMeshes[f];
+                if (mesh.index >= 9) continue;
+                BYTE* record = farRecords + mesh.index * 0x30;
                 if (const char* why = NewVertices(*reinterpret_cast<BYTE**>(record + 4), *reinterpret_cast<BYTE**>(record + 8),
-                                                  far.count, far.size, far.vertices.data(), record + 0x0C, record + 0x18))
+                                                  mesh.count, mesh.size, mesh.vertices.data(), record + 0x0C, record + 0x18))
                     return why;
             }
         // The height field's body set where it already is (hkpRigidBody::setPosition, 0xACAFF0, with
