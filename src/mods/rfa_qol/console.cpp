@@ -1832,6 +1832,7 @@ struct SpawnedPiece {
     BYTE* piece = nullptr;
     BYTE* record = nullptr;
     std::string name;
+    int flags = 4;
 };
 std::vector<SpawnedPiece> g_spawnedPieces;
 
@@ -2059,7 +2060,11 @@ void EditorAddStitchPiece(const std::string& line) {
     }
     SpawnedPiece* spawned = nullptr;
     for (SpawnedPiece& s : g_spawnedPieces)
-        if (s.id == id && s.record == record && _stricmp(s.name.c_str(), name) == 0) spawned = &s;
+        if (s.id == id && s.record == record && _stricmp(s.name.c_str(), name) == 0 && s.flags == flags) spawned = &s;
+    // Another piece made before for the same id (the piece was made another chunk, or its flags
+    // changed, in the editor): taken away.
+    for (SpawnedPiece& s : g_spawnedPieces)
+        if (s.id == id && &s != spawned && !LivePieceOf(s.piece).hidden) GuardedHidePiece(s.piece, false);
     const bool made = spawned != nullptr;
     if (!spawned) {
         const int subChunks = GuardedSubChunks(name);
@@ -2079,7 +2084,7 @@ void EditorAddStitchPiece(const std::string& line) {
             return;
         }
         *reinterpret_cast<int*>(piece + kPieceDrawCount) = subChunks;
-        g_spawnedPieces.push_back({id, piece, record, name});
+        g_spawnedPieces.push_back({id, piece, record, name, flags});
         spawned = &g_spawnedPieces.back();
     }
     // Pieces of our own always have a body of their own (made for them, as for a combined collision).
