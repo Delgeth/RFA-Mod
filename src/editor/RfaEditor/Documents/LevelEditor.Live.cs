@@ -184,7 +184,7 @@ public partial class LevelEditor
         foreach (var (chunk, (container, since)) in liveChunkLoads.ToList())
         {
             string? answer = gameLink.ChunkAnswer(container);
-            if (answer == null && liveTicks - since < 300) continue;  // (30 seconds)
+            if (answer == null && liveTicks - since < 1100) continue;  // (33 seconds: the game gives up after 30)
             liveChunkLoads.Remove(chunk);
             if (answer == "loaded")
             {

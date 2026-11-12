@@ -1800,7 +1800,34 @@ void LoadEditorChunk(const std::string& assetList, const std::string& container)
 // ("chunk_texture", allocator 1), finished (0x909E60) and loaded at once (0x908FC0). (Reading an asset
 // list instead, 0x90A3A0, faults: its temporary allocator is only open while the game starts.) A file
 // the game can't find is fatal there, so each is looked for first (0xC92010).
-constexpr bool g_makeChunkGroups = false;  // (see LoadEditorChunkFiles)
+constexpr bool g_makeChunkGroups = true;  // (see LoadEditorChunkFiles)
+
+// The allocator a group's records (its container, names and primitive records) come from. The game's
+// chunk pool (0x26AEE78) is its start-up pool, full once the game runs: asking it for more stalls the
+// game and fails. The streaming system only asks its allocator (an object whose first word is its
+// function table) "has a mark?" (+0x0C), for a mark (+0x5C, only if so) and for memory (+0x38:
+// size, alignment, 0, 0): this one answers from the C heap. A group is never let go, nor its memory.
+void* __fastcall LiveAllocate(void*, void*, unsigned size, unsigned alignment, int, int) {
+    if (alignment < 4) alignment = 4;
+    void* memory = _aligned_malloc(size ? size : 1, alignment);
+    if (memory) memset(memory, 0, size);
+    return memory;
+}
+bool __fastcall LiveHasMark(void*, void*) { return false; }
+int __fastcall LiveMark(void*, void*) { return 0; }
+struct LiveAllocator {
+    void** table;
+};
+void* g_liveAllocatorTable[48];
+LiveAllocator g_liveAllocator{g_liveAllocatorTable};
+void* LiveGroupAllocator() {
+    if (!g_liveAllocatorTable[0]) {
+        for (void*& slot : g_liveAllocatorTable) slot = reinterpret_cast<void*>(&LiveMark);
+        g_liveAllocatorTable[0x0C / 4] = reinterpret_cast<void*>(&LiveHasMark);
+        g_liveAllocatorTable[0x38 / 4] = reinterpret_cast<void*>(&LiveAllocate);
+    }
+    return &g_liveAllocator;
+}
 auto const StreamContainerStart = reinterpret_cast<bool(__cdecl*)(const char* name, void* pool, BYTE type, BYTE notPreload, BYTE)>(0x909670);
 auto const StreamAddPrimitive = reinterpret_cast<void*(__cdecl*)(const char* file, const char* typeName, BYTE allocator, char split, int, BYTE flags, int)>(0x9097A0);
 auto const StreamContainerFinish = reinterpret_cast<void*(__cdecl*)(BYTE, BYTE)>(0x909E60);
@@ -1819,16 +1846,18 @@ int GuardedFileExists(const char* name) {
 int GuardedMakeChunkGroup(const char* group, const std::vector<const char*>& files, int* failedFile) {
     bool started = false;
     __try {
-        if (!StreamContainerStart(group, reinterpret_cast<void*>(kChunkPool), 15, 0, 0)) return -1;
+        // As a level's chunk is listed when the game loads a level from loose files (0x6AE620): a group of
+        // type 14 (not preloaded), the model in the chunk allocator (2), its textures in the texture one (1).
+        if (!StreamContainerStart(group, LiveGroupAllocator(), 14, 1, 0)) return -1;
         started = true;
         const char* const* types = reinterpret_cast<const char* const*>(kPrimitiveTypeNames);
         for (size_t i = 0; i < files.size(); i++) {
             *failedFile = static_cast<int>(i);
             const char* dot = strrchr(files[i], '.');
             if (!dot) continue;
-            if (_stricmp(dot, ".cchk_pc") == 0) StreamAddPrimitive(files[i], types[4], 2, 2, 1, 0, 0);
-            else if (_stricmp(dot, ".cstch_pc") == 0) StreamAddPrimitive(files[i], types[3], 2, 2, 1, 0, 0);
-            else if (_stricmp(dot, ".cvbm_pc") == 0 || _stricmp(dot, ".cpeg_pc") == 0) StreamAddPrimitive(files[i], types[5], 1, 2, 0, 0, 0);
+            if (_stricmp(dot, ".cchk_pc") == 0) StreamAddPrimitive(files[i], types[4], 2, 1, 0, 0, 0);
+            else if (_stricmp(dot, ".cstch_pc") == 0) StreamAddPrimitive(files[i], types[3], 2, 1, 0, 0, 0);
+            else if (_stricmp(dot, ".cvbm_pc") == 0 || _stricmp(dot, ".cpeg_pc") == 0) StreamAddPrimitive(files[i], types[5], 1, 1, 0, 0, 0);
         }
         *failedFile = -1;
         started = false;
@@ -1841,6 +1870,56 @@ int GuardedMakeChunkGroup(const char* group, const std::vector<const char*>& fil
             }
         }
         return *failedFile >= 0 ? -2 : -1;
+    }
+}
+
+auto const RequestContainerLoad = reinterpret_cast<bool(__cdecl*)(void* container)>(0x908F10);
+auto const ContainerState = reinterpret_cast<int(__cdecl*)(void* container)>(0x909210);  // 3 loaded, 4 failed
+struct ChunkLoading {
+    std::string group;
+    void* container;
+    ULONGLONG since;
+};
+std::vector<ChunkLoading> g_chunksLoading;
+
+int GuardedRequestLoad(void* container) {
+    __try {
+        return RequestContainerLoad(container) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+int GuardedContainerState(void* container) {
+    __try {
+        return ContainerState(container);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 4;
+    }
+}
+
+void AnswerChunk(const std::string& group, bool loaded) {
+    rfa::Log("Editor link: chunk %s %s", group.c_str(), loaded ? "loaded" : "NOT loaded");
+    const std::wstring path = LinkFolder() + L"\\chunk_" + std::wstring(group.begin(), group.end()) + L".txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+        fputs(loaded ? "loaded" : "failed", file);
+        fclose(file);
+    }
+}
+
+// Every frame: chunks asked to load that have (or failed, or are taking more than 30 seconds) are
+// answered.
+void WatchEditorChunks() {
+    for (auto it = g_chunksLoading.begin(); it != g_chunksLoading.end();) {
+        const int state = GuardedContainerState(it->container);
+        const bool late = GetTickCount64() - it->since > 30000;
+        if (state != 3 && state != 4 && !late) {
+            ++it;
+            continue;
+        }
+        if (late && state != 3) rfa::Log("Editor link: chunk %s: still not loaded after 30 seconds (state %d)", it->group.c_str(), state);
+        AnswerChunk(it->group, state == 3);
+        it = g_chunksLoading.erase(it);
     }
 }
 
@@ -1858,16 +1937,7 @@ void LoadEditorChunkFiles(const std::string& line) {
         return;
     }
     const std::string group = words[0];
-    const std::wstring answer = L"chunk_" + std::wstring(group.begin(), group.end());
-    auto reply = [&](bool loaded) {
-        rfa::Log("Editor link: chunk %s %s", group.c_str(), loaded ? "loaded" : "NOT loaded");
-        const std::wstring path = LinkFolder() + L"\\" + answer + L".txt";
-        FILE* file = nullptr;
-        if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
-            fputs(loaded ? "loaded" : "failed", file);
-            fclose(file);
-        }
-    };
+    auto reply = [&](bool loaded) { AnswerChunk(group, loaded); };
     bool faulted = false;
     void* found = GuardedFindContainer(group.c_str(), &faulted);
     if (!found && !faulted && !g_makeChunkGroups) {
@@ -1903,12 +1973,15 @@ void LoadEditorChunkFiles(const std::string& line) {
         }
         found = GuardedFindContainer(group.c_str(), &faulted);
     }
-    int load = 0;
-    if (found) {
-        load = GuardedLoadContainer(found);
-        if (load < 0) rfa::Log("Editor link: loading chunk group %s FAULTED (exception %08X)", group.c_str(), static_cast<unsigned>(-load) | 0x80000000u);
+    // Asked to load (0x908F10), not loaded at once: the game streams it in over the next frames, and
+    // the answer goes to the editor once it has (WatchEditorChunks). (Loading at once, 0x908FC0,
+    // waits in a loop, for good if the streaming system can't load it.)
+    if (!found || GuardedRequestLoad(found) <= 0) {
+        reply(false);
+        return;
     }
-    reply(load > 0);
+    rfa::Log("Editor link: chunk %s: loading", group.c_str());
+    g_chunksLoading.push_back({group, found, GetTickCount64()});
 }
 
 // Level geometry (stitch pieces), live. A zone's stitch list stays in memory as it was read (the
@@ -2606,6 +2679,7 @@ void __cdecl FrameUpdate() {
     }
     const bool linkFolderThere = g_linkFolderThere;
     if (linkFolderThere && !RenderLocked()) RunEditorCommands();
+    if (!g_chunksLoading.empty()) WatchEditorChunks();
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastCheck < kCheckEveryMs) return;
     g_lastCheck = now;
