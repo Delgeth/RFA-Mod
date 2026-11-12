@@ -94,7 +94,11 @@ public partial class MainWindow
         FillTemplates();
         var fileName = new TextBox { Text = "" };
         var displayName = new TextBox { Text = "" };
-        var blank = new CheckBox { Content = "Blank: flat ground, only its starts, spawns and mode objects", IsChecked = true };
+        var blank = new CheckBox { Content = "Blank: only its starts, spawns and mode objects", IsChecked = true };
+        var ground = new ComboBox { ItemsSource = new[] { "Flat (to sculpt and paint)", "None (for caves and interiors built from pieces)" }, SelectedIndex = 0 };
+        blank.Checked += (_, _) => ground.IsEnabled = true;
+        blank.Unchecked += (_, _) => ground.IsEnabled = false;
+        mode.SelectionChanged += (_, _) => ground.SelectedIndex = mode.SelectedIndex == 0 ? 0 : 1;  // (Infestation's levels have none to flatten)
         var picture = new TextBox { IsReadOnly = true, Text = "" };
         var browse = new Button { Content = "Choose...", Margin = new Thickness(6, 0, 0, 0), MinWidth = 70 };
         var clear = new Button { Content = "None", Margin = new Thickness(6, 0, 0, 0), MinWidth = 50 };
@@ -114,7 +118,9 @@ public partial class MainWindow
         form.Row("Start from", template, "The level of that mode it's made from (its ground, its starts and spawns, its mode objects, its spawn resources)");
         form.Row("File name", fileName, "The level's file name (its archive, <name>.vpp_pc): lower case letters, digits and _");
         form.Row("Name in the menu", displayName, "What the map list shows (every language)");
-        form.Row("", blank, "Off: a full copy of the level, its buildings and scenery too");
+        form.Row("", blank, "Off: a full copy of the level, its ground, buildings and scenery too");
+        form.Row("Ground", ground, "Flat: the level's ground, flattened. None: no ground at all (as Infestation's levels in their caves): " +
+                                   "build the floor, walls and ceiling from stitch pieces, terrain pieces and chunks");
         form.Row("Preview picture", pictureRow, "Shown for it in the map list (and Infestation's loading screen): fitted to the game's picture size, its middle kept. None: the start level's picture");
         form.Buttons(window, "Make");
         if (window.ShowDialog() != true) return;
@@ -137,7 +143,7 @@ public partial class MainWindow
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null, replace);
+            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null, replace, ground.SelectedIndex == 1);
             Log($"New level {name} ({chosenMode}, from {start}):");
             foreach (string line in report) Log("  " + line);
             Log("  The game reads its map lists at start-up: restart it to see the level in the menu.");
