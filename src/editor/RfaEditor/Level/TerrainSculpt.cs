@@ -11,11 +11,18 @@ namespace RfaEditor;
 /// (falling off steeply from the middle); Mountain a rugged rise (the bell broken up by ridged noise,
 /// so strokes build crags and spurs); Valley carves a trough with a wide flat floor and steep sides.
 /// Hill, Peak and Mountain go down instead with the opposite (Shift), Valley up (a ridge);
+/// The Martian landforms of Guerrilla's world: Mesa raises a flat-topped butte with steep, ragged
+/// sides; Terrace cuts the ground into ledges (the strata of its cliffs); Cliff steepens the ground
+/// at the height the stroke began (above it up, below it down); Erode carves branching gullies;
+/// Canyon a deep cut whose walls step down in ledges; Dunes lays wind ripples; Crater an impact
+/// bowl with a raised rim; Roughen breaks the ground up into rubble. Shift gives the opposite
+/// (a pit, a mound, softer slopes, ridges, a stepped butte, a dome, smoother ground).
 /// PaintFoliage and EraseFoliage are the foliage painter's (see LevelEditor.Foliage.cs), not the ground's;
 /// PaintGround (the ground's texture layers) and PaintRoad (a graded road, painted) are the ground
 /// painter's (see LevelEditor.GroundPaint.cs).
 /// </summary>
-enum SculptMode { Raise, Lower, Smooth, Flatten, Hill, Peak, Mountain, Valley, PaintFoliage, EraseFoliage, PaintGround, PaintRoad }
+enum SculptMode { Raise, Lower, Smooth, Flatten, Hill, Peak, Mountain, Valley, Mesa, Terrace, Cliff, Erode, Canyon, Dunes, Crater, Roughen,
+                 PaintFoliage, EraseFoliage, PaintGround, PaintRoad }
 
 /// <summary>
 /// A zone's ground, held for sculpting: its collision height field (in the terrain file,
@@ -350,6 +357,31 @@ sealed class TerrainSculpt
                         h += (opposite ^ mode == SculptMode.Valley ? -1 : 1) * amount * Shape(mode, t, px, pz, radius);
                         break;
                     case SculptMode.Flatten: h += (flattenTo - h) * Math.Clamp(amount * weight, 0, 1); break;
+                    case SculptMode.Mesa:
+                    case SculptMode.Canyon:
+                    case SculptMode.Dunes:
+                    case SculptMode.Crater:
+                    case SculptMode.Erode:
+                    case SculptMode.Roughen:
+                        h += (opposite ? -1 : 1) * amount * Martian(mode, t, px, pz, radius);
+                        break;
+                    case SculptMode.Terrace:
+                    {
+                        // Ledges: each step of the strata flat, then a steep rise to the next.
+                        float step = MathF.Max(1, radius / (opposite ? 3 : 6));
+                        float level = h / step, floor = MathF.Floor(level), part = level - floor;
+                        float ledged = (floor + SmoothStep(0.65f, 1, part)) * step;
+                        h += (ledged - h) * Math.Clamp(amount * weight * 0.5f, 0, 1);
+                        break;
+                    }
+                    case SculptMode.Cliff:
+                    {
+                        // Away from the height the stroke began at (toward it with Shift): a sharp edge there.
+                        float d = h - flattenTo;
+                        float push = MathF.Sign(d) * MathF.Min(1, MathF.Abs(d) / 2) * amount * weight;
+                        h += opposite ? -MathF.Sign(d) * MathF.Min(MathF.Abs(d), amount * weight) : push;
+                        break;
+                    }
                     case SculptMode.Smooth:
                     {
                         float sum = 0;
@@ -417,6 +449,73 @@ sealed class TerrainSculpt
             }
             default:
                 return bell;
+        }
+    }
+
+    static float SmoothStep(float from, float to, float x)
+    {
+        float t = Math.Clamp((x - from) / (to - from), 0, 1);
+        return t * t * (3 - 2 * t);
+    }
+
+    /// <summary>
+    /// How much a step of the Martian modes raises the ground at a place (lowers, below 0), by how far
+    /// out it is (t: 0 in the middle, 1 at the brush's edge): see <see cref="SculptMode"/>.
+    /// </summary>
+    static float Martian(SculptMode mode, float t, float x, float z, float radius)
+    {
+        float size = MathF.Max(radius, 2);
+        switch (mode)
+        {
+            case SculptMode.Mesa:
+            {
+                // A flat top to about two thirds out, its edge broken up, then a steep fall.
+                float edge = t + (ValueNoise(x / (size * 0.35f), z / (size * 0.35f), 21) - 0.5f) * 0.25f;
+                return 1 - SmoothStep(0.55f, 0.72f, edge);
+            }
+            case SculptMode.Canyon:
+            {
+                // A floor a quarter across, then walls stepping up in four ledges to the rim.
+                float side = Math.Clamp((t - 0.22f) / 0.78f, 0, 1) * 4;
+                float ledge = MathF.Floor(side), part = side - ledge;
+                float up = (ledge + SmoothStep(0.55f, 1, part)) / 4;
+                return -(1 - up);
+            }
+            case SculptMode.Dunes:
+            {
+                // Ripples across the wind (along x, bent by noise): a long gentle side and a steep lee.
+                float u = x / (size * 0.35f) + (ValueNoise(x / size, z / size, 31) - 0.5f) * 2.5f + z / (size * 2.5f);
+                float wave = u - MathF.Floor(u);
+                float profile = wave < 0.75f ? wave / 0.75f : (1 - wave) / 0.25f;
+                float fade = (1 - t * t) * (1 - t * t);
+                return (0.5f - 0.5f * MathF.Cos(MathF.PI * profile) - 0.35f) * fade;
+            }
+            case SculptMode.Crater:
+            {
+                float bowl = t < 0.75f ? -(1 - (t / 0.75f) * (t / 0.75f)) : 0;
+                float rim = 0.55f * MathF.Exp(-MathF.Pow((t - 0.8f) / 0.12f, 2));
+                return bowl + rim;
+            }
+            case SculptMode.Erode:
+            {
+                // Gullies: the creases of ridged noise, two sizes, sharpened; deepest in the middle.
+                float gullies = 0;
+                foreach ((float scale, float weight, int seed) in new[] { (0.45f, 0.65f, 41), (0.18f, 0.35f, 42) })
+                {
+                    float n = ValueNoise(x / (size * scale), z / (size * scale), seed);
+                    gullies += MathF.Pow(1 - MathF.Abs(n * 2 - 1), 6) * weight;
+                }
+                return -gullies * (1 - t * t);
+            }
+            case SculptMode.Roughen:
+            {
+                float n = 0, w = 0.6f;
+                for (int octave = 0; octave < 3; octave++, w *= 0.5f)
+                    n += (ValueNoise(x / (size * 0.12f) * (1 << octave), z / (size * 0.12f) * (1 << octave), 51 + octave) - 0.5f) * w;
+                return n * (1 - t * t) * 0.8f;
+            }
+            default:
+                return 0;
         }
     }
 

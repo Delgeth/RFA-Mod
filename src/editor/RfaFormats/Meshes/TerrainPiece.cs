@@ -14,7 +14,7 @@ namespace RfaFormats.Meshes;
 /// <param name="Tile">How many metres its texture covers before it repeats.</param>
 public sealed record TerrainPieceShape(string Kind, float Size, float Height, float Feature, int Seed, int Resolution, float Skirt, float Tile)
 {
-    public static readonly string[] Kinds = ["Hill", "Mountain", "Mesa", "Ridge", "Dunes", "Crater", "Rolling", "Slab", "Ramp"];
+    public static readonly string[] Kinds = ["Hill", "Mountain", "Mesa", "Butte", "Badlands", "Ridge", "Dunes", "Crater", "Rolling", "Slab", "Ramp"];
 
     /// <summary>As one line of text (to keep it, and to name the piece by).</summary>
     public string Text => string.Join(";", Kind, Num(Size), Num(Height), Num(Feature), Seed, Resolution, Num(Skirt), Num(Tile));
@@ -134,6 +134,19 @@ public static class TerrainPiece
             {
                 float rim = r + (Fbm(x, z, f, 3, seed + 11) - 0.5f) * 0.35f;
                 return H * (1 - SmoothStep(0.6f, 0.8f, rim)) * (1 + detail * 0.3f);
+            }
+            case "Butte":
+            {
+                // A mesa whose sides step down in ledges (Guerrilla's Mars).
+                float rim = r + (Fbm(x, z, f, 3, seed + 12) - 0.5f) * 0.3f;
+                float stepped = (1 - SmoothStep(0.35f, 0.85f, rim)) * 4, ledge = MathF.Floor(stepped);
+                return H * (ledge + SmoothStep(0.6f, 1, stepped - ledge)) / 4;
+            }
+            case "Badlands":
+            {
+                float rise = SmoothStep(0.42f, 0.62f, Fbm(x, z, f, 4, seed + 15)) * edge;
+                float stepped = rise * 5, ledge = MathF.Floor(stepped);
+                return H * (ledge + SmoothStep(0.6f, 1, stepped - ledge)) / 5;
             }
             case "Ridge":
             {

@@ -520,7 +520,7 @@ public partial class LevelEditor
 
     // ---- The terrain creator ------------------------------------------------------------------
 
-    enum Landform { Flat, RollingHills, Mountains, Canyon, Plateau, Dunes, Crater }
+    enum Landform { Flat, RollingHills, Mountains, Canyon, Plateau, Dunes, Crater, Badlands, Canyonlands }
 
     sealed record CreateOptions(Landform Kind, float Height, float Size, int Seed, float Mix, bool KeepEdges, bool Paint, int FlatLayer, int SlopeLayer, int HighLayer);
 
@@ -565,7 +565,7 @@ public partial class LevelEditor
             grid.Children.Add(control);
             row++;
         }
-        var kind = new ComboBox { ItemsSource = new[] { "Flat", "Rolling hills", "Mountains", "Canyon", "Plateau", "Dunes", "Crater" }, SelectedIndex = 1 };
+        var kind = new ComboBox { ItemsSource = new[] { "Flat", "Rolling hills", "Mountains", "Canyon", "Plateau", "Dunes", "Crater", "Badlands (terraced mesas)", "Canyonlands (a plateau cut by canyons)" }, SelectedIndex = 1 };
         var height = new TextBox { Text = "40" };
         var size = new TextBox { Text = "120" };
         var seed = new TextBox { Text = Random.Shared.Next(1, 100000).ToString() };
@@ -681,6 +681,22 @@ public partial class LevelEditor
                     float rim = H * 0.35f * MathF.Exp(-MathF.Pow((r - 1) / 0.18f, 2));
                     return level + bowl + rim + H * 0.05f * (Fbm(x, z, size * 0.5f, 3, 14) - 0.5f);
                 }
+                case Landform.Badlands:
+                {
+                    // Mesas and buttes from noise, their sides cut into ledges (Guerrilla's Mars).
+                    float rise = SmoothStep(0.45f, 0.62f, Fbm(x, z, size * 1.5f, 4, 15));
+                    float stepped = rise * 5, ledge = MathF.Floor(stepped);
+                    float ledged = (ledge + SmoothStep(0.6f, 1, stepped - ledge)) / 5;
+                    return level + H * ledged + H * 0.04f * (Fbm(x, z, size * 0.25f, 3, 16) - 0.5f);
+                }
+                case Landform.Canyonlands:
+                {
+                    // A plateau at full height, cut by branching canyons (the creases of ridged noise) whose walls step down.
+                    float crease = 1 - MathF.Abs(Fbm(x, z, size * 2, 3, 17) * 2 - 1);
+                    float cut = SmoothStep(0.78f, 0.97f, crease) * 4, ledge = MathF.Floor(cut);
+                    float down = (ledge + SmoothStep(0.5f, 1, cut - ledge)) / 4;
+                    return level + H * (1 - Math.Min(1, down)) + H * 0.03f * (Fbm(x, z, size * 0.3f, 3, 18) - 0.5f);
+                }
                 default:
                     return level;
             }
@@ -741,7 +757,7 @@ public partial class LevelEditor
         }
         if (painted) LiveNeedsReload();  // (the paint shows once the level is loaded again; the shape at once)
         else SculptedLive();
-        string name = o.Kind switch { Landform.RollingHills => "rolling hills", _ => o.Kind.ToString().ToLowerInvariant() };
+        string name = o.Kind switch { Landform.RollingHills => "rolling hills", Landform.Canyonlands => "canyonlands", _ => o.Kind.ToString().ToLowerInvariant() };
         Record(new Change(null, $"Create terrain ({name})", Undo: () => Put(back: true), Redo: () => Put(back: false)));
         context.Log($"Create terrain: {name} over {ground.Zone} ({H:0} m high, features {size:0} m, seed {o.Seed}" +
                     (o.Mix < 1 ? $", mixed {o.Mix:P0}" : "") + (o.KeepEdges ? ", faded out to the edges" : "") + ")" +

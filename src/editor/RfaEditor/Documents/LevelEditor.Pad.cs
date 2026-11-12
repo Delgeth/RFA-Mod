@@ -153,6 +153,9 @@ public partial class LevelEditor
             SculptMode.Flatten => Color.FromRgb(230, 200, 90), SculptMode.Mountain => Color.FromRgb(200, 150, 255), SculptMode.Peak => Color.FromRgb(255, 90, 90),
             SculptMode.PaintFoliage => Color.FromRgb(120, 220, 90), SculptMode.EraseFoliage => Color.FromRgb(220, 220, 220),
             SculptMode.PaintGround => Color.FromRgb(255, 220, 120), SculptMode.PaintRoad => Color.FromRgb(170, 170, 190),
+            SculptMode.Mesa or SculptMode.Terrace or SculptMode.Cliff => Color.FromRgb(230, 120, 70),
+            SculptMode.Canyon or SculptMode.Erode or SculptMode.Crater => Color.FromRgb(120, 140, 255), SculptMode.Dunes => Color.FromRgb(240, 210, 140),
+            SculptMode.Roughen => Color.FromRgb(180, 160, 140),
             _ => Color.FromRgb(255, 140, 60),
         };
         var material = new MaterialGroup { Children = { new DiffuseMaterial(new SolidColorBrush(Colors.Black)), new EmissiveMaterial(new SolidColorBrush(colour)) } };
@@ -214,7 +217,9 @@ public partial class LevelEditor
         }
         if (inverse) mode = mode switch { SculptMode.Raise => SculptMode.Lower, SculptMode.Lower => SculptMode.Raise, _ => mode };
         float strength = (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1);
-        bool landform = mode is SculptMode.Hill or SculptMode.Peak or SculptMode.Mountain or SculptMode.Valley;
+        bool landform = mode is SculptMode.Hill or SculptMode.Peak or SculptMode.Mountain or SculptMode.Valley or
+                        SculptMode.Mesa or SculptMode.Canyon or SculptMode.Dunes or SculptMode.Crater or SculptMode.Erode or SculptMode.Roughen or
+                        SculptMode.Terrace or SculptMode.Cliff;
         float amount = mode is SculptMode.Raise or SculptMode.Lower || landform ? strength * seconds : Math.Min(1, strength * seconds * 0.5f);
         foreach (var (ground, parts) in TerrainSculpt.ApplyAll(sculptZones, new Vector2(centre.X, centre.Z), BrushRadius, mode, amount, flattenTo,
                                                                opposite: inverse && landform))
