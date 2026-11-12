@@ -341,6 +341,75 @@ sealed class NewLevel
         }
     }
 
+    /// <summary>
+    /// The levels the editor has made (in a mode's list, with no archive of the game's): their file
+    /// names, and whether their archive is still there.
+    /// </summary>
+    public static List<(string Name, Mode Mode, bool Archive)> Made(Workspace workspace)
+    {
+        var made = new List<(string, Mode, bool)>();
+        foreach (Mode mode in new[] { Mode.Ruin, Mode.Infestation })
+            foreach (string level in LevelsOf(workspace, mode))
+            {
+                string archive = Cache + level + ".vpp_pc";
+                if (File.Exists(Path.Combine(workspace.GameFolder, archive))) continue;
+                made.Add((level, mode, File.Exists(Path.Combine(workspace.OverridesFolder, archive))));
+            }
+        return made;
+    }
+
+    /// <summary>
+    /// Takes a level the editor made out again: its row in its mode's list (and Infestation's pre-game
+    /// row), its own spawn resources, its pictures, and its archive with its edits. Its strings stay
+    /// (nothing shows them). Returns what was done.
+    /// </summary>
+    public List<string> Remove(Mode mode, string name)
+    {
+        string archive = Cache + name + ".vpp_pc";
+        if (File.Exists(Path.Combine(workspace.GameFolder, archive))) throw new InvalidDataException($"{name} is one of the game's own levels");
+        var (tableName, row, key) = TableOf(mode);
+        string table = Encoding.Latin1.GetString(workspace.Read(Tables, tableName));
+        string? resources = LevelFiles.RowValue(table, row, key, name, "resource_reservation");
+        var images = new[] { "image_name", "level_image_name", "Load_image" }
+                     .Select(t => LevelFiles.RowValue(table, row, key, name, t)).OfType<string>().Where(i => i.Length > 0).ToList();
+        if (LevelFiles.WithoutRow(table, row, key, name) is { } without)
+        {
+            workspace.WriteOverride(Tables, tableName, Encoding.Latin1.GetBytes(without));
+            report.Add($"{tableName}: its row taken out");
+        }
+        if (mode == Mode.Infestation)
+        {
+            string pregame = Encoding.Latin1.GetString(workspace.Read(Tables, "rf4_mp_pregame.xtbl"));
+            if (LevelFiles.WithoutRow(pregame, "pregame", "Name", name) is { } p)
+            {
+                workspace.WriteOverride(Tables, "rf4_mp_pregame.xtbl", Encoding.Latin1.GetBytes(p));
+                report.Add("rf4_mp_pregame.xtbl: its row taken out");
+            }
+        }
+        if (resources != null && resources.Equals(name, StringComparison.OrdinalIgnoreCase))  // (its own, as New level made it)
+        {
+            string spawn = Encoding.Latin1.GetString(workspace.Read(Tables, "spawn_resource.xtbl"));
+            if (LevelFiles.WithoutRow(spawn, "spawn_resource_entry", "Name", name) is { } left)
+            {
+                workspace.WriteOverride(Tables, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(left));
+                report.Add($"spawn_resource.xtbl: its spawn resources \"{name}\" taken out");
+            }
+        }
+        // Its pictures: those it has of its own (a container New level wrote beside interface.vpp_pc).
+        var own = images.Where(i => File.Exists(Path.Combine(workspace.OverridesFolder, Cache, i + ".str2_pc"))).ToList();
+        if (own.Count > 0)
+        {
+            AsmFile list = AsmFile.Read(workspace.Read(Interface, "ui_images.asm_pc"));
+            list.Containers.RemoveAll(c => own.Contains(c.Name, StringComparer.OrdinalIgnoreCase));
+            workspace.WriteOverride(Interface, "ui_images.asm_pc", list.ToBytes());
+            foreach (string image in own) File.Delete(Path.Combine(workspace.OverridesFolder, Cache, image + ".str2_pc"));
+            report.Add($"its pictures {string.Join(", ", own)} taken out");
+        }
+        if (workspace.RemoveNewArchive(archive)) report.Add($"{archive} and its edits deleted");
+        workspace.RefreshOverrides();
+        return report;
+    }
+
     // ---- The mode's list -------------------------------------------------------------------------
 
     void AddToMode(Mode mode, string template, string name, string displayName, string? picture)

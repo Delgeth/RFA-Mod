@@ -677,6 +677,21 @@ bool FindNewFile(FileFindResult* result, const char* name) {
         SharedFiles shared;
         auto found = g_newFiles.find(key);
         if (found == g_newFiles.end()) found = g_newFiles.find(key.substr(key.find_last_of('\\') + 1));
+        // The console's "level <zone>" (0x58E9A0) first checks that the level is there, as a world's
+        // first layer: build\pc\cache\<zone>_l0.vpp_pc (0x6CD1A0). A level the editor made (New level)
+        // is one archive, <zone>.vpp_pc, as the game's Ruin and Infestation maps are (which the check
+        // doesn't find either: they are started from their menus, which don't check): it answers for it.
+        // The level is then loaded by its zone's name, as from the menus.
+        static const char kLayer0[] = "_l0.vpp_pc";
+        if (found == g_newFiles.end() && key.size() > sizeof(kLayer0) - 1 &&
+            key.compare(key.size() - (sizeof(kLayer0) - 1), sizeof(kLayer0) - 1, kLayer0) == 0) {
+            const std::string level = key.substr(0, key.size() - (sizeof(kLayer0) - 1)) + ".vpp_pc";
+            found = g_newFiles.find(level);
+            if (found == g_newFiles.end()) found = g_newFiles.find(level.substr(level.find_last_of('\\') + 1));
+            if (found != g_newFiles.end())
+                RFA_LOG_FIRST(20, "The game asked for %s, a world's first layer; the level %s is one archive, so that is its answer", name,
+                              found->second.relative.c_str());
+        }
         if (found == g_newFiles.end()) {
             for (const auto& [newKey, newFile] : g_newFiles) {
                 const std::string stem = newKey.substr(newKey.find_last_of('\\') + 1, newKey.find_last_of('.') - newKey.find_last_of('\\') - 1);
@@ -757,10 +772,44 @@ inline const auto KeepString =
 inline const auto NameChecksum =
     rfa::game::At<DWORD*(__fastcall*)(DWORD* out, void* unused, const char* text, DWORD seed, int maxLength)>(0xC8BEB0);
 
+// More than five maps: the reader's `cmp [12F3A74h],5` (its 5 at 0x50E78F) made 32, the list's own
+// limit (checked just before, at 0x50E77B; the "WC mempool" behind it holds 32), and the shipped values
+// it puts back over each map by its place (0x50EBF6 to 0x50EC54: the name, as above, the round times
+// 60000 and 15000 ms, the scoreboard as its place, the damage-to-score multiplier from five constants,
+// read past the fifth for a sixth map) jumped over (to 0x50EC57): every map is as its table says. The
+// game's table has those very values for its five, so they are as they were. A map the game reads from
+// its base table starts locked (+0x2D) until the map before it unlocks it (its unlocks_map, once that
+// map's par score is beaten); a map past the five has none, so it is opened once the table is read.
+constexpr DWORD kRuinMapLimitAt = 0x50E78F, kRuinShippedValuesAt = 0x50EBF6;
+constexpr int kRuinShippedMaps = 5, kRuinMostMaps = 32;
+bool g_moreRuinMaps = false;
+
+void AllowMoreRuinMaps() {
+    static const BYTE limit[] = {0x83, 0x3D, 0x74, 0x3A, 0x2F, 0x01, 0x05, 0x7C};  // cmp dword ptr [12F3A74h],5 / jl
+    static const BYTE shipped[] = {0x8B, 0x4D, 0xC4, 0x8B, 0x15, 0x74};          // mov ecx,[ebp-3Ch] / mov edx,[12F3A74h]
+    if (memcmp(reinterpret_cast<const void*>(kRuinMapLimitAt - 6), limit, sizeof(limit)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kRuinShippedValuesAt), shipped, sizeof(shipped)) != 0) {
+        rfa::Log("The Ruin map reader isn't as expected; Ruin keeps its five maps");
+        return;
+    }
+    const BYTE most = kRuinMostMaps;
+    const BYTE jump[] = {0xEB, static_cast<BYTE>(0x50EC57 - (kRuinShippedValuesAt + 2))};  // jmp short 0x50EC57
+    g_moreRuinMaps = rfa::PatchCode(reinterpret_cast<void*>(kRuinMapLimitAt), &most, 1) &&
+                     rfa::PatchCode(reinterpret_cast<void*>(kRuinShippedValuesAt), jump, sizeof(jump));
+    rfa::Log(g_moreRuinMaps ? "Ruin takes up to %d maps from wrecking_crew_maps.xtbl, each as the table gives it"
+                            : "Could not change the Ruin map reader; Ruin keeps its five maps", kRuinMostMaps);
+}
+
 void __cdecl ReadRuinMapsHook(void* table, int dlc) {
     const int first = g_ruinMapCount;
     g_readRuinMaps(table, dlc);
     if (!table) return;
+    if (g_moreRuinMaps)
+        for (int i = (first > kRuinShippedMaps ? first : kRuinShippedMaps); i < g_ruinMapCount && i < kRuinMostMaps; ++i)
+            if (BYTE* map = reinterpret_cast<BYTE*>(g_ruinMaps[i])) {
+                map[0x2D] = 0;
+                rfa::Log("Ruin map %d: %s, unlocked", i, g_ruinMaps[i]->fileName ? g_ruinMaps[i]->fileName : "(no name)");
+            }
     int index = first;
     std::string leftOut;
     for (void* entry = FirstEntry(table, "wc_map_list"); entry; entry = NextEntry(table, entry, "wc_map_list"), ++index) {
@@ -777,7 +826,7 @@ void __cdecl ReadRuinMapsHook(void* table, int dlc) {
         NameChecksum(&map->fileNameChecksum, nullptr, fileName, 0, -1);
     }
     if (!leftOut.empty())
-        rfa::Log("The game reads at most 5 Ruin maps; left out of its list: %s", leftOut.c_str());
+        rfa::Log("The game reads at most %d Ruin maps; left out of its list: %s", g_moreRuinMaps ? kRuinMostMaps : kRuinShippedMaps, leftOut.c_str());
 }
 
 // With LogLookups=1, the Ruin map list is logged too when a Ruin match begins
@@ -948,6 +997,7 @@ void InstallOverrides() {
     g_readRuinMaps = reinterpret_cast<ReadRuinMapsFn>(
         rfa::HookFunction(kReadRuinMaps, kReadRuinMapsPrologue, reinterpret_cast<void*>(&ReadRuinMapsHook)));
     if (!g_readRuinMaps) rfa::Log("Could not hook the Ruin map reader; Ruin starts maps by their place in its table");
+    else AllowMoreRuinMaps();
     const auto newFiles = std::count_if(g_newFiles.begin(), g_newFiles.end(),
                                         [](const auto& file) { return file.first.find('\\') != std::string::npos; });
     rfa::Log("Overrides: %u in overrides\\, and %u new files; Lua scripts %s, other files %s",

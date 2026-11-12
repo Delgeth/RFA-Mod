@@ -122,6 +122,46 @@ public partial class MainWindow
         form.Row("Ground", ground, "Flat: the level's ground, flattened. None: no ground at all (as Infestation's levels in their caves): " +
                                    "build the floor, walls and ceiling from stitch pieces, terrain pieces and chunks");
         form.Row("Preview picture", pictureRow, "Shown for it in the map list (and Infestation's loading screen): fitted to the game's picture size, its middle kept. None: the start level's picture");
+        // The levels made before, to take out again (their rows, pictures and archives).
+        var made = NewLevel.Made(workspace);
+        if (made.Count > 0)
+        {
+            var madeList = new ComboBox
+            {
+                ItemsSource = made.Select(m => $"{m.Name}  ({m.Mode}{(m.Archive ? "" : ", its archive gone")})").ToList(),
+                SelectedIndex = 0,
+            };
+            var remove = new Button { Content = "Remove", MinWidth = 70, Margin = new Thickness(6, 0, 0, 0) };
+            remove.Click += (_, _) =>
+            {
+                if (madeList.SelectedIndex < 0) return;
+                var (level, levelMode, _) = made[madeList.SelectedIndex];
+                if (MessageBox.Show(window, $"Take {level} out of {levelMode}'s map list, and delete its archive and its edits?", "Remove level",
+                                    MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+                foreach (var document in documents.Where(d => d.Key.StartsWith($@"level:build\pc\cache\{level}.vpp_pc", StringComparison.OrdinalIgnoreCase)).ToList())
+                    document.Value.Tab.Close();
+                try
+                {
+                    Log($"Removed level {level} ({levelMode}):");
+                    foreach (string line in new NewLevel(workspace, context.Assets).Remove(levelMode, level)) Log("  " + line);
+                    Log("  The game reads its map lists at start-up: restart it.");
+                    RefreshOverrideMarks();
+                    BuildTree();
+                    made.RemoveAt(madeList.SelectedIndex);
+                    madeList.ItemsSource = made.Select(m => $"{m.Name}  ({m.Mode}{(m.Archive ? "" : ", its archive gone")})").ToList();
+                    madeList.SelectedIndex = made.Count > 0 ? 0 : -1;
+                }
+                catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+                {
+                    Log($"Remove level: {level} couldn't be taken out: {ex.Message}");
+                }
+            };
+            var madeRow = new DockPanel();
+            DockPanel.SetDock(remove, Dock.Right);
+            madeRow.Children.Add(remove);
+            madeRow.Children.Add(madeList);
+            form.Row("Made before", madeRow, "Levels made with New level: Remove takes one out of its mode's list and deletes it");
+        }
         form.Buttons(window, "Make");
         if (window.ShowDialog() != true) return;
 

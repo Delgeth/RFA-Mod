@@ -130,6 +130,20 @@ public static class LevelFiles
         return table.Insert(last.Index + last.Length, row);
     }
 
+    /// <summary>A table without its rows of element <paramref name="rowTag"/> whose <paramref name="keyTag"/> is <paramref name="key"/>; null if it has none.</summary>
+    public static string? WithoutRow(string table, string rowTag, string keyTag, string key)
+    {
+        var rows = new Regex($@"[ \t]*<{rowTag}>.*?</{rowTag}>\r?\n?", RegexOptions.Singleline);
+        bool any = false;
+        string left = rows.Replace(table, m =>
+        {
+            if (!Regex.Match(m.Value, $@"<{keyTag}>([^<]*)</{keyTag}>").Groups[1].Value.Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) return m.Value;
+            any = true;
+            return "";
+        });
+        return any ? left : null;
+    }
+
     /// <summary>A table with one tag of one row (the first whose key is <paramref name="key"/>) given a new text; null if the row or tag isn't found.</summary>
     public static string? WithRowValue(string table, string rowTag, string keyTag, string key, string tag, string text)
     {
