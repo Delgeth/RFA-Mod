@@ -427,6 +427,7 @@ public partial class LevelEditor
             return true;
         }
         gameLink.Send(["editor_rescan", "editor_reload"]);
+        NoteTerrainReloaded();
         NoteGeometryReloaded();
         NoteLiveObjects();
         return true;
@@ -549,6 +550,7 @@ public partial class LevelEditor
             return;
         }
         gameLink.Send(["editor_rescan", "editor_reload"]);
+        NoteTerrainReloaded();
         // The game has every object where the saved zone puts it again.
         NoteGeometryReloaded();
         if (LiveBox.IsChecked == true) NoteLiveObjects();

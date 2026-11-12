@@ -22,7 +22,20 @@ public partial class LevelEditor
     /// <summary>After a sculpting change: the game has it live, unless that has failed (then the level is loaded again).</summary>
     void SculptedLive()
     {
-        if (liveTerrainFailed) LiveNeedsReload();
+        if (liveTerrainFailed || sculptZones.Any(z => z.LayoutPending)) LiveNeedsReload();
+    }
+
+    /// <summary>
+    /// The game is loading the level again (from what was just saved): it has the ground as saved, so
+    /// Live changes it from there, and a zone whose sub-zones were made over at every grid step can be
+    /// changed live again.
+    /// </summary>
+    void NoteTerrainReloaded()
+    {
+        liveTerrainWaiting.Clear();
+        liveTerrainFailed = false;
+        foreach (TerrainSculpt ground in sculptZones)
+            foreach (var (name, bytes) in ground.ReloadedInGame()) liveTerrainSent[name] = bytes;
     }
 
     /// <summary>Every few frames while Live is on: the ground files that changed sent to the game, and its answers taken.</summary>
@@ -40,6 +53,9 @@ public partial class LevelEditor
             }
         }
         if (liveTerrainFailed || sculpt == null || ++liveTerrainTick % 8 != 0 || liveTerrainWaiting.Count > 0 || !sculptZones.Any(z => z.Changed)) return;
+        // Sub-zones made over at every grid step (see TerrainSculpt.FullDetail): the game has the old
+        // layout, so nothing is sent till it has loaded the level again.
+        if (sculptZones.Any(z => z.LayoutPending)) return;
         var lines = new List<string>();
         var written = new List<string>();
         var sending = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);

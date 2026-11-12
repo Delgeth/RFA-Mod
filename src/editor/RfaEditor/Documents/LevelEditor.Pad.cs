@@ -284,13 +284,45 @@ public partial class LevelEditor
     /// <summary>Gives a zone's sculpted sub-zones' models new meshes, at their vertices' heights now (with their normals; the rest kept).</summary>
     void ShowSculptedGround(TerrainSculpt zone, IReadOnlyList<TerrainSculpt.Part> parts)
     {
+        if (zone.TakeDetailNote() is string note)
+        {
+            context.Log("Sculpt: " + note + (zone.LayoutPending ? ". The game shows it once the level is saved and loaded again (Auto reload does it); till then the ground isn't changed in it live." : "."));
+            parts = zone.Parts;
+        }
         if (!groundModels.TryGetValue(zone.Zone, out var ground)) return;
         foreach (TerrainSculpt.Part part in parts)
         {
             int index = ground.Numbers.IndexOf(part.Number);
             if (index < 0 || index >= ground.Models.Children.Count || ground.Models.Children[index] is not GeometryModel3D { IsFrozen: false } model ||
-                model.Geometry is not MeshGeometry3D old || old.Positions.Count != part.Heights.Length)
+                model.Geometry is not MeshGeometry3D old)
                 continue;
+            if (old.Positions.Count != part.Heights.Length)
+            {
+                // Made over at every grid step: a new mesh, its picture spread over the box the old one filled.
+                if (!part.Regridded) continue;
+                Vector3 min = part.DrawnMin, size = part.DrawnMax - part.DrawnMin;
+                var grid = new MeshGeometry3D();
+                var gridPositions = new Point3DCollection(part.Heights.Length);
+                var gridNormals = new Vector3DCollection(part.Heights.Length);
+                var uvs = new PointCollection(part.Heights.Length);
+                for (int v = 0; v < part.Heights.Length; v++)
+                {
+                    Vector3 p = part.Subzone.Positions[v], n = part.Normals[v];
+                    gridPositions.Add(new Point3D(p.X, part.Heights[v], -p.Z));
+                    gridNormals.Add(new Vector3D(n.X, n.Y, -n.Z));
+                    uvs.Add(new Point(size.X > 0 ? (p.X - min.X) / size.X : 0, size.Z > 0 ? (p.Z - min.Z) / size.Z : 0));
+                }
+                var triangles = new Int32Collection(part.Subzone.Triangles.Length);
+                int[] t = part.Subzone.Triangles;
+                for (int k = 0; k + 2 < t.Length; k += 3) { triangles.Add(t[k]); triangles.Add(t[k + 2]); triangles.Add(t[k + 1]); }  // (WPF's Z flipped turns them over)
+                grid.Positions = gridPositions;
+                grid.Normals = gridNormals;
+                grid.TextureCoordinates = uvs;
+                grid.TriangleIndices = triangles;
+                grid.Freeze();
+                model.Geometry = grid;
+                continue;
+            }
             var positions = new Point3DCollection(part.Heights.Length);
             var normals = new Vector3DCollection(part.Heights.Length);
             for (int v = 0; v < part.Heights.Length; v++)

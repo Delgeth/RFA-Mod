@@ -177,6 +177,20 @@
                                 ToolTip="Duplicate the picked object, in the same place (Ctrl+D)">
                             <TextBlock Text="{x:Static local:Icons.Duplicate}" Style="{StaticResource Icon}" />
                         </Button>
+                        <Button x:Name="CopyPropertiesButton" Style="{StaticResource ToolButton}" Click="OnCopyPropertiesClicked" IsEnabled="False"
+                                ToolTip="Copy properties: keep the picked object's properties (all but where it is), to paste onto another (Ctrl+Shift+C)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Duplicate}" Style="{StaticResource Icon}" />
+                                <TextBlock Text="Props" FontSize="10" VerticalAlignment="Center" Margin="2,0,0,0" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="PastePropertiesButton" Style="{StaticResource ToolButton}" Click="OnPastePropertiesClicked" IsEnabled="False"
+                                ToolTip="Paste properties: copy an object's first (Ctrl+Shift+C)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Add}" Style="{StaticResource Icon}" />
+                                <TextBlock Text="Paste" FontSize="10" VerticalAlignment="Center" Margin="2,0,0,0" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="DeleteButton" Style="{StaticResource ToolButton}" Click="OnDeleteClicked" IsEnabled="False"
                                 ToolTip="Delete the picked object (Del); not if other things name it">
                             <TextBlock Text="{x:Static local:Icons.Delete}" Style="{StaticResource Icon}" />

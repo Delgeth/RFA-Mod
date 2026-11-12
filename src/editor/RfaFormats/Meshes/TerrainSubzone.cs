@@ -763,6 +763,196 @@ public sealed class TerrainSubzone
         return (h, d);
     }
 
+    /// <summary>
+    /// A copy of a sub-zone (version 42, with ground) whose ground is drawn at every grid step: a vertex
+    /// at each step where the ground is, two triangles to each step square, split along the diagonal
+    /// most of its own whole-step squares are, wound as its own triangles. So what is drawn is the
+    /// collision height field itself (Havok's field is two triangles to each sample square the same
+    /// way), not the game's mesh simplified from it, whose big flat triangles leave strokes smaller
+    /// than them in the collision alone. A square is ground where the sub-zone's own triangles cover
+    /// its middle (its cut-outs, under its roads, stay), of the patch and render block (ground or a
+    /// cliff kind) of the triangle there; each vertex's cliff fade is the most of that triangle's
+    /// corners. Its road decals, names and the rest are kept; it must have no stitch pieces (the
+    /// game's have none). Null (and why) if it can't be.
+    /// </summary>
+    /// <param name="height">The ground's height at a grid step (x, z from the sub-zone's origin).</param>
+    /// <param name="normal">Its normal there.</param>
+    public static (byte[] Header, byte[] Data)? Regridded(byte[] header, byte[] data, Func<int, int, float> height, Func<int, int, Vector3> normal, out string? why)
+    {
+        why = null;
+        var subzone = new TerrainSubzone(header, data);
+        if (subzone.FormatVersion != Version || !subzone.HasGround) { why = "not an Armageddon sub-zone with ground"; return null; }
+        int fields = (0x18 + BitConverter.ToInt32(header, 0x14) + 3) & ~3;
+        int block = Enumerable.Range((fields + 0x48) / 4, (header.Length - fields - 0x48) / 4).Select(i => i * 4)
+                              .First(a => ModelFile.IsMeshBlock(header, a));
+        if (BitConverter.ToInt32(header, fields + 0x5C) != 0) { why = "it has stitch pieces"; return null; }
+        var (stitchMesh, _, decals) = Sections(header, fields, block, guerrilla: false);
+        if (stitchMesh >= 0) { why = "it has a stitch mesh"; return null; }
+        float step = subzone.Step;
+        int StepOf(float value, float origin) => (int)MathF.Round((value - origin) / step);
+        int n = subzone.Positions.Length;
+        var gx = new int[n];
+        var gz = new int[n];
+        for (int v = 0; v < n; v++) { gx[v] = StepOf(subzone.Positions[v].X, subzone.Origin.X); gz[v] = StepOf(subzone.Positions[v].Z, subzone.Origin.Y); }
+        int minX = gx.Min(), maxX = gx.Max(), minZ = gz.Min(), maxZ = gz.Max();
+        if (maxX - minX < 1 || maxZ - minZ < 1) { why = "its ground is a line"; return null; }
+        int w = maxX - minX, d = maxZ - minZ;  // squares across
+        // Each square: the triangle covering its middle (-1 none).
+        var owner = new int[w * d];
+        Array.Fill(owner, -1);
+        int[] tris = subzone.Triangles;
+        int mainDiagonal = 0, otherDiagonal = 0, windingUp = 0, windingDown = 0;
+        for (int t = 0; t + 2 < tris.Length; t += 3)
+        {
+            int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+            float ax = gx[a], az = gz[a], bx = gx[b], bz = gz[b], cx = gx[c], cz = gz[c];
+            float area = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+            if (area == 0) continue;
+            if (area > 0) windingUp++; else windingDown++;
+            // A half of one step square: which diagonal.
+            if (MathF.Abs(area) == 1 && Math.Max(Math.Max(gx[a], gx[b]), gx[c]) - Math.Min(Math.Min(gx[a], gx[b]), gx[c]) == 1 &&
+                Math.Max(Math.Max(gz[a], gz[b]), gz[c]) - Math.Min(Math.Min(gz[a], gz[b]), gz[c]) == 1)
+            {
+                // The edge that isn't along x or z is the diagonal: up-right (both grow) or the other.
+                foreach (var (p, q) in new[] { (a, b), (b, c), (c, a) })
+                    if (gx[p] != gx[q] && gz[p] != gz[q])
+                    {
+                        if ((gx[q] - gx[p]) * (gz[q] - gz[p]) > 0) mainDiagonal++; else otherDiagonal++;
+                    }
+            }
+            int x0 = (int)MathF.Floor(Math.Min(ax, Math.Min(bx, cx))), x1 = (int)MathF.Ceiling(Math.Max(ax, Math.Max(bx, cx)));
+            int z0 = (int)MathF.Floor(Math.Min(az, Math.Min(bz, cz))), z1 = (int)MathF.Ceiling(Math.Max(az, Math.Max(bz, cz)));
+            for (int z = Math.Max(z0, minZ); z < Math.Min(z1, maxZ); z++)
+                for (int x = Math.Max(x0, minX); x < Math.Min(x1, maxX); x++)
+                {
+                    float px = x + 0.5f, pz = z + 0.5f;
+                    float e0 = (bx - ax) * (pz - az) - (bz - az) * (px - ax);
+                    float e1 = (cx - bx) * (pz - bz) - (cz - bz) * (px - bx);
+                    float e2 = (ax - cx) * (pz - cz) - (az - cz) * (px - cx);
+                    bool inside = area > 0 ? e0 >= 0 && e1 >= 0 && e2 >= 0 : e0 <= 0 && e1 <= 0 && e2 <= 0;
+                    if (inside) owner[(z - minZ) * w + (x - minX)] = t / 3;
+                }
+        }
+        bool main = mainDiagonal >= otherDiagonal;  // (x, z)-(x+1, z+1)
+        bool up = windingUp >= windingDown;          // the triangles' corners turn as x towards z
+        // The patch of each triangle.
+        var patchOf = new int[tris.Length / 3];
+        for (int p = 0, t = 0; p < subzone.PatchTriangles.Count; p++)
+            for (int k = 0; k < subzone.PatchTriangles[p].Length / 3; k++) patchOf[t++] = p;
+
+        // The vertices: each corner of a square that is ground.
+        var index = new Dictionary<(int, int), int>();
+        var vertices = new List<GroundVertex>();
+        int Vertex(int x, int z, int triangle)
+        {
+            if (index.TryGetValue((x, z), out int i)) return i;
+            int t = triangle * 3;
+            byte fade = Math.Max(subzone.CliffAlpha[tris[t]], Math.Max(subzone.CliffAlpha[tris[t + 1]], subzone.CliffAlpha[tris[t + 2]]));
+            i = vertices.Count;
+            vertices.Add(new GroundVertex(x, z, height(x, z), normal(x, z), fade));
+            index[(x, z)] = i;
+            return i;
+        }
+        // The triangles of each patch's blocks, by kind, a row of squares at a time (as strips).
+        var blocks = new SortedDictionary<int, SortedDictionary<uint, List<int[]>>>();
+        int squares = 0;
+        for (int z = 0; z < d; z++)
+        {
+            int x = 0;
+            while (x < w)
+            {
+                int t = owner[z * w + x];
+                if (t < 0) { x++; continue; }
+                int patch = patchOf[t];
+                uint kind = subzone.TriangleKinds[t];
+                int start = x;
+                var run = new List<(int A, int B)>();  // each column's lower and upper corner
+                while (x < w && owner[z * w + x] is int o && o >= 0 && patchOf[o] == patch && subzone.TriangleKinds[o] == kind)
+                {
+                    x++;
+                }
+                for (int c = start; c <= x; c++)
+                {
+                    int square = Math.Min(c, x - 1);  // the square a corner is of (the run's last for its right edge)
+                    int tri = owner[z * w + square];
+                    run.Add((Vertex(minX + c, minZ + z, tri), Vertex(minX + c, minZ + z + 1, tri)));
+                }
+                squares += x - start;
+                if (!blocks.TryGetValue(patch, out var kinds)) blocks[patch] = kinds = new();
+                if (!kinds.TryGetValue(kind, out var strips)) kinds[kind] = strips = [];
+                strips.Add(RowStrip(run, main, up));
+            }
+        }
+        if (vertices.Count > 65536) { why = $"{vertices.Count} vertices at every grid step: more than a sub-zone holds"; return null; }
+        var patches = blocks.Values.Select(kinds => (IReadOnlyList<PatchBlock>)kinds.Select(k => new PatchBlock(k.Key, Join(k.Value))).ToList()).ToList();
+
+        // The road decals, as they are.
+        int I(byte[] b, int o) => BitConverter.ToInt32(b, o);
+        var roads = decals.Select(r => new RoadDecalToWrite(header[r.Record..(r.Record + 40)], header[r.Mesh..(r.Mesh + I(header, r.Mesh + 8))], I(header, r.Record),
+                                                           header[r.Names..(r.Names + 4 + I(header, r.Names))], header[r.Map..(r.Map + 16)], header[r.Material..r.End],
+                                                           data[r.Data..(r.Data + I(header, r.Mesh + 0x0C))])).ToList();
+        // As the template Write: its header to the first patch, its checksum, material word, six floats and data tail.
+        int firstPatch = Enumerable.Range((fields + 0x48) / 4, (block - fields - 0x48) / 4).Select(i => i * 4)
+                                   .First(a => U32(header, a + 48) == 0 && F32(header, a + 12) == 1 && F32(header, a + 28) == 1 && F32(header, a + 44) == 1);
+        uint checksum = U32(header, block + 4);
+        uint material = U32(header, block + 0x60 + (int)U32(header, block + 0x14) * 48);
+        int vertexEnd = (int)U32(header, block + 0x3C) + (int)U32(header, block + 0x1C) * 8;
+        byte[] dataTail = data.Length >= vertexEnd + 4 ? data[vertexEnd..(vertexEnd + 4)] : new byte[4];
+        return Write(header[..firstPatch], fields, checksum, material, header[(block + 0x24)..(block + 0x3C)], new byte[4], dataTail,
+                     subzone.Origin, vertices, patches, step, roads);
+    }
+
+    /// <summary>
+    /// A strip along a row of squares (each column's lower and upper corner, in x order), split along
+    /// the chosen diagonal and wound as asked: the order of the corners picked so it comes out so.
+    /// </summary>
+    static int[] RowStrip(List<(int A, int B)> run, bool main, bool up)
+    {
+        // Four ways to walk it: lower or upper corner first, along x or back. Each makes its squares'
+        // diagonal one way and turns its triangles one way; the one that matches is taken.
+        foreach (bool backwards in new[] { false, true })
+            foreach (bool upperFirst in new[] { false, true })
+            {
+                var strip = new List<int>(run.Count * 2);
+                for (int k = 0; k < run.Count; k++)
+                {
+                    var (a, b) = run[backwards ? run.Count - 1 - k : k];
+                    if (upperFirst) { strip.Add(b); strip.Add(a); } else { strip.Add(a); strip.Add(b); }
+                }
+                // The first triangle (corner positions in the run: column, row 0 lower / 1 upper).
+                (int C, int R) At(int position)
+                {
+                    int column = position / 2, row = position % 2 == 0 ? (upperFirst ? 1 : 0) : (upperFirst ? 0 : 1);
+                    return (backwards ? run.Count - 1 - column : column, row);
+                }
+                var (p0, p1, p2) = (At(0), At(1), At(2));
+                // Its diagonal: the edge between corners in different columns and rows.
+                bool diagonalMain = false;
+                foreach (var (p, q) in new[] { (p0, p1), (p1, p2), (p2, p0) })
+                    if (p.C != q.C && p.R != q.R) diagonalMain = (q.C - p.C) * (q.R - p.R) > 0;
+                float area = (p1.C - p0.C) * (p2.R - p0.R) - (p1.R - p0.R) * (p2.C - p0.C);
+                if (diagonalMain == main && area > 0 == up) return [.. strip];
+            }
+        throw new InvalidOperationException("no way along the row gives the diagonal and winding asked");
+    }
+
+    /// <summary>Strips joined into one by repeated indices, each starting at an even place (so it keeps its winding).</summary>
+    static int[] Join(List<int[]> strips)
+    {
+        var joined = new List<int>();
+        foreach (int[] strip in strips)
+        {
+            if (joined.Count > 0)
+            {
+                joined.Add(joined[^1]);
+                joined.Add(strip[0]);
+                if (joined.Count % 2 == 1) joined.Add(strip[0]);
+            }
+            joined.AddRange(strip);
+        }
+        return [.. joined];
+    }
+
     static byte NormalByte(float value) => (byte)Math.Clamp(MathF.Round((value + 1) * 127.5f), 0, 255);
 
     /// <summary>

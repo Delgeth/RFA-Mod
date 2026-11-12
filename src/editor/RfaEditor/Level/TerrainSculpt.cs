@@ -54,6 +54,11 @@ sealed class TerrainSculpt
         public required float[] Heights { get; init; }
         public required Vector3[] Normals { get; init; }
         public bool Changed { get; set; }
+        /// <summary>The box its ground filled as the game had it (what the editor's picture of it is spread over).</summary>
+        public required Vector3 DrawnMin { get; init; }
+        public required Vector3 DrawnMax { get; init; }
+        /// <summary>Made over at every grid step here (see <see cref="FullDetail"/>): the game has the old layout until the level is loaded again.</summary>
+        public bool Regridded { get; init; }
         internal Dictionary<(int, int), List<int>> Buckets { get; } = [];
     }
 
@@ -67,7 +72,8 @@ sealed class TerrainSculpt
     readonly Vector2 corner;
     readonly int columns, rows;
     public float Step { get; }
-    public IReadOnlyList<Part> Parts { get; }
+    readonly List<Part> parts;
+    public IReadOnlyList<Part> Parts => parts;
     public bool FieldChanged { get; private set; }
 
     /// <summary>Whether anything has been sculpted since it was read (or last saved).</summary>
@@ -115,16 +121,112 @@ sealed class TerrainSculpt
         columns = field.XSamples;
         rows = field.ZSamples;
         Step = field.Step;
-        Parts = parts;
-        foreach (Part part in parts)
-            for (int v = 0; v < part.Subzone.Positions.Length; v++)
-            {
-                Vector3 p = part.Subzone.Positions[v];
-                var key = ((int)MathF.Floor(p.X / BucketSize), (int)MathF.Floor(p.Z / BucketSize));
-                if (!part.Buckets.TryGetValue(key, out List<int>? list)) part.Buckets[key] = list = [];
-                list.Add(v);
-            }
+        this.parts = parts;
+        foreach (Part part in parts) Bucket(part);
     }
+
+    static void Bucket(Part part)
+    {
+        for (int v = 0; v < part.Subzone.Positions.Length; v++)
+        {
+            Vector3 p = part.Subzone.Positions[v];
+            var key = ((int)MathF.Floor(p.X / BucketSize), (int)MathF.Floor(p.Z / BucketSize));
+            if (!part.Buckets.TryGetValue(key, out List<int>? list)) part.Buckets[key] = list = [];
+            list.Add(v);
+        }
+    }
+
+    bool fullDetail;
+
+    /// <summary>What <see cref="FullDetail"/> did, until the editor takes it (to say so, and draw the sub-zones made over).</summary>
+    public string? DetailNote { get; private set; }
+
+    /// <summary>Takes <see cref="DetailNote"/> (once).</summary>
+    public string? TakeDetailNote()
+    {
+        string? note = DetailNote;
+        if (note != null) DetailNote = "";
+        return note is { Length: > 0 } ? note : null;
+    }
+
+    /// <summary>
+    /// True from <see cref="FullDetail"/> making a sub-zone over until the game has loaded the level
+    /// again (<see cref="ReloadedInGame"/>): till then the game has the old layout, so the ground
+    /// can't be changed in it live.
+    /// </summary>
+    public bool LayoutPending { get; private set; }
+
+    /// <summary>
+    /// Makes the drawn ground the collision itself, before the first stroke: the game's sub-zones are
+    /// simplified from the height field (big flat triangles where it was flat), and a vertex only moves
+    /// to the field's height where it stands, so a stroke between vertices showed in the collision
+    /// alone (the player walked on a hill that wasn't drawn, or through one that was). Each sub-zone
+    /// coarser than the field is made over with a vertex at every sample, its squares split as
+    /// Havok splits the field's (see <see cref="TerrainSubzone.Regridded"/>). Its files grow (saved
+    /// with the asset lists' sizes), and the game shows it once the level is loaded again. Returns
+    /// what was done, or null if nothing was (once per zone).
+    /// </summary>
+    public string? FullDetail()
+    {
+        if (fullDetail) return null;
+        fullDetail = true;
+        int made = 0, before = 0, after = 0;
+        var notes = new List<string>();
+        for (int i = 0; i < parts.Count; i++)
+        {
+            Part part = parts[i];
+            TerrainSubzone sub = part.Subzone;
+            // The sub-zone's grid against the field's: the same step, its origin on a sample.
+            float fx = (sub.Origin.X - corner.X) / Step, fz = (sub.Origin.Y - corner.Y) / Step;
+            int ox = (int)MathF.Round(fx), oz = (int)MathF.Round(fz);
+            if (MathF.Abs(sub.Step - Step) > 1e-4f || MathF.Abs(fx - ox) > 0.02f || MathF.Abs(fz - oz) > 0.02f)
+            {
+                notes.Add($"{part.HeaderName}'s grid isn't the field's");
+                continue;
+            }
+            float Height(int x, int z) => samples[Math.Clamp(oz + z, 0, rows - 1) * columns + Math.Clamp(ox + x, 0, columns - 1)];
+            Vector3 Normal(int x, int z) => NormalAt(corner.X + (ox + x) * Step, corner.Y + (oz + z) * Step);
+            (byte[] Header, byte[] Data)? redone;
+            try { redone = TerrainSubzone.Regridded(part.Header, part.Data, Height, Normal, out string? why); if (redone == null) notes.Add($"{part.HeaderName}: {why}"); }
+            catch (Exception ex) when (ex is InvalidDataException or ArgumentException or InvalidOperationException or IndexOutOfRangeException)
+            {
+                notes.Add($"{part.HeaderName}: {ex.Message}");
+                continue;
+            }
+            if (redone is not { } files) continue;
+            TerrainSubzone grid = TerrainSubzone.Read(files.Header, files.Data);
+            if (grid.Triangles.Length <= sub.Triangles.Length) continue;  // (already at every step)
+            before += sub.Triangles.Length / 3;
+            after += grid.Triangles.Length / 3;
+            var next = new Part
+            {
+                Number = part.Number, HeaderName = part.HeaderName, DataName = part.DataName, Header = files.Header, Data = files.Data, Subzone = grid,
+                Heights = grid.Positions.Select(p => p.Y).ToArray(), Normals = (Vector3[])grid.Normals.Clone(),
+                DrawnMin = part.DrawnMin, DrawnMax = part.DrawnMax, Regridded = true, Changed = true,
+            };
+            Bucket(next);
+            Follow(next, null);
+            next.Changed = true;
+            parts[i] = next;
+            made++;
+        }
+        if (made > 0) LayoutPending = true;
+        if (made == 0 && notes.Count == 0) return null;
+        return (made > 0 ? $"{Zone}: {made} sub-zones drawn at every grid step so the ground drawn is the collision ({before:N0} triangles before, {after:N0} now)" : $"{Zone}: the drawn ground stays as it was")
+               + (notes.Count > 0 ? $" ({string.Join("; ", notes)})" : "");
+    }
+
+    /// <summary>
+    /// The game has loaded the level again, from what was last saved: its layout is the editor's from
+    /// now on. Returns the files as saved (what the game has now), for Live to change from.
+    /// </summary>
+    public IReadOnlyDictionary<string, byte[]> ReloadedInGame()
+    {
+        if (!Changed) LayoutPending = false;
+        return lastSaved;
+    }
+
+    Dictionary<string, byte[]> lastWritten = new(StringComparer.OrdinalIgnoreCase), lastSaved = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// The zone's ground for sculpting, or null with why: it needs the terrain file with a height
@@ -163,6 +265,7 @@ sealed class TerrainSculpt
             {
                 Number = number, HeaderName = headerName, DataName = dataName, Header = header, Data = data, Subzone = subzone,
                 Heights = subzone.Positions.Select(p => p.Y).ToArray(), Normals = (Vector3[])subzone.Normals.Clone(),
+                DrawnMin = subzone.BoundsMin, DrawnMax = subzone.BoundsMax,
             });
         }
         if (parts.Count == 0)
@@ -286,6 +389,7 @@ sealed class TerrainSculpt
     /// </summary>
     public IReadOnlyList<Part> Reshape(Func<float, float, float, float> shape)
     {
+        DetailNote ??= FullDetail();
         float[] next = (float[])samples.Clone();
         bool any = false;
         float low = field.Offset, high = field.Offset + field.Scale * ushort.MaxValue;
@@ -332,6 +436,7 @@ sealed class TerrainSculpt
         lastApplyMoved = false;
         if (mode >= SculptMode.PaintFoliage) return [];
         if (radius <= 0 || amount <= 0) return [];
+        DetailNote ??= FullDetail();
         int xFrom = Math.Max(0, (int)MathF.Floor((centre.X - radius - corner.X) / Step)), xTo = Math.Min(columns - 1, (int)MathF.Ceiling((centre.X + radius - corner.X) / Step));
         int zFrom = Math.Max(0, (int)MathF.Floor((centre.Y - radius - corner.Y) / Step)), zTo = Math.Min(rows - 1, (int)MathF.Ceiling((centre.Y + radius - corner.Y) / Step));
         if (xFrom > xTo || zFrom > zTo) return [];
@@ -667,6 +772,7 @@ sealed class TerrainSculpt
             files[part.HeaderName] = header;
             files[part.DataName] = data;
         }
+        lastWritten = new Dictionary<string, byte[]>(files, StringComparer.OrdinalIgnoreCase);
         return files;
     }
 
@@ -674,6 +780,7 @@ sealed class TerrainSculpt
     public void Saved()
     {
         savedSamples = (float[])samples.Clone();
+        foreach (var (name, bytes) in lastWritten) lastSaved[name] = bytes;
         FieldChanged = false;
         foreach (Part part in Parts) part.Changed = false;
     }

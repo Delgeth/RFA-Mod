@@ -259,6 +259,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (control && e.Key == Key.S) Save();
         else if (Keyboard.FocusedElement is TextBoxBase) return;  // typing in a property
         else if (drag == Drag.Look) { }                             // flying: the keys move the camera
+        else if (control && shift && e.Key == Key.C) CopyProperties();
+        else if (control && shift && e.Key == Key.V) PasteProperties();
         else if (control && e.Key == Key.D) DuplicateSelected();
         else if (e.Key == Key.Delete) DeleteSelected();
         else if (e.Key == Key.Q) SetTool(LevelTool.Select);
@@ -397,6 +399,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         TransformHost.Content = null;
         RelatedFile? elsewhere = selected != null ? relatedOf.GetValueOrDefault(selected) : null;
         DuplicateButton.IsEnabled = DeleteButton.IsEnabled = selected != null && elsewhere == null;
+        UpdatePasteButton();
         ShowInGameButton.IsEnabled = selected != null;
         ElsewhereNote.Visibility = elsewhere != null ? Visibility.Visible : Visibility.Collapsed;
         TransformHost.IsEnabled = PropertyPanel.IsEnabled = elsewhere == null;  // another file's objects are changed in its own tab
