@@ -1815,6 +1815,7 @@ void* __fastcall LiveAllocate(void*, void*, unsigned size, unsigned alignment, i
 }
 bool __fastcall LiveHasMark(void*, void*) { return false; }
 int __fastcall LiveMark(void*, void*) { return 0; }
+void __fastcall LiveRelease(void*, void*, int, int, int) {}  // (+0x60: back to a mark; nothing kept)
 struct LiveAllocator {
     void** table;
 };
@@ -1824,7 +1825,9 @@ void* LiveGroupAllocator() {
     if (!g_liveAllocatorTable[0]) {
         for (void*& slot : g_liveAllocatorTable) slot = reinterpret_cast<void*>(&LiveMark);
         g_liveAllocatorTable[0x0C / 4] = reinterpret_cast<void*>(&LiveHasMark);
+        g_liveAllocatorTable[0x18 / 4] = reinterpret_cast<void*>(&LiveHasMark);  // (has a parent allocator? no: +0x80 isn't asked)
         g_liveAllocatorTable[0x38 / 4] = reinterpret_cast<void*>(&LiveAllocate);
+        g_liveAllocatorTable[0x60 / 4] = reinterpret_cast<void*>(&LiveRelease);
     }
     return &g_liveAllocator;
 }
@@ -1879,7 +1882,17 @@ struct ChunkLoading {
     std::string group;
     void* container;
     ULONGLONG since;
+    bool onDemand = false;  // a group loaded when needed (flag 0x100): put back so once loaded
 };
+auto const SetOnDemand = reinterpret_cast<bool(__cdecl*)(void* container, bool onDemand)>(0x908480);
+int GuardedSetOnDemand(void* container, bool onDemand) {
+    __try {
+        SetOnDemand(container, onDemand);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
 std::vector<ChunkLoading> g_chunksLoading;
 
 int GuardedRequestLoad(void* container) {
@@ -1918,9 +1931,73 @@ void WatchEditorChunks() {
             continue;
         }
         if (late && state != 3) rfa::Log("Editor link: chunk %s: still not loaded after 30 seconds (state %d)", it->group.c_str(), state);
+        if (it->onDemand && state == 3) GuardedSetOnDemand(it->container, true);
         AnswerChunk(it->group, state == 3);
         it = g_chunksLoading.erase(it);
     }
+}
+
+// editor_chunk_group <group> <asset list>: loads a chunk the level hasn't (Live). The editor put in
+// overrides\live\ (found by name once the loader has looked again: editor_rescan comes first) the
+// chunk's files packed in a container of their own and an asset list naming it and the chunk's group
+// (<chunk>.rfgchunkx, or .rfgstitchx), as the Guerrilla world lists its own. If the game hasn't a group
+// of that name, the list is read into its container records (0x90A3A0) with the allocator above for
+// both its temporary memory and its records (the game's own are its start-up ones, closed or full once
+// it runs). The group is then loaded as the game loads one (0x908FC0) but without waiting: a group
+// loaded on demand (flag 0x100) is made loadable (0x908480, 0), asked to load (0x908F10), watched each
+// frame (WatchEditorChunks), and put back once loaded.
+int GuardedReadOwnAssetList(const char* name) {
+    __try {
+        return ReadAssetList(name, LiveGroupAllocator(), LiveGroupAllocator(), 0, 0, 0) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
+    }
+}
+
+void LoadEditorChunkGroup(const std::string& line) {
+    char groupText[128] = {}, listText[128] = {};
+    if (sscanf_s(line.c_str() + 19, "%127s %127s", groupText, static_cast<unsigned>(sizeof(groupText)), listText,
+                 static_cast<unsigned>(sizeof(listText))) != 2) {
+        rfa::Log("Editor link: editor_chunk_group needs a group and an asset list");
+        return;
+    }
+    const std::string group = groupText;
+    bool faulted = false;
+    void* found = GuardedFindContainer(groupText, &faulted);
+    if (!found && !faulted) {
+        if (GuardedFileExists(listText) <= 0) {
+            rfa::Log("Editor link: chunk %s: the game can't find the asset list %s (is the loader up to date?)", groupText, listText);
+            AnswerChunk(group, false);
+            return;
+        }
+        rfa::Log("Editor link: chunk %s: reading its asset list %s", groupText, listText);
+        const int read = GuardedReadOwnAssetList(listText);
+        if (read <= 0) {
+            rfa::Log(read < 0 ? "Editor link: chunk %s: reading its asset list FAULTED (exception %08X)" : "Editor link: chunk %s: its asset list wasn't read%s",
+                     groupText, read < 0 ? static_cast<unsigned>(-read) | 0x80000000u : 0u);
+            AnswerChunk(group, false);
+            return;
+        }
+        found = GuardedFindContainer(groupText, &faulted);
+        if (!found) {
+            rfa::Log("Editor link: chunk %s: its asset list was read, but has no such group", groupText);
+            AnswerChunk(group, false);
+            return;
+        }
+    }
+    if (!found) {
+        AnswerChunk(group, false);
+        return;
+    }
+    const bool onDemand = (*reinterpret_cast<WORD*>(static_cast<BYTE*>(found) + 0x22) & 0x100) != 0;
+    if (onDemand) GuardedSetOnDemand(found, false);
+    if (GuardedRequestLoad(found) <= 0) {
+        if (onDemand) GuardedSetOnDemand(found, true);
+        AnswerChunk(group, false);
+        return;
+    }
+    rfa::Log("Editor link: chunk %s: loading", groupText);
+    g_chunksLoading.push_back({group, found, GetTickCount64(), onDemand});
 }
 
 void LoadEditorChunkFiles(const std::string& line) {
@@ -2426,6 +2503,10 @@ bool RunEditorEdit(const std::string& line) {
     }
     if (line.rfind("editor_stitch_drop ", 0) == 0) {
         EditorDropStitchPiece(line);
+        return true;
+    }
+    if (line.rfind("editor_chunk_group ", 0) == 0) {
+        LoadEditorChunkGroup(line);
         return true;
     }
     if (line.rfind("editor_chunk_files ", 0) == 0) {
