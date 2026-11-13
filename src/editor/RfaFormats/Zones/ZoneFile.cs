@@ -567,7 +567,7 @@ public sealed class ZoneObject
 
     public uint ClassHash => U32(0);
     public uint Handle { get => U32(4); internal set => SetU32(4, value); }
-    public ushort Flags => BitConverter.ToUInt16(bytes, 32);
+    public ushort Flags { get => BitConverter.ToUInt16(bytes, 32); set => BitConverter.TryWriteBytes(bytes.AsSpan(32), value); }
 
     /// <summary>The bounding box, in world coordinates (the game uses it to decide what to draw).</summary>
     public Vector3 BoundsMin => ReadVector(8);

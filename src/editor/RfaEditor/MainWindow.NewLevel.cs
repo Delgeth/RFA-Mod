@@ -82,29 +82,18 @@ public partial class MainWindow
         Window window = Dialog("New level");
         var form = new DialogForm(300);
         var mode = new ComboBox { ItemsSource = new[] { "Ruin", "Infestation" }, SelectedIndex = 0 };
-        var template = new ComboBox();
-        void FillTemplates()
-        {
-            var levels = NewLevel.LevelsOf(workspace, mode.SelectedIndex == 0 ? NewLevel.Mode.Ruin : NewLevel.Mode.Infestation)
-                                 .Where(l => File.Exists(Path.Combine(workspace.GameFolder, @"build\pc\cache", l + ".vpp_pc"))).ToList();
-            template.ItemsSource = levels;
-            template.SelectedIndex = levels.Count > 0 ? 0 : -1;
-        }
-        mode.SelectionChanged += (_, _) => FillTemplates();
-        FillTemplates();
+        var groundLevels = NewLevel.LevelsWithGround(workspace, context.Assets);
+        var template = new ComboBox { ItemsSource = groundLevels, SelectedIndex = groundLevels.Count > 0 ? 0 : -1 };
         var fileName = new TextBox { Text = "" };
         var displayName = new TextBox { Text = "" };
-        var blank = new CheckBox { Content = "Blank: only its starts, spawns and mode objects", IsChecked = true };
         var ground = new ComboBox { ItemsSource = new[] { "New, flat (made from nothing: to sculpt and paint)", "None (for caves and interiors built from pieces)" }, SelectedIndex = 0 };
         var sizes = new[] { 32, 64, 96, 128, 160, 192, 224, 255 };
         var groundSize = new ComboBox { ItemsSource = sizes.Select(v => v == 255 ? "255 m (the whole zone)" : $"{v} m").ToList(), SelectedIndex = sizes.Length - 1 };
         var skies = NewLevel.Skies(workspace);
-        var sky = new ComboBox { ItemsSource = skies.Prepend("(the start level's)").ToList(), SelectedIndex = 0, IsEditable = true, MaxDropDownHeight = 400 };
-        void GroundChoices() => groundSize.IsEnabled = ground.IsEnabled && ground.SelectedIndex == 0;
+        var sky = new ComboBox { ItemsSource = skies, SelectedIndex = Math.Max(0, skies.FindIndex(s => s.Equals(NewLevel.DefaultSky, StringComparison.OrdinalIgnoreCase))),
+                                 IsEditable = true, MaxDropDownHeight = 400 };
+        void GroundChoices() => groundSize.IsEnabled = template.IsEnabled = ground.SelectedIndex == 0;
         ground.SelectionChanged += (_, _) => GroundChoices();
-        blank.Checked += (_, _) => { ground.IsEnabled = true; sky.IsEnabled = true; GroundChoices(); };
-        blank.Unchecked += (_, _) => { ground.IsEnabled = false; sky.IsEnabled = false; GroundChoices(); };
-        mode.SelectionChanged += (_, _) => ground.SelectedIndex = mode.SelectedIndex == 0 ? 0 : 1;  // (Infestation's levels have none to flatten)
         var picture = new TextBox { IsReadOnly = true, Text = "" };
         var browse = new Button { Content = "Choose...", Margin = new Thickness(6, 0, 0, 0), MinWidth = 70 };
         var clear = new Button { Content = "None", Margin = new Thickness(6, 0, 0, 0), MinWidth = 50 };
@@ -121,28 +110,37 @@ public partial class MainWindow
         pictureRow.Children.Add(browse);
         pictureRow.Children.Add(picture);
         form.Row("Mode", mode, "Which mode's map list it is in");
-        form.Row("Start from", template, "The level of that mode it's made from (its ground, its starts and spawns, its mode objects, its spawn resources)");
         form.Row("File name", fileName, "The level's file name (its archive, <name>.vpp_pc): lower case letters, digits and _");
         form.Row("Name in the menu", displayName, "What the map list shows (every language)");
-        form.Row("", blank, "Off: a full copy of the level, its ground, buildings and scenery too");
-        form.Row("Ground", ground, "New: ground made from nothing (flat, at the level's height). None: no ground at all (as Infestation's levels in their caves): " +
+        form.Row("Ground", ground, "New: ground made from nothing (flat, in the middle of the zone). None: no ground at all: " +
                                    "build the floor, walls and ceiling from stitch pieces, terrain pieces and chunks");
-        form.Row("Ground size", groundSize, "How big the new ground is: a square round the level's starts and spawns (the level's middle); past it the level ends in a drop");
-        form.Row("Sky", sky, "The level's sky (the game's sky effects): its environment boxes name it, and its files go with the level");
-        form.Row("Preview picture", pictureRow, "Shown for it in the map list (and Infestation's loading screen): fitted to the game's picture size, its middle kept. None: the start level's picture");
+        form.Row("Ground size", groundSize, "How big the new ground is: a square in the middle of the zone; past it the level ends in a drop");
+        form.Row("Ground textures", template, "Which of the game's ground texture sets the new ground is painted with (the set this level's ground has: " +
+                                              "only its textures are used, nothing else of the level). Paint its layers in Sculpt");
+        form.Row("Sky", sky, "The level's sky (the game's sky effects): its environment box names it, and its files go with the level");
+        form.Row("Preview picture", pictureRow, "Shown for it in the map list (and Infestation's lobby and loading screen): fitted to the game's picture size, " +
+                                                "its middle kept. None: a title card with its name");
+        form.Row("", new TextBlock
+        {
+            Text = "Everything in it is new: its zone and objects (player starts, the mode's spawns and markers, the intro camera, the sky's box), its ground, " +
+                   "navigation, stitch list, map list row, strings, pictures and spawn resources.",
+            TextWrapping = TextWrapping.Wrap, Opacity = 0.75, Width = 300,
+        });
         form.Buttons(window, "Make");
         if (window.ShowDialog() != true) return;
 
         string name = fileName.Text.Trim().ToLowerInvariant();
         string shown = displayName.Text.Trim();
-        if (template.SelectedItem is not string start) { Log("New level: no level to start from."); return; }
+        bool noGround = ground.SelectedIndex == 1;
+        string start = template.SelectedItem as string ?? "";
+        if (!noGround && start.Length == 0) { Log("New level: the game has no level with ground textures to paint the ground with."); return; }
         if (!Regex.IsMatch(name, "^[a-z][a-z0-9_]{1,30}$")) { Log("New level: the file name has to be lower case letters, digits and _ (2 to 31, a letter first)."); return; }
         if (shown.Length == 0) shown = name;
         var chosenMode = mode.SelectedIndex == 0 ? NewLevel.Mode.Ruin : NewLevel.Mode.Infestation;
         bool replace = false;
         if (File.Exists(Path.Combine(workspace.OverridesFolder, $@"build\pc\cache\{name}.vpp_pc")))
         {
-            if (MessageBox.Show(this, $"There is already a level {name} made by the editor. Make it again, from {start}? Its edits are lost.",
+            if (MessageBox.Show(this, $"There is already a level {name} made by the editor. Make it again, new? Its edits are lost.",
                                 "New level", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
             foreach (var (key, _) in OpenTabs($@"level:build\pc\cache\{name}.vpp_pc")) CloseTab(key);
             replace = true;
@@ -150,9 +148,10 @@ public partial class MainWindow
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null, replace, ground.SelectedIndex == 1,
-                sizes[Math.Max(0, groundSize.SelectedIndex)], sky.SelectedIndex == 0 || string.IsNullOrWhiteSpace(sky.Text) || sky.Text.StartsWith('(') ? null : sky.Text.Trim());
-            Log($"New level {name} ({chosenMode}, from {start}):");
+            string chosenSky = string.IsNullOrWhiteSpace(sky.Text) ? NewLevel.DefaultSky : sky.Text.Trim();
+            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, picture.Text.Length > 0 ? picture.Text : null, replace, noGround,
+                sizes[Math.Max(0, groundSize.SelectedIndex)], chosenSky);
+            Log($"New level {name} ({chosenMode}):");
             foreach (string line in report) Log("  " + line);
             Log("  The game reads its map lists at start-up: restart it to see the level in the menu.");
             RefreshOverrideMarks();

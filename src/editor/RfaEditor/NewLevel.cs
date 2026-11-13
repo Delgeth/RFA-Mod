@@ -1,6 +1,7 @@
 using System.IO;
 using System.Numerics;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using RfaFormats;
@@ -12,30 +13,34 @@ using RfaFormats.Zones;
 namespace RfaEditor;
 
 /// <summary>
-/// Makes a brand-new level for one of the game's modes (Ruin, Infestation), from one of that mode's
-/// levels (its template), and lists it in that mode's map list. See the project's rfa-new-level.md.
+/// Makes a brand-new level for one of the game's modes (Ruin, Infestation) and lists it in that mode's
+/// map list. See the project's rfa-new-level.md. Nothing of another level's is in it:
+///
+///   - Its zone and persistent zone are made empty and given new objects, from the game's zone schema
+///     with the editor's settings: the zone object (its terrain, its spawn resources), the player's
+///     starts (in the persistent zone too, as the game's levels have them), the spectator's intro
+///     camera, the mode's own (Ruin: an exo spawn; Infestation: the objective and four enemy spawns
+///     round the edge), and one environment box round the zone with the chosen sky. All on the new
+///     ground, round its middle.
+///   - Its ground is made from nothing (a flat square of the chosen size in the middle of the zone,
+///     the height field, sub-zones, far-away ground, a blank blend map and a plain colour map; no
+///     foliage, roads, walls or occluders), or there is none (for a cave or interior built from pieces).
+///     The terrain files' materials (which ground textures the shader draws, and names for its blend
+///     and colour maps) are the only part taken from the game: from the level whose ground textures you
+///     chose, as there is no other way to describe them. The ground textures go with the level.
+///   - Its stitch list is empty; its navigation new (Ruin none; Infestation a flat mesh over the new
+///     ground for its enemies, with its Havok tree; with no ground, none).
+///   - Its asset list keeps only the groups the game loads a level of the mode by (the first of the
+///     mode's levels has them: its zone group and cells, ns_base, ns_precache), listing only the new
+///     level's files, its ground textures and its sky's.
+///   - Its map list row, its strings, its pictures and its spawn resources are its own (the row laid out
+///     as the mode's rows are; the spawn resources start as what the mode's first level can spawn, to
+///     be changed with Spawn resources). With no picture given, a title card with its name is made.
 ///
 /// The level: build\pc\cache\&lt;name&gt;.vpp_pc, a new archive in overrides\ (the editor's own: it opens
-/// and saves it as any level, its edits kept in edits\). In it, the template's archive with every file
-/// of the level's own (its zone, persistent zone, terrain, far ground, sub-zones, stitch list,
-/// navigation, blend and colour maps) under the new name, all of them in its ns_base container (as
-/// Infestation's levels keep theirs; Ruin's keep theirs loose in dlc01_precache.vpp_pc), and its
-/// asset list with every name the same way (its groups name them; ns_precache doesn't any more).
-/// The names inside the files: the zones' (their text values) rewritten; the terrain's and
-/// sub-zones' names of the blend and colour maps written over in place by a name as long (the new
-/// level's texture tag: "x" and a hash, as long as the template's name), as are the textures' own.
-///
-/// Blank (the default): the template's ground made flat (at its average height: the terrain file,
-/// sub-zones and far ground written as the sculptor would), its foliage cleared, its stitch list
-/// empty, the objects that make its scenery taken out (movers, lights, effects, damage regions and
-/// sound regions), what's left (player starts, spawn nodes, markers, regions the mode uses) moved
-/// down or up with the ground under it, and the groups for its scenery's chunks and pieces dropped.
-///
-/// The mode's list: a copy of the template's row (Ruin: wrecking_crew_maps.xtbl; Infestation:
-/// mp_levels.xtbl and rf4_mp_pregame.xtbl) with the new file name, display name (new strings in each
-/// language's multiplayer_*.le_strings), unlocked, and the preview picture if one is given (a new
-/// image container of its own, as the game's: &lt;image&gt;.str2_pc beside interface.vpp_pc, listed in
-/// ui_images.asm_pc). The game reads its tables and strings at start-up.
+/// and saves it as any level, its edits kept in edits\), its files in its ns_base container (as
+/// Infestation's levels keep theirs; its zone group, 1_c0807, names its zone and the game finds it
+/// there). The game reads its tables and strings at start-up.
 /// </summary>
 sealed class NewLevel
 {
@@ -43,6 +48,13 @@ sealed class NewLevel
 
     const string Cache = @"build\pc\cache\";
     const string Tables = Cache + "table.vpp_pc", Misc = Cache + "misc.vpp_pc", Interface = Cache + "interface.vpp_pc";
+    public const string DefaultSky = "env_sur_day_sky";
+
+    // Where a single-zone level is in the world: every one of the game's (Ruin's, Infestation's) has its
+    // zone object at (127.5, 0, -127.5), its zone the square from (0, -255) to (255, 0), place 0x88.
+    static readonly Vector2 ZoneCorner = new(0, -255);
+    const float ZoneWidth = 255;
+    const byte ZonePlace = 0x88;
 
     public static (string Table, string Row, string Key) TableOf(Mode mode) => mode == Mode.Ruin
         ? ("wrecking_crew_maps.xtbl", "wc_map_list", "file_name")
@@ -56,9 +68,12 @@ sealed class NewLevel
         catch (Exception ex) when (ex is IOException or InvalidDataException) { return []; }
     }
 
-    // The scenery a blank level leaves out (by class).
-    static readonly string[] SceneryClasses =
-        ["general_mover", "rfg_mover", "obj_light", "object_effect", "effect_streaming_node", "Damage_Region", "object_interior_sound_region", "ambient_sound"];
+    /// <summary>The game's levels (of both modes) that have ground, whose ground textures a new level can have.</summary>
+    public static List<string> LevelsWithGround(Workspace workspace, GameAssets assets) =>
+        LevelsOf(workspace, Mode.Ruin).Concat(LevelsOf(workspace, Mode.Infestation))
+            .Where(l => File.Exists(Path.Combine(workspace.GameFolder, Cache + l + ".vpp_pc")))
+            .Where(l => assets.ReadAnywhere(l + ".cterrain_pc") is { Length: > 64 * 1024 })  // (a level with none has a small one)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
     readonly Workspace workspace;
     readonly GameAssets assets;
@@ -70,128 +85,190 @@ sealed class NewLevel
         this.assets = assets;
     }
 
-    /// <summary>
-    /// Makes the level and its row; returns what was done (a line each), or throws InvalidDataException
-    /// saying why it couldn't be. <paramref name="name"/>: the level's file name (lower case letters,
-    /// digits and _); <paramref name="picture"/>: a picture file for its preview, or null for the template's.
-    /// </summary>
-    public List<string> Make(Mode mode, string template, string name, string displayName, bool blank, string? picture, bool replace = false, bool noGround = false,
-                             float size = 255, string? sky = null)
+    /// <summary>A level of the game's as it is: its archive's loose files, its asset list, and the files of its own (its name in theirs).</summary>
+    sealed record GameLevel(string Name, Dictionary<string, byte[]> Loose, AsmFile Asm, Dictionary<string, byte[]> Own, bool Compressed)
     {
-        string archive = Cache + template + ".vpp_pc", newArchive = Cache + name + ".vpp_pc";
-        if (File.Exists(Path.Combine(workspace.GameFolder, newArchive))) throw new InvalidDataException($"the game already has a level {name}");
-        if (File.Exists(Path.Combine(workspace.OverridesFolder, newArchive)) && !(replace && workspace.RemoveNewArchive(newArchive)))
-            throw new InvalidDataException($"there is already a level {name} in overrides\\ (delete overrides\\{newArchive} to make it again, or choose another name)");
+        public bool IsOwn(string file) => file.Contains(Name, StringComparison.OrdinalIgnoreCase);
+        public string? Precache => Loose.Keys.FirstOrDefault(f => f.EndsWith(".precache", StringComparison.OrdinalIgnoreCase));
+    }
+
+    GameLevel ReadLevel(string level)
+    {
+        string archive = Cache + level + ".vpp_pc";
         Packfile source = workspace.Archive(archive);
         var loose = source.Entries.ToDictionary(e => e.Name, e => source.Read(e), StringComparer.OrdinalIgnoreCase);
-        if (!loose.TryGetValue(template + ".asm_pc", out byte[]? asmBytes)) throw new InvalidDataException($"{archive} has no {template}.asm_pc");
+        if (!loose.TryGetValue(level + ".asm_pc", out byte[]? asmBytes)) throw new InvalidDataException($"{archive} has no {level}.asm_pc");
         AsmFile asm = AsmFile.Read(asmBytes);
-        string tag = LevelFiles.TextureTag(name, template.Length);
-        bool Own(string file) => file.Contains(template, StringComparison.OrdinalIgnoreCase);
-        string Renamed(string file) => file.EndsWith("vbm_pc", StringComparison.OrdinalIgnoreCase)
-            ? ReplaceIgnoringCase(file, template, tag) : ReplaceIgnoringCase(file, template, name);
-
-        // ---- The level's own files: from its ns_base container, else wherever the game has them.
-        Packfile? nsBase = loose.TryGetValue("ns_base.str2_pc", out byte[]? nsBytes) ? Packfile.FromBytes("ns_base.str2_pc", nsBytes) : null;
-        var inBase = nsBase?.Entries.Select(e => (e.Name, Data: nsBase.Read(e))).ToList() ?? new List<(string Name, byte[] Data)>();
+        bool Own(string file) => file.Contains(level, StringComparison.OrdinalIgnoreCase);
         var own = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (file, data) in inBase.Where(f => Own(f.Name))) own[file] = data;
-        var named = asm.Containers.SelectMany(c => c.Primitives).Select(p => p.Name).Where(Own).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        foreach (string header in named)
+        if (loose.TryGetValue("ns_base.str2_pc", out byte[]? nsBytes))
+        {
+            Packfile nsBase = Packfile.FromBytes("ns_base.str2_pc", nsBytes);
+            foreach (PackfileEntry e in nsBase.Entries.Where(x => Own(x.Name))) own[e.Name] = nsBase.Read(e);
+        }
+        foreach (string header in asm.Containers.SelectMany(c => c.Primitives).Select(p => p.Name).Where(Own).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!own.ContainsKey(header) && (loose.GetValueOrDefault(header) ?? assets.ReadAnywhere(header)) is { } h) own[header] = h;
             if (DataOf(header) is string dataName && !own.ContainsKey(dataName) && assets.ReadAnywhere(dataName) is { } d) own[dataName] = d;
         }
-        foreach (string zone in new[] { template + ".rfgzone_pc", "p_" + template + ".rfgzone_pc" })
-            if (loose.TryGetValue(zone, out byte[]? z)) own[zone] = z;
-        if (!own.ContainsKey(template + ".cterrain_pc")) throw new InvalidDataException($"{template}.cterrain_pc wasn't found in the game's files");
+        return new GameLevel(level, loose, asm, own, source.IsCompressed);
+    }
 
-        // ---- Renamed, and the names inside.
+    /// <summary>
+    /// Makes the level and its row; returns what was done (a line each), or throws InvalidDataException
+    /// saying why it couldn't be. <paramref name="name"/>: the level's file name (lower case letters,
+    /// digits and _); <paramref name="groundTextures"/>: the game's level whose ground textures its
+    /// ground has (any with ground, of either mode); <paramref name="picture"/>: a picture file for its
+    /// preview, or null for a title card.
+    /// </summary>
+    public List<string> Make(Mode mode, string groundTextures, string name, string displayName, string? picture, bool replace = false, bool noGround = false,
+                             float size = 255, string sky = DefaultSky)
+    {
+        string newArchive = Cache + name + ".vpp_pc";
+        if (File.Exists(Path.Combine(workspace.GameFolder, newArchive))) throw new InvalidDataException($"the game already has a level {name}");
+        if (File.Exists(Path.Combine(workspace.OverridesFolder, newArchive)) && !(replace && workspace.RemoveNewArchive(newArchive)))
+            throw new InvalidDataException($"there is already a level {name} in overrides\\ (delete overrides\\{newArchive} to make it again, or choose another name)");
+        if (assets.ZoneSchema is not { } schema) throw new InvalidDataException("the game's zone schema (rfg_zonex_format.txt) couldn't be read");
+
+        // The groups the game loads a level of this mode by: the first of the mode's levels has them.
+        string pattern = LevelsOf(workspace, mode).FirstOrDefault(l => File.Exists(Path.Combine(workspace.GameFolder, Cache + l + ".vpp_pc")))
+                         ?? throw new InvalidDataException($"the game has none of {mode}'s levels to see how its levels are loaded");
+        GameLevel basis = ReadLevel(pattern);
+
         var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (file, data) in own)
-        {
-            byte[] bytes = data;
-            string ext = Path.GetExtension(file).ToLowerInvariant();
-            if (ext is ".cterrain_pc" or ".ctmesh_pc" or ".cvbm_pc") bytes = LevelFiles.ReplaceSameLength(bytes, template, tag);
-            else if (ext == ".rfgzone_pc")
-            {
-                ZoneFile zone = ZoneFile.Read(bytes);
-                LevelFiles.RenameInZone(zone, template, name);
-                bytes = zone.ToBytes();
-            }
-            files[Renamed(file)] = bytes;
-        }
-        report.Add($"{own.Count} files of {template}'s under the name {name} (its textures as {tag}_...)");
-
-        if (blank) MakeBlank(mode, template, name, files, asm, noGround, size, sky);
-
-        // ---- The asset list: every name renamed, each own file's sizes as now; ns_base holding them all.
-        var ownNow = files.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var kinds = new Dictionary<string, AsmPrimitive>(StringComparer.OrdinalIgnoreCase);
-        foreach (AsmContainer c in asm.Containers)
+        var groundTextureFiles = new List<string>();
+        Vector2 centre = ZoneCorner + new Vector2(ZoneWidth / 2);
+        float half = ZoneWidth / 2, height = 0;
+        bool copyTextures = false;
+        if (noGround)
         {
-            foreach (AsmPrimitive p in c.Primitives.Where(p => Own(p.Name)))
-            {
-                p.Name = Renamed(p.Name);
-                if (files.TryGetValue(p.Name, out byte[]? h)) p.HeaderSize = h.Length;
-                p.DataSize = DataOf(p.Name) is string dn && files.TryGetValue(dn, out byte[]? d) ? d.Length : p.DataSize;
-                kinds.TryAdd(p.Name, p);
-            }
-            if (c.Name.Equals("ns_precache", StringComparison.OrdinalIgnoreCase)) c.Primitives.RemoveAll(p => ownNow.Contains(p.Name));
+            report.Add("no ground (" + NoGround(name, files) + "): build the floor, walls and ceiling from stitch pieces, terrain pieces and chunks");
         }
-        var baseFiles = inBase.Where(f => !Own(f.Name) && (!blank || !Scenery(f.Name))).ToList();
-        // (its zone too, as Infestation's levels have theirs: its zone group, 1_c0807, names it, and the
-        // game finds it there; the template's was in its precache archive. Not its persistent zone.)
-        baseFiles.AddRange(files.Where(f => !f.Key.StartsWith("p_", StringComparison.OrdinalIgnoreCase) || !f.Key.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
-                                .Select(f => (f.Key, f.Value)));
+        else
+        {
+            GameLevel ground = groundTextures.Equals(pattern, StringComparison.OrdinalIgnoreCase) ? basis : ReadLevel(groundTextures);
+            string tag = LevelFiles.TextureTag(name, ground.Name.Length);
+            // Its terrain files: the terrain file, the far-away ground, the sub-zones, the blend and colour maps.
+            foreach (var (file, data) in ground.Own)
+            {
+                string ext = Path.GetExtension(file).ToLowerInvariant();
+                if (ext is not (".cterrain_pc" or ".gterrain_pc" or ".ctmesh_pc" or ".gtmesh_pc" or ".cvbm_pc" or ".gvbm_pc")) continue;
+                bool map = ext.EndsWith("vbm_pc");
+                byte[] bytes = ext is ".cterrain_pc" or ".ctmesh_pc" or ".cvbm_pc" ? LevelFiles.ReplaceSameLength(data, ground.Name, tag) : data;
+                files[ReplaceIgnoringCase(file, ground.Name, map ? tag : name)] = bytes;
+            }
+            if (!files.ContainsKey(name + ".cterrain_pc")) throw new InvalidDataException($"{ground.Name}'s terrain file wasn't found in the game's files");
+            (centre, half, height) = NewGround(name, files, size);
+            // The ground textures its materials name, with the level (copied into it if the mode's levels don't load them).
+            copyTextures = !string.Equals(ground.Precache, basis.Precache, StringComparison.OrdinalIgnoreCase);
+            var groundKinds = ground.Asm.Containers.SelectMany(c => c.Primitives).GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+                                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            foreach (string texture in GroundTexturesOf(files, tag))
+            {
+                if (assets.ReadAnywhere(texture) is not { } header) continue;
+                groundTextureFiles.Add(texture);
+                AsmPrimitive like = groundKinds.GetValueOrDefault(texture) ?? Kind(texture);
+                byte[]? data = DataOf(texture) is { } dataName ? assets.ReadAnywhere(dataName) : null;
+                kinds[texture] = new AsmPrimitive
+                {
+                    Name = texture, Type = like.Type, Allocator = like.Allocator, Flags = like.Flags, SplitIndex = like.SplitIndex,
+                    HeaderSize = header.Length, DataSize = data?.Length ?? 0,
+                };
+                if (!copyTextures) continue;
+                files[texture] = header;
+                if (data != null) files[DataOf(texture)!] = data;
+            }
+            report.Add($"new ground: a {half * 2:0} m square at {height:0.#} m in the middle of the zone, made from nothing (its height field, sub-zones at every grid step, " +
+                       $"far-away ground, a blank blend map and a plain colour map; no foliage, roads, walls or occluders); its ground textures {ground.Name}'s " +
+                       $"({groundTextureFiles.Count}{(copyTextures ? ", copied into the level" : "")})");
+        }
+
+        // An empty stitch list; navigation.
+        files[name + ".stchlst_pc"] = StitchList.Write([], new Vector3(centre.X, height, centre.Y), []);
+        if (mode == Mode.Infestation && !noGround)
+        {
+            files[name + ".navdata_pc"] = NavigationBuilder.FlatSquare(centre, half - 1, height, ZoneCorner, ZoneWidth, ZonePlace).ToBytes();
+            report.Add("navigation: a new flat mesh over the ground, for the enemies (untested in the game)");
+        }
+        else
+        {
+            files[name + ".navdata_pc"] = NavigationFile.None.ToBytes();
+            report.Add(mode == Mode.Infestation ? "navigation: none (no ground to make it over: the enemies won't find their way)" : "navigation: none (nothing walks in Ruin by itself)");
+        }
+
+        // Its row, strings, spawn resources and picture (before its zone, which names its spawn resources).
+        string resources = AddToMode(mode, pattern, name, displayName, picture);
+
+        // Its zones, new.
+        var (zone, persistent) = NewZones(schema, mode, name, resources, centre, half, height, sky);
+        files[name + ".rfgzone_pc"] = zone;
+        AddSky(sky, files, kinds);
+
+        // ---- The asset list: the mode's groups, listing only the level's files.
+        AsmFile asm = basis.Asm;
+        int dropped = asm.Containers.RemoveAll(c => c.Type == 14);
+        AsmContainer? Holding(string file) => asm.Containers.FirstOrDefault(c => c.Type == 17 && !c.Name.StartsWith("ns_", StringComparison.OrdinalIgnoreCase) && c.Primitives.Any(p => p.Name.Equals(file, StringComparison.OrdinalIgnoreCase)));
+        AsmContainer zoneGroup = Holding(pattern + ".rfgzone_pc") ?? Holding(pattern + ".cterrain_pc")
+                                 ?? asm.Containers.FirstOrDefault(c => c.Type == 17 && c.Name.StartsWith("1_", StringComparison.OrdinalIgnoreCase))
+                                 ?? throw new InvalidDataException($"{pattern}'s asset list has no zone group");
+        var cells = new Dictionary<int, AsmContainer>();
+        for (int k = 0; k < 64; k++)
+            if (Holding($"{pattern}_{k}.ctmesh_pc") is { } cell) cells[k] = cell;
+        AsmContainer? precache = asm.Containers.FirstOrDefault(c => c.Name.Equals("ns_precache", StringComparison.OrdinalIgnoreCase));
+        foreach (AsmContainer c in asm.Containers.Where(c => !IsNsBase(c))) c.Primitives.Clear();
+
+        AsmPrimitive Entry(string file)
+        {
+            AsmPrimitive like = kinds.GetValueOrDefault(file) ?? Kind(file);
+            return new AsmPrimitive
+            {
+                Name = file, Type = like.Type, Allocator = like.Allocator, Flags = like.Flags, SplitIndex = like.SplitIndex,
+                HeaderSize = files.TryGetValue(file, out byte[]? h) ? h.Length : like.HeaderSize,
+                DataSize = DataOf(file) is string dn && files.TryGetValue(dn, out byte[]? d) ? d.Length : like.DataSize,
+            };
+        }
+        foreach (string file in files.Keys.Where(f => !IsDataFile(f)).Concat(groundTextureFiles).Distinct(StringComparer.OrdinalIgnoreCase).Order())
+        {
+            Match subzone = Regex.Match(file, "^" + Regex.Escape(name) + @"_(\d+)\.ctmesh_pc$", RegexOptions.IgnoreCase);
+            AsmContainer into = subzone.Success && cells.TryGetValue(int.Parse(subzone.Groups[1].Value), out AsmContainer? cell) ? cell : zoneGroup;
+            into.Primitives.Add(Entry(file));
+            bool precached = groundTextureFiles.Contains(file, StringComparer.OrdinalIgnoreCase) || skyFiles.Contains(file);
+            if (precached) precache?.Primitives.Add(Entry(file));
+        }
+
+        // ns_base: every file of the level's (but its persistent zone, loose beside it).
+        var baseFiles = files.Select(f => (f.Key, f.Value)).ToList();
         byte[] baseBytes = Packfile.CreateContainer(baseFiles);
         var container = Packfile.FromBytes("ns_base.str2_pc", baseBytes);
-        AsmContainer baseEntry = asm.Containers.FirstOrDefault(c => c.Name.Equals("ns_base", StringComparison.OrdinalIgnoreCase))
-                                 ?? new AsmContainer { Name = "ns_base", Type = 17, Flags = 0x80 };
+        AsmContainer baseEntry = asm.Containers.FirstOrDefault(IsNsBase) ?? new AsmContainer { Name = "ns_base", Type = 17, Flags = 0x80 };
         if (!asm.Containers.Contains(baseEntry)) asm.Containers.Insert(0, baseEntry);
-        var keptPrimitives = baseEntry.Primitives.Where(p => baseFiles.Any(f => f.Item1.Equals(p.Name, StringComparison.OrdinalIgnoreCase))).ToList();
         baseEntry.DataOffset = (uint)container.DataStart;
         baseEntry.CompressedSize = container.CompressedDataSize;
         baseEntry.Sizes.Clear();
         baseEntry.Sizes.AddRange(container.Entries.Select(e => (int)e.Size));
         baseEntry.Primitives.Clear();
-        foreach (var (file, data) in baseFiles)
-        {
-            if (IsDataFile(file)) continue;
-            AsmPrimitive? like = keptPrimitives.FirstOrDefault(p => p.Name.Equals(file, StringComparison.OrdinalIgnoreCase)) ?? kinds.GetValueOrDefault(file) ?? skyKinds.GetValueOrDefault(file);
-            string? dataName = DataOf(file);
-            baseEntry.Primitives.Add(new AsmPrimitive
-            {
-                Name = file,
-                Type = like?.Type ?? (byte)0, Allocator = like?.Allocator ?? (byte)0, Flags = like?.Flags ?? (byte)2, SplitIndex = like?.SplitIndex ?? (byte)0,
-                HeaderSize = data.Length,
-                DataSize = dataName != null && baseFiles.FirstOrDefault(f => f.Item1.Equals(dataName, StringComparison.OrdinalIgnoreCase)).Item2 is byte[] d ? d.Length : 0,
-            });
-        }
+        foreach (var (file, _) in baseFiles.Where(f => !IsDataFile(f.Key))) baseEntry.Primitives.Add(Entry(file));
 
-        // ---- The archive.
+        // ---- The archive: its asset list, its precache marker, ns_base, its zones.
         var archiveFiles = new List<(string Name, byte[] Data)> { (name + ".asm_pc", asm.ToBytes()) };
-        foreach (var (file, data) in loose)
-        {
-            if (file.EndsWith(".asm_pc", StringComparison.OrdinalIgnoreCase) || file.Equals("ns_base.str2_pc", StringComparison.OrdinalIgnoreCase)) continue;
-            if (Own(file)) continue;  // (the zones: below, renamed)
-            archiveFiles.Add((file, data));
-        }
+        foreach (var (file, data) in basis.Loose.Where(f => f.Key.EndsWith(".precache", StringComparison.OrdinalIgnoreCase))) archiveFiles.Add((file, data));
         archiveFiles.Add(("ns_base.str2_pc", baseBytes));
-        foreach (var (file, data) in files.Where(f => f.Key.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))) archiveFiles.Add((file, data));
+        archiveFiles.Add((name + ".rfgzone_pc", zone));
+        archiveFiles.Add(("p_" + name + ".rfgzone_pc", persistent));
         string path = Path.Combine(workspace.OverridesFolder, newArchive);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        Packfile.Write(path, archiveFiles, source.IsCompressed);
-        report.Add($"{newArchive} written ({new FileInfo(path).Length / 1024:N0} KB): {baseFiles.Count} files in its ns_base container");
-
-        // ---- Its row in the mode's list, its strings and picture.
-        AddToMode(mode, template, name, displayName, picture);
+        Packfile.Write(path, archiveFiles, basis.Compressed);
+        report.Add($"{newArchive} written ({new FileInfo(path).Length / 1024:N0} KB): {baseFiles.Count} files in its ns_base container; its asset list " +
+                   $"has the groups {mode} loads a level by, with only its own files ({dropped} model groups of {pattern}'s left out)");
         workspace.RefreshOverrides();
         return report;
     }
 
+    static bool IsNsBase(AsmContainer c) => c.Name.Equals("ns_base", StringComparison.OrdinalIgnoreCase);
+
     static string ReplaceIgnoringCase(string text, string from, string to) =>
-        System.Text.RegularExpressions.Regex.Replace(text, System.Text.RegularExpressions.Regex.Escape(from), to.Replace("$", "$$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        Regex.Replace(text, Regex.Escape(from), to.Replace("$", "$$"), RegexOptions.IgnoreCase);
 
     /// <summary>The data file (g-file) going with a header file, by the game's naming: .cXXX → .gXXX; null for one without.</summary>
     static string? DataOf(string header)
@@ -206,73 +283,139 @@ sealed class NewLevel
         return ext.Length > 2 && (ext[1] is 'g' or 'G') && !ext.Equals(".gtodx", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>A file of a level's scenery (a chunk, a stitch piece, a texture, an effect, and their data files).</summary>
-    static bool Scenery(string file) =>
-        Path.GetExtension(file).ToLowerInvariant() is ".cchk_pc" or ".gchk_pc" or ".cstch_pc" or ".gstch_pc" or ".cvbm_pc" or ".gvbm_pc" or ".cpeg_pc" or ".gpeg_pc" or ".cefct_pc";
-
-    /// <summary>The blank level (see the class): flat ground, no foliage, an empty stitch list, the scenery out.</summary>
-    void MakeBlank(Mode mode, string template, string name, Dictionary<string, byte[]> files, AsmFile asm, bool noGround, float size, string? sky)
+    /// <summary>A file's kind in an asset list (type, allocator, flags, split), as the game's levels list such files.</summary>
+    static AsmPrimitive Kind(string file)
     {
-        string terrainName = name + ".cterrain_pc", zoneName = name + ".rfgzone_pc";
-        ZoneFile zone = ZoneFile.Read(files[zoneName]);
-        // The scenery out first: what's left (starts, spawns, markers) is where the level is.
-        var classes = SceneryClasses.Select(NameHashes.ClassHash).ToHashSet();
-        var going = zone.Objects.Where(o => classes.Contains(o.ClassHash)).SelectMany(o => zone.WithAttached(o)).Distinct().ToList();
-        int taken = going.Count;
-        if (going.Count > 0) zone.Remove(going);
-        var points = zone.Objects.Where(o => o.ClassHash != NameHashes.ClassHash("object_env_settings")).Select(o => o.Placement.Position).ToList();
-        Vector3 middle = points.Count > 0 ? points.Aggregate((a, b) => a + b) / points.Count : Vector3.Zero;
-        string groundSaid;
-        if (noGround)
+        (byte type, byte allocator, byte flags, byte split) = Path.GetExtension(file).ToLowerInvariant() switch
         {
-            // No ground: the terrain files of a level that has none (Infestation's levels, in their caves,
-            // have a terrain file with no height field and empty sub-zones), under this level's name.
-            groundSaid = "no ground (" + NoGround(template, name, files, asm) + ")";
+            ".rfgzone_pc" => (3, 0, 2, 0),
+            ".cterrain_pc" => (4, 0, 6, 0),
+            ".navdata_pc" => (5, 0, 2, 0),
+            ".ctmesh_pc" => (21, 0, 6, 0),
+            ".stchlst_pc" => (23, 0, 2, 0),
+            ".cefct_pc" => (13, 1, 6, 0),
+            ".cvbm_pc" => (1, 1, 6, 1),
+            ".cpeg_pc" => (1, 1, 6, 1),
+            _ => (0, 0, 2, 0),
+        };
+        return new AsmPrimitive { Name = file, Type = type, Allocator = allocator, Flags = flags, SplitIndex = split };
+    }
+
+    /// <summary>The ground textures the terrain files' materials name (their .tga names, as the game's textures: .cvbm_pc), but the level's own maps.</summary>
+    static List<string> GroundTexturesOf(Dictionary<string, byte[]> files, string tag) =>
+        files.Where(f => f.Key.EndsWith(".cterrain_pc", StringComparison.OrdinalIgnoreCase) || f.Key.EndsWith(".ctmesh_pc", StringComparison.OrdinalIgnoreCase))
+             .SelectMany(f => Regex.Matches(Encoding.Latin1.GetString(f.Value), @"(?<![A-Za-z0-9_])[A-Za-z0-9_]+\.tga", RegexOptions.IgnoreCase).Select(m => m.Value))
+             .Where(t => !t.StartsWith(tag, StringComparison.OrdinalIgnoreCase))
+             .Select(t => Path.ChangeExtension(t, ".cvbm_pc")).Distinct(StringComparer.OrdinalIgnoreCase).Order().ToList();
+
+    // ---- The zones ---------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The level's zone and persistent zone, made empty and given new objects (see the class), from the
+    /// zone schema with the editor's settings. Handles 0x88000001 on (the zone's place, as the game's levels').
+    /// </summary>
+    (byte[] Zone, byte[] Persistent) NewZones(ZoneSchema schema, Mode mode, string name, string resources, Vector2 centre, float half, float y, string sky)
+    {
+        ZoneFile zone = ZoneFile.Create(NameHashes.ClassHash("Default"), NameHashes.ClassHash("none"));
+        ZoneFile persistent = ZoneFile.Create(0, 0);
+        uint next = 0x88000001;
+        int made = 0;
+        var middle = new Vector3(centre.X, y, centre.Y);
+        float reach = MathF.Max(4, MathF.Min(half - 6, 24));
+
+        ZoneObject Add(string className, Vector3 at, params (string Name, object Value)[] values) => AddWithin(className, at, null, values);
+        ZoneObject AddWithin(string className, Vector3 at, Vector3? extent, params (string Name, object Value)[] values)
+        {
+            SchemaClass type = schema.Class(className) ?? throw new InvalidDataException($"the zone schema has no {className}");
+            var (min, max) = extent is { } e ? (at - e, at + e) : type.NewObjectBounds(at);
+            ZoneObject o = zone.AddNew(NameHashes.ClassHash(type.ZoneClassNames[0]), next++, type.NewObject(at, assets.Choices), min, max);
+            foreach (var (property, value) in values) Set(o, property, value);
+            made++;
+            return o;
+        }
+        void Face(ZoneObject o, Vector3 towards)
+        {
+            Vector3 forward = towards - o.Placement.Position;
+            if (forward.LengthSquared() < 1e-6f) return;
+            forward = Vector3.Normalize(forward);
+            Vector3 right = Vector3.Cross(Vector3.UnitY, forward);
+            right = right.LengthSquared() < 1e-6f ? Vector3.UnitX : Vector3.Normalize(right);
+            Vector3 up = Vector3.Cross(forward, right);
+            o.TurnTo(new Matrix4x4(right.X, right.Y, right.Z, 0, up.X, up.Y, up.Z, 0, forward.X, forward.Y, forward.Z, 0, 0, 0, 0, 1));
+        }
+        void Persist(ZoneObject o)
+        {
+            o.Flags |= 1;  // (the game's player starts: in both zones, persistent)
+            persistent.Insert(persistent.Objects.Count, ZoneFile.Copy(o, o.Handle));
+        }
+
+        // The zone object: which terrain, which spawn resources.
+        Add("obj_zone", new Vector3(centre.X, 0, centre.Y), ("terrain_file_name", name), ("spawn_resource_data", resources), ("district", "Default"),
+            ("ambient_spawn", "None"), ("wind_min_speed", 50f), ("wind_max_speed", 80f));
+
+        // The player's starts.
+        Vector3 start = middle + new Vector3(0, 0, -reach);
+        if (mode == Mode.Ruin)
+        {
+            ZoneObject player = Add("player_start", start, ("mp_team", "Neutral"), ("respawn", true), ("initial_spawn", false), ("mission_info", "none"));
+            Face(player, middle);
+            Persist(player);
+            Face(Add("object_exo_spawn_node", start + new Vector3(6, 0, 0), ("exo_type", "rf_exo"), ("spawn_prob", 1f)), middle);
         }
         else
         {
-            TerrainSculpt old = TerrainSculpt.Load(name, f => files.GetValueOrDefault(f), out string? why)
-                                ?? throw new InvalidDataException($"its ground couldn't be read ({why}); a level from {template} can only be made with no ground");
-            var before = new TerrainHeightsBefore(old);
-            // The new ground's height: the old ground's under the level's objects (they stay as high above it).
-            float level = points.Count > 0 ? points.Select(p => before.HeightAt(p.X, p.Z)).Where(h => !float.IsNaN(h)).DefaultIfEmpty(middle.Y).Average() : middle.Y;
-            (Vector2 centre, float half) = NewGround(mode, name, files, level, size, new Vector2(middle.X, middle.Z));
-            foreach (ZoneObject o in zone.Objects)
+            for (int i = 0; i < 4; i++)
             {
-                Vector3 p = o.Placement.Position;
-                float under = before.HeightAt(p.X, p.Z);
-                float x = Math.Clamp(p.X, centre.X - half + 2, centre.X + half - 2), z = Math.Clamp(p.Z, centre.Y - half + 2, centre.Y + half - 2);
-                bool env = o.ClassHash == NameHashes.ClassHash("object_env_settings");
-                o.MoveTo(env ? p : new Vector3(x, float.IsNaN(under) ? p.Y : level + (p.Y - under), z));
+                ZoneObject player = Add("player_start", start + new Vector3((i - 1.5f) * 3, 0, 0), ("mp_team", "Guerilla"), ("respawn", true), ("initial_spawn", true),
+                                        ("mission_info", "none"));
+                Face(player, middle);
+                Persist(player);
             }
-            middle = new Vector3(centre.X, level, centre.Y);
-            groundSaid = $"new ground, {half * 2:0} m square at {level:0.#} m, round the level's starts and spawns (made from nothing: its height field, " +
-                         "sub-zones at every grid step, far-away ground, blend and colour maps; no foliage, walls or old roads)";
+            Add("multi_object_marker", middle, ("marker_type", "Infestation objective"), ("mp_team", "Neutral"));
+            // Its enemies come from the edge.
+            float edge = MathF.Max(4, half - 8);
+            foreach (Vector3 at in new[] { new Vector3(-edge, 0, -edge), new Vector3(edge, 0, -edge), new Vector3(edge, 0, edge), new Vector3(-edge, 0, edge) })
+                Face(Add("object_squad_spawn_node", middle + at, ("squad_def", "Creeper"), ("default_orders", "Immediate Attack"), ("spawn_prob", 0f)), middle);
         }
-        // A new, empty stitch list.
-        if (files.ContainsKey(name + ".stchlst_pc")) files[name + ".stchlst_pc"] = StitchList.Write([], middle, []);
-        // Its sky.
-        if (sky != null) SetSky(zone, sky, middle, files, asm);
-        files[zoneName] = zone.ToBytes();
-        // The groups of its scenery's chunks and pieces, and their files in its cells' groups, out.
-        int groups = asm.Containers.RemoveAll(c => c.Type == 14);
-        foreach (AsmContainer c in asm.Containers.Where(c => c.Type == 17 && !c.Name.Equals("ns_base", StringComparison.OrdinalIgnoreCase)))
-            c.Primitives.RemoveAll(p => Scenery(p.Name) && !p.Name.Contains(template, StringComparison.OrdinalIgnoreCase) && !p.Name.Contains("sky", StringComparison.OrdinalIgnoreCase));
-        report.Add($"blank: {groundSaid}, an empty stitch list, {taken} scenery objects and {groups} chunk groups taken out, " +
-                   $"{zone.Objects.Count} objects kept (starts, spawns, markers)");
+        // The spectator's intro camera: behind and above the start, looking at the middle.
+        Face(Add("multi_object_marker", start + new Vector3(0, 8, -10), ("marker_type", "Spectator intro camera"), ("mp_team", "Neutral")), middle);
+
+        // One environment box round the zone, with the sky.
+        Vector3 box = new(ZoneWidth / 2 + 1, 600, ZoneWidth / 2 + 1);
+        AddWithin("object_env_settings", new Vector3(centre.X, y, centre.Y), box, ("cam_effect_1", sky), ("skybox_enable", true), ("far_clip", 1500f),
+            ("cull_distance", 475f), ("stitch_lod_distance", 200f), ("area_shape", "box"), ("bb", new[] { -box.X, -box.Y, -box.Z, box.X, box.Y, box.Z }));
+        report.Add($"its zone made new: {made} objects ({(mode == Mode.Ruin ? "a player start, an exo spawn" : "four player starts, the objective, four enemy spawns")}, " +
+                   $"the intro camera, the zone object, an environment box with the sky {sky}); its persistent zone its player starts");
+        return (zone.ToBytes(), persistent.ToBytes());
     }
 
+    /// <summary>Sets a property of a new object (adding it if the object hasn't it): text, a number, true or false, or numbers.</summary>
+    static void Set(ZoneObject o, string property, object value)
+    {
+        byte[] bytes = value switch
+        {
+            string text => [.. Encoding.Latin1.GetBytes(text), 0],
+            float number => BitConverter.GetBytes(number),
+            bool flag => [(byte)(flag ? 1 : 0)],
+            float[] numbers => [.. numbers.SelectMany(BitConverter.GetBytes)],
+            _ => throw new ArgumentException($"{property}: a value of {value.GetType().Name}"),
+        };
+        int type = value is string ? ZoneProperty.TextType : ZoneProperty.ValueType;
+        if (o.Property(property) is { } have) have.SetValue(bytes);
+        else o.AddProperty(type, NameHashes.PropertyHash(property), bytes);
+    }
+
+    // ---- The ground ----------------------------------------------------------------------------------
+
     /// <summary>
-    /// The level's ground made from nothing (its terrain file keeps only its materials, which name the
-    /// game's ground textures and the level's own blend and colour maps): a <paramref name="size"/> m square
-    /// of flat ground at <paramref name="level"/>, centred on <paramref name="root"/> (kept in the zone), as
-    /// the height field (every sample; outside the square 300 m down, so the level ends in a drop),
-    /// the nine sub-zones (a vertex at every grid step, nothing drawn outside the square), the far-away
-    /// ground, a blend map all of its first layer and a colour map of one colour; no foliage, barriers,
-    /// occluders, roads or undergrowth; for Ruin no navigation (nothing walks there by itself; Infestation
-    /// keeps its start level's, its enemies need one). Returns the square's centre and half width.
+    /// The level's ground made from nothing (its terrain file keeps only its materials): a
+    /// <paramref name="size"/> m square of flat ground in the middle of the zone, as the height field
+    /// (every sample; outside the square 300 m down, so the level ends in a drop), the sub-zones (a vertex
+    /// at every grid step, nothing drawn outside the square), the far-away ground, a blend map all of its
+    /// first layer and a plain grey colour map (no tint); no foliage, barriers, occluders, roads or
+    /// undergrowth. Returns the square's centre, half width and height.
     /// </summary>
-    (Vector2 Centre, float Half) NewGround(Mode mode, string name, Dictionary<string, byte[]> files, float level, float size, Vector2 root)
+    (Vector2 Centre, float Half, float Height) NewGround(string name, Dictionary<string, byte[]> files, float size)
     {
         string terrainName = name + ".cterrain_pc";
         byte[] oldTerrain = files[terrainName];
@@ -282,10 +425,12 @@ sealed class NewLevel
         float step = field.Step, width = field.ExtentX;
         var corner = new Vector2(BitConverter.ToSingle(t.Data, 0x04), BitConverter.ToSingle(t.Data, 0x0C));
         float half = Math.Clamp(size, 16, width) / 2;
-        var centre = new Vector2(Math.Clamp(root.X, corner.X + half, corner.X + width - half), Math.Clamp(root.Y, corner.Y + half, corner.Y + width - half));
+        var centre = corner + new Vector2(width / 2);
         bool Inside(int i, int j) => MathF.Abs(corner.X + i * step - centre.X) <= half + step * 0.01f && MathF.Abs(corner.Y + j * step - centre.Y) <= half + step * 0.01f;
 
-        // The height field.
+        // The height: 0 if the height field reaches it with 300 m below to drop to, else as near as it can.
+        float lowest = field.Offset, highest = field.Offset + field.Scale * ushort.MaxValue;
+        float level = Math.Clamp(0, Math.Min(lowest + 300, highest), highest);
         ushort Sample(float h) => (ushort)Math.Clamp(MathF.Round((h - field.Offset) / field.Scale), 0, ushort.MaxValue);
         ushort ground = Sample(level), drop = Sample(level - 300);
         var samples = new ushort[n * m];
@@ -298,12 +443,10 @@ sealed class NewLevel
             }
         float top = ground * field.Scale + field.Offset, bottom = drop * field.Scale + field.Offset;
         t.HeightField = TerrainHeightField.Section(n, m, step, field.InverseStep, field.ExtentX, field.ExtentZ, field.Offset, field.Scale, samples);
-        // The far-away ground, from the heights.
         var (records, blocks, farData) = RfaFormats.Guerrilla.FarGround.Build(heights, n, step, corner, width);
         t.FarRecords = records;
         t.FarBlocks.Clear();
         t.FarBlocks.AddRange(blocks);
-        // Nothing else of the old ground's.
         (t.BarrierRecords, t.BarrierSection) = TerrainBarriers.Parts([]);
         t.Foliage = null;
         t.FoliageBuffer = null;
@@ -327,7 +470,8 @@ sealed class NewLevel
         var starts = new List<(string File, int Number, int X0, int Z0, uint Material)>();
         foreach (string file in parts)
         {
-            var old = TerrainSubzone.Read(files[file], files[Path.ChangeExtension(file, ".gtmesh_pc")]);
+            if (!files.TryGetValue(Path.ChangeExtension(file, ".gtmesh_pc"), out byte[]? data)) continue;
+            var old = TerrainSubzone.Read(files[file], data);
             int number = int.TryParse(file[(name.Length + 1)..^".ctmesh_pc".Length], out int k) ? k : starts.Count;
             starts.Add((file, number, (int)MathF.Round((old.Origin.X - corner.X) / step), (int)MathF.Round((old.Origin.Y - corner.Y) / step), TerrainSubzone.GroundMaterialOf(files[file])));
         }
@@ -343,7 +487,7 @@ sealed class NewLevel
             files[Path.ChangeExtension(file, ".gtmesh_pc")] = data;
         }
 
-        // The blend map all of the first layer; the colour map one colour (the old one's average).
+        // The blend map all of the first layer; the colour map plain grey (no tint).
         foreach (string map in files.Keys.Where(f => f.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase)).ToList())
         {
             string dataName = Path.ChangeExtension(map, ".gvbm_pc");
@@ -353,27 +497,18 @@ sealed class NewLevel
                 PegFile peg = PegFile.Read(files[map], mapData);
                 PegTexture texture = peg.Textures[0];
                 var image = new RgbaImage(texture.Width, texture.Height);
-                bool blend = map.Contains("_alpha", StringComparison.OrdinalIgnoreCase);
-                byte r = 0, g = 0, b = 0;
-                if (!blend)
-                {
-                    RgbaImage was = peg.Decode(texture, 256);
-                    long sr = 0, sg = 0, sb = 0, count = was.Pixels.Length / 4;
-                    for (int p = 0; p < was.Pixels.Length; p += 4) { sr += was.Pixels[p]; sg += was.Pixels[p + 1]; sb += was.Pixels[p + 2]; }
-                    (r, g, b) = ((byte)(sr / count), (byte)(sg / count), (byte)(sb / count));
-                }
-                for (int p = 0; p < image.Pixels.Length; p += 4) { image.Pixels[p] = r; image.Pixels[p + 1] = g; image.Pixels[p + 2] = b; image.Pixels[p + 3] = 255; }
+                byte grey = map.Contains("_alpha", StringComparison.OrdinalIgnoreCase) ? (byte)0 : (byte)128;
+                for (int p = 0; p < image.Pixels.Length; p += 4) { image.Pixels[p] = grey; image.Pixels[p + 1] = grey; image.Pixels[p + 2] = grey; image.Pixels[p + 3] = 255; }
                 files[dataName] = peg.WithTextureData(texture, TextureCodec.EncodeWithMips(texture.Format, image, texture.MipLevels));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException)
             {
-                report.Add($"{map} couldn't be made new ({ex.Message}); it stays as the start level's");
+                files.Remove(map);
+                files.Remove(dataName);
+                report.Add($"{map} couldn't be made ({ex.Message}); the level has none");
             }
         }
-
-        // Navigation: none for Ruin.
-        if (mode == Mode.Ruin && files.ContainsKey(name + ".navdata_pc")) files[name + ".navdata_pc"] = NavigationFile.None.ToBytes();
-        return (centre, half);
+        return (centre, half, top);
     }
 
     /// <summary>The game's skies (effects.xtbl's effects drawing one: env_..._sky...).</summary>
@@ -382,118 +517,58 @@ sealed class NewLevel
         try
         {
             string table = Encoding.Latin1.GetString(workspace.Read(Tables, "effects.xtbl"));
-            return System.Text.RegularExpressions.Regex.Matches(table, @"<Name>(env_[A-Za-z0-9_]*sky[A-Za-z0-9_]*)</Name>").Select(m => m.Groups[1].Value)
-                         .Where(s => !s.Contains("lightning") && !s.Contains("bomb")).Distinct(StringComparer.OrdinalIgnoreCase).Order().ToList();
+            return Regex.Matches(table, @"<Name>(env_[A-Za-z0-9_]*sky[A-Za-z0-9_]*)</Name>").Select(m => m.Groups[1].Value)
+                        .Where(s => !s.Contains("lightning") && !s.Contains("bomb")).Distinct(StringComparer.OrdinalIgnoreCase).Order().ToList();
         }
-        catch (Exception ex) when (ex is IOException or InvalidDataException) { return ["env_sur_day_sky"]; }
+        catch (Exception ex) when (ex is IOException or InvalidDataException) { return [DefaultSky]; }
     }
 
-    /// <summary>
-    /// The level's sky: every environment box naming a sky (a camera effect with "sky" in it) names
-    /// this one instead, or a box round the whole level is added naming it; and the sky's effect file
-    /// and the textures it draws go in the level's ns_base container (the game loads them with the level).
-    /// </summary>
-    void SetSky(ZoneFile zone, string sky, Vector3 middle, Dictionary<string, byte[]> files, AsmFile asm)
+    /// <summary>The sky's files (its effect file and the textures it draws), which go in the level's ns_base container: the game loads them with the level.</summary>
+    void AddSky(string sky, Dictionary<string, byte[]> files, Dictionary<string, AsmPrimitive> kinds)
     {
-        uint envClass = NameHashes.ClassHash("object_env_settings");
-        int named = 0;
-        foreach (ZoneObject o in zone.Objects.Where(o => o.ClassHash == envClass))
-            foreach (string slot in new[] { "cam_effect_1", "cam_effect_2", "cam_effect_3" })
-                if (o.Property(slot) is { } p && p.Text.Contains("sky", StringComparison.OrdinalIgnoreCase)) { p.SetText(sky); named++; }
-        if (named == 0)
-        {
-            if (assets.ZoneSchema?.Class("object_env_settings") is not { } schema) { report.Add($"its sky {sky} couldn't be set: the game's zone schema wasn't found"); return; }
-            const float Half = 200, Low = -500, High = 1000;
-            ZoneObject box = zone.AddNew(envClass, schema.NewObject(middle), middle + new Vector3(-Half, Low, -Half), middle + new Vector3(Half, High, Half), []);
-            box.Property("bb")?.SetValue([.. new[] { -Half, Low, -Half, Half, High, Half }.SelectMany(BitConverter.GetBytes)]);
-            if (box.Property("cam_effect_1") is { } effect) effect.SetText(sky);
-            else box.AddProperty(ZoneProperty.TextType, NameHashes.PropertyHash("cam_effect_1"), Encoding.Latin1.GetBytes(sky + "\0"));
-        }
-        // Its files, with the level.
         var added = new List<string>();
-        void Add(string header, byte type, byte allocator, byte flags, byte split)
+        void Add(string header)
         {
             if (files.ContainsKey(header) || assets.ReadAnywhere(header) is not { } h) return;
             files[header] = h;
-            string dataName = Path.ChangeExtension(header, ".g" + Path.GetExtension(header)[2..]);
-            if (assets.ReadAnywhere(dataName) is { } d) files[dataName] = d;
-            skyKinds[header] = new AsmPrimitive { Name = header, Type = type, Allocator = allocator, Flags = flags, SplitIndex = split };
+            if (DataOf(header) is { } dataName && assets.ReadAnywhere(dataName) is { } d) files[dataName] = d;
+            kinds[header] = Kind(header);
+            skyFiles.Add(header);
             added.Add(header);
         }
-        Add(sky + ".cefct_pc", 13, 1, 6, 0);
+        Add(sky + ".cefct_pc");
         if (files.GetValueOrDefault(sky + ".cefct_pc") is { } effectFile)
-            foreach (string texture in System.Text.RegularExpressions.Regex.Matches(Encoding.Latin1.GetString(effectFile), @"(?<![A-Za-z0-9_])[A-Za-z0-9_]+\.tga")
-                         .Select(m => m.Value).Distinct(StringComparer.OrdinalIgnoreCase))
-                Add(Path.ChangeExtension(texture, ".cvbm_pc"), 1, 1, 6, 1);
-        report.Add($"its sky: {sky}" + (named > 0 ? $" (named by {named} of its environment boxes)" : " (a new environment box round the level)") +
-                   (added.Count > 0 ? $", its files with the level ({string.Join(", ", added)})" : ""));
+            foreach (string texture in Regex.Matches(Encoding.Latin1.GetString(effectFile), @"(?<![A-Za-z0-9_])[A-Za-z0-9_]+\.tga").Select(m => m.Value).Distinct(StringComparer.OrdinalIgnoreCase))
+                Add(Path.ChangeExtension(texture, ".cvbm_pc"));
+        report.Add($"its sky: {sky}" + (added.Count > 0 ? $", its files with the level ({string.Join(", ", added)})" : " (its files weren't found: the game shows none)"));
     }
 
-    /// <summary>The sky's files' kinds, for their asset list entries.</summary>
-    readonly Dictionary<string, AsmPrimitive> skyKinds = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> skyFiles = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Levels with no ground, whose terrain files a level with none is given (the first found).</summary>
+    /// <summary>Levels with no ground, whose terrain files (a terrain file with no height field, empty sub-zones: no names in them) a level with none is given.</summary>
     static readonly string[] GroundlessLevels = ["mp_inf01", "mp_inf02", "mp_inf03", "mp_inf04", "mp_inf05", "mp_inf06", "mp_inf07", "mp_inf08"];
 
-    /// <summary>
-    /// The level's terrain file and sub-zones replaced by a groundless level's (no names inside them),
-    /// and its blend and colour maps taken out (nothing names them now). Returns whose they are.
-    /// </summary>
-    string NoGround(string template, string name, Dictionary<string, byte[]> files, AsmFile asm)
+    /// <summary>The level's terrain file and sub-zones with no ground in them, under its name. Returns whose they were.</summary>
+    string NoGround(string name, Dictionary<string, byte[]> files)
     {
         foreach (string from in GroundlessLevels)
         {
-            if (from.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
             byte[]? header = assets.ReadAnywhere(from + ".cterrain_pc"), data = assets.ReadAnywhere(from + ".gterrain_pc");
             if (header == null || data == null || header.Length > 64 * 1024) continue;  // (a level with ground: its terrain file is far bigger)
             var subzones = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-            bool all = true;
-            foreach (string own in files.Keys.Where(f => f.StartsWith(name + "_", StringComparison.OrdinalIgnoreCase) && f.EndsWith(".ctmesh_pc", StringComparison.OrdinalIgnoreCase)).ToList())
+            for (int k = 0; k < 64; k++)
             {
-                string number = own[(name.Length + 1)..^".ctmesh_pc".Length];
-                byte[]? c = assets.ReadAnywhere($"{from}_{number}.ctmesh_pc"), g = assets.ReadAnywhere($"{from}_{number}.gtmesh_pc");
-                if (c == null || g == null) { all = false; break; }
-                subzones[own] = c;
-                subzones[$"{name}_{number}.gtmesh_pc"] = g;
+                byte[]? c = assets.ReadAnywhere($"{from}_{k}.ctmesh_pc"), g = assets.ReadAnywhere($"{from}_{k}.gtmesh_pc");
+                if (c == null || g == null) break;
+                subzones[$"{name}_{k}.ctmesh_pc"] = c;
+                subzones[$"{name}_{k}.gtmesh_pc"] = g;
             }
-            if (!all) continue;
             files[name + ".cterrain_pc"] = header;
             files[name + ".gterrain_pc"] = data;
             foreach (var (file, bytes) in subzones) files[file] = bytes;
-            // Its blend and colour maps: nothing names them now.
-            var maps = files.Keys.Where(f => f.EndsWith("vbm_pc", StringComparison.OrdinalIgnoreCase)).ToList();
-            foreach (string map in maps) files.Remove(map);
-            foreach (AsmContainer c in asm.Containers)
-                c.Primitives.RemoveAll(p => p.Name.EndsWith("vbm_pc", StringComparison.OrdinalIgnoreCase) && p.Name.Contains(template, StringComparison.OrdinalIgnoreCase));  // (named as the template's still)
-            return $"as {from}'s";
+            return $"empty terrain files as {from}'s, with {subzones.Count / 2} empty sub-zones";
         }
-        throw new InvalidDataException("no level with no ground was found to take its terrain files from (Infestation's mp_inf01 to mp_inf08)");
-    }
-
-    /// <summary>The ground's heights as they were, sampled before it was flattened.</summary>
-    sealed class TerrainHeightsBefore
-    {
-        readonly float[] heights;
-        readonly Vector2 corner;
-        readonly float width;
-        const int N = 128;
-        public TerrainHeightsBefore(TerrainSculpt ground)
-        {
-            corner = ground.Corner;
-            width = ground.Width;
-            heights = new float[(N + 1) * (N + 1)];
-            for (int i = 0; i <= N; i++)
-                for (int j = 0; j <= N; j++) heights[j * (N + 1) + i] = ground.HeightAt(corner.X + width * i / N, corner.Y + width * j / N);
-        }
-        public float HeightAt(float x, float z)
-        {
-            float u = (x - corner.X) / width * N, v = (z - corner.Y) / width * N;
-            if (u < 0 || v < 0 || u > N || v > N) return float.NaN;
-            int i = Math.Min((int)u, N - 1), j = Math.Min((int)v, N - 1);
-            float fu = u - i, fv = v - j;
-            float H(int a, int b) => heights[b * (N + 1) + a];
-            return (H(i, j) * (1 - fu) + H(i + 1, j) * fu) * (1 - fv) + (H(i, j + 1) * (1 - fu) + H(i + 1, j + 1) * fu) * fv;
-        }
+        throw new InvalidDataException("no level with no ground was found to see what empty terrain files are like (Infestation's mp_inf01 to mp_inf08)");
     }
 
     /// <summary>A level the editor made: its file name, the mode whose list has it (null: none, only its files are left), whether its archive is there.</summary>
@@ -633,8 +708,16 @@ sealed class NewLevel
 
     // ---- The mode's list -------------------------------------------------------------------------
 
-    void AddToMode(Mode mode, string template, string name, string displayName, string? picture)
+    /// <summary>
+    /// The level's row in its mode's map list (laid out as <paramref name="template"/>'s, every name,
+    /// string, picture and its spawn resources its own), its strings and pictures (<paramref name="picture"/>,
+    /// or a title card with its name). Returns the name of its spawn resources (spawn_resource.xtbl).
+    /// </summary>
+    string AddToMode(Mode mode, string template, string name, string displayName, string? picture)
     {
+        string resourcesName = "Default";
+        Func<int, int, RgbaImage> pixels = picture != null ? (w, h) => LoadPicture(picture, w, h) : (w, h) => TitleCard(displayName, mode, w, h);
+        string from = picture != null ? Path.GetFileName(picture) : "a title card with its name";
         var (tableName, row, key) = TableOf(mode);
         string table = Encoding.Latin1.GetString(workspace.Read(Tables, tableName));
         string upper = name.ToUpperInvariant();
@@ -645,12 +728,14 @@ sealed class NewLevel
         if (LevelFiles.RowValue(table, row, key, template, "resource_reservation") is { Length: > 0 } templateResources)
         {
             string resources = Encoding.Latin1.GetString(workspace.Read(Tables, "spawn_resource.xtbl"));
+            resourcesName = templateResources;
             if (SpawnResource.Read(resources, templateResources) is { } own)
             {
                 own.Name = name;
                 workspace.WriteOverride(Tables, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(own.WriteTo(resources, templateResources)));
                 change["resource_reservation"] = name;
-                report.Add($"spawn_resource.xtbl: its own spawn resources \"{name}\", as {templateResources} (change them with Spawn resources...)");
+                resourcesName = name;
+                report.Add($"spawn_resource.xtbl: its own spawn resources \"{name}\", to start with what {mode} levels spawn ({templateResources}'s); change them with Spawn resources");
             }
         }
         if (mode == Mode.Ruin)
@@ -664,7 +749,7 @@ sealed class NewLevel
             change["display_name_uppercase"] = id + "_UC";
             change["is_locked"] = "False";
             change["unlocks_map"] = "";
-            if (picture != null && TryPicture(LevelFiles.RowValue(table, row, key, template, "image_name"), "ui_ruin_" + name, picture) is { } image) change["image_name"] = image;
+            if (TryPicture(LevelFiles.RowValue(table, row, key, template, "image_name"), "ui_ruin_" + name, pixels, from) is { } image) change["image_name"] = image;
         }
         else
         {
@@ -675,22 +760,19 @@ sealed class NewLevel
             change["Filename"] = name;
             change["Display_name"] = id;
             change["Display_name_uppercase"] = id + "_UC";
-            if (picture != null)
-            {
-                if (TryPicture(LevelFiles.RowValue(table, row, key, template, "level_image_name"), "ui_mp_lobby_" + name, picture) is { } lobby) change["level_image_name"] = lobby;
-                if (TryPicture(LevelFiles.RowValue(table, row, key, template, "Load_image"), "ui_mp_load_" + name, picture) is { } load) change["Load_image"] = load;
-            }
+            if (TryPicture(LevelFiles.RowValue(table, row, key, template, "level_image_name"), "ui_mp_lobby_" + name, pixels, from) is { } lobby) change["level_image_name"] = lobby;
+            if (TryPicture(LevelFiles.RowValue(table, row, key, template, "Load_image"), "ui_mp_load_" + name, pixels, from) is { } load) change["Load_image"] = load;
         }
         string made = LevelFiles.WithRowCopied(table, row, key, template, name, change) ?? throw new InvalidDataException($"{tableName} has no row for {template}");
         workspace.WriteOverride(Tables, tableName, Encoding.Latin1.GetBytes(made));
-        report.Add($"{tableName}: a row for {name} (\"{displayName}\"), copied from {template}'s, unlocked");
+        report.Add($"{tableName}: its row (\"{displayName}\"), unlocked, laid out as the mode's rows are");
         if (mode == Mode.Infestation)
         {
             string pregame = Encoding.Latin1.GetString(workspace.Read(Tables, "rf4_mp_pregame.xtbl"));
             if (LevelFiles.WithRowCopied(pregame, "pregame", "Name", template, name, new Dictionary<string, string> { ["Name"] = name }) is { } p)
             {
                 workspace.WriteOverride(Tables, "rf4_mp_pregame.xtbl", Encoding.Latin1.GetBytes(p));
-                report.Add("rf4_mp_pregame.xtbl: its pre-game row, as " + template + "'s");
+                report.Add("rf4_mp_pregame.xtbl: its pre-game row");
             }
         }
         // The strings, in every language's multiplayer strings.
@@ -701,26 +783,28 @@ sealed class NewLevel
             languages++;
         }
         report.Add($"its name in {languages} languages' multiplayer strings ({string.Join(", ", strings.Select(s => s.Tag))})");
+        return resourcesName;
     }
 
     /// <summary>The picture made (its name), or null (and why, in the report) if it couldn't be: the level is made without it.</summary>
-    string? TryPicture(string? templateImage, string image, string picture)
+    string? TryPicture(string? templateImage, string image, Func<int, int, RgbaImage> pixels, string from)
     {
-        try { return MakePicture(templateImage, image, picture); }
+        try { return MakePicture(templateImage, image, pixels, from); }
         catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentException or NotSupportedException
                                        or InvalidOperationException or FormatException or System.Runtime.InteropServices.COMException)
         {
-            report.Add($"its picture {image} couldn't be made ({ex.Message}); it shows {templateImage ?? "none"}'s");
+            report.Add($"its picture {image} couldn't be made ({ex.Message}); the menu shows another level's ({templateImage ?? "none"})");
             return null;
         }
     }
 
     /// <summary>
-    /// A preview picture: the template's image (its container in interface.vpp_pc, its size and
-    /// format) with the picture in it (scaled to fill it, its middle kept), as a new image container
-    /// beside interface.vpp_pc (&lt;image&gt;.str2_pc), listed in ui_images.asm_pc. Returns its name.
+    /// A preview picture, new: <paramref name="pixels"/> at the size and in the format the menu's
+    /// pictures of this kind have (<paramref name="templateImage"/>'s, in interface.vpp_pc), as a new
+    /// image container beside interface.vpp_pc (&lt;image&gt;.str2_pc), listed in ui_images.asm_pc as
+    /// such pictures are. Returns its name.
     /// </summary>
-    string MakePicture(string? templateImage, string image, string picture)
+    string MakePicture(string? templateImage, string image, Func<int, int, RgbaImage> pixels, string from)
     {
         if (templateImage == null) throw new InvalidDataException("the template's row names no picture");
         Packfile ui = workspace.Archive(Interface);
@@ -730,10 +814,10 @@ sealed class NewLevel
         byte[] data = templateContainer.Read(templateContainer.Find(templateImage + ".gvbm_pc") ?? throw new InvalidDataException($"{templateImage} has no texture data"));
         PegFile peg = PegFile.Read(header, data);
         PegTexture texture = peg.Textures[0];
-        RgbaImage pixels = LoadPicture(picture, texture.Width, texture.Height);
+        RgbaImage made0 = pixels(texture.Width, texture.Height);
         (byte[] newHeader, byte[] newData) = peg.Single(texture, image + ".tga", texture.MipLevels);
         PegFile made = PegFile.Read(newHeader, newData);
-        newData = made.WithTextureData(made.Textures[0], TextureCodec.EncodeWithMips(texture.Format, pixels, texture.MipLevels));
+        newData = made.WithTextureData(made.Textures[0], TextureCodec.EncodeWithMips(texture.Format, made0, texture.MipLevels));
         var containerFiles = new List<(string Name, byte[] Data)> { (image + ".cvbm_pc", newHeader), (image + ".gvbm_pc", newData) };
         byte[] bytes = Packfile.CreateContainer(containerFiles);
         string containerPath = Path.Combine(workspace.OverridesFolder, Cache, image + ".str2_pc");
@@ -754,7 +838,44 @@ sealed class NewLevel
         });
         list.Containers.Add(entry);
         workspace.WriteOverride(Interface, "ui_images.asm_pc", list.ToBytes());
-        report.Add($"its picture: {image} ({texture.Width} × {texture.Height}, from {Path.GetFileName(picture)}), as {templateImage} is");
+        report.Add($"its picture: {image} ({texture.Width} × {texture.Height}, {from})");
+        return image;
+    }
+
+    /// <summary>
+    /// A title card for a level with no picture of its own: its name, large, over a dark ground in the
+    /// mode's colour (Ruin rust, Infestation green), with the mode's name under it.
+    /// </summary>
+    static RgbaImage TitleCard(string displayName, Mode mode, int width, int height)
+    {
+        var visual = new DrawingVisual();
+        using (DrawingContext dc = visual.RenderOpen())
+        {
+            Color top = mode == Mode.Ruin ? Color.FromRgb(0x5A, 0x24, 0x12) : Color.FromRgb(0x1C, 0x40, 0x22);
+            dc.DrawRectangle(new LinearGradientBrush(top, Color.FromRgb(0x10, 0x10, 0x12), 90), null, new System.Windows.Rect(0, 0, width, height));
+            var face = new Typeface(new FontFamily("Segoe UI"), System.Windows.FontStyles.Normal, System.Windows.FontWeights.Bold, System.Windows.FontStretches.Normal);
+            double size = height * 0.2;
+            FormattedText Text(string text, double em, Brush brush) => new(text, System.Globalization.CultureInfo.CurrentUICulture, System.Windows.FlowDirection.LeftToRight,
+                                                                          face, em, brush, 1.0) { MaxTextWidth = width * 0.9, TextAlignment = System.Windows.TextAlignment.Center };
+            FormattedText title = Text(displayName.ToUpperInvariant(), size, Brushes.White);
+            while (title.Height > height * 0.6 && size > 8) title = Text(displayName.ToUpperInvariant(), size *= 0.85, Brushes.White);
+            FormattedText under = Text(mode == Mode.Ruin ? "RUIN" : "INFESTATION", Math.Max(8, height * 0.08), new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0xFF, 0xFF)));
+            double y = (height - title.Height - under.Height) / 2;
+            dc.DrawText(title, new System.Windows.Point(width * 0.05, y));
+            dc.DrawText(under, new System.Windows.Point(width * 0.05, y + title.Height));
+        }
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        var bgra = new byte[width * height * 4];
+        bitmap.CopyPixels(bgra, width * 4, 0);
+        var image = new RgbaImage(width, height);
+        for (int p = 0; p < bgra.Length; p += 4)
+        {
+            image.Pixels[p] = bgra[p + 2];
+            image.Pixels[p + 1] = bgra[p + 1];
+            image.Pixels[p + 2] = bgra[p];
+            image.Pixels[p + 3] = 255;
+        }
         return image;
     }
 

@@ -249,7 +249,9 @@ are working in, in folders on its left:
 - **Level geometry**: every stitch piece (rock walls, cliffs, ledges, roads, ...), by category,
   setting and pack.
 - **New objects**: every class in the game's schema that can be made from it alone (lights,
-  spawns, triggers, effects, items, ...), by kind.
+  spawns, triggers, effects, items, navpoints, ...), by kind. Under **From the game's levels** are
+  the classes only Volition's tools could make (logic handlers, roads, splines, animated rigs):
+  every different one the game's levels have, added as a copy with the rest of its set.
 - **Everything**, at the top, lists all of them at once.
 
 Pick a folder to list what is in it and in the folders under it. The **Find** box narrows the list
@@ -419,15 +421,22 @@ has the brush's choices while you sculpt.
   - As in Volition's editor, some properties are hidden and some are read-only (with a lock): its
     tools set them, such as a building's model or a light's curve files. Tick **Show hidden and
     read-only properties** to see and change them anyway.
-  - Properties Volition's tools added that the schema doesn't describe (a navpoint's data, links,
-    a building's destruction data) are shown at the end, with their names from the game.
+  - Properties Volition's tools added that the schema doesn't describe are shown at the end, with
+    their names from the game, and every one can be changed: a navpoint's data as its type, outer
+    radius and speed limit; links and a rig's children as handles in hex (add or take out as many
+    as you like); numbers as numbers; any other packed data (a logic handler's script, a road's
+    points) as its bytes in hex, with the text in it on hover.
 - **Add** (+ in the toolbar, or Edit > Add) lists one of each kind of object the file has (a crate, a light, a
   squad spawn, a building piece, ...), with a Find box. Pick one to add a copy where the middle of
   the view points. Below them are **new objects** of every class in the game's schema that can be
   made from it alone (lights, spawns, triggers, effects, items, ...): a new one gets every
   property at the schema's default, as Volition's tools would have written it, where the middle
-  of the view points. Hover over the last line for the classes that can't be made this way and
-  why (navpoints, roads and buildings need data Volition's tools made). A few classes, marked
+  of the view points. A new navpoint gets its packed data from the schema's defaults (a path
+  node); link it by adding handles to its obj_links. Below them, **From the game's levels** lists
+  every different logic handler, road, spline and animated rig in the game's levels: picking one
+  adds a copy of it with the objects it hangs from and those hanging from it (a trigger with its
+  handler, a monolith's rigs), its handles new and the handles they name of each other changed to
+  the copies'. Buildings are added from the chunk browser. A few classes, marked
   *unused*, are in none of the game's levels, so the game may do nothing with them. The
   [Assets panel](#the-assets-panel) offers the same things in folders, with a preview, to drag
   into the view.
@@ -561,8 +570,8 @@ top right, brings it forward):
 - The ground's normal maps, and effects such as fire and smoke (and the sky's moving clouds).
 - Shadows of the few omni lamps that cast them.
 - Editing the level geometry, terrain or foliage.
-- Making new navpoints, roads, splines, logic handlers and animation rigs from nothing (copy one
-  instead).
+- Making new roads, splines, logic handlers and animation rigs from nothing (add a copy of one of
+  the game's instead).
 - Deleting objects that other objects' links name, and editing links between objects.
 - Changing a zone's layers or the zones around it from the zone's tab.
 - Putting changed models back into the game, and textures of another size.

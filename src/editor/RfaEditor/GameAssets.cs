@@ -102,6 +102,24 @@ sealed class GameAssets
     Dictionary<string, AsmContainer>? chunkGroups;       // "<chunk>" -> its group (<chunk>.rfgchunkx) in an asset list
     Dictionary<string, AsmPrimitive>? primitiveKinds;    // a file's primitive as some asset list gives it (its type, allocator, ...)
     Task<Dictionary<string, ChunkPlacement>>? placements;
+    readonly Dictionary<uint, List<ObjectExample>> examples = [];  // filled with the placements (see ObjectExamples)
+
+    /// <summary>
+    /// The classes whose objects only Volition's tools could make (their data isn't described: a logic handler's
+    /// script, a road's or spline's points, a rig's bones), by name: added as copies of the game's own.
+    /// </summary>
+    public static readonly string[] ExampleClasses = ["object_logic_handler", "object_path_road", "object_spline", "object_anim_rig"];
+
+    /// <summary>
+    /// Objects of the game's levels of <see cref="ExampleClasses"/>, by class: up to 60 different ones a class (a rig
+    /// by its rig_name, a handler by the text in its script, else one a zone), to add copies of. Found with
+    /// <see cref="ChunkPlacements"/> (each zone read once).
+    /// </summary>
+    public async Task<IReadOnlyDictionary<uint, List<ObjectExample>>> ObjectExamples()
+    {
+        await ChunkPlacements();
+        lock (examples) return examples.ToDictionary(e => e.Key, e => e.Value.ToList());
+    }
 
     /// <summary>Every chunk (model of a building or prop: a .cchk_pc) in the game's files and ours, by name without extension. Empty until the index is ready.</summary>
     public IReadOnlyList<string> ChunkNames()
@@ -451,6 +469,8 @@ sealed class GameAssets
         {
             var found = new Dictionary<string, ChunkPlacement>(StringComparer.OrdinalIgnoreCase);
             uint chunkName = NameHashes.PropertyHash("chunk_name");
+            var exampleClasses = ExampleClasses.ToDictionary(NameHashes.ClassHash, c => c);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (IndexedFile file in zones)
             {
                 try
@@ -458,13 +478,33 @@ sealed class GameAssets
                     Packfile pack = file.Container == null ? own.Archive(file.Archive) : own.Container(file.Archive, file.Container);
                     if (pack.Find(file.Name) is not { } entry) continue;
                     foreach (ZoneObject obj in ZoneFile.Read(pack.Read(entry)).Objects)
+                    {
                         if (obj.Property(chunkName) is { Type: ZoneProperty.TextType } name)
                             found.TryAdd(Path.GetFileNameWithoutExtension(name.Text), new ChunkPlacement(file.Archive, file.Container, file.Name, obj.Handle));
+                        if (!exampleClasses.TryGetValue(obj.ClassHash, out string? className)) continue;
+                        string label = ExampleLabel(obj) is { Length: > 0 } l ? l : Path.GetFileNameWithoutExtension(file.Name);
+                        lock (examples)
+                        {
+                            if (!examples.TryGetValue(obj.ClassHash, out List<ObjectExample>? list)) examples[obj.ClassHash] = list = [];
+                            if (list.Count < 60 && seen.Add(className + "|" + label))
+                                list.Add(new ObjectExample(className, label, new ChunkPlacement(file.Archive, file.Container, file.Name, obj.Handle)));
+                        }
+                    }
                 }
                 catch (Exception) { }  // (a file that can't be read gives no places)
             }
             return found;
         });
+    }
+
+    /// <summary>What tells an example object from others of its class: a rig's name, the first words in a handler's script.</summary>
+    static string ExampleLabel(ZoneObject obj)
+    {
+        if (obj.Property("rig_name") is { Type: ZoneProperty.TextType } rig) return rig.Text;
+        if (obj.Property("logic_handler_buffer") is { } script)
+            return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(System.Text.Encoding.Latin1.GetString(script.Value), "[A-Za-z_][A-Za-z0-9_ ]{3,}")
+                                        .Select(m => m.Value.Trim()).Take(2));
+        return "";
     }
 
     /// <summary>A model by its c-file name, or null if it can't be found or read.</summary>
@@ -625,3 +665,6 @@ sealed record ChunkPackage(string Chunk, List<(string Name, byte[] Data)> Files,
 
 /// <summary>An object placing a chunk: in which zone file (where it is) and its handle.</summary>
 sealed record ChunkPlacement(string Archive, string? Container, string Zone, uint Handle);
+
+/// <summary>An object of one of the game's levels to add a copy of (see <see cref="GameAssets.ObjectExamples"/>).</summary>
+sealed record ObjectExample(string Class, string Label, ChunkPlacement Place);

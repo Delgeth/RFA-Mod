@@ -150,6 +150,18 @@ public partial class LevelEditor : IAssetSource
                                            c.Class))
                 .ToList()))
             .ToList();
+        // The classes only Volition's tools could make: copies of the game's own (see LevelEditor.Examples.cs).
+        Task<IReadOnlyDictionary<uint, List<ObjectExample>>> examples = context.Assets.ObjectExamples();
+        if (examples.IsCompletedSuccessfully && examples.Result.Count > 0)
+            byKind.Add(new AssetFolder("From the game's levels", Icons.Zone, null, examples.Result.Values.SelectMany(list => list)
+                .OrderBy(e => e.Class).ThenBy(e => e.Label, StringComparer.OrdinalIgnoreCase)
+                .Select(e =>
+                {
+                    ObjectKind kind = ObjectKind.Of(e.Class, false);
+                    string about = $"A copy of {e.Place.Zone}'s {e.Class} ({e.Label}), with the objects of its set.";
+                    return new AssetItem(kind.Icon, kind.Brush, $"{ClassTitle(e.Class)}: {e.Label}", e.Place.Zone, "", about,
+                                         about + " Its data (script, points, bones) as the game's; every property editable.", e);
+                }).ToList()));
         int cant = schema.Classes.Count(c => c.CantMake != null);
         return new AssetFolder("New objects", Icons.Add, null, [], byKind,
                                cant > 0 ? $"{cant} classes can't be made from the schema alone (the Add list says why)." : null);
@@ -206,6 +218,9 @@ public partial class LevelEditor : IAssetSource
                 break;
             case GeometryChoice piece:
                 AddGeometry(piece.Piece, at);
+                break;
+            case ObjectExample example:
+                AddExample(example, at);
                 break;
         }
         ViewArea.Focus();
