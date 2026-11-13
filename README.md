@@ -197,6 +197,11 @@ Things to know:
   is brightest just after the line passes it and fades until the line comes round again, and a ring
   grows from each person it passes. To keep the dots showing between sweeps, raise `RadarMinAlpha=`
   under `[GuerrillaHud]` (0 to 255; Guerrilla's is 0).
+- Guerrilla's tool tips pop up as things first happen: when you open a weapon locker or an ammo
+  crate, stand at an upgrade station, pick up salvage, get into a car, find a radio tag, or raise the
+  alert. Each shows as often as in Guerrilla (most once). Some pause the game until you press Enter
+  (`TipContinue=` under `[GuerrillaKeys]`). `ToolTips=0` under `[GuerrillaHud]` turns them off, and
+  deleting `mods\guerrilla_hud\tool_tips_played.txt` shows them again.
 - Guerrilla's reticle sits in the middle, turning red over an enemy and green over a friend, with
   the rounds in your magazine beside it and the rest in the box (the infinity sign where ammo is
   unlimited), which turn red when you should reload. Guerrilla's weapons have their own reticles

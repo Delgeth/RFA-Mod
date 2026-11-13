@@ -1633,6 +1633,30 @@ float gear::JumpBoost(BYTE* player, float horizontal, float vertical, bool up) {
     return before;
 }
 
+void gear::CameraLook(BYTE* human, float* out) {
+    if (g_lookVector) g_lookVector(human, out);
+    else reinterpret_cast<LookVectorFn>(kLookVector)(human, out);
+}
+
+bool gear::Velocity(BYTE* player, float* out) {
+    if (!player || !out || player[kHasController] != 1) return false;
+    Vector3 velocity{};
+    ControllerVelocity(player, &velocity);
+    out[0] = velocity.x;
+    out[1] = velocity.y;
+    out[2] = velocity.z;
+    return true;
+}
+
+bool gear::SetVelocity(BYTE* player, const float* velocity) {
+    if (!player || !velocity || player[kHasController] != 1) return false;
+    const Vector3 v{velocity[0], velocity[1], velocity[2]};
+    SetControllerVelocity(player, &v);
+    if (BYTE* controller = *reinterpret_cast<BYTE**>(player + kController))
+        *reinterpret_cast<float*>(controller + kLastClimb) = v.y;
+    return true;
+}
+
 namespace {
 
 // Swapping a gun on the ground for one of his (the action button, 0x8BEB00: the gun in the slot asked
@@ -1957,7 +1981,9 @@ void MasonsHammer() {
 // hit; the damage returned): by the object's type (0x422AD0: 0 a person, 2 a building or other mover,
 // 3 a vehicle) the data's figure for it (people, structures, vehicles), or 10 when there is no data.
 // The wrap calls it and returns its figure unchanged; for the player's hits it logs a line, at most
-// four a second. No line while swinging at someone means the hit test never got that far.
+// four a second. No line while swinging at someone means the hit test never got that far. It also
+// tells the backpacks of each hit (backpacks::MeleeHit: Guerrilla's melee hit asks the attacker's pack
+// for its ripple, attempt_ripple).
 constexpr DWORD kMeleeDamage = 0x878780;
 constexpr size_t kMeleeDamagePrologue = 6;  // push ebp / mov ebp,esp / sub esp,24h
 using MeleeDamageFn = float(__cdecl*)(BYTE* attacker, const BYTE* data, BYTE* target);
@@ -1976,6 +2002,7 @@ const char* ObjectKind(int type) {
 
 float __cdecl MeleeDamage(BYTE* attacker, const BYTE* data, BYTE* target) {
     const float damage = g_meleeDamage(attacker, data, target);
+    if (g_upgradesRunning) backpacks::MeleeHit(attacker, target);  // a pack's ripple (Guerrilla's attempt_ripple)
     if (attacker && attacker == LocalPlayer()) {
         const DWORD now = GetTickCount();
         if (now - g_lastMeleeLog >= 250) {

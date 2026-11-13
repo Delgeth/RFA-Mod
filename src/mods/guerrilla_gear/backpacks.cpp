@@ -19,15 +19,22 @@
 // guerrilla_hud; the older [GuerrillaGear] BackpackKey= where it isn't set; B unless either is): Armageddon has no
 // backpack button, and its Nano Forge ability button (nano_use) stays the Nano Forge's.
 //
-// What each pack does while on, so far (each from its own active_abilities in Guerrilla's table):
+// Switching one on is Guerrilla's: the key starts its ramp-up (start_ramp_up, 300 ms: control_gameplay_process's
+// player_toggle_backpack_activation(player, false, 300)), and once that is over it activates (process_ramp_up ->
+// activate, RM 0x9F2300) if it still has the fuel: the fuel_activation_cost taken, its kaboom and its ripple set off
+// at once, and a pack whose activatable block has no deactivatable block (Concussion) goes off again straight away.
+// What each pack does while on (each from its own active_abilities in Guerrilla's table):
 //   Jetpack: climbs (above). Thrust: 180 ms after it goes on, straight up (climb max(climb, 2) + 10 m/s) or, with
-//   jump held as it goes on, the slam down (climb - 10), on until he lands; no damage taken.
-//   Fleetfoot: runs and sprints x 1.45. Firepower: bullets, melee and the hammer x 1.25, explosions x 1.25.
-//   Concussion: Guerrilla's mp_shockwave_blast at his centre 1 s after it goes on. Tremor: mp_quake every
-//   300 ms. Heal: 400 hit points a second to everyone within 5.5 m. Rhino: no damage taken.
+//   jump held as it goes on, the slam down (climb - 10), on until he lands; no damage taken; bullets hit him as steel.
+//   Fleetfoot: runs and sprints x 1.45. Firepower: bullets, melee and the hammer x 1.25, explosions x 1.25, and an
+//   explosive impact where his bullets land. Concussion: Guerrilla's mp_shockwave_blast and its ripple (people
+//   within 6 m thrown and hurt, vehicles and movers pushed) as it goes on. Tremor: mp_quake as it goes on and every
+//   300 ms, shaking his camera. Heal: 400 hit points a second to everyone within 5.5 m. Rhino: its charge at
+//   8.2 m/s, throwing people and vehicles it runs into and cutting through buildings; no damage taken; bullets hit
+//   him as steel. Stealth: his fade, the EDF lose him. Vision: Guerrilla's x-ray.
 // All ten are worn on Mason's back as Guerrilla's rfg_PC wears them (below, "The worn pack on his back"), with
-// their effects, camera shakes and sounds (below, "The packs' effects"). Vision: Guerrilla's x-ray. Not in yet: Stealth, Rhino's
-// charge, Concussion's ripple, Firepower's bullet effects, the material effects, and the HUD's pack icon and fuel.
+// their effects, camera shakes and sounds (below, "The packs' effects"). Not in yet: Vision's and Heal's material
+// effects (Armageddon's matfx.xtbl hasn't them), Rhino's limits on his other controls while charging.
 // The speed and damage factors are the player's own upgrade parameters (below), so walking (as against
 // running) isn't faster; damage taken goes through the "Last Gasp" ones, which the pack overrides while on.
 #define RFA_MOD_NAME "guerrilla_gear"
@@ -40,7 +47,10 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <intrin.h>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -387,18 +397,30 @@ void HoldParameters(BYTE* player, const Wish* wishes, int count) {
 
 ULONGLONG g_onSince = 0;     // when the worn pack was switched on (GetTickCount64)
 bool g_boosted = false;      // Thrust: its boost given since switched on
-ULONGLONG g_nextKaboom = 0;  // Concussion, Tremor: when the next explosion goes off (0: none)
+ULONGLONG g_nextKaboom = 0;  // Tremor: when the next explosion goes off (0: none)
 
-// Sets off one of Guerrilla's explosions (the world build's explosions.xtbl) at the player's centre.
-void Kaboom(BYTE* player, const std::string& name) {
-    const void* info = name.empty() ? nullptr : ExplosionNamed(name.c_str());
+BYTE* PackModel();                                             // (the worn pack's first model, below)
+const std::string* Field(const Pack& pack, const char* path);  // (a pack's field, below)
+void ShakeNamedOnce(const std::string& name, float scale);     // (a camera shake, below)
+const float kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+// Guerrilla's use_kaboom (RM 0x958350): its kaboom_explosion_name (the world build's explosions.xtbl) set off where
+// the pack is (explosion_create at the pack's place, Guerrilla's identity turn, him its owner and source; kaboom_damages_user
+// False for both packs: the game's explosion keeps him out as its owner's), then its kaboom_camera_shake shaken at its
+// kaboom_camera_shake_user_intensity (he is the local player: Guerrilla's fall-off by distance is nothing).
+void Kaboom(BYTE* player, const Pack& pack) {
+    const std::string* name = Field(pack, "activatable.active_abilities.kaboom.kaboom_explosion_name");
+    const void* info = name ? ExplosionNamed(name->c_str()) : nullptr;
     if (!info) {
-        rfa::Log("Backpacks: no explosion \"%s\" in explosions.xtbl (build the world again)", name.c_str());
+        rfa::Log("Backpacks: no explosion \"%s\" in explosions.xtbl (build the world again)", name ? name->c_str() : "");
         return;
     }
-    Vec3 centre{};
-    BodyCentre(player, nullptr, &centre);
-    MakeExplosion(info, player, player, &centre, reinterpret_cast<const float*>(player + kOrient), nullptr, nullptr, 0, false);
+    Vec3 at{};
+    if (const BYTE* model = PackModel()) at = *reinterpret_cast<const Vec3*>(model + kPosition);
+    else BodyCentre(player, nullptr, &at);
+    MakeExplosion(info, player, player, &at, kIdentity, nullptr, nullptr, 0, false);
+    if (const std::string* shake = Field(pack, "activatable.active_abilities.kaboom.kaboom_camera_shake.kaboom_camera_shake"))
+        ShakeNamedOnce(*shake, std::clamp(pack.Number("activatable.active_abilities.kaboom.kaboom_camera_shake.kaboom_camera_shake_user_intensity", 1.0f), 0.0f, 1.0f));
 }
 
 // Heal (Unique_ID 7): health_regen_per_second (400) to everyone within health_regen_radius (5.5 m), enemies
@@ -461,31 +483,32 @@ bool Thrust(BYTE* player, const Pack& pack, ULONGLONG now) {
     return true;
 }
 
-// Concussion (6, Guerrilla's Shockwave) and Tremor (9): kaboom_explosion_name kaboom_delay_ms after it goes
-// on (Concussion: mp_shockwave_blast after 1 s, then it is spent: its fuel_activation_cost is all of it), and
-// for Tremor again every kaboom_delay_ms (300) while on (mp_quake). Guerrilla keeps its own out of the blast
-// (kaboom_damages_user False); here the game's explosion decides.
+// A pack with a kaboom block in its active abilities (Concussion, 6, Guerrilla's Shockwave; Tremor, 9): its kaboom as it
+// activates (Activate, below), then, while it stays on, again each kaboom_delay_ms (Guerrilla's process: the kaboom's
+// kaboom_explosion_delay_timer, which use_kaboom sets). Concussion never stays on (it has no deactivatable block), so
+// only Tremor's repeats: mp_quake every 300 ms.
+bool HasKaboom(const Pack& pack) { return Field(pack, "activatable.active_abilities.kaboom.kaboom_explosion_name") != nullptr; }
+
 bool Kabooms(BYTE* player, const Pack& pack, ULONGLONG now) {
     if (!g_nextKaboom || now < g_nextKaboom) return true;
-    Kaboom(player, pack.values.count("activatable.active_abilities.kaboom.kaboom_explosion_name")
-                       ? pack.values.at("activatable.active_abilities.kaboom.kaboom_explosion_name") : std::string());
-    if (pack.id == 9) {
-        g_nextKaboom = now + static_cast<ULONGLONG>(pack.Number("activatable.active_abilities.kaboom.kaboom_delay_ms", 300.0f));
-        return true;
-    }
-    g_nextKaboom = 0;
-    return false;  // Concussion: spent
+    Kaboom(player, pack);
+    g_nextKaboom = now + static_cast<ULONGLONG>(pack.Number("activatable.active_abilities.kaboom.kaboom_delay_ms", 300.0f));
+    return true;
 }
+
+void Stealth(BYTE* player, const Pack& pack, ULONGLONG now);  // (Stealth, below)
+void StealthOff(BYTE* player);
+void Rhino(BYTE* player, const Pack& pack, ULONGLONG now);    // (Rhino's charge, below)
 
 // A pack's turn while on; false when it is spent.
 bool WhileOn(BYTE* player, const Pack& pack, float seconds) {
     const ULONGLONG now = GetTickCount64();
     switch (pack.id) {
         case 1: return Thrust(player, pack, now);
-        case 6:
-        case 9: return Kabooms(player, pack, now);
+        case 3: Stealth(player, pack, now); return true;
         case 7: Heal(player, pack, seconds); return true;
-        default: return true;  // Stealth, Vision, Rhino's charge: not in yet
+        case 8: Rhino(player, pack, now); return true;
+        default: return HasKaboom(pack) ? Kabooms(player, pack, now) : true;  // Tremor's quakes; Vision's x-ray: Activate
     }
 }
 
@@ -663,13 +686,10 @@ void PackAttack(BYTE* player, const Pack& pack) {
     for (const PackEffect& e : pack.onHim) PlayEffectNamed(player, pack, e.attack, false, true, e.attach);
 }
 
-// Switched on: Guerrilla's start_ramp_up (no ramp-up time: at once) and activation. Its ramp-up's effect on the pack
-// (at the ramp-up's attach point) and on him, its ramp-up and activation camera shakes, its sound set's attack and
-// loop, and each of its effects' loops on the pack and on him; their attack effects too, but Thrust's, which go with
-// its boost.
-void PackOn(BYTE* player, const Pack& pack) {
-    const bool alternate = pack.id == 1 && !g_thrustUp;  // Thrust's slam down: its alternate ramp-up and effects
-    if (alternate) {
+// The key pressed: Guerrilla's start_ramp_up (RM 0x97D070): its ramp-up's effect on the pack (at the ramp-up's attach
+// point) and on him, and its ramp-up camera shake (Thrust's slam down: the alternate ramp-up).
+void RampUp(BYTE* player, const Pack& pack) {
+    if (pack.id == 1 && !g_thrustUp) {
         PlayPackEffect(player, pack, "activatable.activation_effects.alternate_ramp_up_effects.backpack_effects", false, false,
                        "activatable.activation_effects.alternate_ramp_up_effects.attach_point_name");
         ShakePack(pack, "activatable.activation_effects.alternate_ramp_up_effects.camera_shake");
@@ -678,6 +698,13 @@ void PackOn(BYTE* player, const Pack& pack) {
         PlayPackEffect(player, pack, "activatable.activation_effects.ramp_up_effects.player_effects", false, true);
         ShakePack(pack, kRampShake);
     }
+}
+
+// The ramp-up over: Guerrilla's activate (RM 0x9F2300). Its activation camera shake, its sound set's attack and loop,
+// and each of its effects' loops on the pack and on him; their attack effects too, but Thrust's, which go with its
+// boost.
+void PackOn(BYTE* player, const Pack& pack) {
+    const bool alternate = pack.id == 1 && !g_thrustUp;  // Thrust's slam down: its alternate effects
     ShakePack(pack, kActiveShake);
     if (!pack.sfxAttack.empty()) PostEvent(player, "RFG_" + pack.sfxAttack);
     if (!pack.sfxLoop.empty()) PostEvent(player, "RFG_" + pack.sfxLoop);
@@ -711,6 +738,7 @@ void VisionOn(bool on) {
 // Off (by its key, spent, run dry, taken off): its loops end, its sound set's loop stops and its release plays.
 void PackOff(BYTE* player) {
     VisionOn(false);
+    StealthOff(player);
     StopPackLoop();
     if (!g_sfxLoop.empty()) PostEvent(player, "RFG_" + g_sfxLoop + "_STOP");
     if (!g_sfxRelease.empty()) PostEvent(player, "RFG_" + g_sfxRelease);
@@ -718,7 +746,518 @@ void PackOff(BYTE* player) {
     g_sfxRelease.clear();
 }
 
+// ---- Stealth (3)
+//
+// Guerrilla's multi_object_backpack: switched on, stealth_player fades him (stealth_time_ms, 1000 ms, its
+// stealth_timestamp); he is wholly stealthed (is_fully_stealthed, RM 0x958B50) once the fade is done and no
+// re-stealth is waiting (time_until_restealth: restealth_time_ms, 1000 ms, after he attacks), and the EDF don't
+// take a target in stealth (human_combat_get_target, human_is_player_in_stealth). Its look is the pack's material
+// effect (items_3d MaterialEffect stealth_pack) on him, the pack and his gun (activatable.material_effects
+// on_human, on_backpack, on_weapon: start_material_effects, RM 0x999BF0, material_effects_apply). Armageddon kept
+// matfx.xtbl's stealth_pack (its second layer without Guerrilla's Stencil_test and Stencil_clear) and applies a
+// material effect to a human as its Ambushers' cloak does (0x865030): its number by name (0x6F7C40), its parameters
+// (0x6F7C90: out, 0, -1), on the human (0x890430: the human, the number, &parameters; 0x890660 takes it off) and on
+// his gun (0x84E930 thiscall(human, 0) the gun; 0x7460A0 off; 0x745BA0: the gun, the human, the number, the
+// parameters by value).
+auto const MatfxNamed = reinterpret_cast<int(__cdecl*)(const char* name)>(0x6F7C40);
+auto const MatfxParameters = reinterpret_cast<DWORD*(__cdecl*)(DWORD* out, int first, int second)>(0x6F7C90);
+auto const MatfxOnHuman = reinterpret_cast<void(__cdecl*)(BYTE* human, int effect, const DWORD* parameters)>(0x890430);
+auto const MatfxOffHuman = reinterpret_cast<void(__cdecl*)(BYTE* human)>(0x890660);
+auto const EquippedGun = reinterpret_cast<BYTE*(__thiscall*)(BYTE* human, int which)>(0x84E930);
+auto const MatfxOffGun = reinterpret_cast<void(__cdecl*)(BYTE* gun)>(0x7460A0);
+auto const MatfxOnGun = reinterpret_cast<void(__cdecl*)(BYTE* gun, BYTE* human, int effect, DWORD p0, DWORD p1, DWORD p2, DWORD p3, DWORD p4)>(0x745BA0);
+constexpr int kPrimaryAttack = 0x11, kAltAttack = 0x12, kMeleeAttack = 0x13;  // the controls (0xF7F0B8)
+
+bool g_stealthed = false;       // the material effect on him
+ULONGLONG g_stealthFadeFrom = 0;  // when the fade began (0: not fading or faded)
+ULONGLONG g_restealthAt = 0;      // a re-stealth waiting after an attack (0: none)
+BYTE* g_stealthGun = nullptr;
+bool g_fullyStealthed = false;  // for GuerrillaGear_PlayerStealthed
+
+void StealthLook(BYTE* player, const Pack& pack, bool on) {
+    if (on == g_stealthed) return;
+    g_stealthed = on;
+    if (!on) {
+        MatfxOffHuman(player);
+        if (g_stealthGun) MatfxOffGun(g_stealthGun);
+        g_stealthGun = nullptr;
+        return;
+    }
+    const int effect = MatfxNamed("stealth_pack");
+    if (effect < 0) {
+        Missing("the material effect stealth_pack");
+        return;
+    }
+    DWORD parameters[5] = {};
+    MatfxParameters(parameters, 0, -1);
+    if (pack.Flag("activatable.material_effects.on_human")) MatfxOnHuman(player, effect, parameters);
+    if (pack.Flag("activatable.material_effects.on_weapon") && (g_stealthGun = EquippedGun(player, 0)) != nullptr)
+        MatfxOnGun(g_stealthGun, player, effect, parameters[0], parameters[1], parameters[2], parameters[3], parameters[4]);
+}
+
+// Each frame while Stealth is on.
+void Stealth(BYTE* player, const Pack& pack, ULONGLONG now) {
+    const ULONGLONG fadeMs = static_cast<ULONGLONG>(pack.Number("activatable.active_abilities.stealth.stealth_time_ms", 1000.0f));
+    const ULONGLONG restealthMs = static_cast<ULONGLONG>(pack.Number("activatable.active_abilities.stealth.restealth_time_ms", 1000.0f));
+    const int controller = *kLocalController;
+    const bool attacking = ControlHeld(kPrimaryAttack, controller, 0) || ControlHeld(kAltAttack, controller, 0) || ControlHeld(kMeleeAttack, controller, 0);
+    if (attacking) {  // Guerrilla's event_player_attacked: unstealthed, again restealth_time_ms after
+        if (g_stealthed) StealthLook(player, pack, false);
+        g_restealthAt = now + restealthMs;
+        g_stealthFadeFrom = 0;
+    } else if (!g_stealthed && (!g_restealthAt || now >= g_restealthAt)) {
+        StealthLook(player, pack, true);
+        g_restealthAt = 0;
+        g_stealthFadeFrom = now;
+    }
+    if (g_stealthFadeFrom && now - g_stealthFadeFrom >= fadeMs) g_stealthFadeFrom = 0;
+    const bool fully = g_stealthed && !g_stealthFadeFrom && !g_restealthAt;
+    if (fully != g_fullyStealthed) rfa::Log("Backpacks: Stealth: %s", fully ? "wholly stealthed (the EDF lose him as a target)" : "seen");
+    g_fullyStealthed = fully;
+}
+
+void StealthOff(BYTE* player) {
+    for (auto& [id, pack] : g_packs)
+        if (id == 3) StealthLook(player, pack, false);
+    g_stealthFadeFrom = g_restealthAt = 0;
+    if (g_fullyStealthed) rfa::Log("Backpacks: Stealth: off");
+    g_fullyStealthed = false;
+}
+
+// ---- Hitting people, vehicles and movers: Concussion's ripple and Rhino's charge
+//
+// Guerrilla's ripple (multi_object_backpack::use_ripple, RM 0x9F1B10) and Rhino's charge (its process, 0x9F2A70)
+// hit what is about him with Guerrilla's own calls; here they are Armageddon's, which are Guerrilla's under other
+// addresses (Armageddon's own Nano ripple, 0x713D60 and 0x714BA0, uses these same ones):
+//   - the people within a range of a place: 0x495D40 (thiscall: the world; the place, the range, the handles out,
+//     how many at most, no filter, no data; how many), each by its handle with 0x436120; the movers alike with
+//     0x4AD4D0 and 0x437A00; the vehicles from the world's list (0x477090 how many, 0x4770E0 each) by their place;
+//   - an object's type and subtype (+0x7A, +0x7B, signed bytes; 0x422AD0, 0x423530): 0 a person (subtype 3 an NPC,
+//     4 the player: Guerrilla's 2 and 3), 2 a mover (subtype 1 a building, rfg_mover, whose flags +0x150 bit 3 is
+//     invulnerable), 3 a vehicle (subtype 5 an automobile: Guerrilla's 4; 6 flyers, 8 walkers); dead: its fifth
+//     virtual function; a person's invulnerable flag +0xB0 bit 6 (Guerrilla's hflags.invulnerable);
+//   - human_ragdoll_start 0x8996F0 (cdecl: the human, no source -1, 0, false, 0, 0: Guerrilla's (human, false, -1);
+//     true too for one already ragdolled), the ragdoll human+0x794 (Guerrilla's +0x344), havok_ragdoll_apply_point_
+//     velocity 0x795AC0 (cdecl: the ragdoll, &velocity, &point, true) and havok_ragdoll_set_velocity 0x7957C0
+//     (cdecl: the ragdoll, &velocity);
+//   - human_damage: a damage record (0x42E960 makes it, 0x30 bytes: +0 the victim, +4 the attacker, +8 the damage,
+//     +0xC the kind) to 0x85E0C0; the kind Guerrilla's DBT_NONE (0) for the ripple's and Rhino's people;
+//   - vehicle_apply_damage 0x6077A0 (cdecl: the vehicle, its part -1, the attacker, no weapon, the kind (5,
+//     DBT_MELEE), &where, &direction, 1.0, the damage as an int, &impulse, false: Guerrilla's with the part added),
+//     and Guerrilla's vehicle_apply_point_velocity (RM 0xB65030) with Armageddon's parts: the velocity × the
+//     vehicle's mass (its virtual +0x5C) as an impulse at the point on its body (+0x4C; 0x778440 -1 to none;
+//     0x78BE00 makes Havok's vectors; 0x604500 thiscall: the body, &impulse, &point, which wakes the body too);
+//   - a mover's push: explosion_modify_impulses 0x6E6C40 (&impulse, 0, &impulse, 0, its mass, 1, 0, 15, 0), then
+//     havok_body_apply_linear_impulse 0x776F50 (its body +0x4C, &impulse).
+// Guerrilla's ripple and Rhino also pass a weapon of their own (mp_backpack_ripple, mp_backpack_rhino) to
+// human_damage; those weapons aren't ported, so ours pass none.
+using CollectFn = int(__thiscall*)(void* world, const Vec3* at, float range, DWORD* out, int most, void* filter, const void* data);
+auto const HumansWithin = reinterpret_cast<CollectFn>(0x495D40);
+auto const MoversWithin = reinterpret_cast<CollectFn>(0x4AD4D0);
+auto const HumanByHandle = reinterpret_cast<BYTE*(__thiscall*)(void* world, DWORD handle)>(0x436120);
+auto const MoverByHandle = reinterpret_cast<BYTE*(__thiscall*)(void* world, DWORD handle)>(0x437A00);
+auto const VehicleCount = reinterpret_cast<int(__fastcall*)(void* world, void* unused)>(0x477090);
+auto const VehicleAt = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, int index)>(0x4770E0);
+constexpr DWORD kObjectType = 0x7A, kObjectSubtype = 0x7B, kBody = 0x4C, kRagdoll = 0x794;
+constexpr int kPersonType = 0, kMoverType = 2, kVehicleType = 3;
+constexpr int kBuildingSubtype = 1, kNpcSubtype = 3, kPlayerSubtype = 4, kAutomobileSubtype = 5;
+constexpr DWORD kHumanFlags = 0xB0, kHumanInvulnerable = 1u << 6;
+constexpr DWORD kMoverFlags = 0x150, kMoverInvulnerable = 1u << 3;
+constexpr int kDamagedByNone = 0, kDamagedByMelee = 5;
+constexpr int kMostCollected = 64;  // Guerrilla's collect_objects lists (0x40)
+
+auto const RagdollStart = reinterpret_cast<bool(__cdecl*)(BYTE* human, DWORD source, int unknown, bool flag, int unknown2, int unknown3)>(0x8996F0);
+auto const RagdollPointVelocity = reinterpret_cast<void(__cdecl*)(int ragdoll, const Vec3* velocity, const Vec3* point, bool flag)>(0x795AC0);
+auto const RagdollVelocity = reinterpret_cast<void(__cdecl*)(int ragdoll, const Vec3* velocity)>(0x7957C0);
+auto const DamageRecord = reinterpret_cast<void(__thiscall*)(BYTE* record)>(0x42E960);
+auto const HumanDamage = reinterpret_cast<float(__cdecl*)(BYTE* record)>(0x85E0C0);
+using VehicleDamageFn = bool(__cdecl*)(BYTE* vehicle, int part, BYTE* attacker, const void* weapon, int kind, const Vec3* where,
+                                       const Vec3* direction, float scale, int damage, const Vec3* impulse, bool flag);
+auto const VehicleDamage = reinterpret_cast<VehicleDamageFn>(0x6077A0);
+struct alignas(16) HavokVector {
+    float x, y, z, w;
+};
+auto const ToHavok = reinterpret_cast<void(__cdecl*)(HavokVector* out, const Vec3* in)>(0x78BE00);
+auto const BodyPointer = reinterpret_cast<BYTE*(__cdecl*)(DWORD body)>(0x778440);
+auto const PointImpulse = reinterpret_cast<void(__thiscall*)(BYTE* body, const HavokVector* impulse, const HavokVector* point)>(0x604500);
+using ModifyImpulsesFn = void(__cdecl*)(Vec3* out, Vec3* second, const Vec3* in, const Vec3* secondIn, float mass, float a, float b, float c, float d);
+auto const ModifyImpulses = reinterpret_cast<ModifyImpulsesFn>(0x6E6C40);
+auto const LinearImpulse = reinterpret_cast<void(__cdecl*)(DWORD body, const Vec3* impulse)>(0x776F50);
+using MassFn = float(__thiscall*)(BYTE* object);
+constexpr DWORD kMassFunction = 0x5C;
+auto const AnyObjectAt = reinterpret_cast<BYTE*(__thiscall*)(void* world, DWORD handle)>(0x6CB9E0);  // any kind
+using IsDeadFn = bool(__thiscall*)(BYTE* object);
+constexpr DWORD kIsDeadFunction = 0x10;
+
+int TypeOf(const BYTE* object) { return static_cast<signed char>(object[kObjectType]); }
+int SubtypeOf(const BYTE* object) { return static_cast<signed char>(object[kObjectSubtype]); }
+bool IsDead(BYTE* object) { return (*reinterpret_cast<const IsDeadFn*>(*reinterpret_cast<BYTE* const*>(object) + kIsDeadFunction))(object); }
+float MassOf(BYTE* object) { return (*reinterpret_cast<const MassFn*>(*reinterpret_cast<BYTE* const*>(object) + kMassFunction))(object); }
+const Vec3& PlaceOf(const BYTE* object) { return *reinterpret_cast<const Vec3*>(object + kPosition); }
+
+Vec3 Minus(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+// Guerrilla's vector::normalize_safe: a vector of no length stays one.
+Vec3 Normal(const Vec3& v) {
+    const float length = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    return length > 1e-6f ? Vec3{v.x / length, v.y / length, v.z / length} : Vec3{0.0f, 0.0f, 0.0f};
+}
+
+// The throw both use: from a place towards the one hit, at a speed, its climb at least a minimum.
+Vec3 Throw(const Vec3& from, const Vec3& to, float speed, float minimumClimb) {
+    const Vec3 d = Normal(Minus(to, from));
+    Vec3 v{d.x * speed, d.y * speed, d.z * speed};
+    if (v.y < minimumClimb) v.y = minimumClimb;
+    return v;
+}
+
+void Hurt(BYTE* victim, BYTE* attacker, float damage) {
+    alignas(8) BYTE record[0x30];
+    DamageRecord(record);
+    *reinterpret_cast<BYTE**>(record + 0x0) = victim;
+    *reinterpret_cast<BYTE**>(record + 0x4) = attacker;
+    *reinterpret_cast<float*>(record + 0x8) = damage;
+    *reinterpret_cast<int*>(record + 0xC) = kDamagedByNone;
+    HumanDamage(record);
+}
+
+// Guerrilla's vehicle_apply_point_velocity.
+void PointVelocity(BYTE* vehicle, const Vec3& velocity, const Vec3& point) {
+    BYTE* body = BodyPointer(*reinterpret_cast<const DWORD*>(vehicle + kBody));
+    if (!body) return;
+    const float mass = MassOf(vehicle);
+    const Vec3 impulse{velocity.x * mass, velocity.y * mass, velocity.z * mass};
+    HavokVector havokImpulse{}, havokPoint{};
+    ToHavok(&havokImpulse, &impulse);
+    ToHavok(&havokPoint, &point);
+    PointImpulse(body, &havokImpulse, &havokPoint);
+}
+
+// Concussion (6): Guerrilla's use_ripple, from his place (his activation: activate calls it with his position; a melee
+// hit while a pack with a ripple is on: attempt_ripple, MeleeHit below). Its ripple_effect_name on the pack (Guerrilla
+// plays it with the pack as its host, at ripple_effect_attach_point_name, none for Concussion); in single player
+// then the people, the vehicles and the movers within ripple_range of the place (6 m):
+//   - each person but him and the invulnerable: thrown away from him at ripple_player_hit_speed (12 m/s), the climb at
+//     least ripple_player_minimum_y_velocity (8): ragdolled, the throw given to the ragdoll at his place
+//     (ripple_process_npcs_hit), then hurt for ripple_player_damage (130);
+//   - each automobile: the same throw, ripple_player_damage × 4 as vehicle damage (melee) at its place, upwards, the throw
+//     its impulse, then half the throw as a point velocity at its place (ripple_process_vehicles_hit);
+//   - each mover with a body: pushed away from the place by ripple_mover_impulse (4000), through
+//     explosion_modify_impulses.
+// Its ripple_local_player_camera_shake is for a player it hits (multiplayer): none in single player.
+const char* const kRipple = "activatable.active_abilities.ripple.";
+int g_rippleLogs = 0;
+
+bool HasRipple(const Pack& pack) { return pack.Has((std::string(kRipple) + "ripple_range").c_str()); }
+
+void Ripple(BYTE* player, const Pack& pack, const Vec3& at) {
+    auto number = [&](const char* field, float otherwise) { return pack.Number((std::string(kRipple) + field).c_str(), otherwise); };
+    const float range = number("ripple_range", 0.0f), speed = number("ripple_player_hit_speed", 0.0f);
+    const float climb = number("ripple_player_minimum_y_velocity", 0.0f), damage = number("ripple_player_damage", 0.0f);
+    const int moverImpulse = static_cast<int>(number("ripple_mover_impulse", 0.0f));
+    if (const std::string* effect = Field(pack, (std::string(kRipple) + "ripple_effect_name").c_str())) {
+        const std::string* point = Field(pack, (std::string(kRipple) + "ripple_effect_attach_point_name").c_str());
+        PlayEffectNamed(player, pack, *effect, false, false, point ? *point : std::string());
+    }
+    const Vec3 him = PlaceOf(player);
+    DWORD handles[kMostCollected];
+    int people = 0, vehicles = 0, movers = 0;
+    const int humanCount = HumansWithin(kWorld, &at, range, handles, kMostCollected, nullptr, nullptr);
+    for (int i = 0; i < humanCount && i < kMostCollected; ++i) {
+        BYTE* human = HumanByHandle(kWorld, handles[i]);
+        if (!human || human == player || (*reinterpret_cast<const DWORD*>(human + kHumanFlags) & kHumanInvulnerable)) continue;
+        const Vec3 throwing = Throw(him, PlaceOf(human), speed, climb);
+        if (RagdollStart(human, 0xFFFFFFFF, 0, false, 0, 0)) RagdollPointVelocity(*reinterpret_cast<const int*>(human + kRagdoll), &throwing, &him, true);
+        Hurt(human, player, damage);
+        ++people;
+    }
+    const int vehicleCount = VehicleCount(kWorld, nullptr);
+    for (int i = 0; i < vehicleCount; ++i) {
+        BYTE* vehicle = VehicleAt(kWorld, nullptr, i);
+        if (!vehicle || SubtypeOf(vehicle) != kAutomobileSubtype) continue;
+        const Vec3 d = Minus(PlaceOf(vehicle), at);
+        if (d.x * d.x + d.y * d.y + d.z * d.z > range * range) continue;
+        const Vec3 throwing = Throw(him, PlaceOf(vehicle), speed, climb);
+        const Vec3 up{0.0f, 1.0f, 0.0f};
+        VehicleDamage(vehicle, -1, player, nullptr, kDamagedByMelee, &PlaceOf(vehicle), &up, 1.0f, static_cast<int>(damage * 4.0f), &throwing, false);
+        PointVelocity(vehicle, Vec3{throwing.x * 0.5f, throwing.y * 0.5f, throwing.z * 0.5f}, PlaceOf(vehicle));
+        ++vehicles;
+    }
+    if (moverImpulse) {
+        const int moverCount = MoversWithin(kWorld, &at, range, handles, kMostCollected, nullptr, nullptr);
+        for (int i = 0; i < moverCount && i < kMostCollected; ++i) {
+            BYTE* mover = MoverByHandle(kWorld, handles[i]);
+            if (!mover || *reinterpret_cast<const DWORD*>(mover + kBody) == 0xFFFFFFFF) continue;
+            const Vec3 d = Normal(Minus(PlaceOf(mover), at));
+            const float push = static_cast<float>(moverImpulse);
+            Vec3 impulse{d.x * push, d.y * push, d.z * push};
+            ModifyImpulses(&impulse, nullptr, &impulse, nullptr, MassOf(mover), 1.0f, 0.0f, 15.0f, 0.0f);
+            LinearImpulse(*reinterpret_cast<const DWORD*>(mover + kBody), &impulse);
+            ++movers;
+        }
+    }
+    if (g_rippleLogs < 24) {
+        ++g_rippleLogs;
+        rfa::Log("Backpacks: %s's ripple at (%.1f, %.1f, %.1f): %d people thrown and hurt (%.0f), %d vehicles, %d movers pushed, within %.1f m",
+                 pack.name.c_str(), at.x, at.y, at.z, people, damage, vehicles, movers, range);
+    }
+}
+
+// Rhino (8): Guerrilla's charge and rhino abilities while it is on (process, RM 0x9F2A70).
+//   - The charge: his move_speed (Guerrilla's human +0x28C) charge_top_speed (8.2 m/s) × (time on / charge_ramp_up_time_
+//     seconds)^2.5 while ramping up, × (fuel time left / charge_ramp_down_time_seconds) while ramping down (both 0 for
+//     Rhino: its full speed at once), and his own walking left out (control_gameplay_process with a charge). Armageddon's
+//     player has no move_speed to set, so his controller's velocity along the ground is that speed towards where the
+//     camera has him look (gear::CameraLook), each frame before the controller's step; his climb stays his.
+//   - The hits: unless the cast timer (rhino_shape_cutter_timer) runs, a sphere of 0.855 m cast along his velocity
+//     (havok_spherecast; Armageddon's 0x79A4A0, cdecl: the ray, its hits; the ray made by 0x424AD0 with the game's
+//     default collision, Guerrilla's COLLIDE_RAY_DEFAULT; +0x20 the filter's data, +0x24 the filter, cdecl (object,
+//     data) -> take it; its hits made and freed by 0x424B40 / 0x424CD0): from 0.95 m up his body and 0.475 m behind
+//     him, 0.095 m higher, as far as his speed × min(0.45, max(fuel time left, 0.4)) / 0.95 (at least 0.1 s). Guerrilla's
+//     filter (rhino_cast_filter_callback, 0x97C170) takes a mover (not an invulnerable building), a living NPC or
+//     automobile not hit yet this charge (none of them with under 0.2 s of fuel left), and marks the cast as having hit;
+//     a cast that hit nothing waits 100 ms for the next.
+//   - What the first hit is: a mover: a shape cutter 0.475 m along his velocity from the hit (guerrilla_world's
+//     GuerrillaWorld_CutBuildings, as Guerrilla's shape_cutter_props: his turn, 0.95 m, mp_rhino_cutter, him its source),
+//     and the rhino_mover_hit_effect there at most every 500 ms (Guerrilla's active Rhino names none); an NPC (64 at most
+//     a charge): thrown from the hit at rhino_player_hit_speed (12 m/s), the climb at least rhino_player_minimum_y_
+//     velocity (8), hurt for rhino_player_hit_damage (225), ragdolled with that velocity (rhino_process_npc_hit); an
+//     automobile: the same throw, the damage × 4 as melee damage at the hit (its normal the direction, the throw its
+//     impulse), then the throw as a point velocity at the hit (rhino_process_vehicle_hit). Its rhino_local_player_camera_
+//     shake and radial blur are for a player it hits (multiplayer): none in single player.
+struct Ray {
+    float from[3], to[3];
+    float radius;
+    int passThrough;   // -1
+    void* filterData;  // +0x20
+    void* filter;      // +0x24
+    DWORD collision, collector, flags;
+};
+static_assert(sizeof(Ray) == 0x34, "the game's ray");
+struct RayHit {
+    float at[3], centre[3], normal[3];
+    float along;
+    DWORD handle;
+    DWORD rest[3];
+};
+static_assert(sizeof(RayHit) == 0x38, "the game's ray hit");
+struct RayHits {
+    RayHit* hits;
+    int count;
+    DWORD capacityAndFlags;
+};
+auto const RayInit = reinterpret_cast<void(__thiscall*)(Ray* ray)>(0x424AD0);
+auto const HitsInit = reinterpret_cast<void(__thiscall*)(RayHits* hits)>(0x424B40);
+auto const HitsFree = reinterpret_cast<void(__thiscall*)(RayHits* hits)>(0x424CD0);
+auto const SphereCast = reinterpret_cast<bool(__cdecl*)(const Ray* ray, RayHits* hits)>(0x79A4A0);
+using CutBuildingsFn = bool(__cdecl*)(const float* position, const float* turn, float radius, const char* explosion, DWORD source);
+
+const char* const kRhino = "activatable.active_abilities.rhino.";
+const char* const kCharge = "activatable.active_abilities.charge.";
+constexpr float kRhinoCastRadius = 0.855f, kRhinoCastUp = 0.95f, kRhinoCastBehind = 0.475f, kRhinoCastLift = 0.095f;
+constexpr float kRhinoCutAhead = 0.475f, kRhinoCutRadius = 0.95f;
+constexpr ULONGLONG kRhinoIdleCastMs = 100, kRhinoMoverEffectMs = 500;
+constexpr size_t kRhinoMostHits = 64;
+
+std::vector<DWORD> g_rhinoHit;     // the NPCs and vehicles hit this charge (Guerrilla's rhino_hit_npcs)
+ULONGLONG g_rhinoNextCast = 0;     // its cast timer (0: cast now)
+ULONGLONG g_rhinoEffectAt = 0;     // its mover hit effect's timer
+CutBuildingsFn g_cutBuildings = nullptr;
+bool g_cutLooked = false;
+int g_rhinoLogs = 0;
+float g_rhinoSpeedAsked = -1.0f;   // the charge's speed set, looked at a frame on (a diagnostic, once a charge)
+bool g_rhinoSpeedLooked = false;
+
+void RhinoLog(const char* format, ...) {
+    if (g_rhinoLogs >= 40) return;
+    ++g_rhinoLogs;
+    char text[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    rfa::Log("Backpacks: Rhino: %s", text);
+}
+
+struct RhinoCastData {
+    BYTE* player;
+    bool hit;          // the filter took something (Guerrilla's data +4)
+    bool nearlyEmpty;  // under 0.2 s of fuel left (+5)
+};
+
+bool RhinoHitAlready(const BYTE* object) {
+    return std::find(g_rhinoHit.begin(), g_rhinoHit.end(), HandleOfObject(object)) != g_rhinoHit.end();
+}
+
+// Guerrilla's rhino_cast_filter_callback.
+bool __cdecl RhinoCastFilter(BYTE* object, void* data) {
+    auto* cast = static_cast<RhinoCastData*>(data);
+    if (!cast || !object) return false;
+    const int type = TypeOf(object), subtype = SubtypeOf(object);
+    bool take = false;
+    if (type == kMoverType) {
+        if (subtype == kBuildingSubtype && (*reinterpret_cast<const DWORD*>(object + kMoverFlags) & kMoverInvulnerable)) return false;
+        take = true;
+    } else if ((type == kPersonType && subtype == kNpcSubtype && object != cast->player) || (type == kVehicleType && subtype == kAutomobileSubtype)) {
+        if (IsDead(object) || cast->nearlyEmpty) return false;
+        take = !RhinoHitAlready(object);
+    }
+    if (take) cast->hit = true;
+    return take;
+}
+
+void Rhino(BYTE* player, const Pack& pack, ULONGLONG now) {
+    auto field = [&](const char* block, const char* name, float otherwise) { return pack.Number((std::string(block) + name).c_str(), otherwise); };
+    const float use = pack.Number("activatable.uses_fuel.fuel_use_per_second", 0.0f);
+    const float timeLeft = use > 0.0f ? g_fuel / use : 1000.0f;  // Guerrilla's fuel_timer: when it runs dry, in seconds
+    float velocity[3] = {};
+    if (!gear::Velocity(player, velocity)) return;  // not on foot
+    if (g_rhinoSpeedAsked >= 0.0f) {
+        RhinoLog("its speed a frame on: %.1f m/s along the ground (it set %.1f)", std::sqrt(velocity[0] * velocity[0] + velocity[2] * velocity[2]), g_rhinoSpeedAsked);
+        g_rhinoSpeedAsked = -1.0f;
+    }
+    // The charge.
+    if (pack.Has((std::string(kCharge) + "charge_top_speed").c_str())) {
+        const float top = field(kCharge, "charge_top_speed", 0.0f);
+        const float rampUp = field(kCharge, "charge_ramp_up_time_seconds", 0.0f), rampDown = field(kCharge, "charge_ramp_down_time_seconds", 0.0f);
+        const float since = static_cast<float>(now - g_onSince) / 1000.0f;
+        float share = 1.0f;
+        if (rampUp > 0.0f && since < rampUp) share = std::pow(since / rampUp, 2.5f);
+        else if (rampDown > 0.0f && timeLeft < rampDown) share = timeLeft / rampDown;
+        share = std::fmax(0.0f, std::fmin(1.0f, share));
+        float look[3] = {};
+        gear::CameraLook(player, look);
+        float x = look[0], z = look[2], length = std::sqrt(x * x + z * z);
+        if (length < 1e-4f) {  // looking straight up or down: his facing
+            const float* forward = reinterpret_cast<const float*>(player + kOrient + 0x18);
+            x = forward[0];
+            z = forward[2];
+            length = std::sqrt(x * x + z * z);
+        }
+        if (length > 1e-4f) {
+            const float speed = top * share;
+            velocity[0] = x / length * speed;
+            velocity[2] = z / length * speed;
+            gear::SetVelocity(player, velocity);
+            if (!g_rhinoSpeedLooked) {
+                g_rhinoSpeedLooked = true;
+                g_rhinoSpeedAsked = speed;
+                RhinoLog("the charge: %.1f m/s towards where he looks (charge_top_speed %.1f)", speed, top);
+            }
+        }
+    }
+    // The hits.
+    if (!pack.Has((std::string(kRhino) + "rhino_player_hit_damage").c_str()) || now < g_rhinoNextCast) return;
+    const Vec3 v{velocity[0], velocity[1], velocity[2]};
+    const float speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    float lookahead = std::fmin(0.45f, std::fmax(timeLeft, 0.4f));
+    if (lookahead < 0.1f) lookahead = 0.1f;
+    const float length = speed * lookahead / 0.95f;
+    const Vec3 dir = Normal(v);
+    const Vec3 him = PlaceOf(player);
+    const Vec3 start{him.x - dir.x * kRhinoCastBehind, him.y + kRhinoCastUp - dir.y * kRhinoCastBehind, him.z - dir.z * kRhinoCastBehind};
+    RhinoCastData data{player, false, timeLeft < 0.2f};
+    Ray ray;
+    RayInit(&ray);
+    ray.from[0] = start.x;
+    ray.from[1] = start.y + kRhinoCastLift;
+    ray.from[2] = start.z;
+    ray.to[0] = start.x + dir.x * length;
+    ray.to[1] = start.y + dir.y * length + kRhinoCastLift;
+    ray.to[2] = start.z + dir.z * length;
+    ray.radius = kRhinoCastRadius;
+    ray.filterData = &data;
+    ray.filter = reinterpret_cast<void*>(&RhinoCastFilter);
+    ray.collector = 0;  // the nearest
+    ray.flags = 0;
+    RayHits hits;
+    HitsInit(&hits);
+    if (SphereCast(&ray, &hits) && hits.count >= 1 && hits.hits) {
+        const RayHit hit = hits.hits[0];
+        const Vec3 centre{hit.centre[0], hit.centre[1], hit.centre[2]};
+        BYTE* object = AnyObjectAt(kWorld, hit.handle);
+        const int type = object ? TypeOf(object) : -1, subtype = object ? SubtypeOf(object) : -1;
+        const float hitSpeed = field(kRhino, "rhino_player_hit_speed", 0.0f), climb = field(kRhino, "rhino_player_minimum_y_velocity", 0.0f);
+        const float damage = field(kRhino, "rhino_player_hit_damage", 0.0f);
+        if (type == kMoverType) {
+            const float cut[3] = {centre.x + dir.x * kRhinoCutAhead, centre.y + dir.y * kRhinoCutAhead, centre.z + dir.z * kRhinoCutAhead};
+            if (!g_cutLooked) {
+                g_cutLooked = true;
+                if (HMODULE world = GetModuleHandleW(L"guerrilla_world.dll"))
+                    g_cutBuildings = reinterpret_cast<CutBuildingsFn>(GetProcAddress(world, "GuerrillaWorld_CutBuildings"));
+                if (!g_cutBuildings) rfa::Log("Backpacks: Rhino: guerrilla_world.dll hasn't GuerrillaWorld_CutBuildings; it doesn't cut through buildings");
+            }
+            const bool cutting = g_cutBuildings && g_cutBuildings(cut, reinterpret_cast<const float*>(player + kOrient), kRhinoCutRadius, "mp_rhino_cutter", HandleOfObject(player));
+            RhinoLog("ran into a mover (subtype %d) at (%.1f, %.1f, %.1f): %s", subtype, centre.x, centre.y, centre.z, cutting ? "cut" : "no cutter made");
+            if (now >= g_rhinoEffectAt) {
+                if (const std::string* effect = Field(pack, (std::string(kRhino) + "rhino_mover_hit_effect").c_str())) {
+                    int number = EffectNumber(("rfg_" + *effect).c_str());
+                    if (number < 0) number = EffectNumber(effect->c_str());
+                    if (number >= 0) EffectsPlay(number, cut, reinterpret_cast<const float*>(player + kOrient), false, 0xFFFFFFFF, -1, 0xFFFFFFFF, false, 0, 0);
+                    else Missing("the effect " + *effect);
+                }
+                g_rhinoEffectAt = now + kRhinoMoverEffectMs;
+            }
+        } else if (type == kPersonType && subtype == kNpcSubtype && g_rhinoHit.size() < kRhinoMostHits) {
+            const Vec3 throwing = Throw(centre, PlaceOf(object), hitSpeed, climb);
+            Hurt(object, player, damage);
+            if (RagdollStart(object, 0xFFFFFFFF, 0, false, 0, 0)) RagdollVelocity(*reinterpret_cast<const int*>(object + kRagdoll), &throwing);
+            g_rhinoHit.push_back(HandleOfObject(object));
+            RhinoLog("ran into a person: hurt for %.0f, thrown at (%.1f, %.1f, %.1f) m/s", damage, throwing.x, throwing.y, throwing.z);
+        } else if (type == kVehicleType && subtype == kAutomobileSubtype && g_rhinoHit.size() < kRhinoMostHits) {
+            const Vec3 throwing = Throw(centre, PlaceOf(object), hitSpeed, climb);
+            const Vec3 at{hit.at[0], hit.at[1], hit.at[2]}, normal{hit.normal[0], hit.normal[1], hit.normal[2]};
+            VehicleDamage(object, -1, player, nullptr, kDamagedByMelee, &at, &normal, 1.0f, static_cast<int>(damage * 4.0f), &throwing, false);
+            PointVelocity(object, throwing, at);
+            g_rhinoHit.push_back(HandleOfObject(object));
+            RhinoLog("ran into a vehicle: %d damage, pushed at (%.1f, %.1f, %.1f) m/s", static_cast<int>(damage * 4.0f), throwing.x, throwing.y, throwing.z);
+        }
+    }
+    HitsFree(&hits);
+    g_rhinoNextCast = data.hit ? 0 : now + kRhinoIdleCastMs;
+}
+
 // ---- The packs switched on with their key
+
+// Guerrilla's ramp-up: 300 ms from the key (player_toggle_backpack_activation's, from control_gameplay_process), then
+// activate if the pack can still (process_ramp_up -> can_activate: its fuel).
+constexpr ULONGLONG kRampUpMs = 300;
+ULONGLONG g_rampUntil = 0;  // a ramp-up running (0: none)
+
+// Whether its activatable block has a deactivatable block (backpacks.txt gives that block's fields, or the block
+// alone): without one Guerrilla's activate leaves the pack off again as it finishes.
+bool Deactivatable(const Pack& pack) {
+    static const std::string kBlock = "activatable.deactivatable";
+    for (const auto& [path, value] : pack.values)
+        if (path == kBlock || path.rfind(kBlock + ".", 0) == 0) return true;
+    return false;
+}
+
+// Guerrilla's activate, for what this mod has of it: the fuel taken, on, its effects, shakes and sounds (PackOn), its
+// kaboom (use_kaboom) and its ripple from his place (use_ripple); Rhino's charge starts with no one hit yet; off again
+// at once without a deactivatable block.
+void Activate(BYTE* player, const Pack& pack, float cost) {
+    g_on = true;
+    g_onSince = GetTickCount64();
+    g_boosted = false;
+    g_fuel = std::fmax(0.0f, g_fuel - cost);
+    g_rhinoHit.clear();
+    g_rhinoNextCast = 0;
+    g_rhinoEffectAt = 0;
+    g_rhinoSpeedLooked = false;
+    rfa::Log("Backpacks: %s on (fuel %.2f)", pack.name.c_str(), g_fuel);
+    PackOn(player, pack);  // its effects, shakes and sounds
+    g_nextKaboom = 0;
+    if (HasKaboom(pack)) {
+        Kaboom(player, pack);
+        g_nextKaboom = g_onSince + static_cast<ULONGLONG>(pack.Number("activatable.active_abilities.kaboom.kaboom_delay_ms", 300.0f));
+    }
+    if (HasRipple(pack)) Ripple(player, pack, PlaceOf(player));
+    if (!Deactivatable(pack)) {
+        g_on = false;
+        PackOff(player);
+        rfa::Log("Backpacks: %s spent as it went on (Guerrilla's: no deactivatable block; fuel %.2f)", pack.name.c_str(), g_fuel);
+    }
+}
 
 void Activated(BYTE* player, const Pack& pack, float seconds) {
     const bool fuel = pack.Has("activatable.uses_fuel.fuel_use_per_second") || pack.Has("activatable.uses_fuel.minimum_fuel_to_activate");
@@ -727,28 +1266,27 @@ void Activated(BYTE* player, const Pack& pack, float seconds) {
     const float cost = pack.Number("activatable.uses_fuel.fuel_activation_cost", 0.0f);
     const float minimum = pack.Number("activatable.uses_fuel.minimum_fuel_to_activate", 0.0f);
     const bool playerOff = pack.Flag("activatable.deactivatable.player_deactivatable");
+    const ULONGLONG now = GetTickCount64();
     if (KeyPressed()) {
-        if (!g_on) {
+        if (!g_on && !g_rampUntil) {
             if (!fuel || g_fuel + 0.0001f >= minimum) {
-                g_on = true;
-                g_onSince = GetTickCount64();
-                g_boosted = false;
-                g_nextKaboom = pack.id == 6 || pack.id == 9
-                    ? g_onSince + static_cast<ULONGLONG>(pack.Number("activatable.active_abilities.kaboom.kaboom_delay_ms", 300.0f)) : 0;
-                g_fuel = std::fmax(0.0f, g_fuel - cost);
-                rfa::Log("Backpacks: %s on (fuel %.2f)%s", pack.name.c_str(), g_fuel,
-                         pack.id == 3 || pack.id == 4 ? "; its ability isn't in yet" : pack.id == 8 ? "; no damage taken (its charge isn't in yet)" : "");
                 if (pack.id == 1) g_thrustUp = !ControlHeld(kJump, *kLocalController, 0);  // Thrust: jump held, the slam down
-                PackOn(player, pack);  // its effects, shakes and sounds
+                g_rampUntil = now + kRampUpMs;
+                RampUp(player, pack);
             } else {
                 rfa::Log("Backpacks: %s needs %.2f fuel to switch on (has %.2f)", pack.name.c_str(), minimum, g_fuel);
                 PackSound(player, pack, kNoFuelFoley);
             }
-        } else if (playerOff) {
+        } else if (g_on && playerOff) {
             g_on = false;
             PackOff(player);
             rfa::Log("Backpacks: %s off (fuel %.2f)", pack.name.c_str(), g_fuel);
         }
+    }
+    if (g_rampUntil && now >= g_rampUntil) {
+        g_rampUntil = 0;
+        if (!fuel || g_fuel + 0.0001f >= minimum) Activate(player, pack, cost);
+        else rfa::Log("Backpacks: %s's ramp-up over, but it has %.2f fuel of the %.2f it needs: not on", pack.name.c_str(), g_fuel, minimum);
     }
     if (g_on) {
         if (!WhileOn(player, pack, seconds)) {
@@ -986,10 +1524,97 @@ void Dress(BYTE* player, int worn) {
     }
 }
 
+// ---- The packs' bullet hit effects: Firepower's explosive impacts, Thrust's and Rhino's steel
+//
+// Guerrilla's weapons_create_bullet_hit_effects (RM 0xBDBDC0) asks the shooter's backpack and the hit player's for
+// effects while they are on (get_backpack_abilities): the shooter's additional_bullet_hit_effect_other (Firepower's
+// wep_bullet_impact_exp), played where the bullet lands besides its own effect, and its replacement_bullet_hit_effect_
+// other_player in place of it when the one hit is a player (multiplayer only); the hit player's additional_bullet_hit_
+// effect_self besides, and his replacement_bullet_hit_effect_self (Thrust's and Rhino's wep_bullet_impact_steelsolid)
+// in place of the material's effect (the weapon's own effect and the decal stay). Armageddon kept the same four in
+// its own (0x72C840, cdecl: the shooter, the shot's record, a scale; the hit's place at the record's +0x28), but reads
+// them from the player's Nano ability while one is on: 0x8BEFE0 (cdecl: the player; that ability's record, else null),
+// its +0x190, +0x194, +0x198 and +0x19C, each an effect's record, played with 0x4EB4B0 (it plays +0x194 on any person
+// hit). So while a pack with any of them is on, 0x8BEFE0's two calls from 0x72C840 (told by where they return to) get
+// a copy of the Nano ability's record, or an empty one, holding the pack's effects; +0x194 stays the Nano ability's,
+// there being no other players. An effect's record: its number by name (0x4EF370), then 0x4EF320.
+using ActiveAbilityFn = BYTE*(__cdecl*)(BYTE* player);
+constexpr DWORD kActiveAbility = 0x8BEFE0;
+constexpr BYTE kActiveAbilityPrologue[] = {0x55, 0x8B, 0xEC, 0x83, 0x7D, 0x08, 0x00};  // push ebp / mov ebp,esp / cmp dword ptr [ebp+8],0
+constexpr DWORD kBulletHitEffects = 0x72C840, kBulletHitEffectsEnd = 0x72CC0D;         // Armageddon's weapons_create_bullet_hit_effects
+constexpr size_t kAbilityRecordSize = 0x2E8;                                             // an abilities.xtbl record
+ActiveAbilityFn g_activeAbility = nullptr;
+alignas(16) BYTE g_bulletAbility[kAbilityRecordSize];
+auto const EffectRecord = reinterpret_cast<const BYTE*(__cdecl*)(int number)>(0x4EF320);
+auto const LocalPlayerHuman = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
+
+struct BulletEffect {
+    const char* field;  // in the pack's active_abilities
+    DWORD slot;         // in Armageddon's ability record
+};
+const BulletEffect kBulletEffects[] = {
+    {"additional_bullet_hit_effect_other", 0x190},
+    {"additional_bullet_hit_effect_self", 0x198},
+    {"replacement_bullet_hit_effect_self", 0x19C},
+};
+std::vector<std::string> g_bulletEffectsSaid;  // each pack effect's first use, in the log
+
+const BYTE* EffectRecordNamed(const std::string& name) {
+    int number = EffectNumber(("rfg_" + name).c_str());
+    if (number < 0) number = EffectNumber(name.c_str());
+    if (number < 0) {
+        Missing("the effect " + name);
+        return nullptr;
+    }
+    return EffectRecord(number);
+}
+
+BYTE* __cdecl ActiveAbility(BYTE* player) {
+    BYTE* own = g_activeAbility(player);
+    const DWORD from = reinterpret_cast<DWORD>(_ReturnAddress());
+    if (from < kBulletHitEffects || from >= kBulletHitEffectsEnd || !player || !g_on || player != LocalPlayerHuman()) return own;
+    auto found = g_packs.find(g_wearing);
+    if (found == g_packs.end()) return own;
+    const BYTE* effects[std::size(kBulletEffects)] = {};
+    bool any = false;
+    for (size_t i = 0; i < std::size(kBulletEffects); ++i)
+        if (const std::string* name = Field(found->second, (std::string("activatable.active_abilities.") + kBulletEffects[i].field).c_str())) {
+            effects[i] = EffectRecordNamed(*name);
+            if (!effects[i]) continue;
+            any = true;
+            const std::string said = found->second.name + " " + kBulletEffects[i].field;
+            if (std::find(g_bulletEffectsSaid.begin(), g_bulletEffectsSaid.end(), said) == g_bulletEffectsSaid.end() && g_bulletEffectsSaid.size() < 16) {
+                g_bulletEffectsSaid.push_back(said);
+                rfa::Log("Backpacks: %s's %s %s plays at a bullet's hit (%s)", found->second.name.c_str(), kBulletEffects[i].field, name->c_str(),
+                         kBulletEffects[i].slot == 0x190 ? "his shots" : "shots that hit him");
+            }
+        }
+    if (!any) return own;
+    if (own) memcpy(g_bulletAbility, own, sizeof g_bulletAbility);
+    else memset(g_bulletAbility, 0, sizeof g_bulletAbility);
+    for (size_t i = 0; i < std::size(kBulletEffects); ++i)
+        if (effects[i]) *reinterpret_cast<const BYTE**>(g_bulletAbility + kBulletEffects[i].slot) = effects[i];
+    return g_bulletAbility;
+}
+
+void BulletEffects() {
+    if (memcmp(reinterpret_cast<const void*>(kActiveAbility), kActiveAbilityPrologue, sizeof kActiveAbilityPrologue) != 0) {
+        rfa::Log("Backpacks: the active ability's getter (0x%08lX) isn't the publicbeta's; the packs' bullet hit effects are off", kActiveAbility);
+        return;
+    }
+    g_activeAbility = reinterpret_cast<ActiveAbilityFn>(rfa::HookFunction(kActiveAbility, sizeof kActiveAbilityPrologue, reinterpret_cast<void*>(&ActiveAbility)));
+    if (!g_activeAbility) rfa::Log("Backpacks: could not wrap the active ability's getter; the packs' bullet hit effects are off");
+    else rfa::Log("Backpacks: the packs' bullet hit effects (Firepower's, Thrust's and Rhino's) go through the game's own bullet hit effects");
+}
+
+// Guerrilla's attempt_ripple's timer (ripple_timer_ms; Concussion has none: every hit).
+ULONGLONG g_rippleNext = 0;
+
 }  // namespace
 
 void backpacks::Init() {
     ReadPacks();
+    BulletEffects();
     // [GuerrillaKeys] Backpack= (empty: no key), else the older [GuerrillaGear] BackpackKey=, else B. (Asked of
     // guerrilla_hud once the game runs, FollowHudKey: the same setting, and its F7 window's changes.)
     const wchar_t* const kUnset = L"\x01";
@@ -1017,6 +1642,7 @@ void backpacks::Step(BYTE* player) {
         g_fuel = 1.0f;
         if (g_on) PackOff(player);
         g_on = false;
+        g_rampUntil = 0;
         auto found = g_packs.find(worn);
         if (worn >= 0) rfa::Log("Backpacks: wearing %s", found != g_packs.end() ? found->second.name.c_str() : "an unknown pack");
         if (found != g_packs.end() && g_wearingSeen) PlayPackEffect(player, found->second, kEquipEffect, false);  // Guerrilla's pickup_effects
@@ -1042,6 +1668,20 @@ void backpacks::Step(BYTE* player) {
 
 float backpacks::Fuel() { return g_fuel; }
 bool backpacks::On() { return g_on; }
+
+// Guerrilla's human_combat_unified_melee_hit (RM 0xAD18C9): a hit by someone whose pack's abilities have a ripple calls
+// its attempt_ripple, which ripples from where the hit landed (here: the one hit's place) unless its ripple_timer_ms
+// runs. Only the player wears a pack, and only while on are its active abilities its (a pack's passive ones have no
+// ripple); Guerrilla's Concussion goes off as it goes on, so in Guerrilla's single player this never ripples.
+void backpacks::MeleeHit(BYTE* attacker, BYTE* target) {
+    if (!attacker || !target || !g_on || attacker != LocalPlayerHuman()) return;
+    auto found = g_packs.find(g_wearing);
+    if (found == g_packs.end() || !HasRipple(found->second)) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_rippleNext) return;
+    g_rippleNext = now + static_cast<ULONGLONG>(found->second.Number("activatable.active_abilities.ripple.ripple_timer_ms", 0.0f));
+    Ripple(attacker, found->second, PlaceOf(target));
+}
 
 // For other mods (guerrilla_hud's backpack icon and fuel meter, as Guerrilla's hud_ui_multiplayer_process_backpack_
 // data_item shows them): the worn pack's Unique_ID (0 the jetpack, 1 Thrust ... 9 Tremor; -1 none), and, where asked,
@@ -1077,8 +1717,8 @@ extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_PackGauge(float* out)
 
 // For other mods (the alert session's EDF sight, as Guerrilla's human_combat_get_target skips a target that
 // human_is_player_in_stealth): whether the player is wholly stealthed by the Stealth pack (multi_object_backpack::
-// is_fully_stealthed). Always 0 until Stealth is in.
-extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_PlayerStealthed() { return 0; }
+// is_fully_stealthed): Stealth on, faded in, no re-stealth waiting after an attack.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_PlayerStealthed() { return g_fullyStealthed ? 1 : 0; }
 
 // Guerrilla's get_max_rounds × the worn pack's abilities' ammo_factor: multi_object_backpack::get_backpack_abilities
 // gives its active_abilities while it is on, else its passive_abilities (parse_backpacks_table reads those two

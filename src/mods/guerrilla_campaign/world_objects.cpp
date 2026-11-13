@@ -25,6 +25,7 @@ Object FromElement(const tables::Element& element) {
     object.parent = Hex(element.Text("parent"));
     object.zone = element.Text("zone");
     sscanf_s(element.Text("pos").c_str(), "%f %f %f", &object.pos.x, &object.pos.y, &object.pos.z);
+    object.hasParentPos = sscanf_s(element.Text("parent_pos").c_str(), "%f %f %f", &object.parentPos.x, &object.parentPos.y, &object.parentPos.z) == 3;
     for (const tables::Element* property : element.Children("property"))
         object.properties.emplace_back(property->Text("name"), property->Text("value"));
     return object;

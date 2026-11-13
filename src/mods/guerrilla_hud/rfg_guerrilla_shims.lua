@@ -13,69 +13,56 @@ TWEEN_STATE_IDLE = TWEEN_STATE_WAITING
 -- Lua's string library, which the game's Lua doesn't have: find, for a plain part, from the mod.
 string = { find = rfg_string_find }
 
--- Guerrilla's scripts give and read tints as 0-1, Armageddon's interface as 0-255 (in its documents
--- both are 0-1). GuerrillaBuilder.exe makes their vint_set_property and vint_get_property calls these.
 -- Guerrilla's text sizes. Armageddon has fonts of the same names as Guerrilla's, drawn bigger (its font_body half as
 -- big again as Guerrilla's; its font_header a little taller), so GuerrillaBuilder.exe scales the texts of some of
--- Guerrilla's documents by their font (Guerrilla's height over Armageddon's) and tells this script which, by each
--- document's text elements' names (rfg_text_scales, at the top of the document's script). A text_scale Guerrilla's
--- script sets or reads is then scaled the same way, so its script works in Guerrilla's sizes as it did.
--- Kept by every document's copy of these shims: { document = name, scales = { { element, scale }, ... }, found = its
--- handle the names were looked up in }, and element handle -> scale.
-if Rfg_text_scale_documents == nil then
-	Rfg_text_scale_documents = {}
-end
-if Rfg_text_scale_of == nil then
-	Rfg_text_scale_of = {}
-end
+-- Guerrilla's documents by their font (Guerrilla's height over Armageddon's) and tells this script which, by the
+-- document's text elements' names (rfg_text_scales, later in the document's script). A text_scale Guerrilla's script
+-- sets or reads is then scaled the same way, so its script works in Guerrilla's sizes as it did.
+-- All of it is local to this document's script (each document has its own copy of these shims): a global would live
+-- in one document's table, gone when that document unloads, and reading or making a global that isn't there is an
+-- error (2026-11-12: every document's script stopped on one, and the game crashed).
+local Text_scale_document = nil		-- this document's name, nil if its texts weren't scaled
+local Text_scale_names = {}			-- { { element name, scale }, ... }
+local Text_scale_found = 0			-- the document's handle the names were last looked up in
+local Text_scale_of = {}			-- element handle -> scale
 
-function rfg_text_scales(document, scales)
-	for i, known in ipairs(Rfg_text_scale_documents) do
-		if known.document == document then
-			known.scales = scales
-			known.found = nil
-			return
-		end
-	end
-	Rfg_text_scale_documents[#Rfg_text_scale_documents + 1] = { document = document, scales = scales }
+local function rfg_text_scales(document, scales)
+	Text_scale_document = document
+	Text_scale_names = scales
+	Text_scale_found = 0
 end
 
 local function rfg_text_scale(handle)
-	-- Each document's names looked up in it, again whenever one of the documents is loaded again (its elements'
-	-- handles are new, and old ones may be reused).
-	local changed = false
-	for i, known in ipairs(Rfg_text_scale_documents) do
-		local found = vint_document_find(known.document)
-		if found == nil then
-			found = 0
-		end
-		if known.found ~= found then
-			known.found = found
-			changed = true
-		end
+	if Text_scale_document == nil then
+		return 1
 	end
-	if changed then
-		Rfg_text_scale_of = {}
-		for i, known in ipairs(Rfg_text_scale_documents) do
-			if known.found ~= 0 then
-				for j, pair in ipairs(known.scales) do
-					local element = vint_object_find(pair[1], 0, known.found)
-					if element ~= nil and element ~= 0 then
-						Rfg_text_scale_of[element] = pair[2]
-					end
+	-- The names looked up in the document, again whenever it was loaded again (its elements' handles are new).
+	local found = vint_document_find(Text_scale_document)
+	if found == nil then
+		found = 0
+	end
+	if found ~= Text_scale_found then
+		Text_scale_found = found
+		Text_scale_of = {}
+		if found ~= 0 then
+			for i, pair in ipairs(Text_scale_names) do
+				local element = vint_object_find(pair[1], 0, found)
+				if element ~= nil and element ~= 0 then
+					Text_scale_of[element] = pair[2]
 				end
 			end
 		end
 	end
-	local scale = Rfg_text_scale_of[handle]
+	local scale = Text_scale_of[handle]
 	if scale == nil then
-		scale = 1
-		Rfg_text_scale_of[handle] = scale
+		return 1
 	end
 	return scale
 end
 
-function rfg_vint_set_property(handle, property, ...)
+-- Guerrilla's scripts give and read tints as 0-1, Armageddon's interface as 0-255 (in its documents both are 0-1):
+-- GuerrillaBuilder.exe makes their vint_set_property and vint_get_property calls these (local to the document too).
+local function rfg_vint_set_property(handle, property, ...)
 	-- Guerrilla's game named many texts by their string tag's hash (text_tag_crc), which Armageddon's
 	-- string tables don't have: our bridges hand the words instead, as a string.
 	if property == "text_tag_crc" then
@@ -98,7 +85,7 @@ function rfg_vint_set_property(handle, property, ...)
 	return vint_set_property(handle, property, ...)
 end
 
-function rfg_vint_get_property(handle, property, ...)
+local function rfg_vint_get_property(handle, property, ...)
 	if property == "tint" then
 		local r, g, b = vint_get_property(handle, property, ...)
 		return r / 255, g / 255, b / 255

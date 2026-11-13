@@ -81,6 +81,14 @@ public static partial class GuerrillaHud
                              "Num_rows", "Row_base_pos_x", "Row_base_pos_y", "Highlight_bar_size_x", "Highlight_bar_size_y", "Page_base_x",
                              "Page_base_y", "Scroll_bar_height", "Scroll_bar_top_y", "Scroll_bar_top_x", "Scroll_bar_bottom_y",
                              "INFO_ROTATION", "Icon_image_name"], GuerrillaTextSizes: true),
+        // Guerrilla's help box: its tool tips (GuerrillaToolTips, tool_tips.txt), one at a time, with their icons. Its
+        // generic globals renamed (Armageddon's HUD has a help box of its own).
+        new("rfg_ui_hud_help", [], GuerrillaScript: true, BridgedItems: true, GuerrillaTextSizes: true, ToolTipPictures: true,
+            RenamedGlobals: ["NUM_SCREEN_COORDS", "Screen_coords", "Screen_coords_handles", "Help_message_main_handle",
+                             "Help_title_handle", "Help_text_handle", "Help_icon_handle", "Help_icon2_handle", "Help_arrow_handle",
+                             "Help_hint_handle", "Help_bg_main", "Help_bg_body", "Help_bg_bottom", "Help_arrows_anim_handle",
+                             "Help_main_anim_handle", "Help_main_alpha_twn_handle", "Help_main_scale_twn_handle", "init_handles_help",
+                             "set_help_data", "set_help_language"]),
     ];
 
     /// <summary>
@@ -307,6 +315,7 @@ public static partial class GuerrillaHud
                 _ => hud.ScriptPictures,
             };
             scriptPictures = scriptPictures.Concat(upgradePictures.SelectMany(u => new[] { u.Icon, u.Blueprint }).OfType<string>());
+            if (hud.ToolTipPictures) scriptPictures = scriptPictures.Concat(GuerrillaToolTips.Icons(guerrillaMisc));
             foreach (string picture in scriptPictures.Distinct(StringComparer.OrdinalIgnoreCase))
                 if (TextureFor(picture) is { } texture && !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
                 else if (TextureFor(picture) == null) report.Add($"{name}: its script's picture {picture} isn't in Guerrilla's textures");
@@ -487,6 +496,7 @@ public static partial class GuerrillaHud
         report.AddRange(GuerrillaWeaponCabinet.Build(guerrillaCache, scriptsFolder));
         // The handbook's pages and entries.
         report.AddRange(GuerrillaHandbook.Build(guerrillaCache, scriptsFolder));
+        report.AddRange(GuerrillaToolTips.Build(guerrillaCache, scriptsFolder));
 
         string listsOut = Path.Combine(cacheOut, "interface.vpp_pc");
         Write(Path.Combine(listsOut, "vint_doc_containers.asm_pc"), containers.ToBytes());
@@ -554,6 +564,7 @@ public static partial class GuerrillaHud
             files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.SafehousesFile));
             files.Add(Path.Combine(scriptsFolder, GuerrillaWeaponCabinet.FileName));
             files.Add(Path.Combine(scriptsFolder, GuerrillaHandbook.FileName));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaToolTips.FileName));
         }
         files.AddRange(OldFiles(overridesFolder));
         var report = new List<string>();
@@ -987,10 +998,12 @@ public static partial class GuerrillaHud
 /// lacking one, its scale) is scaled by its font (GuerrillaHud.FontScale), and so is any text_scale its script sets
 /// (the shims, told by rfg_text_scales).
 /// </param>
+/// <param name="ToolTipPictures">It shows Guerrilla's tool tips (tool_tips.xtbl): their icons come along.</param>
 public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures, bool GuerrillaScript = false,
                                  HudWeaponPictures WeaponPictures = HudWeaponPictures.None, bool BridgedItems = false,
                                  IReadOnlyList<string>? ExtraTextures = null, bool UpgradePictures = false,
-                                 IReadOnlyList<string>? RenamedGlobals = null, bool GuerrillaTextSizes = false);
+                                 IReadOnlyList<string>? RenamedGlobals = null, bool GuerrillaTextSizes = false,
+                                 bool ToolTipPictures = false);
 
 /// <summary>Which of Guerrilla's weapons' pictures a HUD document brings along (see <see cref="GuerrillaHud.Build"/>).</summary>
 public enum HudWeaponPictures { None, Icons, Reticles }

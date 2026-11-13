@@ -35,6 +35,7 @@
 #include "rfa_mod.h"
 #include "rfa_game.h"
 #include "keys.h"
+#include "tool_tips.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -424,6 +425,7 @@ struct Document {
     bool whileHandbook = false;  // loaded and drawn only while Guerrilla's handbook is open
     bool handbookPicture = false;  // one of the handbook's entries' pictures: loaded while its entry is shown
     bool zoneSet = false;    // one of the four documents of the zones' pictures (ZoneSetDocument)
+    bool onTop = false;      // drawn over the others, our screens too (the tool tips' help box: KeepOnTop)
     bool loaded = false;     // the mod asked for it
     bool seen = false;       // and the game has had it open since
     bool missing = false;    // not in the game's interface project, or the game couldn't load it
@@ -559,6 +561,8 @@ bool StationScreenOpen() { return ShopIsOpen() || CabinetIsOpen(); }  // a safeh
 bool HandbookIsOpen();  // Guerrilla's handbook (below)
 bool HandbookClosing();
 void FollowHandbook();
+bool ObjectIsDead(BYTE* object);  // (Guerrilla's minimap blips, below)
+void FollowToolTipTriggers();     // Guerrilla's tool tips this mod raises (below)
 void HandbookDocumentArrived();
 void HandbookPictureShown(const std::string& document);
 void CloseHandbook(const char* why, bool toPauseMenu);
@@ -895,7 +899,7 @@ void FollowPauseMenuBlock() {
         HoldPauseMenu(false);
         return;
     }
-    const bool screenOpen = g_mapOpen || OurScreenOpen();
+    const bool screenOpen = g_mapOpen || OurScreenOpen() || tool_tips::HoldsGame();
     const bool closeKeyHeld = HeldDown(VK_ESCAPE) || HeldDown(VK_TAB) || HeldDown(VK_BACK) || HeldDown(keys::Key(keys::Map));
     if (screenOpen) g_pauseMenuBlockLeft = kPauseMenuBlockAfterUpdates;
     else if (g_pauseMenuBlockLeft > 0 && !closeKeyHeld) --g_pauseMenuBlockLeft;
@@ -968,10 +972,23 @@ bool Wanted(const Document& doc) {
 bool ShouldDraw(const Document& doc, bool hudRuns) {
     const bool shop = ShopIsOpen(), cabinet = CabinetIsOpen(), handbook = HandbookIsOpen();
     if ((shop || cabinet || handbook) && !(shop && doc.whileShop) && !(cabinet && doc.whileCabinet) &&
-        !(handbook && doc.whileHandbook) && !doc.zoneSet && !doc.handbookPicture)
+        !(handbook && doc.whileHandbook) && !doc.zoneSet && !doc.handbookPicture && !doc.onTop)
         return false;
     return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen) && (!doc.whileShop || shop) && (!doc.whileCabinet || cabinet) &&
            (!doc.whileHandbook || handbook);
+}
+
+// The draw list draws in the order documents were added to it, and adds a new one last: a document added after one that
+// stays on top (a screen opened while a tool tip is up) is drawn over it. So that one is taken off and added again.
+void KeepOnTop() {
+    for (const Document& doc : g_documents) {
+        if (!doc.onTop || !doc.listed) continue;
+        if (BYTE* open = OpenDocument(doc.name.c_str())) {
+            const unsigned short handle = *reinterpret_cast<unsigned short*>(open + 0x40);
+            RemoveFromDrawList(g_drawList, nullptr, &handle);
+            AddToDrawList(g_drawList, nullptr, &handle);
+        }
+    }
 }
 
 void Unload(Document& doc, BYTE* open) {
@@ -1017,6 +1034,8 @@ void FollowTheWorld() {
         else FollowTheMapKey();
         FollowRadioTags();
         FollowHandbook();
+        tool_tips::Step(g_hudFrameMs / 1000.0, g_player && !ObjectIsDead(g_player));
+        FollowToolTipTriggers();
         if (!HandbookIsOpen() && !HandbookClosing()) FollowSafehouses();
         FollowMessages(g_hudFrameMs);
     } else {
@@ -1076,6 +1095,7 @@ void FollowTheWorld() {
         doc.seen = false;
         doc.listed = ShouldDraw(doc, true);
         if (doc.listed) AddToDrawList(g_drawList, nullptr, &handle);
+        if (doc.listed && !doc.onTop) KeepOnTop();
         RFA_LOG_FIRST(200, "Loaded %s (handle %u)%s", doc.name.c_str(), handle, doc.listed ? ", and listed it to be drawn" : "");
     }
 }
@@ -1179,6 +1199,7 @@ bool __cdecl DrawPass(bool flag) {
         if (draw) AddToDrawList(g_drawList, nullptr, &handle);
         else RemoveFromDrawList(g_drawList, nullptr, &handle);
         doc.listed = draw;
+        if (draw && !doc.onTop) KeepOnTop();
         RFA_LOG_FIRST(40, draw ? "%s shown" : "%s hidden", doc.name.c_str());
     }
     return g_drawPass(flag);
@@ -1207,6 +1228,7 @@ void __cdecl LoadStart() {
     g_pauseMenuBlockLeft = 0;
     HoldPauseMenu(false);  // before the level's start sets the game's count to 0
     ForgetPickups();  // what the new level gives at its start isn't picked up
+    tool_tips::LevelShutdown();  // the tips waiting gone, the game unpaused
     int unloaded = 0, forgotten = 0;
     for (Document& doc : g_documents) {
         doc.closedByGame = 0;
@@ -1344,7 +1366,9 @@ void FollowRadioTags() {
         if (left == 3) {
             g_bombsShown.insert(node.pair);
             message = RadioTagMessage("spawn_bomb", 0);
+            tool_tips::Add("MOAB_Located");  // bftp_touch_tag (RM 0xA8DC6F): a M.O.A.B.'s three tags found
         } else {
+            tool_tips::Add("Blast_from_the_Past");  // bftp_touch_tag (0xA8DBE7)
             message = left == 1 ? RadioTagMessage("tag_found", 1) : RadioTagMessage("tags_found", left);
         }
         ShowMessage(message, true);  // bftp_touch_tag: a primary message (hud_message_add)
@@ -1573,6 +1597,8 @@ void FollowSafehouses() {
             const float dx = station.x - position[0], dy = station.y - position[1], dz = station.z - position[2];
             if (dx * dx + dy * dy + dz * dz < kStationReachSquared) g_shop.nearStation = static_cast<int>(i);
         }
+    // Guerrilla's use prompt at an upgrade station raised its "upgrades" tool tip, 100 ms on (hud_ui_process_use_action_info).
+    if (g_shop.nearStation >= 0 && g_stations[g_shop.nearStation].shop) tool_tips::Add("upgrades", 100);
     const bool use = ButtonHeld(UseAction(g_localPlayer), g_localPlayer);
     if (use && !g_shop.useDown && g_shop.nearStation >= 0 && !g_mapOpen && !MenusShown() && GameFocused()) {
         if (!g_stations[g_shop.nearStation].shop) OpenCabinet(false);
@@ -2074,6 +2100,7 @@ void OpenCabinet(bool crate) {
     g_cabinet.current = 0;
     if (g_cabinet.current == g_cabinet.skipped) g_cabinet.current = CabinetPlace(0, 1);
     g_cabinet.open = true;
+    tool_tips::Add(crate ? "Ammo_Crate_Weapons" : "Locker");  // hud_ui_weapon_cabinet_process (RM 0x85B33C)
     g_cabinet.scroll = g_cabinet.shine = 0;
     ++g_cabinet.version;
     g_cabinet.useDown = g_cabinet.closeDown = true;  // keys held as it opens aren't presses
@@ -2105,7 +2132,9 @@ void CloseCabinet(const char* why, bool giveAmmo) {
         // hud_ui_weapon_cabinet_exit: a secondary message (ui_add_secondary_message).
         if (!g_cabinet.crate && g_cabinetTexts.count("full_ammo")) ShowMessage(g_cabinetTexts["full_ammo"], false);
         rfa::Log("Weapon cabinet: ammo for %d guns (%s)", guns, g_cabinet.crate ? "the crate's restock" : "full, at a locker");
+        tool_tips::Add(g_cabinet.crate ? "Ammo_Boxes" : "Locker_Ammo");  // hud_ui_weapon_cabinet_exit (0x85B1D9, 0x85B20C)
     }
+    tool_tips::Remove(g_cabinet.crate ? "Ammo_Crate_Weapons" : "Locker");
     g_cabinet.open = false;
     g_shop.useDown = true;  // the use key still held doesn't open it again
     if (g_cabinet.paused) {
@@ -2983,8 +3012,10 @@ void FollowPickups(ULONGLONG now) {
     if (!g_pickups.known && g_pickups.quietUntil == 0) g_pickups.quietUntil = now + kPickupQuietAfterLoadMs;
     std::vector<Pickup> found;
     if (g_pickups.known && now >= g_pickups.quietUntil) {
-        if (salvage >= 0 && g_pickups.salvage >= 0 && salvage > g_pickups.salvage)
+        if (salvage >= 0 && g_pickups.salvage >= 0 && salvage > g_pickups.salvage) {
             found.push_back({kSalvagePicture, salvage - g_pickups.salvage, salvage, true});
+            tool_tips::Add("Salvage", 500);  // player_meta_data::add_salvage (RM 0xA11AB6), 500 ms on
+        }
         for (int slot = 0; slot < kInventorySlots; ++slot) {
             const int w = CabinetWeaponOfEntry(entries[slot]);
             if (w < 0 || g_cabinetWeapons[w].picture.empty() || g_cabinetWeapons[w].sledgehammer) continue;
@@ -3700,6 +3731,48 @@ void CollectBlips(double reachMetres) {
     }
 }
 
+// ---- Guerrilla's tool tips this mod raises (their rules: tool_tips.cpp)
+//
+// Where Guerrilla raised them (RM), and where this mod does:
+//   - the weapon cabinet (hud_ui_weapon_cabinet_process 0x85B33C, _exit 0x85B1D9 / 0x85B20C): "Locker" or
+//     "Ammo_Crate_Weapons" as it opens, taken away as it closes, then "Locker_Ammo" (a locker) or "Ammo_Boxes" (a
+//     crate): OpenCabinet, CloseCabinet;
+//   - an upgrade station's use prompt (hud_ui_process_use_action_info 0x8E9495): "upgrades", 100 ms on: the stations;
+//   - salvage picked up (player_meta_data::add_salvage 0xA11AB6): "Salvage", 500 ms on: the pickups;
+//   - a radio tag found (bftp_touch_tag 0xA8DBE7, 0xA8DC6F): "Blast_from_the_Past", or "MOAB_Located" with a M.O.A.B.'s
+//     third: FollowRadioTags (Guerrilla's "Blast", from its collectable pickup, isn't raised: which pickup it was is
+//     to check);
+//   - getting into a vehicle, once seated (set_enter_complete 0xBB548A): "Driving", for a car or a tank (not a flyer or a
+//     walker: a walker has its own, not yet; Guerrilla's "EDF_Turret" for a gunner's seat and "Mine_Pooper" for a mine
+//     layer aren't told apart yet): here;
+//   - the alert level changing to anything above green (change_alert_level 0x7A43CA; Guerrilla not in a safehouse or a
+//     mission, not checked yet): "Yellow_Alert": here.
+// The rest are raised by Guerrilla's mission and activity scripts (tool_tip_add), its campaign's systems (activities
+// started and won, control and morale) and its gear: other mods, through GuerrillaHud_ToolTip.
+constexpr BYTE kSubtypeAutomobile = 5;  // an object's subtype (+0x7B): 5 a car or tank, 6 a flyer, 8 a walker
+
+void FollowToolTipTriggers() {
+    BYTE* player = g_player;
+    static DWORD enteredVehicle = kNoHandle;  // got into, not seated yet
+    static DWORD lastVehicle = kNoHandle;
+    const DWORD vehicle = player ? *reinterpret_cast<const DWORD*>(player + kHumanVehicle) : kNoHandle;
+    if (vehicle != lastVehicle) {
+        lastVehicle = vehicle;
+        enteredVehicle = vehicle != 0 ? vehicle : kNoHandle;
+    }
+    if (enteredVehicle != kNoHandle && player && Driving(player)) {
+        BYTE* object = ObjectFromHandle(kCabinetWorld, nullptr, enteredVehicle);
+        if (object && object[kObjectSubtype] == kSubtypeAutomobile) tool_tips::Add("Driving");
+        enteredVehicle = kNoHandle;
+    }
+    static int lastAlert = -1;
+    const int alert = AlertLevelNow();
+    if (alert != lastAlert) {
+        if (lastAlert >= 0 && alert > 0) tool_tips::Add("Yellow_Alert");
+        lastAlert = alert;
+    }
+}
+
 // rfg_map_blips(reach) -> count
 //   Collects the people and vehicles Guerrilla's minimap shows within `reach` metres of the player (its
 //   rules: see "Guerrilla's minimap blips" above), for rfg_map_blip.
@@ -3794,6 +3867,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_handbook_available", LuaHandbookAvailable);
     rfa::game::lua_register(L, "rfg_handbook_open", LuaHandbookOpen);
     rfa::game::lua_register(L, "rfg_handbook", LuaHandbook);
+    tool_tips::Register(L);
     rfa::game::lua_register(L, "rfg_handbook_screen", LuaHandbookScreen);
     rfa::game::lua_register(L, "rfg_handbook_page_new", LuaHandbookPageNew);
     rfa::game::lua_register(L, "rfg_handbook_rows", LuaHandbookRows);
@@ -3842,6 +3916,11 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         // Guerrilla's prompts (its use prompt at the safehouses' stations) and its upgrade screen, loaded with
         // the HUD; the screen drawn only while a shop is open.
         if (!FindDocument("rfg_ui_messages")) g_documents.push_back({"rfg_ui_messages"});
+        // Guerrilla's help box (its tool tips), loaded with the HUD, drawn over the rest, our screens too (a tip the
+        // weapon cabinet raises shows over it).
+        Document help{"rfg_ui_hud_help"};
+        help.onTop = true;
+        g_documents.push_back(help);
         Document shop{"rfg_ui_upgrades"};
         shop.whileShop = true;
         g_documents.push_back(shop);
@@ -3865,6 +3944,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         ReadSafehouses();
         ReadCabinet();
         ReadHandbook();
+        tool_tips::Read();
         // The handbook's entries' pictures' documents, listed before the handbook's own: each pass over the list
         // unloads a picture before the handbook (the opposite of the order they load in; see Wanted).
         std::set<std::string> pictureDocuments;

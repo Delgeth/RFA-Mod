@@ -54,6 +54,7 @@
 #include "undercover.h"
 #include "kill_regions.h"
 #include "stealth.h"
+#include "district_commands.h"
 
 namespace campaign {
 namespace {
@@ -98,6 +99,7 @@ void __cdecl ScriptFrame() {
         restricted_areas::Enter();
         kill_regions::Enter();
         stealth::Enter();
+        district_commands::Enter();
         if (g_activities) activities::Enter();
     }
     g_playing = playing;

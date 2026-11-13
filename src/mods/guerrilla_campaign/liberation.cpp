@@ -513,6 +513,18 @@ void ChangeMorale(float delta, int which) {
     words::PostCivilianMoraleChange(before, Percent(morale, district.moraleMax));
 }
 
+void SetEdfControl(float control, int which) {
+    const int index = Resolve(which);
+    if (index < 0 || index >= DistrictCount()) return;
+    DistrictState& district = g_districts[index];
+    const float before = Percent(district.control, district.controlMax);
+    district.control = control < 0.0f ? 0.0f : control > district.controlMax ? district.controlMax : control;
+    SaveDistrict(district);
+    words::PostEdfControlLowered(before, Percent(district.control, district.controlMax));
+    rfa::Log("%s: EDF control set to %.0f / %.0f", district.name.c_str(), district.control, district.controlMax);
+    MaybeLiberate(district);
+}
+
 void SetMorale(float morale, int which) {
     const int index = Resolve(which);
     if (index < 0 || index >= DistrictCount()) return;

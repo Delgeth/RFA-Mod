@@ -2073,10 +2073,14 @@ public static class GuerrillaWeapons
             if (entry.Element("character_mesh") is { } ourCharacterMesh && ourRig != null)
             {
                 if (ourCharacterMesh.Element("rig") is { } rigField) GuerrillaTableFit.Set(rigField, "Filename", Path.ChangeExtension(ourRig, ".rigx"));
+                // Its own animations (its moving parts): the Shockwave's and Rhino's packs' set BackPacks is ported with
+                // the player's animations (GuerrillaPlayerAnimations.BackpackSetName); any other set isn't yet.
                 if (ourCharacterMesh.ValueOf("Anim_set")?.Trim() is { Length: > 0 } set && !set.Equals("none", StringComparison.OrdinalIgnoreCase))
                 {
-                    GuerrillaTableFit.Set(ourCharacterMesh, "Anim_set", "none");
-                    notes.Add($"item {name}: its own animations ({set}: its moving parts) not ported yet; it holds still");
+                    bool backpacks = set.Equals(GuerrillaPlayerAnimations.GuerrillaBackpackSet, StringComparison.OrdinalIgnoreCase);
+                    GuerrillaTableFit.Set(ourCharacterMesh, "Anim_set", backpacks ? GuerrillaPlayerAnimations.BackpackSetName : "none");
+                    notes.Add(backpacks ? $"item {name}: its own animations: Guerrilla's set {set} as {GuerrillaPlayerAnimations.BackpackSetName} (with the player's animations)"
+                                        : $"item {name}: its own animations ({set}: its moving parts) not ported yet; it holds still");
                 }
             }
             var flags = entry.Element("Item_Flags");

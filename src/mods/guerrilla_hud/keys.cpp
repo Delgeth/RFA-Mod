@@ -2,7 +2,7 @@
 //
 // Guerrilla's PC version let its own actions be bound in its controls menu; Armageddon's controls menu knows only
 // Armageddon's. Until Guerrilla's are added there, this window lists them: click a key, then press the new one (a
-// letter, a digit, Tab or F1-F12; Esc keeps the old one, Delete leaves the action without a key). Each change is
+// letter, a digit, Tab, Enter, Space or F1-F12; Esc keeps the old one, Delete leaves the action without a key). Each change is
 // written to rfa_mods.ini at once and used at once. Before [GuerrillaKeys] the map's key was [GuerrillaHud] MapKey and
 // the backpack's [GuerrillaGear] BackpackKey: those are still read where [GuerrillaKeys] has no setting.
 #include "rfa_mod.h"
@@ -36,6 +36,7 @@ KeyAction g_actions[keys::Count] = {
     {L"Down", "Down (the map's pan, the safehouse screens' lists)", "the down arrow, the mouse wheel in the lists", L"S", nullptr, nullptr},
     {L"Left", "Left (the map's pan)", "the left arrow", L"A", nullptr, nullptr},
     {L"Right", "Right (the map's pan)", "the right arrow", L"D", nullptr, nullptr},
+    {L"TipContinue", "Close a tool tip that paused the game", "", L"Enter", nullptr, nullptr},
 };
 constexpr wchar_t kSection[] = L"GuerrillaKeys";
 
@@ -62,10 +63,12 @@ int g_capturing = -1;        // the action waiting for its new key, -1 for none
 bool g_heldAtCapture[256];   // the keys already down as it started waiting (not taken as the new key)
 std::string g_status;
 
-// A key's virtual-key code from its name: a letter or digit, Tab, or F1-F12; 0 for anything else (or none).
+// A key's virtual-key code from its name: a letter or digit, Tab, Enter, Space, or F1-F12; 0 for anything else (or none).
 int CodeOf(const std::wstring& name) {
     if (name.size() == 1 && iswalnum(name[0])) return towupper(name[0]);
     if (_wcsicmp(name.c_str(), L"Tab") == 0) return VK_TAB;
+    if (_wcsicmp(name.c_str(), L"Enter") == 0) return VK_RETURN;
+    if (_wcsicmp(name.c_str(), L"Space") == 0) return VK_SPACE;
     if (name.size() >= 2 && name.size() <= 3 && (name[0] == L'F' || name[0] == L'f')) {
         const int number = _wtoi(name.c_str() + 1);
         if (number >= 1 && number <= 12) return VK_F1 + number - 1;
@@ -76,6 +79,8 @@ int CodeOf(const std::wstring& name) {
 std::wstring NameOf(int code) {
     if ((code >= 'A' && code <= 'Z') || (code >= '0' && code <= '9')) return std::wstring(1, static_cast<wchar_t>(code));
     if (code == VK_TAB) return L"Tab";
+    if (code == VK_RETURN) return L"Enter";
+    if (code == VK_SPACE) return L"Space";
     if (code >= VK_F1 && code <= VK_F12) return L"F" + std::to_wstring(code - VK_F1 + 1);
     return L"";
 }
@@ -159,7 +164,7 @@ void Window() {
     if (!g_windowOpen) g_capturing = -1;
     Capture();
     ImGui::TextWrapped("The keys of Guerrilla's own actions in the Guerrilla world. Click a key, then press the new one: "
-                       "a letter, a digit, Tab or F1-F12 (Esc keeps the old one, Delete leaves it without a key). "
+                       "a letter, a digit, Tab, Enter, Space or F1-F12 (Esc keeps the old one, Delete leaves it without a key). "
                        "They're saved in rfa_mods.ini under [GuerrillaKeys] and work at once.");
     ImGui::Spacing();
     if (ImGui::BeginTable("keys", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
@@ -236,7 +241,7 @@ void keys::Read() {
         else name = a.defaultKey;
         a.code = CodeOf(name);
         if (!name.empty() && !a.code)
-            rfa::Log("Guerrilla's keys: [GuerrillaKeys] %s=%s isn't a key this mod knows (a letter, a digit, Tab, F1-F12); %s has none",
+            rfa::Log("Guerrilla's keys: [GuerrillaKeys] %s=%s isn't a key this mod knows (a letter, a digit, Tab, Enter, Space, F1-F12); %s has none",
                      Narrow(a.name).c_str(), Narrow(name).c_str(), a.shown);
         summary += (summary.empty() ? "" : ", ") + Narrow(a.name) + " " + (a.code ? Narrow(NameOf(a.code)) : "none");
     }

@@ -26,6 +26,7 @@
 #include "liberation.h"
 #include "script_words.h"
 #include "tables.h"
+#include <stdio.h>
 #include <string.h>
 
 namespace campaign::activities {
@@ -97,10 +98,22 @@ auto& g_commandRunning = *reinterpret_cast<int*>(0x28FF1C0);
 auto const g_commandWord = reinterpret_cast<const char*>(0x28FF0B8);
 BYTE g_startCommand[32];
 
+using ConsolePrintFn = void(__cdecl*)(const char* format, ...);
+auto const ConsolePrint = reinterpret_cast<ConsolePrintFn>(0xC7C440);
+
 void StartCommand() {
     if (!g_commandRunning) return;
     ParseArguments(2, 0);
-    if (!StartDemolitionsMaster(g_commandWord)) rfa::Log("rfg_dm_start: couldn't start \"%s\"", g_commandWord);
+    if (StartDemolitionsMaster(g_commandWord)) return;
+    // Why not, in the console too: Guerrilla's demolitions_master_can_be_started (no activity running,
+    // the activity's cooldown over, the alert green).
+    char why[160];
+    if (AnyRunning()) sprintf_s(why, "an activity is running");
+    else if (g_cooldown > 0.0f) sprintf_s(why, "the activities' cooldown, %.0f s more (Guerrilla's: 180 s after one ends)", g_cooldown);
+    else if (liberation::AlertLevel() != handles::AlertGreen) sprintf_s(why, "the alert level isn't green");
+    else sprintf_s(why, "see logs\\rfa_mods.log");
+    rfa::Log("rfg_dm_start: couldn't start \"%s\": %s", g_commandWord, why);
+    ConsolePrint("rfg_dm_start: couldn't start \"%s\": %s\n", g_commandWord, why);
 }
 
 }  // namespace

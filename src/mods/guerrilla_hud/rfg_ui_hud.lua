@@ -251,7 +251,8 @@ local function build_map()
 	end
 
 	-- Guerrilla's radar sweep: its line over the map, not turned with it; a ring for each person.
-	if rfg_map_sweep_clock ~= nil and rfg_sin_cos ~= nil then
+	-- An older mod has neither (reading a global that isn't there is an error: Armageddon's own silent look).
+	if _GetAnyGlobalSilent("rfg_map_sweep_clock") ~= nil and _GetAnyGlobalSilent("rfg_sin_cos") ~= nil then
 		for i = 1, BLIPS do
 			Ring_handles[i] = picture("rfg_minimap_ring" .. i, turn, RING_PICTURE)
 			vint_set_property(Ring_handles[i], "visible", false)

@@ -59,6 +59,8 @@ int PlayerDistrict();
 void ChangeEdfControl(float delta, int district);
 void ChangeMorale(float delta, int district);
 void SetMorale(float morale, int district);
+// Set outright (gfm_set_edf_control: clamped to 0..max, then the district may be liberated).
+void SetEdfControl(float control, int district);
 // What morale's effects read: the district's, or the temporary morale while a mission uses it,
 // plus the offset (gfm_get_effective_morale), and that as a fraction of the most.
 float EffectiveMoralePercent(int district);

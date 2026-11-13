@@ -19,6 +19,8 @@ struct Object {
     unsigned parent = 0xFFFFFFFF;  // the object it is attached to (a demolitions node's building)
     std::string zone;
     Vector pos{};
+    bool hasParentPos = false;     // where the parent is in Guerrilla's world (parent_pos): to find it by its place
+    Vector parentPos{};            // when ours gave it another handle
     std::vector<std::pair<std::string, std::string>> properties;
 
     std::string Property(const char* name, const char* fallback = "") const;
