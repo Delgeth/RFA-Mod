@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Readers for Red Faction: Armageddon's file formats. No UI; the editor and any future tools use it. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RfaFormats</RootNamespace>
+    <!-- Any CPU, so the 64-bit editor can load it whatever Platform the build environment sets -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Guerrilla's material shaders in HLSL, which the world builder compiles (GuerrillaShaders.cs) -->
+    <EmbeddedResource Include="Guerrilla\Shaders\*.hlsl" LogicalName="%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

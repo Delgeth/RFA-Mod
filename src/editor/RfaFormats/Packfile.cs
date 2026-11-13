@@ -1,0 +1,607 @@
+using System.IO.Compression;
+using System.Text;
+
+namespace RfaFormats;
+
+/// <summary>
+/// A packfile: a .vpp_pc archive in the game folder, or a .str2_pc container inside one. Both use
+/// format version 6:
+///
+///   0x000  2 KB header: magic 0x51890ACE, version 6, ..., flags at 0x14C, and at 0x154 the file
+///          count, packfile size, directory size, names size, data size, compressed data size
+///   0x800  directory: 24 bytes per file (name offset, 0, data offset, size, compressed size, 0)
+///   then   the file names (NUL-separated), then the data; each block starts on a 2 KB boundary
+///
+/// The data can be stored three ways (see <see cref="PackfileFlags"/>): plain; compressed, with
+/// each file its own zlib stream starting on a 2 KB boundary; or compressed and condensed, with the
+/// whole data block one zlib stream. In a condensed one the files sit at their directory offsets
+/// (one after another in .str2_pc containers, on 16-byte boundaries in table.vpp_pc), and the
+/// stream is flushed after each file; the directory's compressed size of a file is the stream bytes
+/// up to that flush. The game's zlib streams are never finished, so they are read by size, not to
+/// their end.
+///
+/// Red Faction: Guerrilla uses version 3 of this format, which is read too (not written): the same
+/// header, and 28 bytes per file in the directory (name offset, 0, data offset, name hash, size,
+/// compressed size, 0).
+/// </summary>
+public sealed class Packfile
+{
+    public const uint Magic = 0x51890ACE;
+    public const uint Version = 6;
+    public const uint GuerrillaVersion = 3;
+    const int HeaderSize = 0x800;
+
+    readonly Func<long, int, byte[]> readBytes;  // reads from wherever the packfile lives
+    readonly byte[] header;
+    readonly byte[] directory;
+    readonly byte[] names;
+    readonly int entrySize;                       // 24 bytes per file in version 6, 28 in version 3
+    byte[]? condensedData;                        // the whole data block, once a condensed file was read
+
+    public string Name { get; }
+    public uint FormatVersion { get; }     // 6 (Armageddon) or 3 (Guerrilla)
+    public PackfileFlags Flags { get; }
+    public long DataStart { get; }
+    public uint DataSize { get; }          // uncompressed size of the data block
+    public uint CompressedDataSize { get; } // 0xFFFFFFFF if not compressed
+    public IReadOnlyList<PackfileEntry> Entries { get; }
+
+    public bool IsCompressed => Flags.HasFlag(PackfileFlags.Compressed);
+    public bool IsCondensed => Flags.HasFlag(PackfileFlags.Condensed);
+
+    Packfile(string name, Func<long, int, byte[]> readBytes)
+    {
+        Name = name;
+        this.readBytes = readBytes;
+
+        header = readBytes(0, HeaderSize);
+        if (header.Length < HeaderSize || U32(header, 0) != Magic)
+            throw new InvalidDataException($"{name} is not a packfile");
+        FormatVersion = U32(header, 4);
+        if (FormatVersion != Version && FormatVersion != GuerrillaVersion)
+            throw new InvalidDataException($"{name} is packfile version {FormatVersion}; only versions 6 (Armageddon) and 3 (Guerrilla) are read");
+        entrySize = FormatVersion == GuerrillaVersion ? 28 : 24;
+        int sizeAt = FormatVersion == GuerrillaVersion ? 16 : 12;  // the file's size, then its compressed size
+
+        Flags = (PackfileFlags)U32(header, 0x14C);
+        int count = (int)U32(header, 0x154);
+        uint directorySize = U32(header, 0x15C);
+        uint namesSize = U32(header, 0x160);
+        DataSize = U32(header, 0x164);
+        CompressedDataSize = U32(header, 0x168);
+
+        long namesStart = HeaderSize + Align(directorySize, 0x800);
+        DataStart = namesStart + Align(namesSize, 0x800);
+        directory = readBytes(HeaderSize, (int)directorySize);
+        names = readBytes(namesStart, (int)namesSize);
+
+        // Where each file's bytes are stored. Uncompressed and condensed packfiles say so in the
+        // directory; for compressed ones the streams simply follow each other on 2 KB boundaries.
+        var entries = new List<PackfileEntry>(count);
+        long storedAt = DataStart;
+        for (int i = 0; i < count; i++)
+        {
+            int at = i * entrySize;
+            string fileName = CString(names, (int)U32(directory, at));
+            uint offset = U32(directory, at + 8);
+            uint size = U32(directory, at + sizeAt);
+            uint compressedSize = U32(directory, at + sizeAt + 4);
+            if (IsCompressed && !IsCondensed)
+            {
+                entries.Add(new PackfileEntry(fileName, offset, size, compressedSize, storedAt));
+                storedAt += Align(compressedSize, 0x800);
+            }
+            else
+            {
+                entries.Add(new PackfileEntry(fileName, offset, size, compressedSize, DataStart + offset));
+            }
+        }
+        Entries = entries;
+    }
+
+    /// <summary>Opens a .vpp_pc archive on disk. Only the header, directory and names are read now.</summary>
+    public static Packfile Open(string path)
+    {
+        return new Packfile(Path.GetFileName(path), (offset, length) =>
+        {
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            file.Position = offset;
+            var bytes = new byte[length];
+            file.ReadExactly(bytes);
+            return bytes;
+        });
+    }
+
+    /// <summary>Opens a packfile already in memory, such as a .str2_pc read out of an archive.</summary>
+    public static Packfile FromBytes(string name, byte[] data)
+    {
+        return new Packfile(name, (offset, length) => data.AsSpan((int)offset, length).ToArray());
+    }
+
+    /// <summary>
+    /// Opens a container (.str2_pc) inside this archive, as <see cref="FromBytes"/> does with its bytes
+    /// read out, but where it lies if the archive isn't compressed (as the levels' aren't): only its
+    /// header, directory and names are read now, its data when a file is read, so the container's
+    /// bytes aren't held.
+    /// </summary>
+    public Packfile OpenContainer(PackfileEntry entry, string? name = null)
+    {
+        if (IsCompressed) return FromBytes(name ?? entry.Name, Read(entry));
+        return new Packfile(name ?? entry.Name, (offset, length) => readBytes(entry.StoredAt + offset, length));
+    }
+
+    /// <summary>The bytes of one file, decompressed.</summary>
+    public byte[] Read(PackfileEntry entry)
+    {
+        if (!IsCompressed)
+            return readBytes(entry.StoredAt, (int)entry.Size);
+
+        if (!IsCondensed)
+            return Inflate(readBytes(entry.StoredAt, (int)entry.CompressedSize), (int)entry.Size);
+
+        condensedData ??= Inflate(readBytes(DataStart, (int)CompressedDataSize), (int)DataSize);
+        return condensedData.AsSpan((int)entry.Offset, (int)entry.Size).ToArray();
+    }
+
+    /// <summary>
+    /// The bytes of several files, decompressed, in the order given. From a condensed packfile they
+    /// are read in one pass over its stream, as far as the last of them, and its data block isn't
+    /// kept (as <see cref="Read"/> keeps it for the next file): for a few files of many containers.
+    /// </summary>
+    public byte[][] ReadAll(IReadOnlyList<PackfileEntry> entries)
+    {
+        if (!IsCondensed || condensedData != null) return [.. entries.Select(Read)];
+        var files = new byte[entries.Count][];
+        using var zlib = new ZLibStream(new MemoryStream(readBytes(DataStart, (int)CompressedDataSize)), CompressionMode.Decompress);
+        var passed = new byte[0x10000];
+        long at = 0;
+        foreach (int i in Enumerable.Range(0, entries.Count).OrderBy(i => entries[i].Offset))
+        {
+            var entry = entries[i];
+            if (entry.Offset < at) throw new ArgumentException($"{entry.Name} is given twice, or overlaps another file", nameof(entries));
+            while (at < entry.Offset) at += ReadSome(zlib, passed.AsSpan(0, (int)Math.Min(entry.Offset - at, passed.Length)));
+            files[i] = new byte[entry.Size];
+            for (int done = 0; done < files[i].Length;) done += ReadSome(zlib, files[i].AsSpan(done));
+            at += entry.Size;
+        }
+        return files;
+    }
+
+    /// <summary>Some bytes from a stream (the game's have no end marker, so it is read by size), at least one.</summary>
+    static int ReadSome(Stream stream, Span<byte> into)
+    {
+        int read = stream.Read(into);
+        return read > 0 ? read : throw new InvalidDataException("compressed data ended before the files it holds");
+    }
+
+    public PackfileEntry? Find(string fileName) =>
+        Entries.FirstOrDefault(e => string.Equals(e.Name, fileName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// A copy of this packfile with some files replaced (by name), written the way the game's own
+    /// tools wrote it: same header, same file order and names; compressed and condensed packfiles
+    /// get one zlib stream flushed after each file. If every file keeps its size, every file also
+    /// keeps its offset. Used for .str2_pc containers; packfiles compressed file by file (some
+    /// .vpp_pc archives) can't be written.
+    /// </summary>
+    public byte[] Rebuild(IReadOnlyDictionary<string, byte[]> replacements)
+    {
+        if (FormatVersion != Version)
+            throw new NotSupportedException($"{Name} is a Red Faction: Guerrilla packfile, which is only read");
+        if (IsCompressed && !IsCondensed)
+            throw new NotSupportedException($"{Name} is compressed file by file, which can't be written yet");
+
+        var lookup = new Dictionary<string, byte[]>(replacements, StringComparer.OrdinalIgnoreCase);
+        var files = Entries.Select(e => lookup.TryGetValue(e.Name, out byte[]? replacement) ? replacement : Read(e)).ToList();
+        int count = files.Count;
+
+        // Where each file goes in the data block.
+        var offsets = new uint[count];
+        if (files.Select(f => (uint)f.Length).SequenceEqual(Entries.Select(e => e.Size)))
+        {
+            for (int i = 0; i < count; i++) offsets[i] = Entries[i].Offset;
+        }
+        else
+        {
+            uint alignment = Entries.Skip(1).Select((e, i) => e.Offset == Entries[i].Offset + Entries[i].Size).All(x => x) ? 1u
+                           : IsCompressed ? 16u : 0x800u;
+            uint at = 0;
+            for (int i = 0; i < count; i++)
+            {
+                offsets[i] = at;
+                at = (uint)Align(at + files[i].Length, alignment);
+            }
+        }
+        uint dataSize = count == 0 ? 0 : offsets[^1] + (uint)files[^1].Length;
+        var plain = new byte[dataSize];
+        for (int i = 0; i < count; i++) files[i].CopyTo(plain, offsets[i]);
+
+        // The data block as stored, and each file's stored size.
+        var stored = new uint[count];
+        byte[] block;
+        if (IsCompressed)
+        {
+            var output = new MemoryStream();
+            var zlib = new ZLibStream(output, CompressionLevel.SmallestSize, leaveOpen: true);
+            long before = 0;
+            for (int i = 0; i < count; i++)
+            {
+                uint end = i + 1 < count ? offsets[i + 1] : dataSize;
+                zlib.Write(plain, (int)offsets[i], (int)(end - offsets[i]));
+                zlib.Flush();  // a sync flush: everything so far can be decompressed
+                stored[i] = (uint)(output.Length - before);
+                before = output.Length;
+            }
+            // Taken before the stream is closed, which would add an end marker the game's own don't have.
+            block = output.ToArray();
+            zlib.Dispose();
+        }
+        else
+        {
+            block = plain;
+            Array.Fill(stored, 0xFFFFFFFFu);
+        }
+
+        byte[] newDirectory = (byte[])directory.Clone();
+        for (int i = 0; i < count; i++)
+        {
+            BitConverter.TryWriteBytes(newDirectory.AsSpan(i * entrySize + 8), offsets[i]);
+            BitConverter.TryWriteBytes(newDirectory.AsSpan(i * entrySize + 12), (uint)files[i].Length);
+            BitConverter.TryWriteBytes(newDirectory.AsSpan(i * entrySize + 16), stored[i]);
+        }
+        byte[] newHeader = (byte[])header.Clone();
+        BitConverter.TryWriteBytes(newHeader.AsSpan(0x158), (uint)(DataStart + block.Length));
+        BitConverter.TryWriteBytes(newHeader.AsSpan(0x164), dataSize);
+        BitConverter.TryWriteBytes(newHeader.AsSpan(0x168), IsCompressed ? (uint)block.Length : 0xFFFFFFFFu);
+
+        var packfile = new byte[DataStart + block.Length];
+        newHeader.CopyTo(packfile, 0);
+        newDirectory.CopyTo(packfile, HeaderSize);
+        names.CopyTo(packfile, HeaderSize + Align(directory.Length, 0x800));
+        block.CopyTo(packfile, DataStart);
+        return packfile;
+    }
+
+    /// <summary>
+    /// A new uncompressed packfile (version 6) holding these files, in this order, laid out as the
+    /// game's own uncompressed archives are (ruin01.vpp_pc): the 2 KB header (taken from
+    /// <paramref name="templateHeader"/>, a game archive's, with the counts and sizes set), the
+    /// directory (name offset, 0, data offset, size, 0xFFFFFFFF for no compression, 0), the
+    /// NUL-separated names, then the data, each block and each file starting on a 2 KB boundary.
+    /// </summary>
+    public static byte[] Create(Packfile templateHeader, IReadOnlyList<(string Name, byte[] Data)> files) => Create(templateHeader.header, files);
+
+    /// <summary>
+    /// A new uncompressed packfile (version 6) holding these files, as
+    /// <see cref="Create(Packfile, IReadOnlyList{ValueTuple{string, byte[]}})"/> but with its header
+    /// made from nothing (see <see cref="NewHeader"/>).
+    /// </summary>
+    public static byte[] Create(IReadOnlyList<(string Name, byte[] Data)> files) => Create(NewHeader(PackfileFlags.None), files);
+
+    /// <summary>
+    /// A 2 KB packfile header as the game's own are: magic, version 6, the flags at 0x14C, and the
+    /// rest zero but for the counts and sizes from 0x154 (filled in by the writers). (The game's also
+    /// hold two words at 0x16C and 0x170, the same in every archive built in one go and different in
+    /// another: memory addresses left by the tool that built them, which the game sets itself.)
+    /// </summary>
+    static byte[] NewHeader(PackfileFlags flags)
+    {
+        var header = new byte[HeaderSize];
+        BitConverter.TryWriteBytes(header.AsSpan(0), Magic);
+        BitConverter.TryWriteBytes(header.AsSpan(4), Version);
+        BitConverter.TryWriteBytes(header.AsSpan(0x14C), (uint)flags);
+        return header;
+    }
+
+    /// <summary>
+    /// Writes a new packfile straight into a file: for archives too big to hold as one array (past
+    /// 2 GB; the game's world_l0.vpp_pc is 3 GB). The format's sizes and offsets are 32-bit, so at
+    /// most 4 GB. Uncompressed it is the same as <see cref="Create(IReadOnlyList{ValueTuple{string, byte[]}})"/>
+    /// makes. <paramref name="compressed"/> writes it compressed file by file, as the game's
+    /// zonescript_world.vpp_pc is (flags 0x4801): each file its own zlib stream, flushed but not
+    /// finished, the streams one after another on 2 KB boundaries; the directory keeps each file's
+    /// uncompressed offset (on 2 KB boundaries) and gives its stream's size. The game reads such an
+    /// archive's stored bytes through a 20 MB pool, so its zone files must be stored compressed.
+    /// </summary>
+    public static void Write(string path, IReadOnlyList<(string Name, byte[] Data)> files, bool compressed = false)
+    {
+        using var output = File.Create(path);
+        Write(output, NewHeader(compressed ? PackfileFlags.Compressed | (PackfileFlags)0x4800 : PackfileFlags.None), files, compressed);
+    }
+
+    /// <summary>
+    /// Writes an archive on disk again with some files replaced, added (a name it hasn't) or taken
+    /// out (a null), by name, the rest kept in their order with their stored bytes copied as they
+    /// are: for archives this editor made or that a tool of ours made (the Guerrilla world's
+    /// rfg_l0.vpp_pc, rfg_l1.vpp_pc, zonescript_rfg.vpp_pc), which are too big to hold in memory
+    /// (rfg_l1 passes a GB). Only the layouts <see cref="Write(string, IReadOnlyList{ValueTuple{string, byte[]}}, bool)"/>
+    /// writes: uncompressed, or compressed file by file (its header and flags kept), each file on a
+    /// 2 KB boundary. Written beside it first, then put in its place, so a failure leaves it whole.
+    /// </summary>
+    public static void RewriteArchive(string path, IReadOnlyDictionary<string, byte[]?> changes)
+    {
+        Packfile pack = Open(path);
+        if (pack.FormatVersion != Version)
+            throw new NotSupportedException($"{pack.Name} is a Red Faction: Guerrilla packfile, which is only read");
+        if (pack.IsCondensed)
+            throw new NotSupportedException($"{pack.Name} is compressed as one stream, which can't be written in place");
+        bool compressed = pack.IsCompressed;
+        var lookup = new Dictionary<string, byte[]?>(changes, StringComparer.OrdinalIgnoreCase);
+
+        // The files as they will be: kept ones (their entry) or new bytes (stored: deflated if compressed).
+        var files = new List<(string Name, PackfileEntry? Kept, byte[]? Stored, uint Size)>();
+        foreach (PackfileEntry entry in pack.Entries)
+        {
+            if (!lookup.TryGetValue(entry.Name, out byte[]? replacement))
+                files.Add((entry.Name, entry, null, entry.Size));
+            else if (replacement != null)
+                files.Add((entry.Name, null, compressed ? Deflate(replacement) : replacement, (uint)replacement.Length));
+        }
+        foreach (var (name, data) in lookup)
+            if (data != null && pack.Find(name) == null)
+                files.Add((name, null, compressed ? Deflate(data) : data, (uint)data.Length));
+
+        var names = new MemoryStream();
+        var directory = new MemoryStream();
+        long dataLength = 0, storedLength = 0;
+        foreach (var (name, kept, stored, size) in files)
+        {
+            dataLength = Align(dataLength, 0x800);
+            uint storedSize = kept != null ? (compressed ? kept.CompressedSize : kept.Size) : (uint)stored!.Length;
+            directory.Write(BitConverter.GetBytes((uint)names.Length));
+            directory.Write(BitConverter.GetBytes(0u));
+            directory.Write(BitConverter.GetBytes((uint)dataLength));
+            directory.Write(BitConverter.GetBytes(size));
+            directory.Write(BitConverter.GetBytes(compressed ? storedSize : 0xFFFFFFFFu));
+            directory.Write(BitConverter.GetBytes(0u));
+            names.Write(Encoding.Latin1.GetBytes(name));
+            names.WriteByte(0);
+            dataLength += size;
+            if (compressed) storedLength = Align(storedLength, 0x800) + storedSize;
+        }
+        if (!compressed) storedLength = dataLength;
+        long namesStart = HeaderSize + Align(directory.Length, 0x800), dataStart = namesStart + Align(names.Length, 0x800);
+        if (dataStart + Math.Max(dataLength, storedLength) > uint.MaxValue)
+            throw new IOException($"a packfile can hold at most 4 GB; {pack.Name} would need {(dataStart + Math.Max(dataLength, storedLength)) / (1 << 20):N0} MB");
+        byte[] head = (byte[])pack.header.Clone();
+        BitConverter.TryWriteBytes(head.AsSpan(0x154), (uint)files.Count);
+        BitConverter.TryWriteBytes(head.AsSpan(0x158), (uint)(dataStart + storedLength));
+        BitConverter.TryWriteBytes(head.AsSpan(0x15C), (uint)directory.Length);
+        BitConverter.TryWriteBytes(head.AsSpan(0x160), (uint)names.Length);
+        BitConverter.TryWriteBytes(head.AsSpan(0x164), (uint)dataLength);
+        BitConverter.TryWriteBytes(head.AsSpan(0x168), compressed ? (uint)storedLength : 0xFFFFFFFFu);
+
+        string temporary = path + ".saving";
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var output = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+        {
+            output.Write(head);
+            output.Write(directory.ToArray());
+            output.Write(new byte[namesStart - HeaderSize - directory.Length]);
+            output.Write(names.ToArray());
+            output.Write(new byte[dataStart - namesStart - names.Length]);
+            var buffer = new byte[1 << 20];
+            long at = 0;
+            foreach (var (_, kept, stored, _) in files)
+            {
+                output.Write(new byte[Align(at, 0x800) - at]);
+                at = Align(at, 0x800);
+                if (stored != null)
+                {
+                    output.Write(stored);
+                    at += stored.Length;
+                    continue;
+                }
+                long length = compressed ? kept!.CompressedSize : kept!.Size;
+                input.Position = kept.StoredAt;
+                for (long left = length; left > 0;)
+                {
+                    int read = input.Read(buffer, 0, (int)Math.Min(left, buffer.Length));
+                    if (read <= 0) throw new InvalidDataException($"{pack.Name} ended inside {kept.Name}");
+                    output.Write(buffer, 0, read);
+                    left -= read;
+                }
+                at += length;
+            }
+        }
+        File.Move(temporary, path, overwrite: true);
+    }
+
+    static byte[] Create(byte[] header, IReadOnlyList<(string Name, byte[] Data)> files)
+    {
+        var output = new MemoryStream();
+        Write(output, header, files, false);
+        return output.ToArray();
+    }
+
+    /// <summary>One file's zlib stream as the game's archives store it: flushed, without an end marker.</summary>
+    static byte[] Deflate(byte[] data)
+    {
+        var output = new MemoryStream();
+        var zlib = new ZLibStream(output, CompressionLevel.SmallestSize, leaveOpen: true);
+        zlib.Write(data);
+        zlib.Flush();
+        byte[] stream = output.ToArray();  // taken before the stream is closed, which would add the end marker
+        zlib.Dispose();
+        return stream;
+    }
+
+    static void Write(Stream output, byte[] header, IReadOnlyList<(string Name, byte[] Data)> files, bool compressed)
+    {
+        byte[][] streams = compressed ? files.Select(f => Deflate(f.Data)).ToArray() : [];
+        var names = new MemoryStream();
+        var directory = new MemoryStream();
+        long dataLength = 0, storedLength = 0;
+        for (int i = 0; i < files.Count; i++)
+        {
+            var (name, bytes) = files[i];
+            dataLength = Align(dataLength, 0x800);
+            directory.Write(BitConverter.GetBytes((uint)names.Length));
+            directory.Write(BitConverter.GetBytes(0u));
+            directory.Write(BitConverter.GetBytes((uint)dataLength));
+            directory.Write(BitConverter.GetBytes((uint)bytes.Length));
+            directory.Write(BitConverter.GetBytes(compressed ? (uint)streams[i].Length : 0xFFFFFFFFu));
+            directory.Write(BitConverter.GetBytes(0u));
+            names.Write(Encoding.Latin1.GetBytes(name));
+            names.WriteByte(0);
+            dataLength += bytes.Length;
+            if (compressed) storedLength = Align(storedLength, 0x800) + streams[i].Length;
+        }
+        if (!compressed) storedLength = dataLength;
+        long namesStart = HeaderSize + Align(directory.Length, 0x800), dataStart = namesStart + Align(names.Length, 0x800);
+        if (dataStart + Math.Max(dataLength, storedLength) > uint.MaxValue) throw new IOException($"a packfile can hold at most 4 GB; these files need {(dataStart + dataLength) / (1 << 20):N0} MB");
+        byte[] head = (byte[])header.Clone();
+        if (!compressed) BitConverter.TryWriteBytes(head.AsSpan(0x14C), (uint)PackfileFlags.None);
+        BitConverter.TryWriteBytes(head.AsSpan(0x154), (uint)files.Count);
+        BitConverter.TryWriteBytes(head.AsSpan(0x158), (uint)(dataStart + storedLength));
+        BitConverter.TryWriteBytes(head.AsSpan(0x15C), (uint)directory.Length);
+        BitConverter.TryWriteBytes(head.AsSpan(0x160), (uint)names.Length);
+        BitConverter.TryWriteBytes(head.AsSpan(0x164), (uint)dataLength);
+        BitConverter.TryWriteBytes(head.AsSpan(0x168), compressed ? (uint)storedLength : 0xFFFFFFFFu);
+        output.Write(head);
+        output.Write(directory.ToArray());
+        output.Write(new byte[namesStart - HeaderSize - directory.Length]);
+        output.Write(names.ToArray());
+        output.Write(new byte[dataStart - namesStart - names.Length]);
+        long at = 0;
+        for (int i = 0; i < files.Count; i++)
+        {
+            byte[] bytes = compressed ? streams[i] : files[i].Data;
+            output.Write(new byte[Align(at, 0x800) - at]);
+            at = Align(at, 0x800);
+            output.Write(bytes);
+            at += bytes.Length;
+        }
+    }
+
+    /// <summary>
+    /// A new .str2_pc container holding these files, in this order, packed as
+    /// <paramref name="template"/> (another container) is: its header and flags, the files one after
+    /// another in the data block, and, when the template is compressed and condensed, one zlib stream
+    /// flushed after each file, each file's stored size being the stream bytes up to its flush (as
+    /// <see cref="Rebuild"/> writes them).
+    /// </summary>
+    public static byte[] CreateContainer(Packfile template, IReadOnlyList<(string Name, byte[] Data)> files)
+    {
+        if (template.FormatVersion != Version || (template.IsCompressed && !template.IsCondensed))
+            throw new NotSupportedException($"{template.Name} isn't packed as a container");
+        return CreateContainer(template.header, template.IsCompressed, files);
+    }
+
+    /// <summary>
+    /// A new .str2_pc container holding these files, packed as the game's own containers are
+    /// (compressed and condensed, flags 0x4803: one zlib stream for all the files), with its header
+    /// made from nothing (see <see cref="NewHeader"/>).
+    /// </summary>
+    public static byte[] CreateContainer(IReadOnlyList<(string Name, byte[] Data)> files) =>
+        CreateContainer(NewHeader(PackfileFlags.Compressed | PackfileFlags.Condensed | (PackfileFlags)0x4800), true, files);
+
+    static byte[] CreateContainer(byte[] header, bool compressed, IReadOnlyList<(string Name, byte[] Data)> files)
+    {
+        var names = new MemoryStream();
+        var directory = new MemoryStream();
+        long dataSize = 0;
+        foreach (var (name, bytes) in files)
+        {
+            directory.Write(BitConverter.GetBytes((uint)names.Length));
+            directory.Write(BitConverter.GetBytes(0u));
+            directory.Write(BitConverter.GetBytes((uint)dataSize));
+            directory.Write(BitConverter.GetBytes((uint)bytes.Length));
+            directory.Write(BitConverter.GetBytes(0xFFFFFFFFu));  // the stored size, below
+            directory.Write(BitConverter.GetBytes(0u));
+            names.Write(Encoding.Latin1.GetBytes(name));
+            names.WriteByte(0);
+            dataSize += bytes.Length;
+        }
+        byte[] dir = directory.ToArray();
+        // The data block: the files one after another, or (compressed) the stream of them; a plain copy
+        // of them is made only when it is what's stored.
+        byte[] block;
+        if (!compressed)
+        {
+            block = new byte[dataSize];
+            long at = 0;
+            foreach (var (_, bytes) in files)
+            {
+                bytes.CopyTo(block, at);
+                at += bytes.Length;
+            }
+        }
+        else
+        {
+            var output = new MemoryStream();
+            var zlib = new ZLibStream(output, CompressionLevel.SmallestSize, leaveOpen: true);
+            long before = 0;
+            for (int i = 0; i < files.Count; i++)
+            {
+                zlib.Write(files[i].Data);
+                zlib.Flush();  // a sync flush: everything so far can be decompressed
+                BitConverter.TryWriteBytes(dir.AsSpan(i * 24 + 16), (uint)(output.Length - before));
+                before = output.Length;
+            }
+            block = output.ToArray();  // taken before closing, which would add an end marker the game's don't have
+            zlib.Dispose();
+        }
+        long namesStart = HeaderSize + Align(dir.Length, 0x800), dataStart = namesStart + Align(names.Length, 0x800);
+        var packfile = new byte[dataStart + block.Length];
+        header.CopyTo(packfile, 0);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x154), (uint)files.Count);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x158), (uint)packfile.Length);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x15C), (uint)dir.Length);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x160), (uint)names.Length);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x164), (uint)dataSize);
+        BitConverter.TryWriteBytes(packfile.AsSpan(0x168), compressed ? (uint)block.Length : 0xFFFFFFFFu);
+        dir.CopyTo(packfile, HeaderSize);
+        names.ToArray().CopyTo(packfile, namesStart);
+        block.CopyTo(packfile, dataStart);
+        return packfile;
+    }
+
+    /// <summary>
+    /// Decompresses exactly <paramref name="size"/> bytes. The game's streams have no end marker,
+    /// so reading stops at the expected size instead of waiting for one.
+    /// </summary>
+    static byte[] Inflate(byte[] compressed, int size)
+    {
+        var output = new byte[size];
+        using var zlib = new ZLibStream(new MemoryStream(compressed), CompressionMode.Decompress);
+        int done = 0;
+        while (done < size)
+        {
+            int read = zlib.Read(output, done, size - done);
+            if (read == 0)
+                throw new InvalidDataException($"compressed data ended after {done} of {size} bytes");
+            done += read;
+        }
+        return output;
+    }
+
+    static uint U32(byte[] bytes, int at) => BitConverter.ToUInt32(bytes, at);
+
+    static long Align(long value, long alignment) => (value + alignment - 1) / alignment * alignment;
+
+    static string CString(byte[] bytes, int at)
+    {
+        int end = Array.IndexOf(bytes, (byte)0, at);
+        return Encoding.Latin1.GetString(bytes, at, (end < 0 ? bytes.Length : end) - at);
+    }
+}
+
+[Flags]
+public enum PackfileFlags : uint
+{
+    None = 0,
+    Compressed = 1,  // file data is zlib-compressed
+    Condensed = 2,   // ...as one stream for all files, instead of one per file
+    // The game also sets 0x4800 on compressed packfiles; what it means is unknown.
+}
+
+/// <summary>One file inside a packfile.</summary>
+/// <param name="Offset">Where the file starts in the (uncompressed) data block.</param>
+/// <param name="CompressedSize">0xFFFFFFFF if the packfile isn't compressed.</param>
+/// <param name="StoredAt">Where its stored bytes start in the packfile.</param>
+public sealed record PackfileEntry(string Name, uint Offset, uint Size, uint CompressedSize, long StoredAt)
+{
+    public string Extension => Path.GetExtension(Name).TrimStart('.').ToLowerInvariant();
+    public bool IsContainer => Extension == "str2_pc";
+}

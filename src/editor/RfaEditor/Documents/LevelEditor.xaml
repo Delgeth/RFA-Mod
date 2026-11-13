@@ -1,0 +1,404 @@
+<UserControl x:Class="RfaEditor.LevelEditor"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:RfaEditor"
+             PreviewKeyDown="OnKey">
+    <Grid x:Name="Parts">
+        <!-- The view (the tab): one slim toolbar over the level in 3D. Every command is in the menus
+             (MenuPart, which the window shows in its title bar while this is the tab you work in); the
+             toolbar has the ones used all the time. The keys are handled in OnKey. -->
+        <DockPanel x:Name="ViewPart" Background="{StaticResource PanelBrush}">
+
+            <!-- The toolbar: tools; snapping; adding; what is drawn and how; the camera; the running
+                 game. Undo, redo and Save on the right -->
+            <Border DockPanel.Dock="Top" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="0,0,0,1" Padding="6,3">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Click="OnSaveAndReload" Margin="0,0,8,0" Padding="8,3,10,4"
+                                ToolTip="Save and reload: save the zone, then have the running game load the level again, so it shows every change (added objects, properties, the ground)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.AutoReload}" Style="{StaticResource Icon}" FontSize="14" Margin="0,0,6,0" />
+                                <TextBlock Text="Save and reload" />
+                            </StackPanel>
+                        </Button>
+                        <Button Style="{StaticResource ToolButton}" Click="OnUndoClicked"
+                                IsEnabled="{Binding IsEnabled, ElementName=UndoButton}" ToolTip="{Binding ToolTip, ElementName=UndoButton}">
+                            <TextBlock Text="{x:Static local:Icons.Undo}" Style="{StaticResource Icon}" />
+                        </Button>
+                        <Button Style="{StaticResource ToolButton}" Click="OnRedoClicked" Margin="1,0,8,0"
+                                IsEnabled="{Binding IsEnabled, ElementName=RedoButton}" ToolTip="{Binding ToolTip, ElementName=RedoButton}">
+                            <TextBlock Text="{x:Static local:Icons.Redo}" Style="{StaticResource Icon}" />
+                        </Button>
+                        <Button x:Name="SaveButton" Click="OnSave" IsEnabled="False" Style="{StaticResource PrimaryButton}" Margin="0" Padding="10,3,10,4"
+                                ToolTip="Write the zone to overrides\, where the game uses it instead of its own (Ctrl+S)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Save}" Style="{StaticResource Icon}" FontSize="14" Margin="0,0,6,0" />
+                                <TextBlock Text="Save" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+
+                    <WrapPanel VerticalAlignment="Center">
+                        <ToggleButton x:Name="SelectTool" Click="OnToolClicked" ToolTip="Select (Q): click objects to pick them">
+                            <TextBlock Text="{x:Static local:Icons.Select}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="MoveTool" Click="OnToolClicked" ToolTip="Move (W): drag an arrow to move the picked object along that axis">
+                            <TextBlock Text="{x:Static local:Icons.Move}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="RotateTool" Click="OnToolClicked" ToolTip="Rotate (E): drag a ring to turn the picked object around that axis">
+                            <TextBlock Text="{x:Static local:Icons.Rotate}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="SculptTool" Click="OnToolClicked" ToolTip="Sculpt the ground (T): hold the left button to raise it ([ and ] change the brush; Shift does the opposite)">
+                            <TextBlock Text="{x:Static local:Icons.Sculpt}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+
+                        <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                        <ToggleButton x:Name="SnapBox" ToolTip="Snap: move in steps of the snap step beside this, and turn in steps of 15 degrees">
+                            <TextBlock Text="{x:Static local:Icons.Snap}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ComboBox x:Name="GridSizeBox" Width="76" SelectedIndex="3" VerticalAlignment="Center" Margin="2,0,0,0"
+                                  ToolTip="Snap step for moving, in metres">
+                            <ComboBoxItem Content="0.1" />
+                            <ComboBoxItem Content="0.25" />
+                            <ComboBoxItem Content="0.5" />
+                            <ComboBoxItem Content="1" />
+                            <ComboBoxItem Content="2" />
+                            <ComboBoxItem Content="5" />
+                            <ComboBoxItem Content="10" />
+                        </ComboBox>
+                        <TextBlock Text="m" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="4,0,4,0" />
+                        <ToggleButton x:Name="MagnetBox" IsChecked="True"
+                                      ToolTip="Magnets (M): a moved object jumps to touch the corners, edges and faces of the models near it, so chunks line up">
+                            <TextBlock Text="{x:Static local:Icons.Magnets}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <Button x:Name="ControllerButton" Click="OnSwapController" Margin="4,0,0,0" Padding="8,3"
+                                ToolTip="Whose the controller is: this view's or the docked game's (the Game panel). Click to swap, or press both sticks in">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" FontSize="14" Margin="0,0,6,0" />
+                                <TextBlock x:Name="ControllerButtonText" Text="Controller: Editor" />
+                            </StackPanel>
+                        </Button>
+
+                        <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                        <Button x:Name="AddButton" Style="{StaticResource ToolButton}" Click="OnAddClicked"
+                                ToolTip="Add an object where the middle of the view points: a copy of one of this file's, a new one of any class in the game's schema, or any chunk of the game's">
+                            <TextBlock Text="{x:Static local:Icons.Add}" Style="{StaticResource Icon}" />
+                        </Button>
+                        <Popup x:Name="AddPopup" PlacementTarget="{Binding ElementName=AddButton}" Placement="Bottom" StaysOpen="False"
+                               AllowsTransparency="True" VerticalOffset="4">
+                            <Border Background="{StaticResource PanelHeaderBrush}" BorderBrush="{StaticResource StrongBorderBrush}" BorderThickness="1"
+                                    CornerRadius="8" Padding="8" Width="440">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" FontSize="11.5" Foreground="{StaticResource DimTextBrush}" Margin="0,0,0,6"
+                                               Text="Added where the middle of the view points: a copy of one of this file's objects (its model is already in the zone, so the game can show it), or a new object of a class from the game's schema, with its defaults." />
+                                    <Grid DockPanel.Dock="Top" Margin="0,0,0,6">
+                                        <TextBox x:Name="AddFilterBox" Padding="28,4,4,4" TextChanged="OnAddFilterChanged" PreviewKeyDown="OnAddListKey" />
+                                        <TextBlock Text="{x:Static local:Icons.Search}" Style="{StaticResource Icon}" FontSize="14" HorizontalAlignment="Left"
+                                                   Margin="9,0,0,0" Foreground="{StaticResource DimTextBrush}" IsHitTestVisible="False" />
+                                        <TextBlock x:Name="AddFilterHint" Text="Find by name or kind" Style="{StaticResource HintText}" Margin="31,0,0,0" />
+                                    </Grid>
+                                    <!-- Where the chunk browser is: Back, and the groups chosen so far (each with x to take it away) -->
+                                    <DockPanel x:Name="AddPathBar" DockPanel.Dock="Top" Margin="0,0,0,6" Visibility="Collapsed">
+                                        <Button x:Name="AddBackButton" DockPanel.Dock="Left" Content="◂ Back" Padding="8,2" Margin="0,0,6,0" Click="OnAddBackClicked"
+                                                ToolTip="Up one level (Backspace in an empty Find box; B on a controller)" />
+                                        <WrapPanel x:Name="AddPath" VerticalAlignment="Center" />
+                                    </DockPanel>
+                                    <ListBox x:Name="AddList" Height="400" PreviewMouseLeftButtonUp="OnAddListClicked" PreviewKeyDown="OnAddListKey" />
+                                </DockPanel>
+                            </Border>
+                        </Popup>
+                        <Button x:Name="TerrainPieceButton" Style="{StaticResource ToolButton}" Click="OnTerrainPieceClicked"
+                                ToolTip="Terrain piece: make new terrain (a hill, mountain, mesa, ridge, dunes, crater...) as level geometry where the view points, to move, turn and place like any piece. With a terrain piece picked: change its shape or look">
+                            <TextBlock Text="{x:Static local:Icons.Terrain}" Style="{StaticResource Icon}" />
+                        </Button>
+
+                        <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                        <ToggleButton x:Name="ShowHelpersBox" IsChecked="True" Checked="OnHelpersChanged" Unchecked="OnHelpersChanged"
+                                      ToolTip="Helpers: show what the game doesn't draw (in the editor only): spot lights' cones, spectator cameras' views, invisible walls and invisible collision boxes">
+                            <TextBlock Text="{x:Static local:Icons.Light}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="ShowModelsBox" IsChecked="True" Checked="OnViewOptionChanged" Unchecked="OnViewOptionChanged"
+                                      ToolTip="Models: draw objects with their models (buildings, props); when off, every object is a small cube">
+                            <TextBlock Text="{x:Static local:Icons.Model}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="ShowTexturesBox" IsChecked="True" Checked="OnViewOptionChanged" Unchecked="OnViewOptionChanged"
+                                      ToolTip="Textures: draw models with their textures">
+                            <TextBlock Text="{x:Static local:Icons.Texture}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="GpuViewBox" Checked="OnGpuViewChanged" Unchecked="OnGpuViewChanged"
+                                      ToolTip="Direct3D view: draw the level on the graphics card (on when a zone opens). Off, WPF draws it">
+                            <TextBlock Text="{x:Static local:Icons.Display}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="GameLightBox" Checked="OnGameLightChanged" Unchecked="OnGameLightChanged"
+                                      ToolTip="Game light: light the level as the game does (in the Direct3D view): its lamps, the ambient light and exposure of the area the camera is in, and the game's tone curve">
+                            <TextBlock Text="{x:Static local:Icons.GameLight}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+
+                        <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                        <Button Style="{StaticResource ToolButton}" Click="OnFocusClicked" ToolTip="Look at the picked object (F)">
+                            <TextBlock Text="{x:Static local:Icons.Focus}" Style="{StaticResource Icon}" />
+                        </Button>
+                        <Button Style="{StaticResource ToolButton}" Click="OnShowEverything" ToolTip="Show the whole zone">
+                            <TextBlock Text="{x:Static local:Icons.ShowAll}" Style="{StaticResource Icon}" />
+                        </Button>
+
+                        <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                        <Button x:Name="ShowInGameButton" Style="{StaticResource ToolButton}" Click="OnShowInGame" IsEnabled="False"
+                                ToolTip="Show in the game: the running game's camera goes to the picked object (in slew mode) and picks it. Needs the game started with RFAModLauncher, in this level">
+                            <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" />
+                        </Button>
+                        <ToggleButton x:Name="FollowGameBox" Checked="OnFollowGameChanged" Unchecked="OnFollowGameChanged"
+                                      ToolTip="Follow the game: this view moves with the running game's camera, and what you pick there (Q in slew mode) is picked here">
+                            <TextBlock Text="{x:Static local:Icons.Link}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="SettledBox" Checked="OnSettledChanged" Unchecked="OnSettledChanged"
+                                      ToolTip="Props as in the game: clutter (debris, barrels, crates) falls and settles when the level starts, so the game has it elsewhere than the zone file; while this is on, it is drawn where the game has it now. Only how it is drawn: the zone isn't changed">
+                            <TextBlock Text="{x:Static local:Icons.Settled}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                        <ToggleButton x:Name="LiveBox" Checked="OnLiveChanged" Unchecked="OnLiveChanged" Padding="6,3"
+                                      ToolTip="Live: objects and level geometry you move, turn, delete or add here are moved, turned, removed and made in the running game as you do it; the ground sculpted too">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{x:Static local:Icons.Live}" Style="{StaticResource Icon}" Margin="0,0,5,0" />
+                                <TextBlock Text="Live" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </ToggleButton>
+                        <ToggleButton x:Name="AutoReloadBox"
+                                      ToolTip="Auto reload (with Live): what the game can't be shown as you do it (a chunk the game can't load as it runs, ground made over) is shown two seconds after: the zone is saved and the game loads the level again, the player put back where they stood">
+                            <TextBlock Text="{x:Static local:Icons.AutoReload}" Style="{StaticResource Icon}" />
+                        </ToggleButton>
+                    </WrapPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- The level in 3D; over it, the sculptor's brush while sculpting, and how fast it is drawn -->
+            <Grid>
+                <Border x:Name="ViewArea" Background="{StaticResource ViewportBrush}" ClipToBounds="True" Focusable="True"
+                        FocusVisualStyle="{x:Null}" MouseDown="OnViewMouseDown" MouseMove="OnViewMouseMove" MouseUp="OnViewMouseUp"
+                        MouseWheel="OnViewMouseWheel">
+                    <Grid>
+                        <!-- The Direct3D view (docs\renderer-plan.md): it draws the same scene as
+                             SceneViewport, which is then hidden (picking looks along rays through its parts) -->
+                        <Image x:Name="GpuImage" Stretch="Fill" Visibility="Collapsed" IsHitTestVisible="False" />
+                        <Viewport3D x:Name="SceneViewport" />
+                        <!-- The gizmo, in a view of its own on top, so walls never hide it -->
+                        <Viewport3D x:Name="GizmoViewport" />
+                        <!-- Which way the axes point, bottom left (drawn by the code) -->
+                        <Canvas x:Name="AxisWidget" Width="64" Height="64" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                                Margin="10" IsHitTestVisible="False" />
+                        <!-- The controller's reticle in the middle of the view, and the name of what it's on (drawn by the code while a controller is connected) -->
+                        <Canvas x:Name="PadReticle" Width="64" Height="64" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                IsHitTestVisible="False" Visibility="Collapsed" />
+                        <Border x:Name="PadTargetLabel" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,84,0,0" Padding="6,2"
+                                CornerRadius="4" Background="#B0141518" IsHitTestVisible="False" Visibility="Collapsed">
+                            <TextBlock x:Name="PadTargetText" Foreground="White" FontSize="11" />
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- How fast the view is drawn, bottom right (filled in by LevelEditor.Layout.cs) -->
+                <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="10" Padding="8,4" CornerRadius="4"
+                        Background="#B0141518" IsHitTestVisible="False">
+                    <TextBlock x:Name="FrameStats" FontFamily="Consolas" FontSize="11" Foreground="{StaticResource DimTextBrush}" />
+                </Border>
+
+                <!-- The sculptor's brush, shown while Sculpt is the tool -->
+                <Border x:Name="SculptPanel" Style="{StaticResource OptionsCard}" HorizontalAlignment="Left" VerticalAlignment="Top"
+                        Width="290" Visibility="Collapsed">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="{x:Static local:Icons.Sculpt}" Style="{StaticResource Icon}" FontSize="14" Margin="0,0,8,0" />
+                            <TextBlock Text="Sculpt" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <TextBlock Grid.Row="1" Text="Brush" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <ComboBox x:Name="SculptModeBox" Grid.Row="1" Grid.Column="1" SelectedIndex="0" Margin="0,0,0,6" MaxDropDownHeight="420"
+                                  ToolTip="What a stroke does to the ground (or its foliage, paint or chunks)" SelectionChanged="OnSculptModeChanged">
+                            <ComboBoxItem Content="Raise" />
+                            <ComboBoxItem Content="Lower" />
+                            <ComboBoxItem Content="Smooth" />
+                            <ComboBoxItem Content="Flatten" />
+                            <ComboBoxItem Content="Hill" ToolTip="A broad, gently rounded rise (Shift: a hollow)" />
+                            <ComboBoxItem Content="Peak" ToolTip="A sharp point, steep from the middle (Shift: a pit)" />
+                            <ComboBoxItem Content="Mountain" ToolTip="A rugged rise, broken up into crags and spurs (Shift: a rugged hollow)" />
+                            <ComboBoxItem Content="Valley" ToolTip="A trough with a wide flat floor and steep sides (Shift: a ridge)" />
+                            <ComboBoxItem Content="Mesa" ToolTip="A flat-topped butte with steep, ragged sides, as across Guerrilla's Mars (Shift: a sunken pit)" />
+                            <ComboBoxItem Content="Terrace" ToolTip="Cuts the ground into ledges, like the strata of Mars's cliffs (Shift: fewer, taller ledges)" />
+                            <ComboBoxItem Content="Cliff" ToolTip="Steepens the ground at the height where the stroke began into a sharp edge (Shift: softens it)" />
+                            <ComboBoxItem Content="Erode" ToolTip="Carves branching gullies, as rain and wind wear rock (Shift: ridges)" />
+                            <ComboBoxItem Content="Canyon" ToolTip="A deep cut with a narrow floor and walls that step down in ledges (Shift: a stepped butte)" />
+                            <ComboBoxItem Content="Dunes" ToolTip="Wind ripples of sand, a long gentle side and a steep lee (Shift: the troughs)" />
+                            <ComboBoxItem Content="Crater" ToolTip="An impact bowl with a raised rim (Shift: a dome)" />
+                            <ComboBoxItem Content="Roughen" ToolTip="Breaks the ground up into rocky rubble" />
+                            <ComboBoxItem Content="Paint foliage" ToolTip="Grows the chosen foliage layer on the ground under the brush (Shift: erases)" />
+                            <ComboBoxItem Content="Erase foliage" ToolTip="Takes the chosen foliage layer away under the brush (Shift: paints)" />
+                            <ComboBoxItem Content="Paint ground" ToolTip="Paints the chosen ground texture layer under the brush (Shift: paints the base layer back)" />
+                            <ComboBoxItem Content="Paint road" ToolTip="Drag a road: when you let go the ground along it is graded smooth and the chosen layer painted on it, as wide as the brush" />
+                            <ComboBoxItem Content="Paint chunks" ToolTip="Scatters chunks of the chosen style over the ground under the brush, set on the ground where they land (Shift: erases them)" />
+                            <ComboBoxItem Content="Erase chunks" ToolTip="Takes the chosen style's chunks away under the brush (Shift: paints)" />
+                        </ComboBox>
+                        <!-- What the painters paint (shown for their brushes) -->
+                        <StackPanel Grid.Row="2" Grid.Column="1" Margin="0,0,0,6">
+                            <ComboBox x:Name="FoliageLayerBox" Visibility="Collapsed" ToolTip="Which of the zone's foliage layers the painter paints or erases" />
+                            <ComboBox x:Name="ChunkStyleBox" Visibility="Collapsed" IsEditable="True" IsTextSearchEnabled="True" MaxDropDownHeight="420"
+                                      ToolTip="What the chunk painter scatters: a preset (rocks, crates, debris, fences, lights; colonist, EDF, Marauder, ruined), as the game's levels lay them out" />
+                            <ComboBox x:Name="GroundLayerBox" Visibility="Collapsed" ToolTip="Which of the zone's four ground texture layers the painter paints" />
+                            <Button x:Name="LayerTextureButton" Content="Layer texture..." Margin="0,4,0,0" Padding="6,2" Click="OnLayerTextureClicked" Visibility="Collapsed"
+                                    ToolTip="Give the chosen layer any ground texture of the game's or the Guerrilla world's" />
+                        </StackPanel>
+                        <TextBlock Grid.Row="3" Text="Radius" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <Slider x:Name="SculptRadiusSlider" Grid.Row="3" Grid.Column="1" Minimum="1" Maximum="80" Value="10" VerticalAlignment="Center"
+                                Margin="0,0,0,6" ValueChanged="OnBrushChanged" ToolTip="The brush's radius, in metres ([ and ])" />
+                        <TextBlock Grid.Row="4" Text="Strength" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <Slider x:Name="SculptStrengthSlider" Grid.Row="4" Grid.Column="1" Minimum="0.2" Maximum="20" Value="3" VerticalAlignment="Center" Margin="0,0,0,6"
+                                ToolTip="How fast a stroke works: metres a second in the middle for Raise and Lower" />
+                        <Button x:Name="CreateTerrainButton" Grid.Row="5" Grid.ColumnSpan="2" Content="Create terrain..." Padding="6,3" Click="OnCreateTerrain"
+                                ToolTip="Make new ground over the whole zone: hills, mountains, a canyon, a plateau, dunes or a crater, and paint it by height and slope" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </DockPanel>
+
+        <!-- The menus (the window shows them in its title bar while this is the tab you work in) -->
+        <Menu x:Name="MenuPart" IsMainMenu="False" Background="Transparent" VerticalAlignment="Center">
+            <MenuItem Header="_File">
+                <MenuItem Header="_Save" InputGestureText="Ctrl+S" Click="OnSave" IsEnabled="{Binding IsEnabled, ElementName=SaveButton}"
+                          ToolTip="Write the zone to overrides\, where the game uses it instead of its own" />
+                <MenuItem x:Name="RestoreButton" Header="_Restore the game's own zone" Click="OnRestore"
+                          ToolTip="Go back to the game's own zone (and its ground), in every copy of it" />
+            </MenuItem>
+            <MenuItem Header="_Edit">
+                <MenuItem x:Name="UndoButton" Header="_Undo" InputGestureText="Ctrl+Z" Click="OnUndoClicked" IsEnabled="False" />
+                <MenuItem x:Name="RedoButton" Header="_Redo" InputGestureText="Ctrl+Y" Click="OnRedoClicked" IsEnabled="False" />
+                <Separator />
+                <MenuItem Header="_Add..." Click="OnAddClicked"
+                          ToolTip="Add an object where the middle of the view points: a copy of one of this file's, a new one of any class in the game's schema, or any chunk of the game's" />
+                <MenuItem x:Name="DuplicateButton" Header="_Duplicate" InputGestureText="Ctrl+D" Click="OnDuplicateClicked" IsEnabled="False"
+                          ToolTip="Duplicate the picked object, beside it" />
+                <MenuItem x:Name="CopyPropertiesButton" Header="_Copy properties" InputGestureText="Ctrl+Shift+C" Click="OnCopyPropertiesClicked" IsEnabled="False"
+                          ToolTip="Keep the picked object's properties (all but where it is), to paste onto another" />
+                <MenuItem x:Name="PastePropertiesButton" Header="_Paste properties" InputGestureText="Ctrl+Shift+V" Click="OnPastePropertiesClicked" IsEnabled="False"
+                          ToolTip="Paste properties: copy an object's first" />
+                <MenuItem x:Name="DeleteButton" Header="De_lete" InputGestureText="Del" Click="OnDeleteClicked" IsEnabled="False"
+                          ToolTip="Delete the picked object; not if other things name it" />
+                <MenuItem x:Name="DeleteAllMenu" Header="Delete _all" SubmenuOpened="OnDeleteAllMenuOpened"
+                          ToolTip="Every chunk, every piece of level geometry, or every object of the picked one's class, in one step to undo">
+                    <MenuItem Header="..." />
+                </MenuItem>
+            </MenuItem>
+            <MenuItem Header="_View">
+                <MenuItem Header="_Helpers" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=ShowHelpersBox, Mode=TwoWay}" />
+                <MenuItem Header="_Models" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=ShowModelsBox, Mode=TwoWay}" />
+                <MenuItem Header="_Textures" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=ShowTexturesBox, Mode=TwoWay}" />
+                <MenuItem Header="_Direct3D view" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=GpuViewBox, Mode=TwoWay}" />
+                <MenuItem Header="_Game light" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=GameLightBox, Mode=TwoWay}" />
+                <Separator />
+                <MenuItem Header="_Look at the picked object" InputGestureText="F" Click="OnFocusClicked" />
+                <MenuItem Header="_Show the whole zone" Click="OnShowEverything" />
+            </MenuItem>
+            <MenuItem Header="_Tools">
+                <MenuItem Header="_Select" InputGestureText="Q" Tag="Select" Click="OnToolMenu" IsChecked="{Binding IsChecked, ElementName=SelectTool, Mode=OneWay}" />
+                <MenuItem Header="_Move" InputGestureText="W" Tag="Move" Click="OnToolMenu" IsChecked="{Binding IsChecked, ElementName=MoveTool, Mode=OneWay}" />
+                <MenuItem Header="_Rotate" InputGestureText="E" Tag="Rotate" Click="OnToolMenu" IsChecked="{Binding IsChecked, ElementName=RotateTool, Mode=OneWay}" />
+                <MenuItem Header="S_culpt the ground" InputGestureText="T" Tag="Sculpt" Click="OnToolMenu" IsChecked="{Binding IsChecked, ElementName=SculptTool, Mode=OneWay}" />
+                <Separator />
+                <MenuItem Header="S_nap" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=SnapBox, Mode=TwoWay}" />
+                <MenuItem x:Name="SnapStepMenu" Header="Snap _step" SubmenuOpened="OnSnapStepMenuOpened">
+                    <MenuItem Header="..." />
+                </MenuItem>
+                <MenuItem Header="M_agnets" InputGestureText="M" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=MagnetBox, Mode=TwoWay}" />
+            </MenuItem>
+            <MenuItem Header="_Game">
+                <MenuItem Header="_Show in the game" Click="OnShowInGame" IsEnabled="{Binding IsEnabled, ElementName=ShowInGameButton}" />
+                <MenuItem Header="_Follow the game" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=FollowGameBox, Mode=TwoWay}" />
+                <MenuItem Header="_Props as in the game" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=SettledBox, Mode=TwoWay}" />
+                <Separator />
+                <MenuItem Header="_Live" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=LiveBox, Mode=TwoWay}" />
+                <MenuItem Header="_Auto reload" IsCheckable="True" IsChecked="{Binding IsChecked, ElementName=AutoReloadBox, Mode=TwoWay}" />
+                <MenuItem Header="Save and _reload" Click="OnSaveAndReload" />
+            </MenuItem>
+            <MenuItem Header="_Help">
+                <MenuItem Header="_Mouse and keys" Click="OnHelpKeys" />
+            </MenuItem>
+        </Menu>
+
+        <!-- Whose zone this is and where saving puts it (the window shows it in its status line) -->
+        <TextBlock x:Name="SourceText" FontSize="11" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
+
+        <!-- The Scene panel (the window shows it as the outliner): the zone as a tree, every row with
+             an eye that draws it or not (filled in by LevelEditor.Scene.cs), and a way to add and find -->
+        <DockPanel x:Name="OutlinerPart">
+            <DockPanel DockPanel.Dock="Top" Margin="6,6,8,6">
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Click="OnAddClicked" Margin="0,0,4,0"
+                        ToolTip="Add an object where the middle of the view points (as + in the toolbar)">
+                    <TextBlock Text="{x:Static local:Icons.Add}" Style="{StaticResource Icon}" />
+                </Button>
+                <Grid>
+                    <TextBox x:Name="FilterBox" Padding="28,4,4,4" TextChanged="OnFilterChanged"
+                             ToolTip="Show only objects whose name or class contains this" />
+                    <TextBlock Text="{x:Static local:Icons.Search}" Style="{StaticResource Icon}" FontSize="14" HorizontalAlignment="Left"
+                               Margin="9,0,0,0" Foreground="{StaticResource DimTextBrush}" IsHitTestVisible="False" />
+                    <TextBlock x:Name="FilterHint" Text="Find objects" Style="{StaticResource HintText}" Margin="31,0,0,0" />
+                </Grid>
+            </DockPanel>
+            <TreeView x:Name="ObjectTree" SelectedItemChanged="OnObjectSelected" ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+        </DockPanel>
+
+        <!-- The inspector: the picked object, where it is, and its properties -->
+        <StackPanel x:Name="InspectorPart" Margin="10,10,10,12">
+            <DockPanel>
+                <Border x:Name="KindBadge" Width="34" Height="34" CornerRadius="6" Margin="0,0,10,0" VerticalAlignment="Top">
+                    <TextBlock x:Name="KindIcon" Style="{StaticResource Icon}" FontSize="16" />
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="ObjectTitle" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" />
+                    <TextBlock x:Name="ObjectInfo" TextWrapping="Wrap" FontSize="11.5" Foreground="{StaticResource DimTextBrush}" Margin="0,2,0,0" />
+                </StackPanel>
+            </DockPanel>
+            <!-- For an object of another file of the zone (a mission layer, say): where it is, and a way to open it -->
+            <Border x:Name="ElsewhereNote" Visibility="Collapsed" Background="{StaticResource PanelHeaderBrush}" CornerRadius="4"
+                    Padding="8,6" Margin="0,10,0,0">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Click="OnOpenElsewhere" VerticalAlignment="Center" Margin="8,0,0,0"
+                            ToolTip="Open the file this object is in, to change it">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{x:Static local:Icons.Zone}" Style="{StaticResource Icon}" FontSize="14" Margin="0,0,6,0" />
+                            <TextBlock Text="Open" />
+                        </StackPanel>
+                    </Button>
+                    <TextBlock x:Name="ElsewhereText" TextWrapping="Wrap" FontSize="11.5" Foreground="{StaticResource DimTextBrush}"
+                               VerticalAlignment="Center" />
+                </DockPanel>
+            </Border>
+            <StackPanel x:Name="TransformSection">
+                <TextBlock Text="TRANSFORM" Style="{StaticResource SectionTitle}" />
+                <ContentControl x:Name="TransformHost" />
+            </StackPanel>
+            <StackPanel x:Name="PropertiesSection">
+                <TextBlock Text="PROPERTIES" Style="{StaticResource SectionTitle}"
+                           ToolTip="As the game's zone schema (Volition's level editor's) describes them. Hover over a property's name for its name in the game, its type and default" />
+                <StackPanel x:Name="PropertyPanel" />
+                <CheckBox x:Name="ShowAllPropertiesBox" Content="Show hidden and read-only properties" Margin="0,8,0,0" IsChecked="True"
+                          Checked="OnShowAllPropertiesChanged" Unchecked="OnShowAllPropertiesChanged"
+                          ToolTip="Volition's editor hid some properties and kept others read-only (its tools set them: a model's name, a light's curve files). Tick to show and change them anyway" />
+            </StackPanel>
+            <StackPanel x:Name="LinksSection" Visibility="Collapsed">
+                <TextBlock Text="LINKS" Style="{StaticResource SectionTitle}"
+                           ToolTip="Objects this one names in its properties (or is attached to), and objects naming it. Click one to pick it" />
+                <StackPanel x:Name="LinkPanel" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</UserControl>

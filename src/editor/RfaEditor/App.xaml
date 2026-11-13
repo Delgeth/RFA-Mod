@@ -1,0 +1,6 @@
+<Application x:Class="RfaEditor.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- The look (WPF UI's Fluent controls, then Theme.xaml) is put in when the editor starts: see
+         FluentLook.cs, which the Guerrilla builder uses too. -->
+</Application>

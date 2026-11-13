@@ -1,0 +1,165 @@
+using System.Numerics;
+using RfaFormats.Zones;
+
+namespace RfaFormats.Meshes;
+
+/// <summary>
+/// Armageddon's terrain materials, written from code (<see cref="TerrainFile.Material"/>) as its own
+/// terrain files have them, so a zone's terrain file names nothing of another level's: the shader,
+/// the material's hash, its flags, its texture slots, its constants and the rows it has room for are
+/// the shaders' own; the textures and values are the caller's.
+///
+/// The ground's set (in this order): the ground (shader 35CA1523: four layers' colour and normal
+/// maps, the blend map, the dither texture; each layer's scale and offset and tint, Specular_Power and
+/// E3218939), its second pass (820F7A64: the same with the colour map in the dither's place) and the
+/// colour map alone (6748866B). The cliffs: one texture projected from the side two ways (7F946638:
+/// Terrain_layer0_xform and _1, Specular_Power, Diffuse_color_0), or two blended (25A64557: _xform 0
+/// to 3, Specular_Power, Diffuse_color_0 and _1); both with the blend map (its alpha mixes the two),
+/// the colour map and the dither texture, the one-texture kind's second texture slots left empty. The
+/// far meshes: the colour map alone (6748866B's layout, flags 0x140). The road decals (8A68E8F0, the
+/// road shader ir_terrain_road_layer2, every one of the game's road decals', and the layer3 and 4 of
+/// the same layout): the ground's four layers' colour and normal maps (the fourth the road's own) and
+/// the blend map; the first three layers' scale and offset, the four tints, Specular_Power and three
+/// more (E3218939, B92F865F, 57CB7618). The world builder's ground, cliffs, far meshes and roads name
+/// our own shaders of the same layouts in place of these (see <see cref="GroundShader"/>).
+/// </summary>
+public static class TerrainMaterials
+{
+    // Texture slots, by their names' hashes (the last two named by what goes in them).
+    const uint DiffuseMap0 = 0x0EA73D69, NormalMap0 = 0x5D63E8D5, DiffuseMap1 = 0x79A00DFF, NormalMap1 = 0x2A64D843;
+    const uint DiffuseMap2 = 0xE0A95C45, NormalMap2 = 0xB36D89F9, DiffuseMap3 = 0x97AE6CD3, NormalMap3 = 0xC46AB96F;
+    const uint AlphaMap0 = 0xD4061253, AlphaMap = 0x9F434FAF, DitherMap = 0x9C264F06;
+    const uint GroundDitherSlot = 0x472860E0, ColourMapSlot = 0x54B89D8D;
+
+    /// <summary>The dither texture every terrain material names (the game's own).</summary>
+    public const string Dither = "dither.tga";
+
+    /// <summary>
+    /// The shaders the ground (its first two materials: near, and fading to the colour map) and the
+    /// cliffs (two textures, one) are drawn with: Guerrilla's terrain shaders' lit pass in Armageddon's
+    /// terrain effects (see Guerrilla\GuerrillaShaders.cs; their files gw_terrain_*_t, which the
+    /// guerrilla_world mod has the game load); and the far meshes (<see cref="FarShader"/>). The ground's
+    /// third material (the game never draws it) keeps Armageddon's lowlod shader.
+    /// </summary>
+    public const string GroundShader = "gw_terrain_ground", GroundFadeShader = "gw_terrain_groundfade",
+                        CliffShader = "gw_terrain_cliff";
+
+    /// <summary>The far meshes' shader: Guerrilla's far ground's lit pass in Armageddon's ir_terrain_height_mesh_lowlod_t.</summary>
+    public const string FarShader = "gw_terrain_lowlod";
+
+    /// <summary>
+    /// The ground's three materials and their names block. <paramref name="layers"/>: the four layers'
+    /// colour and normal maps (eight names); <paramref name="scaleOffsets"/> and <paramref name="tints"/>:
+    /// each layer's Terrain_layerN_scale_offset and Diffuse_color_N; <paramref name="specularPower"/> and
+    /// <paramref name="e3218939"/>: the last two constants (Guerrilla's 984BB1F3 and E3218939).
+    /// </summary>
+    public static (byte[] Names, List<byte[]> Materials) Ground(IReadOnlyList<string> layers, string blendMap, string colourMap,
+        IReadOnlyList<Vector4> scaleOffsets, IReadOnlyList<Vector4> tints, Vector4 specularPower, Vector4 e3218939)
+    {
+        var (names, at) = TerrainFile.NamesBlock([.. layers, blendMap, Dither, colourMap]);
+        uint[] layerSlots = [DiffuseMap0, NormalMap0, DiffuseMap1, NormalMap1, DiffuseMap2, NormalMap2, DiffuseMap3, NormalMap3];
+        var textures = Enumerable.Range(0, 8).Select(k => (at[k], layerSlots[k])).Append((at[8], AlphaMap0)).ToList();
+        var constants = new List<(uint, Vector4[])>();
+        for (int k = 0; k < 4; k++)
+        {
+            constants.Add((NameHashes.PropertyHash($"Terrain_layer{k}_scale_offset"), [scaleOffsets[k]]));
+            constants.Add((NameHashes.PropertyHash($"Diffuse_color_{k}"), [tints[k]]));
+        }
+        constants.Add((NameHashes.PropertyHash("Specular_Power"), [specularPower]));
+        constants.Add((0xE3218939, [e3218939]));  // Terrain_layer_spec_alpha: each layer's shine
+        constants.Add((NameHashes.PropertyHash("Terrain_layer_spec_power"), [specularPower]));  // (984BB1F3) and its sharpness
+        return (names,
+        [
+            TerrainFile.Material(NameHashes.PropertyHash(GroundShader), 0x078AF3A9, 0x40, 20, [.. textures, (at[9], GroundDitherSlot)], constants),
+            TerrainFile.Material(NameHashes.PropertyHash(GroundFadeShader), 0x2D58BC91, 0x40, 20, [.. textures, (at[10], ColourMapSlot)], constants),
+            TerrainFile.Material(0x6748866B, 0x9D00B383, 0x40, 10, [(at[10], DiffuseMap0)], []),
+        ]);
+    }
+
+    /// <summary>
+    /// A cliff material and its names block: <paramref name="second"/> null for one texture (projected by
+    /// xforms 0 and 1, tinted by Diffuse_color_0), else two blended (the second by xforms 2 and 3 and
+    /// Diffuse_color_1). <paramref name="xforms"/>: four rows each; <paramref name="tints"/>: one or two;
+    /// <paramref name="dither"/>: its Dither_map (the game's own, or one of the world's). One texture is
+    /// drawn as two of the same (with the same projections and tint) by our cliff shader: Armageddon's
+    /// one-texture cliff shader has no blend map coordinates, so it couldn't fade to the zone's colour
+    /// map far off as Guerrilla's cliffs and the ground do.
+    /// </summary>
+    public static (byte[] Names, byte[] Material) Cliff((string Colour, string Normal) first, (string Colour, string Normal)? second,
+        string blendMap, string colourMap, IReadOnlyList<Vector4[]> xforms, IReadOnlyList<Vector4> tints, Vector4 specularPower, string dither = Dither)
+    {
+        var two = second ?? first;
+        if (second is null)
+        {
+            xforms = [xforms[0], xforms[1], xforms[0], xforms[1]];
+            tints = [tints[0], tints[0]];
+        }
+        var (names, at) = TerrainFile.NamesBlock([first.Colour, first.Normal, two.Colour, two.Normal, blendMap, colourMap, dither]);
+        List<(int, uint)> textures = [(at[0], DiffuseMap0), (at[1], NormalMap0), (at[2], DiffuseMap1), (at[3], NormalMap1), (at[4], AlphaMap), (at[5], ColourMapSlot), (at[6], DitherMap)];
+        var constants = Enumerable.Range(0, 4).Select(k => (NameHashes.PropertyHash($"Terrain_layer{k}_xform"), xforms[k])).ToList();
+        constants.Add((NameHashes.PropertyHash("Specular_Power"), [specularPower]));
+        for (int k = 0; k < 2; k++) constants.Add((NameHashes.PropertyHash($"Diffuse_color_{k}"), [tints[k]]));
+        return (names, TerrainFile.Material(NameHashes.PropertyHash(CliffShader), 0xF71192C5, 0x40, 27, textures, constants));
+    }
+
+    /// <summary>
+    /// A cliff texture's two side projections (xforms 0 and 1, or 2 and 3), as the game's are: the
+    /// texture repeating <paramref name="perMetre"/> times a metre, centred on the zone's middle
+    /// (<paramref name="halfWidth"/> from its corner).
+    /// </summary>
+    public static Vector4[][] SideProjections(float perMetre, float halfWidth)
+    {
+        float s = perMetre, c = s * halfWidth;
+        return
+        [
+            [new(s, 0, 0, -c), new(0, 0, -1, 0), new(0, -s, 0, c), new(0, 0, 0, 1)],
+            [new(0, 0, -s, -c), new(-1, 0, 0, 0), new(0, -s, 0, c), new(0, 0, 0, 1)],
+        ];
+    }
+
+    /// <summary>The far meshes' material and its names block: the colour map alone.</summary>
+    public static (byte[] Names, byte[] Material) Far(string colourMap)
+    {
+        var (names, at) = TerrainFile.NamesBlock([colourMap]);
+        return (names, TerrainFile.Material(NameHashes.PropertyHash(FarShader), 0x7D45CBD6, 0x140, 10, [(at[0], DiffuseMap0)], []));
+    }
+
+    /// <summary>The road shader's texture slots, in its order: the four layers' colour and normal maps (the fourth the road's own), the blend map.</summary>
+    public static readonly IReadOnlyList<uint> RoadSlots = [DiffuseMap0, NormalMap0, DiffuseMap1, NormalMap1, DiffuseMap2, NormalMap2, DiffuseMap3, NormalMap3, AlphaMap0];
+
+    /// <summary>Armageddon's road shader ir_terrain_road_layer2 (its name hashed as properties are), the road decals' default.</summary>
+    public const uint RoadShader = 0x8A68E8F0;
+
+    /// <summary>
+    /// The road decals' shaders for Guerrilla's rl_terrain_road_layer2, 3 and 4 (each road's own;
+    /// they differ in where the road lies among the three ground layers it is drawn with): Guerrilla's
+    /// lit pass in Armageddon's road effects of the same number (see Guerrilla\GuerrillaShaders.cs).
+    /// </summary>
+    public static string RoadShaderName(int variant) => $"gw_terrain_road{variant}";
+
+    /// <summary>
+    /// A road decal's material. <paramref name="textures"/>: where each of the <see cref="RoadSlots"/>'
+    /// names starts in the decal's own name list; <paramref name="scaleOffsets"/>: the first three
+    /// layers' Terrain_layerN_scale_offset (the road's own layer has none); <paramref name="tints"/>:
+    /// the four layers' Diffuse_color_N; then Specular_Power and three more constants, and the shader.
+    /// </summary>
+    public static byte[] Road(IReadOnlyList<int> textures, IReadOnlyList<Vector4> scaleOffsets, IReadOnlyList<Vector4> tints,
+                              Vector4 specularPower, Vector4 e3218939, Vector4 b92f865f, Vector4 x57cb7618, uint shader = RoadShader)
+    {
+        var constants = new List<(uint, Vector4[])>();
+        for (int k = 0; k < 3; k++)
+        {
+            constants.Add((NameHashes.PropertyHash($"Terrain_layer{k}_scale_offset"), [scaleOffsets[k]]));
+            constants.Add((NameHashes.PropertyHash($"Diffuse_color_{k}"), [tints[k]]));
+        }
+        constants.Add((NameHashes.PropertyHash("Diffuse_color_3"), [tints[3]]));
+        constants.Add((NameHashes.PropertyHash("Specular_Power"), [specularPower]));
+        constants.Add((0xE3218939, [e3218939]));
+        constants.Add((0xB92F865F, [b92f865f]));
+        constants.Add((0x57CB7618, [x57cb7618]));
+        return TerrainFile.Material(shader, 0x9252A41B, 0x40, 21, [.. RoadSlots.Select((slot, k) => (textures[k], slot))], constants);
+    }
+
+    /// <summary>A road decal's material map: its one material's, padded to 16 bytes.</summary>
+    public static byte[] RoadMap() => [.. TerrainFile.MaterialMap(1), 0, 0, 0, 0];
+}
