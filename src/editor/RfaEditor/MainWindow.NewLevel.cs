@@ -144,8 +144,7 @@ public partial class MainWindow
         {
             if (MessageBox.Show(this, $"There is already a level {name} made by the editor. Make it again, from {start}? Its edits are lost.",
                                 "New level", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
-            foreach (var document in documents.Where(d => d.Key.StartsWith($@"level:build\pc\cache\{name}.vpp_pc", StringComparison.OrdinalIgnoreCase)).ToList())
-                document.Value.Tab.Close();
+            foreach (var (key, _) in OpenTabs($@"level:build\pc\cache\{name}.vpp_pc")) CloseTab(key);
             replace = true;
         }
         Mouse.OverrideCursor = Cursors.Wait;
@@ -161,14 +160,14 @@ public partial class MainWindow
             Task index = BuildSearchIndexAsync();
             string archive = $@"build\pc\cache\{name}.vpp_pc";
             Packfile pack = workspace.Archive(archive);
-            if (pack.Find(name + ".rfgzone_pc") is { } zone) OpenLevel(new GameFile(pack, zone, archive, null));
+            if (pack.Find(name + ".rfgzone_pc") is { } zone) context.OpenLevel(new GameFile(pack, zone, archive, null));
             // Its ground, level geometry and sky are found through the file index, which is read again
             // (a minute) to have the new archive: the level is drawn again once it has.
             Mouse.OverrideCursor = null;
             Log("  Its ground shows once the editor has read the new level's files (a minute or so).");
             await index;
-            foreach (var open in documents.Where(d => d.Key.StartsWith($@"level:build\pc\cache\{name}.vpp_pc", StringComparison.OrdinalIgnoreCase)).ToList())
-                if (open.Value.Document is LevelEditor editor) editor.FilesIndexedAgain();
+            foreach (var (_, document) in OpenTabs($@"level:build\pc\cache\{name}.vpp_pc"))
+                if (document is LevelEditor editor) editor.FilesIndexedAgain();
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or InvalidOperationException
                                        or System.Runtime.InteropServices.COMException or FormatException)
@@ -210,8 +209,7 @@ public partial class MainWindow
                             MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
         foreach (NewLevel.MadeLevel level in chosen)
         {
-            foreach (var document in documents.Where(d => d.Key.StartsWith($@"level:build\pc\cache\{level.Name}.vpp_pc", StringComparison.OrdinalIgnoreCase)).ToList())
-                document.Value.Tab.Close();
+            foreach (var (key, _) in OpenTabs($@"level:build\pc\cache\{level.Name}.vpp_pc")) CloseTab(key);
             try
             {
                 Log($"Deleted level {level.Name}:");

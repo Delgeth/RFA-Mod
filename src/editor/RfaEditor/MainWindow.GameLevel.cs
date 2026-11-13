@@ -126,7 +126,7 @@ public partial class MainWindow
         }
         Log($"Game's level: the game has {level} loaded; opening {chosen.Name}" +
             (zones.Count > 1 ? $" (of its {zones.Count} zones, the one {(camera != null ? "the camera" : "the player")} is in)." : "."));
-        OpenLevel(new GameFile(pack, found, chosen.Archive, chosen.Container));
+        context.OpenLevel(new GameFile(pack, found, chosen.Archive, chosen.Container));
     }
 
     readonly record struct ZoneExtent(string Name, string Archive, string? Container, Vector2 Min, Vector2 Max)

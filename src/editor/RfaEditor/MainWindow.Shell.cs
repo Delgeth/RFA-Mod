@@ -43,7 +43,7 @@ public partial class MainWindow
         try
         {
             oldLayout.Children.Remove(explorer);
-            page = new MainPage(context, LogList, explorer, OnTabChosen);
+            page = new MainPage(context, LogList, explorer, OnTabChosen, gamePanel.View);
         }
         catch (Exception ex)
         {
@@ -210,12 +210,16 @@ public partial class MainWindow
     /// </summary>
     void OnShellClosing(object? sender, CancelEventArgs e)
     {
-        if (e.Cancel || page == null) return;  // one of the window's own documents already said no
-        if (!page.ConfirmClose())
+        if (e.Cancel) return;  // one of the window's own documents already said no
+        if (page != null)
         {
-            e.Cancel = true;
-            return;
+            if (!page.ConfirmClose())
+            {
+                e.Cancel = true;
+                return;
+            }
+            page.WindowClosing();
         }
-        page.WindowClosing();
+        gamePanel.Release();  // the game gets its own window back before the editor's goes
     }
 }

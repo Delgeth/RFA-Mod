@@ -4,8 +4,6 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using AvalonDock;
-using AvalonDock.Layout;
 using RfaFormats;
 
 namespace RfaEditor;
@@ -14,9 +12,8 @@ namespace RfaEditor;
 /// The editor's window, laid out like other game editors (Nanoforge among them): the explorer of
 /// the game's archives on the left, open documents as tabs in the middle (the preview of the picked
 /// file, tables, levels), the chosen document's outliner and inspector on the right, and a log at
-/// the bottom, with the running game beside it (the Game panel). Every panel can be dragged by its
-/// title to dock it elsewhere, floated as a window of its own, or pinned to a side (AvalonDock). The
-/// game folder is only ever read.
+/// the bottom, with the running game among the tabs (the Game panel). The game folder is only ever
+/// read.
 /// </summary>
 public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 {
@@ -24,7 +21,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     readonly EditorContext context;
     readonly FilePreview preview;
     readonly GamePanel gamePanel;
-    readonly Dictionary<string, (IEditorDocument Document, LayoutDocument Tab)> documents = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, (IEditorDocument Document, TabItem Tab)> documents = new(StringComparer.OrdinalIgnoreCase);
     List<IndexedFile> searchIndex = [];
     GameFile? selectedFile;  // the file picked in the explorer, if a file is
 
@@ -46,12 +43,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         AddDocument("preview", preview, closable: false);
         BuildTree();
         _ = BuildSearchIndexAsync();
-
-        DockManager.Theme = new AvalonDock.Themes.Vs2013DarkTheme();
-        DockManager.DocumentClosing += OnDocumentClosing;
-        DockManager.DocumentClosed += OnDocumentClosed;
         gamePanel = new GamePanel(context, PlaceGame);
-        GameHostPanel.Content = gamePanel.View;
     }
 
     // ---- Log -----------------------------------------------------------------------------------
@@ -68,41 +60,44 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     void AddDocument(string key, IEditorDocument document, bool closable = true)
     {
-        var tab = new LayoutDocument { ContentId = key, Title = document.Title, Content = document.View, CanClose = closable, CanFloat = true };
-        document.TitleChanged += () => tab.Title = document.Title;
-        tab.IsSelectedChanged += (_, _) =>
+        var icon = new TextBlock { Text = document.Icon, Style = (Style)FindResource("Icon"), FontSize = 12, Margin = new Thickness(0, 0, 7, 0) };
+        var title = new TextBlock { Text = document.Title, VerticalAlignment = VerticalAlignment.Center };
+        var header = new StackPanel { Orientation = Orientation.Horizontal };
+        header.Children.Add(icon);
+        header.Children.Add(title);
+        var tab = new TabItem { Header = header, Content = document.View };
+        if (closable)
         {
-            if (tab.IsSelected) ShowParts(document);
-        };
+            var close = new Button
+            {
+                Content = new TextBlock { Text = Icons.Close, Style = (Style)FindResource("Icon"), FontSize = 9 },
+                Style = (Style)FindResource("ToolButton"), Width = 20, Height = 20, Margin = new Thickness(8, 0, 0, 0), ToolTip = "Close",
+            };
+            close.Click += (_, _) => CloseDocument(key);
+            header.Children.Add(close);
+        }
+        else
+        {
+            header.Margin = new Thickness(0, 0, 6, 0);
+        }
+        document.TitleChanged += () => title.Text = document.Title;
         documents[key] = (document, tab);
-        Documents().Children.Add(tab);
-        Select(tab);
-        ShowParts(document);
+        Documents.Items.Add(tab);
+        Documents.SelectedItem = tab;
     }
 
-    static void Select(LayoutDocument tab)
+    void CloseDocument(string key)
     {
-        tab.IsSelected = true;
-        tab.IsActive = true;
-    }
-
-    /// <summary>Asks the document to save first when its tab's close button is used.</summary>
-    void OnDocumentClosing(object? sender, DocumentClosingEventArgs e)
-    {
-        var open = documents.FirstOrDefault(d => d.Value.Tab == e.Document);
-        if (open.Key != null && !open.Value.Document.ConfirmClose()) e.Cancel = true;
-    }
-
-    void OnDocumentClosed(object? sender, DocumentClosedEventArgs e)
-    {
-        string? key = documents.FirstOrDefault(d => d.Value.Tab == e.Document).Key;
-        if (key != null) documents.Remove(key);
-        if (!documents.Values.Any(d => d.Tab.IsSelected)) ShowParts(null);
+        if (!documents.TryGetValue(key, out var open) || !open.Document.ConfirmClose()) return;
+        Documents.Items.Remove(open.Tab);
+        documents.Remove(key);
     }
 
     /// <summary>Shows the chosen document's outliner and inspector on the right.</summary>
-    void ShowParts(IEditorDocument? document)
+    void OnDocumentChosen(object sender, SelectionChangedEventArgs e)
     {
+        if (e.Source != Documents) return;  // a selection change inside a document bubbling up
+        IEditorDocument? document = documents.Values.FirstOrDefault(d => d.Tab == Documents.SelectedItem).Document;
         OutlinerHost.Content = document?.Outliner ?? Hint("Open a level or a table to see what is in it here.");
         InspectorHost.Content = document?.Inspector;
     }
@@ -113,62 +108,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         Foreground = (System.Windows.Media.Brush)Application.Current.Resources["DimTextBrush"],
     };
 
-    void ShowPreview() => Select(documents["preview"].Tab);
-
-    /// <summary>The pane the documents are tabs of (panels can be dragged about, so it is looked up).</summary>
-    LayoutDocumentPane Documents() =>
-        documents.Values.Select(d => d.Tab.Parent).OfType<LayoutDocumentPane>().FirstOrDefault()
-        ?? DockManager.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault()
-        ?? DocumentPane;
-
-    // ---- The game, docked ----------------------------------------------------------------------
-
-    /// <summary>Puts the Game panel where its Place button says (dragging it by its title does the same by hand).</summary>
-    void PlaceGame(GamePanel.Place place)
-    {
-        Try(() =>
-        {
-            switch (place)
-            {
-                case GamePanel.Place.Window:
-                    GameAnchorable.Float();
-                    return;
-                case GamePanel.Place.Tab:
-                    GameAnchorable.Parent?.RemoveChild(GameAnchorable);
-                    Documents().Children.Add(GameAnchorable);
-                    break;
-                default:
-                    // A pane of its own, under or beside the documents: in the row or column the
-                    // documents are in if it runs that way, else in a new one that takes their place.
-                    Orientation way = place == GamePanel.Place.Below ? Orientation.Vertical : Orientation.Horizontal;
-                    GameAnchorable.Parent?.RemoveChild(GameAnchorable);
-                    var pane = new LayoutAnchorablePane(GameAnchorable);
-                    ILayoutElement middle = Documents();
-                    while (middle.Parent is LayoutDocumentPaneGroup group) middle = group;
-                    if (middle.Parent is LayoutPanel row && row.Orientation == way)
-                    {
-                        row.InsertChildAt(row.IndexOfChild(middle) + 1, pane);
-                    }
-                    else if (middle.Parent is ILayoutContainer container)
-                    {
-                        var split = new LayoutPanel { Orientation = way };
-                        container.ReplaceChild(middle, split);
-                        split.Children.Add((ILayoutPanelElement)middle);
-                        split.Children.Add(pane);
-                    }
-                    break;
-            }
-            GameAnchorable.IsSelected = true;
-            GameAnchorable.IsActive = true;
-        });
-    }
-
-    /// <summary>Brings the Game panel forward.</summary>
-    void OnShowGame(object sender, RoutedEventArgs e)
-    {
-        GameAnchorable.IsSelected = true;
-        GameAnchorable.IsActive = true;
-    }
+    void ShowPreview() => Documents.SelectedItem = documents["preview"].Tab;
 
     /// <summary>Opens a table in the table editor, or brings its tab forward if it's open already.</summary>
     void OpenTable(GameFile file)
@@ -176,7 +116,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         string key = "table:" + file.Name;
         if (documents.TryGetValue(key, out var open))
         {
-            Select(open.Tab);
+            Documents.SelectedItem = open.Tab;
             return;
         }
         Try(() => AddDocument(key, new TableEditor(context, file.Archive, file.Name)));
@@ -188,7 +128,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         string key = $"level:{file.Where}>{file.Name}";
         if (documents.TryGetValue(key, out var open))
         {
-            Select(open.Tab);
+            Documents.SelectedItem = open.Tab;
             return;
         }
         Mouse.OverrideCursor = Cursors.Wait;
@@ -212,14 +152,15 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     {
         foreach (var (document, tab) in documents.Values.ToList())
         {
-            Select(tab);
+            Documents.SelectedItem = tab;
             if (!document.ConfirmClose())
             {
                 e.Cancel = true;
                 return;
             }
         }
-        gamePanel.Release();  // the game gets its own window back before the editor's goes
+        // (The layout's tabs are asked next, in MainWindow.Shell.cs; the game gets its own window
+        // back once the window is closing for certain, see OnShellClosing.)
     }
 
     // ---- Explorer ------------------------------------------------------------------------------
