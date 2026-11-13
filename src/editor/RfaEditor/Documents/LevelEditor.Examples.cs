@@ -27,7 +27,7 @@ public partial class LevelEditor
                 IsEnabled = false, Focusable = false,
                 Content = new TextBlock
                 {
-                    Text = "Logic handlers, roads, splines and animated rigs: being found in the game's levels (once). Open the list again in a moment.",
+                    Text = "Logic handlers, roads, splines, animated rigs and constraints: being found in the game's levels (once). Open the list again in a moment.",
                     FontSize = 11, Foreground = Theme.Brush("DimTextBrush"), TextWrapping = TextWrapping.Wrap,
                 },
             });

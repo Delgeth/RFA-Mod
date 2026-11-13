@@ -178,6 +178,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// </summary>
     public void FilesIndexedAgain()
     {
+        copies = null;  // (the zone's other copies: the index now has the new archive's containers)
         related = null;
         relatedOf.Clear();
         OnIndexReady();
@@ -2513,6 +2514,18 @@ public partial class LevelEditor : UserControl, IEditorDocument
         foreach ((string a, string? c) in context.Assets.PlacesOf(zoneName).Distinct())
             if (!copies.Contains((a, c)) && Original(a, c).AsSpan().SequenceEqual(mine))
                 copies.Add((a, c));
+        // In one of our own archives (a level New level made: its zone loose and in its ns_base container, where
+        // the game reads it), its containers are looked in directly, whether or not the index has them yet.
+        if (Workspace.IsNewArchive(archive))
+            foreach (PackfileEntry entry in Workspace.Archive(archive).Entries.Where(e => e.IsContainer).ToList())
+            {
+                if (copies.Contains((archive, entry.Name))) continue;
+                try
+                {
+                    if (Original(archive, entry.Name).AsSpan().SequenceEqual(mine)) copies.Add((archive, entry.Name));
+                }
+                catch (Exception ex) when (ex is FileNotFoundException or InvalidDataException) { }
+            }
         return copies;
     }
 

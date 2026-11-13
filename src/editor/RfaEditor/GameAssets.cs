@@ -108,7 +108,7 @@ sealed class GameAssets
     /// The classes whose objects only Volition's tools could make (their data isn't described: a logic handler's
     /// script, a road's or spline's points, a rig's bones), by name: added as copies of the game's own.
     /// </summary>
-    public static readonly string[] ExampleClasses = ["object_logic_handler", "object_path_road", "object_spline", "object_anim_rig"];
+    public static readonly string[] ExampleClasses = ["object_logic_handler", "object_path_road", "object_spline", "object_anim_rig", "constraint"];
 
     /// <summary>
     /// Objects of the game's levels of <see cref="ExampleClasses"/>, by class: up to 60 different ones a class (a rig
@@ -501,6 +501,7 @@ sealed class GameAssets
     static string ExampleLabel(ZoneObject obj)
     {
         if (obj.Property("rig_name") is { Type: ZoneProperty.TextType } rig) return rig.Text;
+        if (obj.Property("template") is { Type: ZoneProperty.TextType } template) return template.Text;
         if (obj.Property("logic_handler_buffer") is { } script)
             return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(System.Text.Encoding.Latin1.GetString(script.Value), "[A-Za-z_][A-Za-z0-9_ ]{3,}")
                                         .Select(m => m.Value.Trim()).Take(2));

@@ -73,9 +73,9 @@ public sealed class ZoneSchema
         ["object_anim_rig"] = "its bones are in anim_rig_children and bone_strength, made from its rig; add a copy of one of the game's instead (the Add list's From the game's levels)",
         ["object_logic_handler"] = "its script is in logic_handler_buffer, made by Volition's tools; add a copy of one of the game's instead (the Add list's From the game's levels)",
         ["obj_chunk_ref"] = "it is written as an rfg_mover or general_mover with its model's destruction data; add a copy of one instead",
-        ["constraint_point"] = "it is written as a constraint with a template made by Volition's tools",
-        ["constraint_hinge"] = "it is written as a constraint with a template made by Volition's tools",
-        ["constraint_prism"] = "it is written as a constraint with a template made by Volition's tools",
+        ["constraint_point"] = "it is written as a constraint with a template made by Volition's tools; add a copy of one of the game's (with the pieces it joins) from the Add list's From the game's levels",
+        ["constraint_hinge"] = "it is written as a constraint with a template made by Volition's tools; add a copy of one of the game's (with the pieces it joins) from the Add list's From the game's levels",
+        ["constraint_prism"] = "it is written as a constraint with a template made by Volition's tools; add a copy of one of the game's (with the pieces it joins) from the Add list's From the game's levels",
     };
 
     /// <summary>
