@@ -20,6 +20,9 @@
 //   inventory items    the inventory item types, 0x19F8570, size in `cmp [19F8570h],55h` at 0x7A77F0: a one-byte
 //                      value at 0x7A77F6 (85; guerrilla_gear raises it to 127)
 //   vehicle slots      the vehicle pool 0x1972900: taken of the slots it holds (+0x10; 0x7612F0 the free)
+//   people slots       the people's stream pool 0x19728E8 (set up at 0xF29530 with 17): the characters' containers
+//                      streamed in now, as the vehicles' (the Guerrilla world: a district's 14, the player, and
+//                      guerrilla_people's special NPC and safehouse VIP)
 //   animation names    the "Anim strings" pool 0x2684EC8: bytes used (+0x4C) of its size (+0x44; 128 KB,
 //                      guerrilla_people gives it 512 KB): every animation's, set's, state's and action's name
 //   projectiles        the projectile types' pool 0x2174F90: how many it holds (a word at +0xA; 100,
@@ -48,6 +51,10 @@
 //   people, squads,    the npc pool 0x21DCE30 (100), the object_squad pool 0x2160AF0 (100) and the
 //   squad spawn nodes  object_squad_spawn_node pool 0x2108CE0 (384): the game's own sizes, as Guerrilla's
 //                      (it holds 100 NPCs and 100 squads, and 256 squad spawn nodes)
+//   cars, flyers,      the automobile pool 0x13CC4A0 (16, guerrilla_vehicles 64; Guerrilla's 32), the flyer pool
+//   walkers, turrets   0x142D6F0 (8), the walker pool 0x14AA780 (4) and the turret pool 0x218BB60 (66): pools as
+//                      the projectiles' (each 0x1C before the pool client its type's alloc uses); flyers, walkers
+//                      and turrets the game's own sizes, as Guerrilla's. A vehicle's gun is a turret of its own
 #define RFA_MOD_NAME "limits"
 #include "rfa_mod.h"
 #include "rfa_menu.h"
@@ -111,6 +118,7 @@ constexpr DWORD kProjectilePool = 0x2174F90, kMeleePool = 0x21AFEF0, kPoolHolds 
 constexpr DWORD kPatrolPool = 0x20F3B10, kNpcPool = 0x21DCE30, kSquadPool = 0x2160AF0, kSquadNodePool = 0x2108CE0;
 constexpr DWORD kVehicleGroupPool = 0x19691C0;  // the vehicle spawn groups (32, guerrilla_vehicles 136)
 constexpr DWORD kEmitterPool = 0x26BF650;       // the effects' emitters (2,200, guerrilla_world 6,600)
+constexpr DWORD kCarPool = 0x13CC4A0, kFlyerPool = 0x142D6F0, kWalkerPool = 0x14AA780, kTurretPool = 0x218BB60;
 
 void Row(const char* what, int used, int size, int game, const char* about);
 
@@ -143,6 +151,7 @@ void PoolRow(const char* what, DWORD pool, int game, const char* about) {
 }
 
 BYTE* const kVehiclePool = reinterpret_cast<BYTE*>(0x1972900);
+BYTE* const kPeoplePool = reinterpret_cast<BYTE*>(0x19728E8);
 constexpr DWORD kPoolSlots = 0x10;  // how many slots the pool holds (its slot list's count)
 auto const PoolRoom = reinterpret_cast<int(__fastcall*)(void* pool, void* unused)>(0x7612F0);
 
@@ -183,6 +192,10 @@ void DrawWindow() {
         if (slots > 0)
             Row("Vehicle slots", slots - PoolRoom(kVehiclePool, nullptr), slots, slots,
                 "Room in the vehicle pool for vehicles streamed in now");
+        const int peopleSlots = ValueAt(reinterpret_cast<DWORD>(kPeoplePool) + kPoolSlots);
+        if (peopleSlots > 0)
+            Row("People slots", peopleSlots - PoolRoom(kPeoplePool, nullptr), peopleSlots, 17,
+                "Characters streamed in now, a container each (the Guerrilla world: a district's 14, the player, its special NPC and its safehouse VIP)");
         PoolRow("Projectiles", kProjectilePool, 100,
                 "projectiles.xtbl: Armageddon's, a DLC's, and Guerrilla's thrown and launched weapons' and turrets'");
         PoolRow("Melee moves", kMeleePool, 32, "melee.xtbl: Armageddon's, and Guerrilla's swings and bashes (rfg_)");
@@ -194,6 +207,12 @@ void DrawWindow() {
                      "Wwise's record of each open stream (guerrilla_world 256 KB); full, a sound can't start");
         PoolRow("Patrols", kPatrolPool, 24, "Patrol routes in the zones loaded now (Guerrilla's world places up to 29 in one 3 x 3 block)");
         PoolRow("People (NPCs)", kNpcPool, 100, "Everyone but the player: squads, people dropped in, crews (Guerrilla holds 100 too)");
+        PoolRow("Cars", kCarPool, 16,
+                "Everything on wheels or treads in the world now: parked, traffic, the EDF's, convoys, wrecks, the player's (Guerrilla holds 32); "
+                "full: \"Ran out of slots for object type (automobile)\"");
+        PoolRow("Flyers", kFlyerPool, 8, "The flying vehicles in the world now (Guerrilla holds 8 too)");
+        PoolRow("Walkers", kWalkerPool, 4, "The walkers in the world now (Guerrilla holds 4 too)");
+        PoolRow("Turrets", kTurretPool, 66, "Every gun on a mount: the bases' turrets, and each vehicle's gun (Guerrilla holds 66 too)");
         PoolRow("Squads", kSquadPool, 100, "Squads made from the loaded zones' squad spawn nodes, and those dropped in");
         PoolRow("Squad spawn nodes", kSquadNodePool, 384, "Squad spawn nodes in the zones loaded now");
         PoolRow("Squad members", 0x12EFEF0, 64, "Each different squad member (a character, a loadout, a variant) of squads.xtbl; full, the squads after it aren't read");

@@ -28,7 +28,8 @@
 //
 // The bindings: one control set per player (0xCF0 bytes from 0x11BEBA0), 139 button actions of 20
 // bytes (+0 the gamepad button, +8 the keyboard key as a DirectInput scancode, 0 for none, +0xC the
-// mouse button, 0 to 6, -1 for none: as the defaults are written, 0x4E5CA0), then the axis actions.
+// mouse button, 0 to 6 (0 the left, 1 the middle, 2 the right), -1 for none: as the defaults are written,
+// 0x4E5CA0), then the axis actions.
 // The game's names for keys are a table of 256 strings at 0x1121900, by scancode.
 //
 // Room for Guerrilla's animation sets: each vehicle's interaction plays an animation set (getting in,
@@ -90,7 +91,8 @@
 // and the pool's fill takes from it each slot's object, handle and byte); Armageddon made two smaller
 // than Guerrilla's: the vehicle spawn nodes (parked vehicles' spots) 12 (Guerrilla 128; constructor
 // 0x805710) and the cars 16 at once (Guerrilla 32; 0x5F97F0). The mod replaces both constructors with
-// ones doing the same on buffers of its own, for Guerrilla's counts. And every vehicle model the vehicle
+// ones doing the same on buffers of its own: Guerrilla's 128 spawn nodes, and 64 cars (twice Guerrilla's,
+// at the user's ask: cars.h; 24,045 bytes a car, 1.47 MB in all). And every vehicle model the vehicle
 // table names takes one of the vehicle resource pool's records (0x1972900, built by the start-up code at
 // 0xF29510 and 0xF29550 on a static array of 84); once they are all taken, a model gets none and its
 // vehicles never spawn, without a word; Armageddon's and Guerrilla's models together are more than 84.
@@ -172,6 +174,7 @@
 #define RFA_MOD_NAME "guerrilla_vehicles"
 #include "rfa_mod.h"
 #include "rfa_game.h"
+#include "cars.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -396,12 +399,18 @@ DWORD KeyByName(const std::wstring& name) {
     return 0;
 }
 
-// A setting's mouse button, Mouse1..Mouse7 (any case), as the bindings number it (0..6), or -1.
+// A setting's mouse button, Mouse1..Mouse7 (any case: Mouse1 the left, Mouse2 the right, Mouse3 the middle, as
+// Windows and Guerrilla name them), as Armageddon's bindings number it (0..6), or -1. Armageddon's order isn't
+// Windows': 0 the left, 1 the middle, 2 the right (its own defaults: zoom on 2, alt attack and repair on 1, the
+// wheel 5 and 6; the right button, 2, changed seats while Mouse3 was taken for 2). Guerrilla's change seat is its
+// middle button (CBA_VDC_CHANGE_SEAT, 0x20000002 in its own order: 0 left, 1 right, 2 middle).
 int MouseByName(const std::wstring& name) {
     if (name.size() != 6 || _wcsnicmp(name.c_str(), L"Mouse", 5) != 0) return -1;
-    const int button = name[5] - L'1';
-    return button >= 0 && button < kMouseButtons ? button : -1;
+    const int number = name[5] - L'0';
+    if (number < 1 || number > kMouseButtons) return -1;
+    return number == 2 ? 2 : (number == 3 ? 1 : number - 1);
 }
+int MouseNumber(int button) { return button == 1 ? 3 : (button == 2 ? 2 : button + 1); }  // the setting's MouseN for a binding's button
 
 void __cdecl BuildKeyMap(int controlSet) {
     if (controlSet >= 0 && controlSet < kControlSets) {
@@ -417,7 +426,8 @@ void __cdecl BuildKeyMap(int controlSet) {
                 rfa::Log("Vehicles: %ls on %s (control set %d; it had no key)", given.setting, name ? name : "?", controlSet);
             } else {
                 *mouse = given.mouse;
-                rfa::Log("Vehicles: %ls on Mouse%d (control set %d; it had no key)", given.setting, given.mouse + 1, controlSet);
+                rfa::Log("Vehicles: %ls on Mouse%d (the game's button %d; control set %d; it had no key)", given.setting, MouseNumber(given.mouse),
+                         given.mouse, controlSet);
             }
         }
     }
@@ -700,7 +710,8 @@ constexpr DWORD kSpawnNodePoolMake = 0x805710, kSpawnNodeBufferSize = 0x80572B, 
 constexpr DWORD kAutomobilePoolMake = 0x5F97F0, kAutomobileBufferSize = 0x5F980B, kAutomobileCount = 0x5F981F;
 constexpr DWORD kSpawnNodeSize = 0xB0, kAutomobileSize = 0x5DE8;
 constexpr int kGameSpawnNodes = 12, kSpawnNodes = 128;   // Guerrilla's 128
-constexpr int kGameAutomobiles = 16, kAutomobiles = 32;  // Guerrilla's 32
+constexpr int kGameAutomobiles = gv::kGameCars, kAutomobiles = gv::kCarsAtOnce;  // 16 and 64 (Guerrilla's 32; cars.h)
+static_assert(kAutomobiles <= 127, "the world's list takes its size from a one-byte push (signed)");
 
 // A slot's bytes: its object, its handle (4) and its byte; then room for the memory pool's alignment.
 constexpr DWORD PoolBytes(int count, DWORD size) { return count * (size + 5) + 64; }
@@ -753,10 +764,17 @@ void MakeRoomForVehiclesInTheWorld() {
         rfa::Log("Vehicle spawn nodes: the game holds %d (its own %d)", kSpawnNodes, kGameSpawnNodes);
     else rfa::Log("Vehicle spawn nodes: the pool's constructor isn't as expected; the game keeps its %d", kGameSpawnNodes);
 
-    if (rfa::CodeValue(kAutomobileBufferSize) == 0x5DED9 && CodeByte(kAutomobileCount) == kGameAutomobiles &&
-        rfa::ReplaceFunction(kAutomobilePoolMake, reinterpret_cast<void*>(&MakeAutomobilePool)))
-        rfa::Log("Cars: the game holds %d at once (its own %d)", kAutomobiles, kGameAutomobiles);
-    else rfa::Log("Cars: the pool's constructor isn't as expected; the game keeps its %d", kGameAutomobiles);
+    // The cars' pool: its constructor (0x5F97F0) pushes the buffer's size 0x5DED9 (16 x (0x5DE8 + 5) + 64) at
+    // 0x5F980B and the count 16 at 0x5F981F; both are checked before the constructor is replaced.
+    const DWORD carBuffer = rfa::CodeValue(kAutomobileBufferSize);
+    const int carCount = CodeByte(kAutomobileCount);
+    if (carBuffer == 0x5DED9 && carCount == kGameAutomobiles && rfa::ReplaceFunction(kAutomobilePoolMake, reinterpret_cast<void*>(&MakeAutomobilePool)))
+        rfa::Log("Cars: the game holds %d at once (its own %d, Guerrilla's %d): its pool's constructor (0x%08lX, which pushed %d and a "
+                 "buffer of %lu bytes) replaced by one on a buffer of the mod's, %lu KB",
+                 kAutomobiles, kGameAutomobiles, gv::kGuerrillaCars, kAutomobilePoolMake, carCount, carBuffer,
+                 static_cast<unsigned long>(sizeof(g_automobileBuffer) / 1024));
+    else rfa::Log("Cars: the pool's constructor isn't as expected (it pushes %d and a buffer of 0x%lX, not %d and 0x5DED9); the game keeps its %d",
+                  carCount, carBuffer, kGameAutomobiles, kGameAutomobiles);
 
     // The records' constructor (push the record's constructor, push 54h, push 1Ch, push the records)
     // and the pool's (push the list, push 10h, push the records, push 54h).
@@ -778,8 +796,8 @@ void MakeRoomForVehiclesInTheWorld() {
 // 0x6D49DB; the user's 21:23 run hung there: object_vehicle_spawn_node 12 of 12). A list's capacity is the
 // count its type registers at start-up (0x4FAD90, thiscall: name, five handlers, the object's size, the count,
 // one more handler; it only records them, the world sizes the lists from them later), not its pool's size. The
-// pools above are made 128 spawn nodes and 32 cars, so their types register those: the cars' count is a one-byte
-// value in their registration (`push 10h` at 0xF23058), changed to 32 (checked first); the spawn nodes' (`push
+// pools above are made 128 spawn nodes and 64 cars, so their types register those: the cars' count is a one-byte
+// value in their registration (`push 10h` at 0xF23058), changed to 64 (checked first); the spawn nodes' (`push
 // 0Ch` at 0xF33918) can't hold 128 in one byte, so their registration (0xF33910) is replaced by one making the same
 // call with 128, after its bytes are checked to be the game's.
 auto const RegisterType = reinterpret_cast<void*(__fastcall*)(void* type, void* unused, const char* name, DWORD a, DWORD b, DWORD c, DWORD d,
@@ -798,11 +816,15 @@ void __cdecl RegisterSpawnNodeType() {
 }
 
 void RegisterBiggerTypes() {
-    if (*reinterpret_cast<const BYTE*>(kCarCountValue) == kGameAutomobiles) {
+    const int carsRegistered = *reinterpret_cast<const BYTE*>(kCarCountValue);
+    if (carsRegistered == kGameAutomobiles) {
         const BYTE cars = static_cast<BYTE>(kAutomobiles);
-        if (rfa::PatchCode(reinterpret_cast<void*>(kCarCountValue), &cars, 1)) rfa::Log("Cars: the world's list of them holds %d (its own %d)", kAutomobiles, kGameAutomobiles);
+        if (rfa::PatchCode(reinterpret_cast<void*>(kCarCountValue), &cars, 1))
+            rfa::Log("Cars: the world's list of them holds %d (its own %d): the byte at 0x%08lX changed from %d to %d", kAutomobiles, kGameAutomobiles,
+                     kCarCountValue, carsRegistered, kAutomobiles);
         else rfa::Log("Cars: could not change the game's code; the world's list of them holds %d", kGameAutomobiles);
-    } else rfa::Log("Cars: the type's registration (0x%08lX) isn't as expected; the world's list of them holds what it says", kCarCountValue);
+    } else rfa::Log("Cars: the type's registration (0x%08lX) isn't as expected (%d, not %d); the world's list of them holds what it says", kCarCountValue,
+                    carsRegistered, kGameAutomobiles);
     if (memcmp(reinterpret_cast<const void*>(kSpawnNodeRegistration), kSpawnNodeRegistrationBytes, sizeof(kSpawnNodeRegistrationBytes)) != 0) {
         rfa::Log("Vehicle spawn nodes: the type's registration (0x%08lX) isn't as expected; the world's list of them holds %d", kSpawnNodeRegistration, kGameSpawnNodes);
         return;
@@ -826,8 +848,60 @@ constexpr int kMissionCategory = 8, kReservationOwner = 3;  // as the game's own
 constexpr int kResourceInForce = 4;                          // the spawn resource's state once a change is done
 auto& g_spawnResourceState = *reinterpret_cast<const volatile int*>(0x19734CC);  // 0: no spawn resource in force
 
+// The game's test of a loaded model (0x764E70: its record reserved or in use, holding its container (+8) and that
+// container streamed in, state 3), which its pick from a group uses; object_spawn_vehicle (0x761790) tests the same
+// container's state. A vehicle made while it fails would be drawn without its model, so the log says if one is.
+auto const ModelLoaded = reinterpret_cast<bool(__cdecl*)(void* entry)>(0x762290);
+
+// How soon after its model streamed in a vehicle is made, for a spawn that waited for its model (the log; the user,
+// 2026-11-13: an invisible vehicle at the Dust EDF base, where two EDF_Scout_1 were made 200 ms after their model's
+// file loaded, in the first frames it passed the test). A model asked for while it isn't loaded is watched from then;
+// the first call that finds it loaded marks when it came in; a vehicle made from it within 10 s is noted with its
+// age (NoteModelAge, game.cpp), which the watch for vehicles that don't show prints (traffic.cpp).
+struct ModelWait {
+    void* entry;
+    int loadedAt;  // the game's clock (ms), -1 while still streaming
+};
+std::vector<ModelWait> g_modelWaits;
+constexpr int kAgeWindow = 10000;
+int Clock() { return *reinterpret_cast<const volatile int*>(0x1121300); }  // the game's clock (ms; it stops while paused)
+}  // namespace
+namespace gv { void NoteModelAge(DWORD vehicle, int ms); }  // game.cpp
+namespace {
+
+ModelWait* WaitFor(void* entry) {
+    for (ModelWait& wait : g_modelWaits)
+        if (wait.entry == entry) return &wait;
+    return nullptr;
+}
+
 int __cdecl SpawnVehicle(void** parameters) {
+    void* wanted = parameters ? parameters[0] : nullptr;
+    const int now = Clock();
+    if (wanted) {
+        ModelWait* wait = WaitFor(wanted);
+        const bool loaded = ModelLoaded(wanted);
+        if (!loaded && !wait) {
+            if (g_modelWaits.size() >= 64) g_modelWaits.erase(g_modelWaits.begin());
+            g_modelWaits.push_back({wanted, -1});
+        } else if (loaded && wait && wait->loadedAt < 0) {
+            wait->loadedAt = now;
+        } else if (wait && wait->loadedAt >= 0 && now - wait->loadedAt > kAgeWindow) {
+            g_modelWaits.erase(g_modelWaits.begin() + (wait - g_modelWaits.data()));
+        }
+    }
     const int result = g_spawnVehicle(parameters);
+    if (result == 0 && wanted) {
+        const char* name = *reinterpret_cast<const char* const*>(wanted);
+        if (!ModelLoaded(wanted)) RFA_LOG_FIRST(60, "Spawning: %s was made without its model ready: it may not show", name ? name : "?");
+        BYTE* made = *reinterpret_cast<BYTE**>(reinterpret_cast<BYTE*>(parameters) + 0x5C);  // the spawn's vehicle, once made
+        if (const ModelWait* wait = WaitFor(wanted); wait && wait->loadedAt >= 0 && made) {
+            const DWORD handle = *reinterpret_cast<const DWORD*>(made + 0x68);
+            gv::NoteModelAge(handle, now - wait->loadedAt);
+            RFA_LOG_FIRST(200, "Spawning: %s (0x%08lX) made %d ms after its model streamed in (the spawn waited for it)", name ? name : "?", handle,
+                          now - wait->loadedAt);
+        }
+    }
     if (result != 2 || !parameters || !parameters[0] || !g_spawnResourceState) return result;
     if (g_spawnResourceState != kResourceInForce) return 1;  // the area's resource is still changing: not yet
     void* entry = parameters[0];

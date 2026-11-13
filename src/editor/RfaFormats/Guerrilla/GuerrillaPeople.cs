@@ -86,6 +86,9 @@ public static class GuerrillaPeople
         // group a part of them), and its Driver group's Kyle.
         .. Civilians,
         "Kyle",
+        // Its story people at the safehouses (squads with a special_npc): its special NPCs and its other safehouse
+        // VIPs (Kyle is one); guerrilla_people streams one of each in at a time, as Guerrilla's resource manager.
+        "Samanya", "OldCoot", "RFCommander", "Carmen", "Jorge",
         PlayerCharacter,
     ];
 

@@ -96,6 +96,7 @@ public sealed class GuerrillaKiosks
             yield return $"Deleted {file}";
         }
         foreach (string line in GuerrillaSoundBanks.Remove(game, overrides, worldModFolder, SoundPart)) yield return line;
+        foreach (string line in GuerrillaSoundBanks.Remove(game, overrides, worldModFolder, VoicePart)) yield return line;
     }
 
     /// <summary>
@@ -126,6 +127,20 @@ public sealed class GuerrillaKiosks
 
     /// <summary>The sound part's name (its list in mods\guerrilla_world\: kiosks_sound_banks.txt) and its banks' prefix.</summary>
     public const string SoundPart = "kiosks", SoundBankPrefix = "rfgk_";
+
+    /// <summary>
+    /// The newsreader's own part (kiosk_voices_sound_banks.txt): its bank is Wwise ADPCM (<see cref="VoicesAdpcm"/>),
+    /// which a part sets for all its banks, while the music's loop must stay PCM (the writer has no ADPCM loop yet).
+    /// </summary>
+    public const string VoicePart = "kiosk_voices";
+
+    /// <summary>
+    /// The newsreader's lines as Wwise ADPCM (36 bytes for 64 samples: 33 MB, where PCM is 109 MB), the first of
+    /// Guerrilla's voices in that codec. Armageddon's sound engine has it built in (its source factory 0xEB0470 makes
+    /// an ADPCM source for codec 2 as it does a PCM one for codec 1), but no bank of the game's own uses it, so this is
+    /// its first test in the game; false goes back to PCM.
+    /// </summary>
+    public const bool VoicesAdpcm = true;
 
     /// <summary>
     /// The broadcast's sounds for the mod, in its folder, a line each (lengths in milliseconds):
@@ -186,7 +201,8 @@ public sealed class GuerrillaKiosks
         Music("loop", "Kiosk_Music_Loop", true);
         Music("outro", "Kiosk_Music_Out", false);
 
-        // The voice.
+        // The voice: its own part, in Wwise ADPCM (VoicesAdpcm).
+        var voiceBanks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, VoicePart, SoundBankPrefix) { Adpcm = VoicesAdpcm };
         string persona = Setting("Kiosk_persona") ?? "KIOSK";
         var voices = GuerrillaVoices.Open(guerrillaCache, persona);
         int lineCount = 0;
@@ -209,14 +225,14 @@ public sealed class GuerrillaKiosks
                     wave = voices.ReadWave(line);
                 }
                 catch (Exception e) when (e is InvalidDataException or NotSupportedException) { problems.Add($"{name}: {e.Message}"); continue; }
-                voiceBank ??= banks.Bank(line.WaveBank);
+                voiceBank ??= voiceBanks.Bank(line.WaveBank);
                 string key = "line:" + name, eventName = GuerrillaSoundBanks.EventName(name.ToUpperInvariant());
                 var settings = new WwiseBankWriter.Settings
                 {
                     Volume = GuerrillaSoundBanks.Db(line.Volume) + line.SoundDb, Priority = GuerrillaSoundBanks.Priority(line.Rank, false),
                 };
                 uint sound = voiceBank.Sound(key, voiceBank.Medium(wave), false, settings, 0,
-                                             new WwiseBankWriter.Output(DialogueBus, banks.Attenuation(voiceBank, line.DistanceIndex), true));
+                                             new WwiseBankWriter.Output(DialogueBus, voiceBanks.Attenuation(voiceBank, line.DistanceIndex), true));
                 voiceBank.Event(eventName, voiceBank.Play(key, sound));
                 voiceBank.Event(eventName + "_STOP", voiceBank.Stop(key, sound, 200));
                 double length = (double)wave.Samples.Length / wave.Channels / wave.Rate;
@@ -227,13 +243,21 @@ public sealed class GuerrillaKiosks
             }
         }
         File.WriteAllLines(Path.Combine(folder, SoundList), list, new UTF8Encoding(false));
+        // The music's part first: it takes away the banks it wrote before and doesn't now (an earlier build's PCM
+        // newsreader bank, of the same name), then the voices' part writes theirs.
         foreach (string line in banks.Write(game, overrides, worldModFolder)) yield return "sounds: " + line;
+        foreach (string line in voiceBanks.Write(game, overrides, worldModFolder)) yield return "voice sounds: " + line;
+        var check = voiceBank?.AdpcmCheck ?? (0d, 0d, 0);
         string voiceSize = voiceBank == null ? "" :
             $"; {voiceBank.Name}: {lineCount} lines, {seconds / 60:0.#} min, media {voiceBank.MediaBytes.Written / 1048576.0:0.#} MB " +
-            $"({(voiceBank.Adpcm ? "Wwise ADPCM" : "PCM")}), every sound streamed from the media file (ram_bank_pc False): only its events' bank stays in memory";
+            (voiceBank.Adpcm
+                ? $"(Wwise ADPCM, {voiceBank.MediaBytes.Pcm / 1048576.0:0.#} MB as PCM; decoded again they are {check.Sum / Math.Max(1, check.Count):0.#} dB " +
+                  $"from Guerrilla's waves on average, the worst {check.Worst:0.#} dB)"
+                : "(PCM)") +
+            ", every sound streamed from the media file (ram_bank_pc False): only its events' bank stays in memory";
         yield return $"broadcast sounds: {list.Count(l => l.StartsWith("music "))} music cues and {lineCount} voice lines (persona {persona}) in " +
                      $"mods\\{ModName}\\{SoundList}{voiceSize}" + (problems.Count > 0 ? $"; left out: {string.Join("; ", problems)}" : "") +
-                     (banks.Log.Count > 0 ? $" ({string.Join("; ", banks.Log.Distinct())})" : "");
+                     (banks.Log.Count + voiceBanks.Log.Count > 0 ? $" ({string.Join("; ", banks.Log.Concat(voiceBanks.Log).Distinct())})" : "");
     }
 
     /// <summary>A field's text anywhere under an element (null if it isn't there or is empty).</summary>

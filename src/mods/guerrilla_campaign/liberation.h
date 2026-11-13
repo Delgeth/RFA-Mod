@@ -47,6 +47,12 @@ struct District {
     int liberatedTech = 0, liberatedMarauder = 0, liberatedEdf = 0;  // set on liberation (0 = keep)
     int minEdfProgression = 0;
     bool fixedMorale = false, fixedControl = false;  // disable_morale_change, disable_control_change
+    float controlStart = 0.0f, moraleStart = 0.0f;   // territories.xtbl's, for a fresh campaign
+    // The last changes, for the HUD's meters (hud_ui_change_control / _morale): what changed, by how
+    // much, when (the game's clock), and a count that goes up with each change.
+    unsigned changes = 0;
+    float controlBefore = 0.0f, moraleBefore = 0.0f;
+    int controlChangedAt = -1, moraleChangedAt = -1;
 };
 int DistrictCount();
 const District* GetDistrict(int district);
@@ -56,9 +62,15 @@ int PlayerDistrict();
 
 // EDF control and morale of a district (-1: the player's), changed as Guerrilla's
 // gfm_change_edf_control and gfm_change_district_morale do.
-void ChangeEdfControl(float delta, int district);
-void ChangeMorale(float delta, int district);
+// With a HUD message: Guerrilla's string tag and its picture (hud_message_add_minor).
+void ChangeEdfControl(float delta, int district, const char* tag = nullptr, const char* icon = nullptr);
+void ChangeMorale(float delta, int district, const char* tag = nullptr, const char* icon = nullptr);
 void SetMorale(float morale, int district);
+// difficulty.xtbl's MENU_MORALE_PLAYER_DEATH at the game's difficulty (-2 .. -5).
+float PlayerDeathMorale();
+// The districts, progression and salvage read again from the campaign's save (after a game save was
+// loaded), from territories.xtbl's starting values up.
+void ReloadState();
 // Set outright (gfm_set_edf_control: clamped to 0..max, then the district may be liberated).
 void SetEdfControl(float control, int district);
 // What morale's effects read: the district's, or the temporary morale while a mission uses it,

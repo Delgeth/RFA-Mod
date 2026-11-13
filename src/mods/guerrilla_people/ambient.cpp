@@ -31,6 +31,21 @@
 // Despawning, as Guerrilla's should_despawn_npc (0xB47700): 20 m or more away, 10 s after it was made, out of
 // view for 5 s, and 20 s after it was made or beyond 120 m (MAX_PED_SPAWN_DISTANCE); a leaving one
 // (can_delete_despawning_npc) once it is 20 m away and out of view for 5 s, or beyond 120 m.
+//
+// Left to others (the alert session's morale converts, 2026-11-13): a walker whose team changes from the one it was
+// made with (a convert joins the player's, human +0x13B4: 0 guerrillas, 1 EDF, 2 civilians, 3 Marauders), or that another mod
+// asks for (GuerrillaPeople_LeaveToGame), is given back to the game's AI and is no longer a walker: not walked, not
+// counted against the cap, not despawned by these rules.
+//
+// Their side (the user's run of 2026-11-13 11:52: armed people in civilian clothes stood in Dust's square and didn't fight
+// the EDF; two of them, team 0, died there): the district people are Guerrilla's guerrilla-team characters (Team
+// Guerilla, an rfg_m16 in their inventory, flags "unarmed" and "use tech level"), and a walker made from its character
+// was a guerrilla. Guerrilla's ped spawn (spawn_npc_navpoint, RM 0xB5EB20) gives a walker no loadout and keeps its
+// character's own team (npc_flags use_default_team) only where it spawns inside a safehouse's area
+// (is_inside_safehouse_area, RM 0xB4D590: each enabled safehouse's box over its trigger regions); everywhere else it is a
+// civilian, who keeps the rifle a convert later fights with. So a walker made outside a safehouse's area is put on the
+// civilians' team (the NPC's set_team, 0x8AB200); the areas are the vehicles' mods\guerrilla_vehicles\safehouses.txt
+// (each safehouse's trigger region, a box or a sphere).
 #define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "ambient.h"
@@ -42,6 +57,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -73,6 +89,8 @@ auto const GoneOrDead = reinterpret_cast<bool(__cdecl*)(BYTE* object)>(0x42ADC0)
 auto const RemoveObject = reinterpret_cast<int(__fastcall*)(void* world, void*, DWORD handle, int flag)>(0x6D56A0);
 auto const HumanInfo = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x88D170);
 auto const MakeHuman = reinterpret_cast<BYTE*(__cdecl*)(BYTE* info, const float* where, const float* orientation, void* variant)>(0x762D50);
+using SetTeamFn = bool(__fastcall*)(BYTE* npc, void*, int team);
+auto const SetTeam = reinterpret_cast<SetTeamFn>(0x8AB200);  // the NPC's set_team (it tells the AI too)
 auto const InView = reinterpret_cast<bool(__cdecl*)(const float* centre, float radius)>(0x768400);
 auto const FleeToSafetyBelief = reinterpret_cast<BYTE*(__cdecl*)(BYTE* npc)>(0x483C90);
 auto const EnemyFleeBelief = reinterpret_cast<BYTE*(__cdecl*)(BYTE* npc)>(0x483B00);
@@ -83,6 +101,30 @@ auto const EnemyFleeBelief = reinterpret_cast<BYTE*(__cdecl*)(BYTE* npc)>(0x483B
 using GoToFn = int(__fastcall*)(BYTE* ai, void*, const float* place, int movement, int stance, int priority, DWORD cellLow, DWORD cellHigh, bool flag);
 auto const GoTo = reinterpret_cast<GoToFn>(0x431C20);
 constexpr int kWalk = 1, kStanding = 0, kLowPriority = 0;
+constexpr int kSprint = 3;  // human_movement_states: HMS_SPRINT
+// A human's animation state override (0x86D0F0, cdecl: the human, the state; human +0x73C; -1 none), the state by name
+// (0x97EAE0, its index in the game's states, -1 when none has that name): Armageddon's own sf_char_set_anim_state_override
+// and run_around_panicked_action use them.
+auto const FindState = reinterpret_cast<int(__cdecl*)(const char* name)>(0x97EAE0);
+auto const SetStateOverride = reinterpret_cast<void(__cdecl*)(BYTE* human, int state)>(0x86D0F0);
+// Guerrilla's character_instance::set_state (RM 0x802040: vanim_change_state with a state and an action, each an
+// index_alias of the index and an alias, a blend and a flag) is Armageddon's 0x9691D0 (thiscall on the human's
+// animation, *(human +0x760); vanim_change_state 0x980730; ret 0x18), as its ragdoll get-up calls it. An action by
+// name: 0x97EB90 (the twin of 0x97EAE0, -1 when none has that name). The stance: 0x854B90 (cdecl: human, stance;
+// human +0x728: 0 standing, 1 crouching).
+struct IndexAlias { int index, alias; };
+using SetAnimStateFn = void(__fastcall*)(BYTE* animation, void*, IndexAlias state, IndexAlias action, float blend, bool flag);
+auto const SetAnimState = reinterpret_cast<SetAnimStateFn>(0x9691D0);
+auto const FindAction = reinterpret_cast<int(__cdecl*)(const char* name)>(0x97EB90);
+auto const SetStance = reinterpret_cast<void(__cdecl*)(BYTE* human, int stance)>(0x854B90);
+constexpr DWORD kHumanAnimation = 0x760;
+constexpr int kStandingStance = 0, kCrouchingStance = 1, kNoAlias = -1;
+constexpr float kCowerBlend = 0.3f;  // MIN_PATH_DIST, the blend Guerrilla's cowers use
+constexpr DWORD kBeliefHandle = 0x00, kBeliefPosition = 0x04, kBeliefType = 0x24;  // ai_belief: its source, its place, its kind
+// Armageddon numbers the kinds its own way (their names, set up at 0xF14D80: ... corpse 11, friendly fire 12, building
+// 13, vehicle 14, turret 15, exo 16, ally on turret 17, projectile 18, hazard 19, misc. sound 20, combat sound 21,
+// bullet impact 22, explosion 23, building stress 24, ...); Guerrilla's AI_BELIEF_VEHICLE is 13, Armageddon's 14.
+constexpr char kVehicleBelief = 14;  // flee_to_safety_goal leaves a vehicle to the vehicle goals (cower_goal, gawk_goal)
 constexpr int kNoPath = 6, kStartOffMesh = 7, kDestinationOffMesh = 8;
 int GameTime() { return *reinterpret_cast<const int*>(0x1121300); }   // ms; it stops while the game is paused
 int GameHour() { return *reinterpret_cast<const BYTE*>(0x12F76D4); }
@@ -224,12 +266,77 @@ struct Walker {
     int management = 0;                   // who managed it before
     V3 lastPlace{};
     int lastMoveCheck = 0, stuck = 0;
+    int team = -1;                        // its team when it was made (a change means it joined a side)
+    // Guerrilla's panic (flee_to_safety_goal and flee_action): fleeing from the danger until a while after it is gone,
+    // looking again every 1.5-3 s; cornered, it cowers for 2-4 s.
+    bool fleeing = false, cowering = false;
+    V3 danger{}, fleeGoal{}, fleeAway{};  // the danger, where it runs to, and the way away from the danger
+    int fleeUntil = 0, nextFleeLook = 0, cowerUntil = 0, fleeTry = 0;
+    // Guerrilla's cower_goal (a vehicle about to run it over) and gawk_goal (a heavy vehicle near): cowering from what
+    // comes at it (looked at again every 200-300 ms), and the gawk timer pair (ai_system::gawk_timer).
+    bool incoming = false, gawking = false, fetal = false;
+    int nextHazardLook = 0, gawkWindow = -1, gawkLength = -1;
 };
 std::vector<Walker> g_walkers;
 int g_nextSpawn = 0, g_nextReport = 0, g_lastClock = 0;
 // For the reports.
-int g_made = 0, g_despawned = 0, g_died = 0, g_fled = 0, g_reachedNodes = 0, g_goToFailures = 0, g_notStreamed = 0, g_noNode = 0;
+int g_made = 0, g_despawned = 0, g_died = 0, g_fled = 0, g_reachedNodes = 0, g_goToFailures = 0, g_notStreamed = 0, g_noNode = 0, g_leftToOthers = 0;
+int g_madeCivilians = 0, g_madeInSafehouses = 0;
+// The safehouses' areas (enabled ones): a box (place, right/up/forward axes, least, most along them) or a sphere.
+struct SafehouseArea { bool box = false; float place[3]{}, axes[9]{}, least[3]{}, most[3]{}, radius = 0; };
+std::vector<SafehouseArea> g_safehouseAreas;
+constexpr int kCivilianTeam = 2;
+
+void ReadSafehouseAreas() {
+    std::ifstream file(rfa::RootDir() + L"\\mods\\guerrilla_vehicles\\safehouses.txt");
+    std::string line;
+    bool enabled = false;
+    while (std::getline(file, line)) {
+        std::istringstream in(line);
+        std::string kind, shape, handle, tag;
+        in >> kind;
+        if (kind == "safehouse") {
+            int on = 0;
+            in >> handle >> tag >> on;
+            enabled = on != 0;
+        }
+        else if (kind == "area" && enabled) {
+            SafehouseArea a;
+            in >> shape;
+            for (float& v : a.place) in >> v;
+            if (shape == "box") {
+                a.box = true;
+                for (float& v : a.axes) in >> v;
+                for (float& v : a.least) in >> v;
+                for (float& v : a.most) in >> v;
+            }
+            else in >> a.radius;
+            if (in) g_safehouseAreas.push_back(a);
+        }
+    }
+}
+
+bool InSafehouseArea(const V3& p) {
+    for (const SafehouseArea& a : g_safehouseAreas) {
+        const float d[3] = {p.x - a.place[0], p.y - a.place[1], p.z - a.place[2]};
+        if (!a.box) {
+            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= a.radius * a.radius) return true;
+            continue;
+        }
+        bool inside = true;
+        for (int k = 0; k < 3 && inside; ++k) {
+            const float along = d[0] * a.axes[3 * k] + d[1] * a.axes[3 * k + 1] + d[2] * a.axes[3 * k + 2];
+            inside = along >= a.least[k] && along <= a.most[k];
+        }
+        if (inside) return true;
+    }
+    return false;
+}
+constexpr DWORD kTeam = 0x13B4;
+SRWLOCK g_leaveLock = SRWLOCK_INIT;
+std::unordered_set<DWORD> g_leaveToGame;  // walkers other mods asked for (GuerrillaPeople_LeaveToGame)
 int g_results[9] = {};
+int g_cowered = 0, g_alertNow = 0, g_cowersIncoming = 0, g_gawks = 0, g_fetal = 0;
 // The cap last worked out, for the reports: how many may walk here now and why.
 int g_cap = -1;
 char g_capWhy[160] = "";
@@ -279,7 +386,11 @@ void Head(Walker& w, BYTE* navpoint) {
 }
 
 // Gives a walker back to the game's AI (its manager as before).
+void EndCower(Walker& w, BYTE* human);
+
 void GiveBack(Walker& w, BYTE* human) {
+    EndCower(w, human);
+    w.incoming = w.gawking = false;
     w.walked = false;
     *reinterpret_cast<int*>(human + kManagement) = w.management;
 }
@@ -290,15 +401,367 @@ void SitOut(BYTE* human) {
 }
 
 // One frame of a walker's walk.
+// ---- Guerrilla's panic (piece 5a, 2026-11-13; the user: "Reactions and panic first")
+// flee_to_safety_goal (RM get_fitness 0x66E260: 0x170C, high, whenever ai_get_flee_to_safety_belief RM 0x66DC10 gives a
+// belief that isn't of a vehicle, AI_BELIEF_VEHICLE 13) and its flee_action (RM do_action 0x6AA5D0): the person runs from
+// the danger (combat_maneuver_get_retreat_dir_unified: away from it over the nav mesh, set_direct_movement_to_pos),
+// looks again every 1.5-3 s (set_rand 1500, 3000), and when it can't get away it cowers (play_random_cower_animation:
+// one of the cower states, 2-4 s, set_rand 2000, 4000). Here the belief is Armageddon's own (0x483C90, the same
+// function; or 0x483B00 for an enemy to flee), the way away the AI's go-to at sprint toward a point 25 m from the danger
+// (straight away first, then 35, 70 and 110 degrees off to either side), and the cower an animation state override of
+// the civilians' cower states (cower stand, cower crouch, crouch cower 1 and 2). Guerrilla's ambient people who fled
+// leave once out of view (npc_flags ambient_flee, flee_despawn_action), so a walker that fled leaves 5 s after the
+// danger. The commit (RM 0x6ABA80) also gives a civilian the AFRAID animation variant (7), which Guerrilla's civilian
+// sets have nothing for (no set is of that variant), and within 20 m of the player says VOICE_LINE_PANIC (125), or
+// VOICE_LINE_COMBAT_ALLY_FLEE (58) when the EDF are the shooters: not said yet, Guerrilla's people's voices aren't
+// ported. The vehicles (cower_goal, gawk_goal) are below.
+constexpr float kFleeDistance = 25.0f;
+constexpr int kFleeLingers = 5000, kFleeLookLeast = 1500, kFleeLookMost = 3000, kCowerLeast = 2000, kCowerMost = 4000;
+// npc::play_random_cower_animation (RM 0xA83CB0; flee_action calls it with false): one of its states 10-13 at random,
+// "cower stand" through "stand to cower" (action 356), "cower crouch" standing, "crouch cower 1" and "2" crouching;
+// the blend 0.3. cower_incoming_action::enter (RM 0x5F27E0): from above (the way to it more than 0.5 up) "cower stand",
+// else "stand cower incoming idle" (state 14) through "stand cower incoming front" (352: within 45 degrees of its
+// facing), "... right" (354: on its right) or "... left" (353); it stands. Guerrilla's civilian sets haven't the
+// incoming ones: their parent, the soldiers' Male, has them (male_rfl_std_cwr_incomng_*).
+struct CowerClip { const char* state; const char* action; int stance; };
+const CowerClip kRandomCowers[] = {{"cower stand", "stand to cower", kStandingStance},
+                                   {"cower crouch", nullptr, kStandingStance},
+                                   {"crouch cower 1", nullptr, kCrouchingStance},
+                                   {"crouch cower 2", nullptr, kCrouchingStance}};
+
+// Plays a cower and holds its state (Guerrilla's human_override_default_animation_state with set_state).
+bool PlayCower(Walker& w, BYTE* human, const CowerClip& clip) {
+    const int state = FindState(clip.state);
+    if (state < 0) {
+        RFA_LOG_FIRST(4, "Walkers: the game has no \"%s\" animation state; NPC 0x%08X stands", clip.state, w.human);
+        return false;
+    }
+    const int action = clip.action ? FindAction(clip.action) : -1;
+    if (clip.action && action < 0) RFA_LOG_FIRST(4, "Walkers: the game has no \"%s\" animation action; NPC 0x%08X cowers without it", clip.action, w.human);
+    SetStance(human, clip.stance);
+    SetStateOverride(human, state);
+    if (BYTE* animation = *reinterpret_cast<BYTE**>(human + kHumanAnimation))
+        SetAnimState(animation, nullptr, {state, kNoAlias}, {action, kNoAlias}, kCowerBlend, false);
+    w.cowering = true;
+    return true;
+}
+
+// Ends a cower (flee_action::cleanup, cower_incoming_action::cleanup: the override cleared; it stands).
+void EndCower(Walker& w, BYTE* human) {
+    if (w.cowering) {
+        SetStateOverride(human, -1);
+        SetStance(human, kStandingStance);
+    }
+    w.cowering = false;
+}
+
+// The danger a walker flees, from Guerrilla's flee-to-safety belief (or an enemy to flee), or null.
+const BYTE* DangerBelief(BYTE* human) {
+    const BYTE* belief = FleeToSafetyBelief(human);
+    if (belief && static_cast<char>(belief[kBeliefType]) == kVehicleBelief) belief = nullptr;
+    return belief ? belief : EnemyFleeBelief(human);
+}
+
+const float kFleeTurns[] = {0.0f, 35.0f, -35.0f, 70.0f, -70.0f, 110.0f, -110.0f};  // degrees off straight away
+constexpr int kFleeWays = sizeof(kFleeTurns) / sizeof(kFleeTurns[0]);
+
+bool NoWay(int result) { return result == kNoPath || result == kStartOffMesh || result == kDestinationOffMesh; }
+
+// Cornered: it cowers where it is.
+void Cower(Walker& w, BYTE* human, int now) {
+    if (!PlayCower(w, human, kRandomCowers[std::rand() % 4])) {
+        w.nextFleeLook = now + kCowerLeast;
+        return;
+    }
+    w.cowerUntil = now + kCowerLeast + std::rand() % (kCowerMost - kCowerLeast + 1);
+    ++g_cowered;
+    RFA_LOG_FIRST(16, "Walkers: NPC 0x%08X can't get away from the danger at (%.1f, %.1f, %.1f); it cowers, as Guerrilla's flee_action (%d so far)",
+                  w.human, w.danger.x, w.danger.y, w.danger.z, g_cowered);
+}
+
+// Runs toward the next way away from the danger, from w.fleeTry on. The AI's go-to takes a new place at once (0) and
+// answers that there's no way (6, 7 or 8) then or on a later frame, so a way it turns down moves on to the next one;
+// with none left, it cowers.
+void FleeOn(Walker& w, BYTE* human, BYTE* ai, int now) {
+    const V3 at = Pos(human);
+    for (; w.fleeTry < kFleeWays; ++w.fleeTry) {
+        const float r = kFleeTurns[w.fleeTry] * 0.01745329f, c = std::cos(r), s = std::sin(r);
+        const float dx = w.fleeAway.x * c - w.fleeAway.z * s, dz = w.fleeAway.x * s + w.fleeAway.z * c;
+        w.fleeGoal = {at.x + dx * kFleeDistance, at.y, at.z + dz * kFleeDistance};
+        if (!NoWay(GoTo(ai, nullptr, &w.fleeGoal.x, kSprint, kStanding, kLowPriority, kNone, kNone, false))) return;
+    }
+    Cower(w, human, now);
+}
+
+void Flee(Walker& w, BYTE* human, BYTE* ai, int now) {
+    SitOut(human);
+    if (w.cowering) {
+        if (now < w.cowerUntil) return;
+        EndCower(w, human);
+        w.nextFleeLook = 0;
+    }
+    if (now < w.nextFleeLook) {
+        if (w.fleeTry < kFleeWays && NoWay(GoTo(ai, nullptr, &w.fleeGoal.x, kSprint, kStanding, kLowPriority, kNone, kNone, false))) {
+            ++w.fleeTry;
+            FleeOn(w, human, ai, now);
+        }
+        return;
+    }
+    // A new look (Guerrilla's flee_action looks again every 1.5-3 s): away from where the danger is now.
+    w.nextFleeLook = now + kFleeLookLeast + std::rand() % (kFleeLookMost - kFleeLookLeast + 1);
+    const V3 at = Pos(human);
+    float dx = at.x - w.danger.x, dz = at.z - w.danger.z;
+    const float length = std::sqrt(dx * dx + dz * dz);
+    if (length < 0.1f) {
+        const float a = static_cast<float>(std::rand()) / RAND_MAX * 6.2831853f;
+        dx = std::cos(a), dz = std::sin(a);
+    }
+    else dx /= length, dz /= length;
+    w.fleeAway = {dx, 0, dz};
+    w.fleeTry = 0;
+    FleeOn(w, human, ai, now);
+}
+
+// ---- Guerrilla's reactions to a vehicle (piece 5b, 2026-11-13). flee_to_safety_goal leaves a vehicle's belief to:
+// - cower_goal (RM get_fitness 0x66E380, fitness 4000): not for one in a vehicle; the AI's hazard is a vehicle (or an
+//   explosive projectile, which Armageddon's flee belief already puts first); not the local player's car if the
+//   person is his friend (local_player_is_friendly); get_hazard_physics_info (RM 0x661CA0) says it will hit; and it
+//   passes within half the vehicle's width + 0.5 m, or the vehicle is heavy (ai_perception::vehicle_is_heavy RM
+//   0x5EF470: a walker, or vehicle_is_tank RM 0xB68D90: its info's special type Tank or Artillery Tank).
+// - get_vehicle_hazard_info (RM 0x6616E0) for a vehicle on the ground (get_rolling_physics_info RM 0x5EAF90):
+//   - the local player's car near his friend (within 10 m, slower than 15 m/s) counts as 3 times as fast (15 at most);
+//   - nothing if the person is above it (height over flat distance > 0.5), if it moves away, or slower than 4 m/s on
+//     the flat;
+//   - it hits if its straight line passes within 1.2 x half its width (the time to pass: the distance along its way
+//     over its flat speed);
+//   - a heavy vehicle near a civilian, or the player's car near an ambient person, has a cone ahead of it: within
+//     min(speed x 2.5, 22.5) m, as wide as 8.75 m x (the distance along it / that reach);
+//   - only within 1.5 s (2.5 s: the player's car that isn't heavy, or a heavy one near a civilian).
+// - cower_incoming_action (RM 0x5F27E0, 0x66DAA0): it stops and cowers, looking again every 200-300 ms.
+// - gawk_goal (RM 0x6376C0, fitness 150) with get_gawk_target (RM 0x637570): a heavy vehicle it saw lately within 20 m
+//   (25 m once gawking), not while it is in a tank, walker or flyer; gawk_action stops it and it stands looking at
+//   the vehicle. Its timer pair (commit RM 0x6A0F60): the first gawk starts a 30-45 s window and a 5-15 s length;
+//   it may gawk while the window runs, and not once the window and the length are over.
+// Armageddon's pieces: the vehicle from Armageddon's flee-to-safety belief of a vehicle (kind 14, 0x483C90: it asks
+// for one after projectiles); the object's last known box (+0x7C and +0x88, Guerrilla's +0x80, +0x8C: its width
+// along x, as Guerrilla's get_bbox); the body's velocity (0x778440, 0x776770); the driver (0x603AE0); the
+// disposition (0x8A04D0, 3 friendly or better); the vehicle's subtype (0x423530: 6 flyer, 8 walker) and its info's
+// special type (+0x3DA8, its +0x30: 3 Tank, 4 Artillery Tank, as Guerrilla's).
+// Not ported: a vehicle in the air (Guerrilla's get_ballistic_physics_info and get_straight_trajectory_physics_info,
+// behind a virtual call whose Armageddon slot isn't known), the gawk's look at the vehicle (set_attention: Armageddon's
+// look-at isn't found yet), and the cower-to-stand clip (character_instance::play_action: Armageddon's not found yet).
+constexpr DWORD kObjectBody = 0x4C, kObjectBoxLeast = 0x7C, kObjectBoxMost = 0x88, kVehicleInfo = 0x3DA8, kVehicleSpecialType = 0x30;
+constexpr char kVehicleObject = 3;
+constexpr int kFlyerSubtype = 6, kWalkerSubtype = 8, kTankType = 3, kArtilleryTankType = 4, kFriendly = 3;
+constexpr float kHumanCentre = 1.0f;  // human::get_center_pos, about its middle
+constexpr int kHazardLookLeast = 200, kHazardLookMost = 300;
+constexpr int kGawkWindowLeast = 30000, kGawkWindowMost = 45000, kGawkLengthLeast = 5000, kGawkLengthMost = 15000;
+constexpr float kGawkDistance = 20.0f, kGawkingDistance = 25.0f;
+auto const VehicleSubtype = reinterpret_cast<int(__fastcall*)(BYTE* vehicle, void*)>(0x423530);
+auto const HavokBody = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);
+auto const BodyVelocity = reinterpret_cast<void(__cdecl*)(BYTE* body, V3* out)>(0x776770);
+auto const SeatOccupant = reinterpret_cast<BYTE*(__cdecl*)(BYTE* vehicle, int seat)>(0x603AE0);
+auto const Disposition = reinterpret_cast<int(__cdecl*)(BYTE* human, BYTE* other)>(0x8A04D0);
+
+bool HeavyVehicle(BYTE* vehicle, int subtype) {
+    if (subtype == kWalkerSubtype) return true;
+    const BYTE* info = *reinterpret_cast<BYTE* const*>(vehicle + kVehicleInfo);
+    const int special = info ? *reinterpret_cast<const int*>(info + kVehicleSpecialType) : 0;
+    return special == kTankType || special == kArtilleryTankType;
+}
+
+// Guerrilla's hazard_physics_info, for a vehicle on the ground.
+struct Hazard {
+    float halfWidth = 0, timeToPass = -1, distanceAtPass = -1;
+    bool heavy = false, playerDrives = false, willImpact = false;
+};
+
+bool VehicleHazard(BYTE* human, BYTE* vehicle, BYTE* player, int team, Hazard& h) {
+    const int subtype = VehicleSubtype(vehicle, nullptr);
+    if (subtype == kFlyerSubtype) return false;  // in the air: Guerrilla's ballistic path, not ported
+    const V3 least = *reinterpret_cast<const V3*>(vehicle + kObjectBoxLeast), most = *reinterpret_cast<const V3*>(vehicle + kObjectBoxMost);
+    h.halfWidth = (most.x - least.x) * 0.5f;
+    if (!(h.halfWidth > 0.2f && h.halfWidth < 25.0f)) {
+        RFA_LOG_FIRST(4, "Walkers: vehicle 0x%08X's box (%.1f to %.1f across) isn't a vehicle's size; no cower from it", Handle(vehicle), least.x, most.x);
+        return false;
+    }
+    BYTE* body = HavokBody(*reinterpret_cast<const DWORD*>(vehicle + kObjectBody));
+    if (!body) return false;
+    V3 v{};
+    BodyVelocity(body, &v);
+    const V3 at = Pos(human), car = Pos(vehicle);
+    const V3 o{at.x - car.x, at.y + kHumanCentre - car.y, at.z - car.z};  // the vehicle to the person
+    const float flat = std::sqrt(o.x * o.x + o.z * o.z);
+    float speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    h.playerDrives = player && SeatOccupant(vehicle, 0) == player;
+    if (h.playerDrives && Disposition(human, player) >= kFriendly && flat * flat < 100.0f && speed < 15.0f) {
+        const float faster = std::min(speed * 3.0f, 15.0f);
+        if (faster <= 0) v = {0, 0, 0};
+        else { const float k = faster / speed; v = {v.x * k, v.y * k, v.z * k}; }
+        speed = faster;
+    }
+    h.heavy = HeavyVehicle(vehicle, subtype);
+    const bool civilian = team == kCivilianTeam;
+    // get_rolling_physics_info
+    if (flat > 0 && o.y / flat > 0.5f) return false;
+    if (v.x * o.x + v.y * o.y + v.z * o.z < 0) return false;
+    const float flatSpeed = std::sqrt(v.x * v.x + v.z * v.z);
+    if (flatSpeed < 4.0f) return false;
+    const float along = (o.x * v.x + o.z * v.z) / flatSpeed;
+    h.timeToPass = along / flatSpeed;
+    h.distanceAtPass = std::sqrt(std::max(0.0f, flat * flat - along * along));
+    h.willImpact = h.halfWidth * 1.2f >= h.distanceAtPass;
+    // The cone ahead of the player's car, or of a heavy vehicle near a civilian.
+    if ((h.playerDrives && !h.willImpact && !h.heavy) || (civilian && h.heavy)) {
+        const float reach = std::min(speed * 2.5f, 22.5f), ahead = h.timeToPass * speed;
+        if (reach >= ahead && reach > 0 && ahead / reach * 8.75f >= h.distanceAtPass) h.willImpact = true;
+    }
+    const float soonest = h.playerDrives ? (h.heavy ? 1.5f : 2.5f) : (civilian && h.heavy ? 2.5f : 1.5f);
+    if (h.willImpact && h.timeToPass > soonest) h.willImpact = false;
+    return true;
+}
+
+// The vehicle of Armageddon's flee-to-safety belief, when that is a vehicle's.
+BYTE* BeliefVehicle(BYTE* human) {
+    const BYTE* belief = FleeToSafetyBelief(human);
+    if (!belief || static_cast<char>(belief[kBeliefType]) != kVehicleBelief) return nullptr;
+    BYTE* object = ObjectByHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(belief + kBeliefHandle));
+    return object && static_cast<char>(object[kObjectType]) == kVehicleObject ? object : nullptr;
+}
+
+// cower_incoming_action::enter's choice of clip, by where the hazard is.
+CowerClip IncomingCower(BYTE* human, BYTE* hazard) {
+    const V3 at = Pos(human), from = Pos(hazard);
+    V3 d{from.x - at.x, from.y - at.y, from.z - at.z};
+    const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    if (length > 0 && d.y / length >= 0.5f) return {"cower stand", nullptr, kStandingStance};
+    const float flat = std::sqrt(d.x * d.x + d.z * d.z);
+    if (flat > 0) d = {d.x / flat, 0, d.z / flat};
+    const V3 right = *reinterpret_cast<const V3*>(human + kOrientation), forward = *reinterpret_cast<const V3*>(human + kOrientation + 24);
+    const char* action = d.x * forward.x + d.z * forward.z >= 0.70710677f ? "stand cower incoming front"
+                         : d.x * right.x + d.z * right.z >= 0 ? "stand cower incoming right"
+                                                              : "stand cower incoming left";
+    return {"stand cower incoming idle", action, kStandingStance};
+}
+
+void StandStill(BYTE* human, BYTE* ai) {
+    const V3 at = Pos(human);
+    GoTo(ai, nullptr, &at.x, kWalk, kStanding, kLowPriority, kNone, kNone, false);
+}
+
+// Cower_goal and gawk_goal; true while one of them has the walker.
+bool VehicleReaction(Walker& w, BYTE* human, BYTE* ai, int now) {
+    if (w.incoming && now < w.nextHazardLook) {
+        SitOut(human);
+        return true;
+    }
+    BYTE* vehicle = BeliefVehicle(human);
+    BYTE* player = Player();
+    const int team = *reinterpret_cast<const int*>(human + kTeam);
+    Hazard h;
+    const bool hazard = vehicle && VehicleHazard(human, vehicle, player, team, h);
+    const bool friendsCar = h.playerDrives && Disposition(human, player) >= kFriendly;
+    const bool cower = hazard && h.willImpact && !friendsCar && (h.distanceAtPass <= h.halfWidth + 0.5f || h.heavy);
+    if (cower) {
+        SitOut(human);
+        if (!w.incoming) {
+            StandStill(human, ai);
+            PlayCower(w, human, IncomingCower(human, vehicle));
+            w.incoming = true;
+            w.gawking = false;
+            ++g_cowersIncoming;
+            RFA_LOG_FIRST(16, "Walkers: NPC 0x%08X cowers from vehicle 0x%08X coming at it (passes %.1f m off in %.1f s, half its width %.1f m%s), as Guerrilla's cower_goal (%d so far)",
+                          w.human, Handle(vehicle), h.distanceAtPass, h.timeToPass, h.halfWidth, h.heavy ? ", heavy" : "", g_cowersIncoming);
+        }
+        else StandStill(human, ai);
+        w.nextHazardLook = now + kHazardLookLeast + std::rand() % (kHazardLookMost - kHazardLookLeast + 1);
+        return true;
+    }
+    if (w.incoming) {  // it has passed
+        EndCower(w, human);
+        w.incoming = false;
+    }
+    // gawk_goal: a heavy vehicle near, within its window.
+    const bool inWindow = w.gawkWindow >= 0 && now < w.gawkWindow;
+    const bool over = !inWindow && w.gawkLength >= 0 && now >= w.gawkLength;
+    const float within = w.gawking ? kGawkingDistance : kGawkDistance;
+    const bool target = vehicle && h.heavy && Distance(Pos(human), Pos(vehicle)) < within;
+    if (!over && target) {
+        if (w.gawkWindow < 0 || now >= w.gawkWindow) {
+            w.gawkWindow = now + kGawkWindowLeast + std::rand() % (kGawkWindowMost - kGawkWindowLeast + 1);
+            w.gawkLength = now + kGawkLengthLeast + std::rand() % (kGawkLengthMost - kGawkLengthLeast + 1);
+        }
+        if (!w.gawking) {
+            w.gawking = true;
+            ++g_gawks;
+            RFA_LOG_FIRST(12, "Walkers: NPC 0x%08X stops to gawk at heavy vehicle 0x%08X, %.1f m away, as Guerrilla's gawk_goal (%d so far)", w.human, Handle(vehicle),
+                          Distance(Pos(human), Pos(vehicle)), g_gawks);
+        }
+        SitOut(human);
+        StandStill(human, ai);
+        return true;
+    }
+    w.gawking = false;
+    return false;
+}
+
+// ---- Guerrilla's fetal position (piece 5b). human_combat_unified_melee_hit (RM 0xAD13B0; Armageddon's 0x877BF0)
+// starts a person's beaten_up_timer when a melee hit knocks it down (Armageddon's human +0x1014). When a civilian
+// gets up from that ragdoll within 10 s (human_ragdoll_get_up RM 0xAD50D0, Armageddon's 0x89A510, both asking
+// ai_system::should_go_to_fetal_position: RM 0x5DE970, Armageddon's 0x4307A0), it lies in the fetal state instead
+// (Armageddon's state 9, stance 2) and sets in_fetal_position (hflags+8 bit 30; Armageddon's human +0xB8). Armageddon
+// kept all of that but not Guerrilla's fetal_position_goal (RM 0x5F33B0, 110,000: above everything) and its action
+// (RM 0x5F2AB0): it stays so while should_stay_in_fetal_position (RM 0x5DE930, Armageddon's 0x430750: the beating
+// within 10 s), then the flag is cleared and it gets up. Nothing of Armageddon's clears the flag, so a walker would
+// lie there for good. Its line under half health (VOICE_LINE_PATROL_BEAT_CIVILIAN_SUBMISSIVE_RESPONSE, 34) waits
+// for the people's voices.
+constexpr DWORD kHumanFlags3 = 0xB8, kInFetalPosition = 0x40000000;
+auto const StayInFetal = reinterpret_cast<bool(__fastcall*)(BYTE* ai, void*)>(0x430750);
+
+bool Fetal(Walker& w, BYTE* human, BYTE* ai) {
+    DWORD& flags = *reinterpret_cast<DWORD*>(human + kHumanFlags3);
+    if (!(flags & kInFetalPosition)) {
+        w.fetal = false;
+        return false;
+    }
+    SitOut(human);
+    if (!w.fetal) {
+        w.fetal = true;
+        ++g_fetal;
+        RFA_LOG_FIRST(12, "Walkers: NPC 0x%08X was beaten down and lies in the fetal position, as Guerrilla's fetal_position_goal (%d so far)", w.human, g_fetal);
+    }
+    if (StayInFetal(ai, nullptr)) return true;
+    flags &= ~kInFetalPosition;
+    SetStance(human, kStandingStance);
+    w.fetal = false;
+    RFA_LOG_FIRST(12, "Walkers: NPC 0x%08X gets up from the fetal position (10 s after the beating)", w.human);
+    return false;
+}
+
 void Walk(Walker& w, BYTE* human, int now) {
     BYTE* ai = *reinterpret_cast<BYTE**>(human + kNpcAi);
     if (!ai) return;
-    if (FleeToSafetyBelief(human) || EnemyFleeBelief(human)) {
-        GiveBack(w, human);
-        ++g_fled;
-        RFA_LOG_FIRST(20, "Walkers: NPC 0x%08X saw danger; it's the game's AI's now (Guerrilla's panic isn't ported yet)", w.human);
-        return;
+    if (Fetal(w, human, ai)) return;
+    if (const BYTE* belief = DangerBelief(human)) {
+        w.danger = *reinterpret_cast<const V3*>(belief + kBeliefPosition);
+        if (!w.fleeing) {
+            w.fleeing = true;
+            w.nextFleeLook = 0;
+            ++g_fled;
+            RFA_LOG_FIRST(20, "Walkers: NPC 0x%08X flees from a danger at (%.1f, %.1f, %.1f) (Guerrilla's flee_to_safety_goal; belief kind %d)",
+                          w.human, w.danger.x, w.danger.y, w.danger.z, static_cast<int>(static_cast<char>(belief[kBeliefType])));
+        }
+        w.fleeUntil = now + kFleeLingers;
     }
+    if (w.fleeing) {
+        if (now < w.fleeUntil || w.cowering) {
+            Flee(w, human, ai, now);
+            return;
+        }
+        w.fleeing = false;
+        w.leaving = true;  // Guerrilla's ambient people who fled leave once out of view
+    }
+    if (VehicleReaction(w, human, ai, now)) return;
     SitOut(human);
     if (w.target == kNone && w.leaving) return;  // nowhere to walk: it stands until it's out of view
     const V3 at = Pos(human);
@@ -321,7 +784,10 @@ void Walk(Walker& w, BYTE* human, int now) {
             return;
         }
     }
-    const int result = GoTo(ai, nullptr, &w.goal.x, kWalk, kStanding, kLowPriority, kNone, kNone, false);
+    // Guerrilla's pedestrian_panicked_goal (RM get_fitness 0x656330: ambient people, alert red, or during an air bomb) walks
+    // the same network at sprint (wander_panicked_action RM 0x691170: civilian_ped_do_action_common with HMS_SPRINT).
+    const int movement = g_alertNow >= 3 ? kSprint : kWalk;
+    const int result = GoTo(ai, nullptr, &w.goal.x, movement, kStanding, kLowPriority, kNone, kNone, false);
     if (result >= 0 && result < 9) {
         if (g_results[result]++ == 0)
             rfa::Log("Walkers: the AI's go-to first answered %d for NPC 0x%08X, to navpoint 0x%08X at (%.1f, %.1f, %.1f) from (%.1f, %.1f, %.1f)", result, w.human,
@@ -465,6 +931,12 @@ void SpawnStep(const V3& at, const V3& forward, int now) {
         w.lastPlace = place;
         w.lastMoveCheck = now;
         w.management = *reinterpret_cast<const int*>(human + kManagement);
+        if (InSafehouseArea(place)) ++g_madeInSafehouses;  // Guerrilla's use_default_team: its character's own team
+        else if (*reinterpret_cast<const int*>(human + kTeam) != kCivilianTeam) {
+            SetTeam(human, nullptr, kCivilianTeam);
+            ++g_madeCivilians;
+        }
+        w.team = *reinterpret_cast<const int*>(human + kTeam);
         *reinterpret_cast<int*>(human + kManagement) = kAmbient;
         g_walkers.push_back(w);
         ++g_made;
@@ -489,8 +961,11 @@ void StartAmbient() {
     }
     size_t civilians = 0;
     for (const auto& [resource, people] : g_files.civilians) civilians += people.size();
-    rfa::Log("Walkers: Guerrilla's ped spawner: %u zones where people walk, %u resources' civilians (%u names) from crews.txt",
-             static_cast<unsigned>(g_files.zones.size()), static_cast<unsigned>(g_files.civilians.size()), static_cast<unsigned>(civilians));
+    ReadSafehouseAreas();
+    rfa::Log("Walkers: Guerrilla's ped spawner: %u zones where people walk, %u resources' civilians (%u names) from crews.txt; %u safehouses' areas "
+             "(mods\\guerrilla_vehicles\\safehouses.txt), where a walker keeps its character's own team; elsewhere it is a civilian",
+             static_cast<unsigned>(g_files.zones.size()), static_cast<unsigned>(g_files.civilians.size()), static_cast<unsigned>(civilians),
+             static_cast<unsigned>(g_safehouseAreas.size()));
     g_on = true;
 }
 
@@ -509,10 +984,24 @@ void AmbientFrame(bool ours) {
     }
     g_lastClock = now;
     const V3 at = Pos(player);
+    g_alertNow = AlertLevel();
     for (auto w = g_walkers.begin(); w != g_walkers.end();) {
         BYTE* human = HumanByHandle(kWorld, nullptr, w->human);
         if (!human || GoneOrDead(human)) {
             ++g_died;
+            w = g_walkers.erase(w);
+            continue;
+        }
+        const int team = *reinterpret_cast<const int*>(human + kTeam);
+        bool asked = false;
+        AcquireSRWLockExclusive(&g_leaveLock);
+        if (!g_leaveToGame.empty()) asked = g_leaveToGame.erase(w->human) > 0;
+        ReleaseSRWLockExclusive(&g_leaveLock);
+        if (asked || (w->team >= 0 && team != w->team)) {
+            if (w->walked) GiveBack(*w, human);
+            ++g_leftToOthers;
+            RFA_LOG_FIRST(32, "Walkers: NPC 0x%08X is no longer a walker (%s); the game's AI has it", w->human,
+                          asked ? "another mod took it" : team == 0 ? "it joined the guerrillas" : "its team changed");
             w = g_walkers.erase(w);
             continue;
         }
@@ -533,9 +1022,9 @@ void AmbientFrame(bool ours) {
         g_nextReport = now + 30000;
         if (g_made > 0 || g_noNode > 0)
             rfa::Log("Walkers: %d out of a cap of %d (%s), %d people in the world (no spawning from %d); %d made, %d gone out of view, %d died or were taken, "
-                     "%d fled to the game's AI; %d navpoints reached, %d go-tos without a way; %d not streamed in, %d times no navpoint to spawn on",
+                     "%d fled (%d cowered), %d cowered from a vehicle, %d gawked, %d lay fetal, %d left to others; %d made civilians, %d made in a safehouse's area on their own team; %d navpoints reached, %d go-tos without a way; %d not streamed in, %d times no navpoint to spawn on",
                      static_cast<int>(g_walkers.size()), g_cap < 0 ? 0 : g_cap, g_capWhy[0] ? g_capWhy : "not worked out yet", NpcCount(kWorld, nullptr), kMostPeople,
-                     g_made, g_despawned, g_died, g_fled, g_reachedNodes, g_goToFailures, g_notStreamed, g_noNode);
+                     g_made, g_despawned, g_died, g_fled, g_cowered, g_cowersIncoming, g_gawks, g_fetal, g_leftToOthers, g_madeCivilians, g_madeInSafehouses, g_reachedNodes, g_goToFailures, g_notStreamed, g_noNode);
     }
     if (now < g_nextSpawn && g_nextSpawn - now <= 1000) return;
     const int people = NpcCount(kWorld, nullptr);
@@ -545,4 +1034,15 @@ void AmbientFrame(bool ours) {
         return;
     }
     SpawnStep(at, *reinterpret_cast<const V3*>(player + kOrientation + 24), now);
+}
+
+void AmbientLeaveToGame(unsigned long person) {
+    AcquireSRWLockExclusive(&g_leaveLock);
+    g_leaveToGame.insert(person);
+    ReleaseSRWLockExclusive(&g_leaveLock);
+}
+
+const char* AmbientZoneResource(float x, float z) {
+    const Zone* zone = ZoneAt(V3{x, 0, z});
+    return zone && !zone->resource.empty() ? zone->resource.c_str() : nullptr;
 }

@@ -285,6 +285,7 @@ bool ConvoyFrame(Convoy& convoy, BYTE* player, int clock) {
         const int result = TrySpawn(member.spawn, &vehicle);
         if (result == 1) { waiting = true; continue; }
         member.spawning = false;
+        if (result == 0 && vehicle) NoteMadeBy(Handle(vehicle), "a convoy");
         if (result == 2) {
             RFA_LOG_FIRST(10, "Convoys: %s couldn't make its vehicles; it's called off", def.name.c_str());
             TakeAway(convoy);

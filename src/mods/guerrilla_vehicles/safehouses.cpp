@@ -143,7 +143,10 @@ Outcome Refill(BYTE* node, BYTE* player) {
     if (Blocked(spot, player)) return Outcome::Blocked;
     if (NodeHeldBack(node, nullptr)) return Outcome::HeldBack;
     const DWORD made = SpawnChild(node, nullptr, kNone);
-    if (made != kNone && VehicleByHandle(kWorld, nullptr, made)) return Outcome::Made;
+    if (made != kNone && VehicleByHandle(kWorld, nullptr, made)) {
+        NoteMadeBy(made, "a safehouse refill");
+        return Outcome::Made;
+    }
     return (*reinterpret_cast<const DWORD*>(node + kNodeFlags) & 2) ? Outcome::Waiting : Outcome::NotMade;
 }
 

@@ -308,7 +308,7 @@ void LookAtBuildings() {
         }
         if (destroyed && !seen.destroyedSeen) {
             seen.destroyedSeen = true;
-            // Where Guerrilla lowers the district's EDF control (object_mover::drop_control): not ported yet.
+            // Guerrilla lowers the district's EDF control here too (object_mover::drop_control): district_sources.cpp.
             rfa::Log("An EDF building of %s importance is destroyed (%.0f %% gone)", ImportanceName(importance), percent * 100.0f);
         }
         if (seen.damage <= seen.reported || now < seen.mayReportAt) continue;

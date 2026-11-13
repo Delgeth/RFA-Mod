@@ -17,14 +17,19 @@
 // elapsed ≤ par + 999 ms) the first time gives the same again. Each node keeps whether it is done,
 // discovered, par beaten, how many times, and the best time.
 //
-// The mod runs the challenge's own rules. Not ported yet (each logged when reached): the briefing
-// and results screens (rfg_ui_demolitions, accepted at once), the fade, the building's rebuilding,
-// the inventory swap, clearing the area, the out-of-ammo and death checks, the warp back, the map
-// icons and the "use" prompt at the node (until then the console command rfg_dm_start <je_dm_01..16>
-// starts one).
+// The mod runs the challenge's own rules: the use prompt at the node (the use key starts it; the console's
+// rfg_dm_start <je_dm_01..16> too), the briefing and results (guerrilla_hud shows them through
+// GuerrillaCampaign_Activity and answers through GuerrillaCampaign_ActivityChoose; with no HUD asking, the
+// briefing is accepted and the results closed by themselves), the fade to black and back, the building
+// rebuilt (world::restore_object), the area cleared and the AI ignoring the player, the death check, the
+// warp back to where the player started. Not ported yet (piece 3b): the inventory swap with unlimited ammo
+// and the out-of-ammo check, the layer's supplies.
 #define RFA_MOD_NAME "guerrilla_campaign"
 #include "rfa_mod.h"
 #include "activity_base.h"
+#include "alert_sources.h"
+#include "converts.h"
+#include "messages.h"
 #include "handle_kinds.h"
 #include "liberation.h"
 #include "save.h"
@@ -210,6 +215,92 @@ void NotPorted(const char* what) {
     rfa::Log("Demolitions master: %s isn't ported yet", what);
 }
 
+// ---- Armageddon's calls for the run
+
+// The screen fading to black and back (the interface's ui_fade_to_black): FadeOut(0, seconds) counts a
+// fade up and darkens (0x578790), FadeIn(1, 0, seconds) counts it down (0x578720), IsBlack() (0x578830).
+auto const FadeOut = reinterpret_cast<void(__cdecl*)(int unused, float seconds)>(0x578790);
+auto const FadeIn = reinterpret_cast<void(__cdecl*)(int a, int b, float seconds)>(0x578720);
+auto const IsBlack = reinterpret_cast<bool(__cdecl*)()>(0x578830);
+constexpr float kFadeSeconds = 1.0f;
+constexpr float kFadeWaitMost = 2.0f;  // never wait longer for the black
+// world::restore_object (0x6CF800, thiscall: the world, the handle, false): the building rebuilt, as the
+// console's restore_object and the script word of that name do.
+auto const RestoreObject = reinterpret_cast<bool(__fastcall*)(void* world, void* unused, DWORD handle, bool flag)>(0x6CF800);
+constexpr float kRestoreWaitMost = 5.0f;
+// ai_ignore_player: the flag (0x11A777C) and its setter (0x4768F0), as the console command.
+auto& g_aiIgnoresPlayer = *reinterpret_cast<const BYTE*>(0x11A777C);
+auto const SetAiIgnoresPlayer = reinterpret_cast<void(__cdecl*)(bool ignore)>(0x4768F0);
+// The console's warp: the zone at a place (0x6CB3C0 on the world: null outside the loaded ones), the
+// player's own move (his virtual +0x28: place, orientation, true), his velocity zeroed (0x850990), then
+// 0x7B0860(0, 1).
+auto const ZoneAt = reinterpret_cast<void*(__fastcall*)(void* world, void* unused, const float* place)>(0x6CB3C0);
+using MoveFn = void(__fastcall*)(BYTE* object, void* unused, const float* place, const float* orientation, bool flag);
+auto const SetVelocity = reinterpret_cast<void(__cdecl*)(BYTE* human, const float* velocity)>(0x850990);
+auto const AfterWarp = reinterpret_cast<void(__fastcall*)(BYTE* human, void* unused, int a, int b)>(0x7B0860);
+// The use key, as the game reads it (whatever the player bound): the action for what he is doing
+// (0x4E1B70) held (0x4E4800), for the local player (0x11C0580).
+auto const UseAction = reinterpret_cast<int(__cdecl*)(int player)>(0x4E1B70);
+auto const ButtonHeld = reinterpret_cast<bool(__cdecl*)(int action, int player)>(0x4E4800);
+auto& g_localPlayer = *reinterpret_cast<const int*>(0x11C0580);
+// People.
+using CountFn2 = int(__fastcall*)(void* world, void* unused);
+using AtFn2 = BYTE*(__fastcall*)(void* world, void* unused, int index);
+auto const HumanCount = reinterpret_cast<CountFn2>(0x43A860);
+auto const HumanAt = reinterpret_cast<AtFn2>(0x43A8B0);
+auto const Disposition = reinterpret_cast<int(__cdecl*)(BYTE* human, BYTE* other)>(0x8A04D0);
+constexpr DWORD kInVehicle = 0x1160, kAi = 0x174C, kOrientation = 0x10;
+constexpr int kHostile = 0;
+constexpr float kNpcSweepPeriod = 10.0f;  // despawn_npcs_for_demo_master every 10 s
+using IsDeadFn2 = bool(__thiscall*)(void* object);
+bool Dead(BYTE* object) { return reinterpret_cast<IsDeadFn2>((*reinterpret_cast<void***>(object))[4])(object); }
+
+void WarpPlayer(const Vector& place, const float* orientation) {
+    BYTE* player = static_cast<BYTE*>(Player());
+    if (!player) return;
+    if (!ZoneAt(kWorld, nullptr, &place.x)) {
+        rfa::Log("Demolitions master: the start (%.0f, %.0f, %.0f) isn't in a loaded zone; the player stays where he is", place.x, place.y, place.z);
+        return;
+    }
+    const MoveFn move = reinterpret_cast<MoveFn>((*reinterpret_cast<void***>(player))[0x28 / 4]);
+    move(player, nullptr, &place.x, orientation, true);
+    const float still[3] = {0, 0, 0};
+    SetVelocity(player, still);
+    AfterWarp(player, nullptr, 0, 1);
+}
+
+// despawn_npcs_for_demo_master: those who take the player for an enemy and know of him, or anyone in the
+// area, leave (Guerrilla's active despawn).
+void SweepNpcs(const Vector& center, float range) {
+    BYTE* player = static_cast<BYTE*>(Player());
+    if (!player) return;
+    const DWORD playerHandle = *reinterpret_cast<const DWORD*>(player + kHandle);
+    int sent = 0;
+    const int count = HumanCount(kWorld, nullptr);
+    for (int i = 0; i < count; ++i) {
+        BYTE* human = HumanAt(kWorld, nullptr, i);
+        if (!human || human == player || Dead(human) || !*reinterpret_cast<BYTE**>(human + kAi)) continue;
+        if (*reinterpret_cast<const DWORD*>(human + kInVehicle) != 0xFFFFFFFF) continue;
+        const bool inArea = FlatDistance(PositionOf(human), center) < range;
+        const bool after = Disposition(human, player) == kHostile && (alert_sources::Believes(human, 0, playerHandle) || alert_sources::Believes(human, 1, playerHandle));
+        if (!inArea && !after) continue;
+        converts::SendAway(*reinterpret_cast<const DWORD*>(human + kHandle));
+        ++sent;
+    }
+    if (sent) rfa::Log("Demolitions master: %d people leave the area", sent);
+}
+
+// The HUD's results reasons (DemolitionsInfo's failure text).
+const char* FailureTag(EndReason reason) {
+    switch (reason) {
+    case OutOfTime: return "ACTIVITY_FAIL_OUT_OF_TIME";
+    case OutOfRange: return "ACTIVITY_FAIL_LEFT_AREA";
+    case OutOfAmmo: return "ACTIVITY_FAIL_OUT_OF_AMMO";
+    case PlayerDied: return "MENU_YOU_DIED";
+    default: return "";
+    }
+}
+
 class Demolitions : public Activity {
 public:
     Demolitions() : Activity(DemolitionsMaster, true, false) {}
@@ -248,7 +339,12 @@ public:
                  targetIsBuilding_ ? "a building" : "NOT one of the world's buildings (won when it is gone)", FlatDistance(at, node.pos));
         progress_ = LoadProgress(node);
         step_ = Step::LoadingLayers;
-        if (void* player = Player()) startPosition_ = PositionOf(player);
+        // activity_demolitions_master_start: where the player stands, to warp him back at the end.
+        if (BYTE* player = static_cast<BYTE*>(Player())) {
+            startPosition_ = PositionOf(player);
+            memcpy(startOrientation_, player + kOrientation, sizeof(startOrientation_));
+            haveStart_ = true;
+        }
         rfa::Log("Demolitions master %s: started at node %08X, target building %08X", level_->name.c_str(), node.handle, target_);
         return true;
     }
@@ -258,6 +354,13 @@ public:
         step_ = Step::Wait;
         target_ = 0xFFFFFFFF;
         targetDown_ = success_ = false;
+        reason_ = Success;
+        choice_ = -1;
+        screenAsked_ = false;
+        fadedOut_ = false;
+        haveStart_ = false;
+        salvageGiven_ = 0;
+        proTime_ = false;
         StopListening();
     }
 
@@ -277,15 +380,54 @@ public:
         info.title = "ACT_DEMO_MASTER_NAME";
         info.objective = level_ ? level_->cornerMessage : "";
         info.timerVisible = info.running;
-        // get_display_time: the out-of-range countdown, else the countdown, else the time so far.
-        float shown = rangeTimer_ > 0.0f ? rangeTimer_ : level_ && level_->timeLimit > 0 ? timeRemaining_ : elapsed_;
-        if (shown < 0.0f) shown = 0.0f;
-        char text[16];
-        sprintf_s(text, "%02d:%02d", static_cast<int>(shown) / 60, static_cast<int>(shown) % 60);
-        info.timerText = text;
+        info.timerText = TimerText();
         info.status = targetDown_ ? 2 : 0;
         return info;
     }
+
+    // For the HUD: what of the run it shows now (briefing, corner panel, results).
+    void Fill(Screen& screen) {
+        screenAsked_ = true;
+        screen = {};
+        if (!level_ || step_ == Step::Wait || step_ == Step::Complete) return;
+        screen.mode = DemolitionsMaster;
+        screen.screen = step_ == Step::PregameBriefing ? 1 : step_ == Step::Active || step_ == Step::PostgameDelay ? 2 : step_ == Step::PostgameBriefing ? 3 : 0;
+        screen.title = "ACT_DEMO_MASTER_NAME";
+        screen.subtitle = level_->briefingMessage;
+        screen.body = level_->bodyText;
+        screen.objective = level_->cornerMessage;
+        screen.timer = TimerText();
+        for (size_t i = 0; i < level_->weapons.size() && i < 4; ++i) {
+            const Weapon& weapon = level_->weapons[i];
+            screen.weapons.push_back(weapon.weapon.empty() || _stricmp(weapon.weapon.c_str(), "none") == 0 ? weapon.icon : weapon.weapon);
+            screen.ammo.push_back(weapon.ammo);
+        }
+        screen.timeLimit = level_->timeLimit;
+        screen.parTime = level_->parTime;
+        screen.bestMs = progress_.completed ? progress_.bestTime : 0;
+        screen.elapsedMs = static_cast<int>(elapsed_ * 1000.0f);
+        screen.status = targetDown_ ? 2 : 0;
+        screen.success = success_;
+        screen.result = ResultText();
+        screen.failure = success_ ? "" : FailureTag(reason_);
+        screen.salvage = salvageGiven_;
+        screen.proTime = proTime_;
+        screen.outOfRange = rangeTimer_ > 0.0f;
+        screen.center = center_;
+        screen.range = level_->activeRange;
+    }
+
+    // The HUD's answer: at the briefing, accept (1) or cancel (0); at the results, close (any).
+    void Choose(int accept) { choice_ = accept ? 1 : 0; }
+
+    // The player's death (demolitions_master_process_player_death).
+    void OnPlayerDeath() {
+        if (step_ == Step::Active) Ending(false, PlayerDied);
+    }
+
+    // The use prompt at a node (player_is_near_demolitions_master_node): Guerrilla's icon (1, the default
+    // hand), or 0.
+    int UsePrompt() const { return offerNode_ != nullptr ? 1 : 0; }
 
 protected:
     bool Initialize() override {
@@ -298,21 +440,59 @@ protected:
         return true;
     }
 
-    void FrameReady(float) override {
-        // Guerrilla opens the briefing (rfg_ui_demolitions, with Dan's radio line) and waits for
-        // Accept; then fades to black, cancels charges and explosions in the area, and starts up.
+    void FrameReady(float seconds) override {
+        // activity_do_frame_ready: the briefing (rfg_ui_demolitions; Accept or Cancel).
         if (step_ == Step::LoadingLayers) {
-            NotPorted("the briefing screen (accepted at once)");
-            step_ = Step::PregameAccept;
+            step_ = Step::PregameBriefing;
+            choice_ = -1;
+            screenAsked_ = false;
+            briefingTime_ = 0.0f;
+            rfa::Log("Demolitions master %s: the briefing", level_->name.c_str());
+        }
+        if (step_ == Step::PregameBriefing) {
+            briefingTime_ += seconds;
+            // A HUD that doesn't show the briefing never answers: go on as if accepted.
+            if (choice_ < 0 && !screenAsked_ && briefingTime_ > 1.0f) choice_ = 1;
+            if (choice_ == 0) {  // demolitions_master_reject
+                rfa::Log("Demolitions master %s: the briefing was cancelled", level_->name.c_str());
+                step_ = Step::PregameReject;
+                End();
+                return;
+            }
+            if (choice_ == 1) {  // demolitions_master_accept
+                step_ = Step::PregameAccept;
+                fadeTime_ = 0.0f;
+                FadeOut(0, kFadeSeconds);
+                fadedOut_ = true;
+            }
+            return;
         }
         if (step_ == Step::PregameAccept) {
-            NotPorted("the fade to black");
-            NotPorted("rebuilding the building (the node's restore list)");
+            // do_loading_process: once black, the building rebuilt and the area made ready, then start up.
+            fadeTime_ += seconds;
+            if (!IsBlack() && fadeTime_ < kFadeWaitMost) return;
+            if (!RestoreObject(kWorld, nullptr, target_, false)) rfa::Log("Demolitions master %s: the game didn't rebuild %08X (it may stand)", level_->name.c_str(), target_);
+            restoreTime_ = 0.0f;
+            // clean_area: the AI ignores the player, the area's people leave.
+            aiIgnoredBefore_ = g_aiIgnoresPlayer != 0;
+            SetAiIgnoresPlayer(true);
+            const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
+            SweepNpcs(building ? PositionOf(building) : startPosition_, level_->activeRange + 10.0f);
             if (!BeginStartUp()) {
                 step_ = Step::PregameReject;
+                Unwind();
                 End();
             }
         }
+    }
+
+    void FrameStarting(float seconds) override { restoreTime_ += seconds; }
+
+    // activity_starting_completed: the restore list done (the building back and standing).
+    bool StartingCompleted() const override {
+        const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
+        const bool standing = building && !(targetIsBuilding_ && (*reinterpret_cast<const DWORD*>(building + kBuildingFlags) & kGameDestroyed));
+        return standing || restoreTime_ > kRestoreWaitMost;
     }
 
     bool Start() override {
@@ -320,17 +500,26 @@ protected:
         // finalize_activity_initialization: the inventory swapped for the challenge's weapons.
         for (const Weapon& weapon : level_->weapons)
             rfa::Log("Demolitions master %s: weapon %s (%s), ammo %d", level_->name.c_str(), weapon.weapon.c_str(), weapon.icon.c_str(), weapon.ammo);
-        NotPorted("swapping the player's inventory for the challenge's weapons");
-        NotPorted("clearing the area and having the AI ignore the player");
+        NotPorted("swapping the player's inventory for the challenge's weapons (piece 3b)");
         timeRemaining_ = static_cast<float>(level_->timeLimit);
         elapsed_ = 0.0f;
         rangeTimer_ = 0.0f;
         pollTimer_ = 0.0f;
+        sweepTimer_ = kNpcSweepPeriod;
         // The play area's middle: the building's (Guerrilla: its bounding box's centre, or the
         // layer's DEMO_MASTER dummy).
         center_ = PositionOf(ObjectFromHandle(target_));
+        // The building must be standing now; one still down counts as won at once (it wasn't rebuilt).
+        const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
+        if (building && targetIsBuilding_ && (*reinterpret_cast<const DWORD*>(building + kBuildingFlags) & kGameDestroyed))
+            rfa::Log("Demolitions master %s: its building is still down after %.0f s; the game didn't rebuild it", level_->name.c_str(), restoreTime_);
         listener_ = script::Listen(script::kBuildingDestroyedEvent, &BuildingDestroyed, this);
         step_ = Step::Active;
+        if (fadedOut_) {
+            FadeIn(1, 0, kFadeSeconds);
+            fadedOut_ = false;
+        }
+        messages::Tip("Demo_Master", 2500);
         ConsolePrint("Demolitions master %s: go! (par %d s, limit %d s, area %.0f m)\n", level_->name.c_str(), level_->parTime,
                      level_->timeLimit, level_->activeRange);
         return true;
@@ -339,7 +528,26 @@ protected:
     void FrameActive(float seconds) override {
         if (step_ == Step::PostgameDelay) {
             postTimer_ -= seconds;
-            if (postTimer_ <= 0.0f) Finish();
+            if (postTimer_ <= 0.0f) Results();
+            return;
+        }
+        if (step_ == Step::PostgameBriefing) {
+            resultsTime_ += seconds;
+            if (choice_ < 0 && !screenAsked_ && resultsTime_ > 0.5f) choice_ = 1;  // no HUD to show them
+            if (choice_ >= 0) {
+                step_ = Step::PostgameReject;
+                fadeTime_ = 0.0f;
+                FadeOut(0, kFadeSeconds);
+                fadedOut_ = true;
+            }
+            return;
+        }
+        if (step_ == Step::PostgameReject) {
+            // do_post_activity_loading_process: black, the warp back, then the victory or loss.
+            fadeTime_ += seconds;
+            if (!IsBlack() && fadeTime_ < kFadeWaitMost) return;
+            Unwind();
+            Finish();
             return;
         }
         if (step_ != Step::Active) return;
@@ -352,15 +560,19 @@ protected:
             rangeTimer_ -= seconds;
             if (rangeTimer_ <= 0.0f) return Ending(false, OutOfRange);
         }
+        sweepTimer_ -= seconds;
+        if (sweepTimer_ <= 0.0f) {
+            sweepTimer_ = kNpcSweepPeriod;
+            SweepNpcs(center_, level_->activeRange);
+        }
         pollTimer_ -= seconds;
         if (pollTimer_ > 0.0f) return;
         pollTimer_ = kPollPeriod;
         // activity_should_end: the building down (its game_destroyed flag, the game's event, or gone), out
-        // of ammo (not ported).
+        // of ammo (with the weapons swap, piece 3b).
         const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
         if (building && targetIsBuilding_ && (*reinterpret_cast<const DWORD*>(building + kBuildingFlags) & kGameDestroyed)) targetDown_ = true;
         if (targetDown_ || !building) return Ending(true, Success);
-        NotPorted("the out-of-ammo and death checks");
         void* player = Player();
         if (!player) return;
         const float distance = FlatDistance(PositionOf(player), center_);
@@ -368,6 +580,7 @@ protected:
         if (distance > level_->activeRange) {
             if (rangeTimer_ <= 0.0f && !(level_->timeLimit > 0 && timeRemaining_ <= kRangeGrace)) {
                 rangeTimer_ = kRangeGrace;
+                messages::Minor("ACT_DM_5_SECONDS", nullptr);
                 ConsolePrint("Demolitions master: 5 seconds to return to the area\n");
             }
         } else {
@@ -393,46 +606,76 @@ private:
         listener_ = nullptr;
     }
 
+    // get_display_time: the out-of-range countdown, else the countdown, else the time so far.
+    std::string TimerText() const {
+        float shown = rangeTimer_ > 0.0f ? rangeTimer_ : level_ && level_->timeLimit > 0 ? timeRemaining_ : elapsed_;
+        if (shown < 0.0f) shown = 0.0f;
+        char text[16];
+        sprintf_s(text, "%02d:%02d", static_cast<int>(shown) / 60, static_cast<int>(shown) % 60);
+        return text;
+    }
+
+    std::string ResultText() const {
+        if (!level_) return "";
+        return success_ ? level_->success
+               : reason_ == OutOfTime ? level_->failTime
+               : reason_ == OutOfRange ? level_->failRange
+               : reason_ == OutOfAmmo ? level_->failAmmo
+                                      : level_->failDeath;
+    }
+
     // begin_ending_sequence: the result, then a moment before the end.
     void Ending(bool success, EndReason reason) {
         success_ = success;
+        reason_ = reason;
         rangeTimer_ = 0.0f;
         postTimer_ = success ? kSuccessDelay : kFailureDelay;
         step_ = Step::PostgameDelay;
-        const char* text = success ? level_->success.c_str()
-                           : reason == OutOfTime ? level_->failTime.c_str()
-                           : reason == OutOfRange ? level_->failRange.c_str()
-                           : reason == OutOfAmmo ? level_->failAmmo.c_str()
-                                                 : level_->failDeath.c_str();
-        rfa::Log("Demolitions master %s: %s after %.1f s", level_->name.c_str(), text, elapsed_);
-        ConsolePrint("Demolitions master %s: %s (%.1f s)\n", level_->name.c_str(), text, elapsed_);
+        rfa::Log("Demolitions master %s: %s after %.1f s", level_->name.c_str(), ResultText().c_str(), elapsed_);
+        ConsolePrint("Demolitions master %s: %s (%.1f s)\n", level_->name.c_str(), ResultText().c_str(), elapsed_);
     }
 
-    // do_activity_end, then (after the results screen) the warp back and the victory or loss.
-    void Finish() {
-        const unsigned node = node_;
+    // do_activity_end: the progress and salvage counted (get_salvage_received), then the results screen.
+    void Results() {
         const int elapsedMs = static_cast<int>(elapsed_ * 1000.0f);
-        int salvage = 0;
+        salvageGiven_ = 0;
+        proTime_ = success_ && elapsedMs <= level_->parTime * 1000 + kParSlackMs;
         if (success_) {
-            // get_salvage_received, then record_victory.
-            if (!progress_.completed) salvage += level_->rewards.salvage;
-            if (!progress_.parBeaten && elapsedMs <= level_->parTime * 1000 + kParSlackMs) {
+            if (!progress_.completed) salvageGiven_ += level_->rewards.salvage;
+            if (!progress_.parBeaten && proTime_) {
                 progress_.parBeaten = true;
-                salvage += level_->rewards.salvage;
+                salvageGiven_ += level_->rewards.salvage;
             }
             if (!progress_.completed || elapsedMs < progress_.bestTime) progress_.bestTime = elapsedMs;
             progress_.completed = true;
             ++progress_.timesCompleted;
-            SaveProgress(node, progress_);
+            SaveProgress(node_, progress_);
         }
+        step_ = Step::PostgameBriefing;
+        choice_ = -1;
+        screenAsked_ = false;
+        resultsTime_ = 0.0f;
+        rfa::Log("Demolitions master %s: the results (%s, salvage %d%s)", level_->name.c_str(), success_ ? "won" : FailureTag(reason_), salvageGiven_,
+                 proTime_ ? ", PRO TIME" : "");
+    }
+
+    // What the run changed, undone: the AI's ignoring, the warp back to the start, the fade.
+    void Unwind() {
+        SetAiIgnoresPlayer(aiIgnoredBefore_);
+        if (haveStart_) WarpPlayer(startPosition_, startOrientation_);
+        if (fadedOut_) {
+            FadeIn(1, 0, kFadeSeconds);
+            fadedOut_ = false;
+        }
+    }
+
+    void Finish() {
         End();
-        NotPorted("the results screen");
-        NotPorted("warping the player back and giving back their inventory and vehicle");
         if (success_) {
             Rewards rewards = level_->rewards;
-            rewards.salvage = salvage;
+            rewards.salvage = salvageGiven_;
             RecordVictory(rewards);
-            ConsolePrint("Demolitions master %s: salvage %d, best %.1f s\n", level_->name.c_str(), salvage, progress_.bestTime / 1000.0f);
+            ConsolePrint("Demolitions master %s: salvage %d, best %.1f s\n", level_->name.c_str(), salvageGiven_, progress_.bestTime / 1000.0f);
         } else {
             RecordLoss();
         }
@@ -440,22 +683,31 @@ private:
     }
 
     void FrameInactive(float) override {
-        // Guerrilla shows every node on the map while nothing runs, and offers the challenge at
-        // the node ("use"). Until the prompt is ported, the console says which one is here.
-        void* player = Player();
+        // activity_do_frame_inactive and player_is_near_demolitions_master_node: the offer at a node, about
+        // 1 m from it, on foot, with nothing running, at green; the use key starts it.
+        offerNode_ = nullptr;
+        BYTE* player = static_cast<BYTE*>(Player());
         if (!player) return;
         const Vector here = PositionOf(player);
+        const bool canStart = step_ == Step::Wait && !AnyRunning() && liberation::AlertLevel() == handles::AlertGreen && CanInitialize() &&
+                              *reinterpret_cast<const DWORD*>(player + kInVehicle) == 0xFFFFFFFF;
         for (const world::Object* node : world::OfClass("object_demolitions_master_node")) {
             const float dx = node->pos.x - here.x, dy = node->pos.y - here.y, dz = node->pos.z - here.z;
-            const bool atNode = dx * dx + dy * dy + dz * dz < kUseDistance * kUseDistance * 4.0f;
-            if (atNode && nearNode_ != node->handle)
-                ConsolePrint("Demolitions master here: rfg_dm_start %s\n", node->Property("demolitions_master_type").c_str());
-            if (atNode) {
+            const float distance2 = dx * dx + dy * dy + dz * dz;
+            if (distance2 < kUseDistance * kUseDistance * 4.0f && nearNode_ != node->handle) {
                 nearNode_ = node->handle;
-                return;
+                ConsolePrint("Demolitions master here: rfg_dm_start %s\n", node->Property("demolitions_master_type").c_str());
             }
+            if (canStart && distance2 < kUseDistance * kUseDistance) offerNode_ = node;
         }
-        nearNode_ = 0xFFFFFFFF;
+        const bool use = ButtonHeld(UseAction(g_localPlayer), g_localPlayer);
+        if (use && !useDown_ && offerNode_) {
+            rfa::Log("Demolitions master: the player starts %s at its node", offerNode_->Property("demolitions_master_type").c_str());
+            const world::Object* node = offerNode_;
+            offerNode_ = nullptr;
+            StartAt(*node);
+        }
+        useDown_ = use;
     }
 
     const Level* level_ = nullptr;
@@ -463,11 +715,23 @@ private:
     unsigned target_ = 0xFFFFFFFF;
     Progress progress_;
     Vector startPosition_{};
+    float startOrientation_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    bool haveStart_ = false;
     Vector center_{};
-    float timeRemaining_ = 0.0f, elapsed_ = 0.0f, rangeTimer_ = 0.0f, postTimer_ = 0.0f, pollTimer_ = 0.0f;
+    float timeRemaining_ = 0.0f, elapsed_ = 0.0f, rangeTimer_ = 0.0f, postTimer_ = 0.0f, pollTimer_ = 0.0f, sweepTimer_ = 0.0f;
+    float briefingTime_ = 0.0f, resultsTime_ = 0.0f, fadeTime_ = 0.0f, restoreTime_ = 0.0f;
     bool targetDown_ = false, success_ = false, targetIsBuilding_ = false;
+    EndReason reason_ = Success;
+    int choice_ = -1;          // the HUD's answer (-1: none yet)
+    bool screenAsked_ = false; // the HUD asked what to show since the screen came up
+    bool fadedOut_ = false;
+    bool aiIgnoredBefore_ = false;
+    bool useDown_ = true;      // a key held when the offer comes isn't a press
+    int salvageGiven_ = 0;
+    bool proTime_ = false;
     void* listener_ = nullptr;
     unsigned nearNode_ = 0xFFFFFFFF;
+    const world::Object* offerNode_ = nullptr;
 };
 
 Demolitions* g_demolitions;
@@ -490,6 +754,26 @@ Activity* MakeDemolitionsMaster() {
 bool NodeDone(unsigned node) {
     const auto found = g_done.find(node);
     return found != g_done.end() && found->second;
+}
+
+bool DemolitionsScreen(Screen& screen) {
+    if (!g_demolitions) return false;
+    g_demolitions->Fill(screen);
+    return screen.mode != ModeNone;
+}
+
+void DemolitionsChoose(int accept) {
+    if (g_demolitions) g_demolitions->Choose(accept);
+}
+
+int DemolitionsUsePrompt() { return g_demolitions ? g_demolitions->UsePrompt() : 0; }
+
+void DemolitionsPlayerDied() {
+    if (g_demolitions) g_demolitions->OnPlayerDeath();
+}
+
+void ReloadProgress() {
+    for (const world::Object* node : world::OfClass("object_demolitions_master_node")) g_done[node->handle] = LoadProgress(*node).completed;
 }
 
 bool StartDemolitionsMaster(const char* level) {

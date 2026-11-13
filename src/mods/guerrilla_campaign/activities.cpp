@@ -401,3 +401,93 @@ extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_ActivityDoneAt(fl
     const campaign::world::Object* node = campaign::world::Near(x, z, 2.0f);
     return node && campaign::activities::NodeDone(node->handle) ? 1 : 0;
 }
+
+// ---- For guerrilla_hud: the running activity's screens, its answer, the use prompt, the minimap's rings.
+
+namespace {
+
+// What GuerrillaCampaign_Activity fills (C, for the HUD). The texts are Guerrilla's string tags (or names),
+// valid until the next call.
+struct ActivityInfo {
+    int mode;                // Guerrilla's activity_modes: 11 demolitions master; 0 none
+    int screen;              // 0 none, 1 the briefing (accept or cancel), 2 running (the corner panel), 3 the results (close)
+    const char* title;       // ACT_DEMO_MASTER_NAME
+    const char* subtitle;    // the briefing's (Briefing_Destroy_Message)
+    const char* body;        // the briefing's text (Demo_Info_Body_Text)
+    const char* objective;   // the corner panel's (Corner_HUD_Destroy_Message)
+    const char* timer;       // "mm:ss": the 5 s back into the area, else the time left, else the time so far
+    const char* result;      // the results: the row's Success_String / Failure_String_Time / _Range / _Ammo / _Death
+    const char* failure;     // the results, lost: MENU_YOU_DIED, ACTIVITY_FAIL_OUT_OF_TIME, _LEFT_AREA, _OUT_OF_AMMO
+    const char* weapon[4];   // the briefing's weapons (weapons.xtbl names, or a layer prop's icon); null past the last
+    int ammo[4];             // their rounds (-1: none shown)
+    int timeLimit, parTime;  // seconds (limit 0: none)
+    int bestMs, elapsedMs;   // the best time (0: none yet), this run's
+    int status;              // running: 0, 1 unstable (out of ammo while collapsing), 2 destroyed
+    int success, proTime;    // the results: won; done within the par time
+    int outOfRange;          // running: the 5 s back into the area are counting
+    int salvage;             // the results: salvage given
+};
+
+// A ring on the minimap's ground (CIRCLE_FILLED_OUTLINE).
+struct MapRing {
+    float x, z, radius;
+    unsigned char r, g, b, a;
+    int inverted;  // shade the outside
+};
+
+campaign::activities::Screen g_shown;  // what the last call gave (the texts point into it)
+
+}  // namespace
+
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_Activity(ActivityInfo* info) {
+    using namespace campaign;
+    if (!info) return 0;
+    memset(info, 0, sizeof(*info));
+    g_shown = {};
+    if (!Playing() || !activities::DemolitionsScreen(g_shown) || g_shown.screen == 0) return 0;
+    info->mode = static_cast<int>(g_shown.mode);
+    info->screen = g_shown.screen;
+    info->title = g_shown.title.c_str();
+    info->subtitle = g_shown.subtitle.c_str();
+    info->body = g_shown.body.c_str();
+    info->objective = g_shown.objective.c_str();
+    info->timer = g_shown.timer.c_str();
+    info->result = g_shown.result.c_str();
+    info->failure = g_shown.failure.c_str();
+    for (size_t i = 0; i < 4; ++i) {
+        info->weapon[i] = i < g_shown.weapons.size() ? g_shown.weapons[i].c_str() : nullptr;
+        info->ammo[i] = i < g_shown.ammo.size() ? g_shown.ammo[i] : -1;
+    }
+    info->timeLimit = g_shown.timeLimit;
+    info->parTime = g_shown.parTime;
+    info->bestMs = g_shown.bestMs;
+    info->elapsedMs = g_shown.elapsedMs;
+    info->status = g_shown.status;
+    info->success = g_shown.success;
+    info->proTime = g_shown.proTime;
+    info->outOfRange = g_shown.outOfRange;
+    info->salvage = g_shown.salvage;
+    return 1;
+}
+
+// The HUD's answer: the briefing, 1 accept or 0 cancel; the results, anything closes them.
+extern "C" __declspec(dllexport) void __cdecl GuerrillaCampaign_ActivityChoose(int accept) { campaign::activities::DemolitionsChoose(accept); }
+
+// The use prompt at the start of one of Guerrilla's activities: its icon (Guerrilla's use_object_icon; 1 the
+// default hand), 0 none. The use key itself the campaign reads.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_UsePrompt() {
+    return campaign::Playing() ? campaign::activities::DemolitionsUsePrompt() : 0;
+}
+
+// The rings on the minimap's ground now (render_regions): demolitions master's play area, green (50, 200, 50, 80),
+// red (200, 50, 50, 255) while the 5 s back into it are counting. How many were written.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_MapRings(MapRing* rings, int most) {
+    using namespace campaign;
+    if (!rings || most <= 0 || !Playing()) return 0;
+    activities::Screen screen;
+    if (!activities::DemolitionsScreen(screen) || screen.screen != 2) return 0;
+    MapRing& ring = rings[0];
+    ring = {screen.center.x, screen.center.z, screen.range, 50, 200, 50, 80, 0};
+    if (screen.outOfRange) ring = {screen.center.x, screen.center.z, screen.range, 200, 50, 50, 255, 0};
+    return 1;
+}

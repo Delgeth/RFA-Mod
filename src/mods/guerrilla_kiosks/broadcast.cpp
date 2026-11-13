@@ -122,6 +122,11 @@ std::vector<LineState> g_lineStates;
 std::vector<int> g_available;  // indices into tables::Lines()
 
 bool g_active = false, g_shouldDeactivate = false;
+// The line playing now, for the check two seconds into it (see Update).
+std::string g_voiceLine;
+double g_voiceStartedMs = 0.0;
+int g_voiceMs = 0;
+bool g_voiceChecked = true;
 std::string g_endingWhy;  // why the ending started (kiosk_start_deactivate), said again when it is over
 Timer g_inactiveTimer, g_nextLineTimer, g_screenTimer;
 int g_sessionLines = 0, g_sessionCutoff = 0, g_kiosk = -1, g_nextScreen = -1, g_lastAlert = 0;
@@ -393,6 +398,17 @@ void Update(float seconds) {
         return;
     }
     MoveSoundObject(g_soundObject, PlaceOf(kiosk), nullptr);
+    // Two seconds into each line: whether Wwise is still playing it. The newsreader's lines are the first of
+    // Guerrilla's voices in Wwise's ADPCM (each 5 s or longer), so "still playing" means the game decodes that codec.
+    if (!g_voiceChecked && g_voice && g_clockMs - g_voiceStartedMs >= 2000.0) {
+        g_voiceChecked = true;
+        if (SoundGameObject(g_voice) != 0)
+            RFA_LOG_FIRST(20, "Broadcast: line %s is still playing 2 s on (%.1f s long): Wwise took its file and is decoding it", g_voiceLine.c_str(),
+                          g_voiceMs / 1000.0f);
+        else
+            RFA_LOG_FIRST(20, "Broadcast: line %s had ended 2 s on, of its %.1f s: it did not play (Wwise's reason, if it gave one, is in a "
+                              "\"Wwise:\" line)", g_voiceLine.c_str(), g_voiceMs / 1000.0f);
+    }
     if (!g_nextLineTimer.Elapsed()) {
         if (!g_nextLineTimer.Valid()) return;
         if (g_screenTimer.Elapsed()) {
@@ -432,6 +448,10 @@ void Update(float seconds) {
         SetActive(false, "a line didn't play");
         return;
     }
+    g_voiceLine = l.name;
+    g_voiceStartedMs = g_clockMs;
+    g_voiceMs = sound.ms;
+    g_voiceChecked = false;
     g_nextLineTimer.Set(sound.ms + d.lineDelayMs);
     ++g_lineStates[line].plays;
     ++g_sessionLines;

@@ -55,6 +55,9 @@
 #include "kill_regions.h"
 #include "stealth.h"
 #include "district_commands.h"
+#include "district_sources.h"
+#include "converts.h"
+#include "guerrilla_squads.h"
 
 namespace campaign {
 namespace {
@@ -100,6 +103,9 @@ void __cdecl ScriptFrame() {
         kill_regions::Enter();
         stealth::Enter();
         district_commands::Enter();
+        district_sources::Enter();
+        converts::Enter();
+        guerrilla_squads::Enter();
         if (g_activities) activities::Enter();
     }
     g_playing = playing;
@@ -112,6 +118,9 @@ void __cdecl ScriptFrame() {
         undercover::Frame();
         kill_regions::Frame(g_activities && activities::AnyRunning());
         stealth::Frame();
+        district_sources::Frame();
+        converts::Frame();
+        guerrilla_squads::Frame();
         liberation::Update(seconds);
         if (g_activities) activities::Update(seconds);
     }
@@ -191,6 +200,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     undercover::Init();
     kill_regions::Init();
     stealth::Init();
+    district_sources::Init();
+    converts::Init();
+    guerrilla_squads::Init();
     g_activities = rfa::IniInt(L"GuerrillaCampaign", L"Activities", 0) != 0;
     if (g_activities) activities::Init();
     if (rfa::IniInt(L"GuerrillaCampaign", L"Scripts", 0) != 0) {

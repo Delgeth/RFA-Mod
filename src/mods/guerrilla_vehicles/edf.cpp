@@ -142,6 +142,7 @@ void ActionFrame(BYTE* player) {
         g_now.spawning = false;
         if (result == 2) { Reset(); return; }
         g_now.crew.vehicle = Handle(made);
+        NoteMadeBy(g_now.crew.vehicle, "the EDF's drive-by, fly-by or harassing");
     }
     BYTE* vehicle = VehicleByHandle(kWorld, nullptr, g_now.crew.vehicle);
     if (!vehicle) { Reset(); return; }

@@ -19,8 +19,8 @@ namespace RfaFormats.Guerrilla;
 /// A one-shot cue is played as Guerrilla has it: its wave (or one of its waves at random, not the same
 /// twice running), its volume (the cue's gain and its XACT sound's and track's dB), at the game object in
 /// 3D with Guerrilla's distances for it (foley_settings.xtbl Min_Max_Distances: full volume to the
-/// nearer, then falling to nothing at the farther, as a straight line of the gain), as many at once as
-/// the cue allows.
+/// nearer, then fading to nothing at the farther along Guerrilla's logarithmic rolloff: see
+/// <see cref="Attenuation"/>), as many at once as the cue allows.
 /// </summary>
 public sealed class GuerrillaSoundBanks
 {
@@ -196,36 +196,70 @@ public sealed class GuerrillaSoundBanks
         return (eventName, stopName, (double)wave.Samples.Length / wave.Channels / wave.Rate, wave.Rate, wave.Channels, bank.Name);
     }
 
-    /// <summary>Guerrilla's distances number <paramref name="index"/> as an attenuation in <paramref name="bank"/>: full volume to the nearer, the gain falling in a straight line to nothing at the farther.</summary>
+    /// <summary>
+    /// Guerrilla's logarithmic rolloff (its audiolib_rolloff_curve_logarythmic_entries, RM 0x14F9138): the gain at each
+    /// tenth of the way from a cue's nearer distance to its farther one (1 − log10(1 + 10t), but 0.02 at 0.9 and 0 at
+    /// the end). Guerrilla's audiolib_calc_scaled_value (RM 0x483AC0) gives a sound full volume up to the nearer
+    /// distance, nothing past the farther, and between them this curve at t = (distance − nearer) / (farther − nearer),
+    /// read as straight lines between its points. Each sound category in foley.aud_pc names its curve (its
+    /// rolloff_type, +0x11: 0 or 2 this one, 1 linear, 3 a near/far mix; audiolib_load_category_and_foley_data, RM
+    /// 0x49AC54); every one of the 1,902 cues is in a category with this one, and so are the voice personas' lines (the
+    /// KIOSK persona's category is 48). The two linear categories hold no cue.
+    /// </summary>
+    static readonly float[] GuerrillaRolloff = [1.0f, 0.699f, 0.523f, 0.398f, 0.301f, 0.222f, 0.155f, 0.097f, 0.046f, 0.02f, 0.0f];
+
+    /// <summary>The gain <see cref="GuerrillaRolloff"/> gives at <paramref name="t"/> (0 the nearer distance, 1 the farther).</summary>
+    public static float RolloffGain(float t)
+    {
+        if (t <= 0) return 1;
+        if (t >= 1) return 0;
+        float at = t * 10;
+        int k = (int)at;
+        return GuerrillaRolloff[k] + (GuerrillaRolloff[k + 1] - GuerrillaRolloff[k]) * (at - k);
+    }
+
+    /// <summary>
+    /// Where the curve's points go (t from the nearer distance to the farther): Wwise draws an attenuation as straight
+    /// lines between its points in dB, Guerrilla's curve is straight lines in gain, so the points are close enough
+    /// together that the two agree to a fraction of a dB, closer where the gain nears nothing.
+    /// </summary>
+    static readonly float[] RolloffPoints =
+        [0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.3f, 0.35f, 0.4f, 0.45f, 0.5f, 0.55f, 0.6f, 0.65f, 0.7f, 0.75f, 0.8f, 0.85f, 0.9f,
+         0.925f, 0.95f, 0.97f, 0.98f, 0.99f, 0.995f];
+
+    /// <summary>The curve from <paramref name="near"/> to <paramref name="far"/>, and Wwise's silence at the end.</summary>
+    static void AddRolloff(List<(float, float)> points, float near, float far)
+    {
+        foreach (float t in RolloffPoints) points.Add((near + (far - near) * t, Db(RolloffGain(t))));
+        points.Add((far, WwiseBankWriter.Silent));
+    }
+
+    /// <summary>
+    /// Guerrilla's distances number <paramref name="index"/> as an attenuation in <paramref name="bank"/>: full volume to
+    /// the nearer, then Guerrilla's logarithmic rolloff (<see cref="GuerrillaRolloff"/>) to nothing at the farther, so a
+    /// sound fades away as you leave its range (−13 dB half way, −27 dB at four fifths, −34 dB at nine tenths).
+    /// </summary>
     public uint Attenuation(WwiseBankWriter bank, int index)
     {
         var (near, far) = index >= 0 && index < distances.Count ? distances[index] : (3f, 50f);
         if (far <= near) far = near + 1;
         var points = new List<(float, float)> { (0, 0), (near, 0) };
-        for (int k = 1; k <= 8; k++)
-        {
-            float t = k / 8f;
-            points.Add((near + (far - near) * t, k == 8 ? WwiseBankWriter.Silent : Db(1 - t)));
-        }
-        return bank.Attenuation($"{near}-{far}", points);
+        AddRolloff(points, near, far);
+        return bank.Attenuation($"log:{near}-{far}", points);
     }
 
     /// <summary>
     /// A far cue's attenuation. Guerrilla plays a far cue only for a listener at least the cue's nearer distance
     /// away, beside the near cue (which is silent past its own farther distance): so it is silent nearer than that,
-    /// full there, and falls to nothing at its farther distance as any cue.
+    /// full there, and falls to nothing at its farther distance as any cue (<see cref="GuerrillaRolloff"/>).
     /// </summary>
     public uint FarAttenuation(WwiseBankWriter bank, int index)
     {
         var (near, far) = index >= 0 && index < distances.Count ? distances[index] : (50f, 250f);
         if (far <= near) far = near + 1;
         var points = new List<(float, float)> { (0, WwiseBankWriter.Silent), (near * 0.95f, WwiseBankWriter.Silent), (near, 0) };
-        for (int k = 1; k <= 8; k++)
-        {
-            float t = k / 8f;
-            points.Add((near + (far - near) * t, k == 8 ? WwiseBankWriter.Silent : Db(1 - t)));
-        }
-        return bank.Attenuation($"far:{near}-{far}", points);
+        AddRolloff(points, near, far);
+        return bank.Attenuation($"far-log:{near}-{far}", points);
     }
 
     /// <summary>

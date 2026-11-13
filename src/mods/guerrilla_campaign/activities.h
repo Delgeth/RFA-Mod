@@ -83,4 +83,21 @@ struct HudInfo {
 };
 HudInfo Hud();
 
+// What a run shows the player (guerrilla_hud's briefing, corner panel and results; Guerrilla's
+// DemolitionsInfo and the mission panel's activity info). Texts are Guerrilla's string tags.
+struct Screen {
+    Mode mode = ModeNone;
+    int screen = 0;  // 0 none, 1 the briefing (accept or cancel), 2 running (the corner panel), 3 the results
+    std::string title, subtitle, body, objective, timer, result, failure;
+    std::vector<std::string> weapons;  // the briefing's: weapons.xtbl names, or a layer prop's icon
+    std::vector<int> ammo;             // their rounds (-1: none shown)
+    int timeLimit = 0, parTime = 0;    // seconds (limit 0: none, the timer counts up)
+    int bestMs = 0, elapsedMs = 0;
+    int status = 0;                    // running: 0, 1 unstable (out of ammo while collapsing), 2 destroyed
+    bool success = false, proTime = false, outOfRange = false;
+    int salvage = 0;
+    Vector center{};                   // the play area, for the minimap's ring
+    float range = 0.0f;
+};
+
 }  // namespace campaign::activities

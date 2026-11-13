@@ -74,6 +74,8 @@
 #include "rfa_mod.h"
 #include "rfa_game.h"
 #include "ambient.h"
+#include "ambush.h"
+#include "story.h"
 #include <intrin.h>
 #include <malloc.h>
 #include <algorithm>
@@ -590,6 +592,8 @@ NodeSpawnFn g_nodeSpawn = nullptr;
 int g_leashesLogged = 0;
 
 DWORD __fastcall NodeSpawn(BYTE* node, void* edx, DWORD a, DWORD b) {
+    if (node && InOurWorld() && AmbushHoldsNode(node)) return kNoHandle;  // a Marauder ambush's: its region spawns it (ambush.cpp)
+    if (node && InOurWorld() && StoryHoldsNode(node)) return kNoHandle;   // a story person's: story.cpp spawns the one it streams in
     const DWORD squadHandle = g_nodeSpawn(node, edx, a, b);
     if (squadHandle == kNoHandle || !node || !InOurWorld()) return squadHandle;
     void* world = reinterpret_cast<void*>(kWorld);
@@ -1660,6 +1664,81 @@ void __cdecl GivePlayerSet(void* human) {
     }
 }
 
+// Guerrilla's guerrilla men (npc_maybe_set_male_guerrilla_anim_set, RM 0xA0F8C0; the user's run of 2026-11-13: the
+// guerrillas in civilian clothes didn't fight). Guerrilla's district people are civilians to look at, and a man of the
+// guerrillas' or the civilians' team who draws a gun or a melee weapon (draw_firearm_action::enter RM 0x658A74,
+// draw_melee_action::enter RM 0x658B2E, and a convert, morale_convert_single_npc) is given the soldiers' "Male" set
+// (NPC_male_guerrilla_anim_set) in place of his civilian one, unless his human info marks him otherwise (+0x17C bit 0:
+// the women keep theirs). Armageddon's draw actions are the same (vtables 0xF75C18 and 0xF75C48, enter in slot 4:
+// 0x492E70, 0x493050, thiscall (npc, action), ret 8). Here, in our worlds, a man of team 0 or 2 whose set is the male
+// civilians' (rfg_Civilian_Male) gets rfg_Male, Guerrilla's Male, as he draws: the animation instance (the human's
+// +0x760, its +4) keeps its set at +0x10 and its current one at +0xC, as the game's own player set (0x862B00) writes.
+constexpr DWORD kDrawFirearmEnter = 0x492E70, kDrawMeleeEnter = 0x493050;
+constexpr size_t kDrawEnterPrologue = 6;  // push ebp / mov ebp,esp / sub esp,8
+constexpr DWORD kHumanAnimation = 0x760, kHumanTeam = 0x13B4;
+using DrawEnterFn = int(__fastcall*)(void* action, void*, BYTE* npc, void* aiAction);
+DrawEnterFn g_drawFirearmEnter = nullptr, g_drawMeleeEnter = nullptr;
+int g_guerrillaMen = 0, g_drawsSeen = 0;
+
+// An NPC's animation set by name, for the log (the sets Guerrilla's people use).
+const char* NpcSetName(void* set) {
+    if (!set) return "none";
+    for (const char* name : {"rfg_Civilian_Male", "rfg_Civilian_Female", "rfg_Male", "rfg_Female", "rfg_elite", "rfg_scavenger"})
+        if (FindAnimationSet(name) == set) return name;
+    return "another";
+}
+
+// Guerrilla's npc_maybe_set_male_guerrilla_anim_set: `why` says when (as he draws, or as he joins the guerrillas).
+void MaybeGuerrillaMan(BYTE* npc, const char* why) {
+    if (!npc || !InOurWorld()) return;
+    const int team = *reinterpret_cast<const int*>(npc + kHumanTeam);
+    BYTE* animation = *reinterpret_cast<BYTE**>(npc + kHumanAnimation);
+    BYTE* instance = animation ? *reinterpret_cast<BYTE**>(animation + 4) : nullptr;
+    // The first few in each run, whoever they are: whether the game's NPCs go through here at all.
+    if (++g_drawsSeen <= 8)
+        rfa::Log("Guerrilla men: NPC 0x%08X (team %d, set %s) %s", ObjectHandle(npc, nullptr), team,
+                 NpcSetName(instance ? *reinterpret_cast<void**>(instance + 0x10) : nullptr), why);
+    if (team != 0 && team != 2) return;
+    if (!instance) return;
+    void* civilianMale = FindAnimationSet("rfg_Civilian_Male");
+    void* male = FindAnimationSet("rfg_Male");
+    if (!civilianMale || !male) {
+        RFA_LOG_FIRST(1, "Guerrilla men: rfg_Civilian_Male or rfg_Male isn't loaded; a guerrilla in civilian clothes keeps his civilian set");
+        return;
+    }
+    if (*reinterpret_cast<void**>(instance + 0x10) != civilianMale && *reinterpret_cast<void**>(instance + 0xC) != civilianMale) return;
+    *reinterpret_cast<void**>(instance + 0x10) = male;
+    *reinterpret_cast<void**>(instance + 0xC) = male;
+    if (++g_guerrillaMen <= 16)
+        rfa::Log("Guerrilla men: NPC 0x%08X (team %d) %s: Guerrilla's Male set in place of the male civilians' (%d so far)", ObjectHandle(npc, nullptr), team, why,
+                 g_guerrillaMen);
+}
+
+int __fastcall DrawFirearmEnter(void* action, void* edx, BYTE* npc, void* aiAction) {
+    MaybeGuerrillaMan(npc, "draws a gun");
+    return g_drawFirearmEnter(action, edx, npc, aiAction);
+}
+
+int __fastcall DrawMeleeEnter(void* action, void* edx, BYTE* npc, void* aiAction) {
+    MaybeGuerrillaMan(npc, "draws a melee weapon");
+    return g_drawMeleeEnter(action, edx, npc, aiAction);
+}
+
+// Guerrilla's third call of it, morale_convert_single_npc (RM 0x788EF6): a convert gets the set as he joins, already
+// holding his gun (our converts were walkers, who carry their character's rifle and never draw). The alert session's
+// converts tell us each one (GuerrillaPeople_Converted, below); the set is given on the game's frame.
+SRWLOCK g_newConvertsLock = SRWLOCK_INIT;
+std::vector<DWORD> g_newConverts;
+
+void GiveConvertsTheirSet() {
+    std::vector<DWORD> converts;
+    AcquireSRWLockExclusive(&g_newConvertsLock);
+    converts.swap(g_newConverts);
+    ReleaseSRWLockExclusive(&g_newConvertsLock);
+    for (DWORD handle : converts)
+        if (BYTE* npc = WorldObject(reinterpret_cast<void*>(kWorld), nullptr, handle)) MaybeGuerrillaMan(npc, "joins the guerrillas");
+}
+
 // The world's player is Guerrilla's whatever the start zone gives: the game takes the Player_Override of the spawn
 // resource of the zone at the start position (the zone at it, 0x6CB3C0; its resource, +0xC0; that one's player,
 // +0x1A8), and where that zone has no resource in force it falls back to Armageddon's RF4_PC, Darius. That happened in
@@ -1936,7 +2015,10 @@ void __cdecl GameplayFrame() {
     g_gameplayFrame();
     RunSpawnResourceChanges();
     RunFallsWatch();
+    GiveConvertsTheirSet();
     AmbientFrame(InOurWorld());  // Guerrilla's walkers (ambient.cpp)
+    AmbushFrame(InOurWorld());   // Guerrilla's Marauder ambushes (ambush.cpp)
+    StoryFrame(InOurWorld());    // Guerrilla's story people at the safehouses (story.cpp)
     const DWORD now = GetTickCount();
     if (now - g_lastCheck < 1000) return;
     g_lastCheck = now;
@@ -1990,6 +2072,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_skeletons = ReadList(L"rigs.txt");
     g_people = ReadList(L"people.txt");
     StartAmbient();
+    StartAmbushes();
+    StartStory();
     if (!g_skeletons.empty()) {
         g_readCharacters = reinterpret_cast<ReadCharactersFn>(rfa::HookFunction(kReadCharacters, kReadCharactersPrologue, reinterpret_cast<void*>(&ReadCharacters)));
         if (g_readCharacters) rfa::Log("Skeletons: %u of Guerrilla's people's own to load before the character table", static_cast<unsigned>(g_skeletons.size()));
@@ -2005,6 +2089,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_pickPlayer) rfa::Log("Player: could not hook the player's choice; a DLC uniform chosen in Armageddon's menu still wins in our worlds");
     g_givePlayerSet = reinterpret_cast<GivePlayerSetFn>(rfa::HookFunction(kGivePlayerSet, kGivePlayerSetPrologue, reinterpret_cast<void*>(&GivePlayerSet)));
     if (!g_givePlayerSet) rfa::Log("Player: could not hook the player's animation set; Guerrilla's player gets Armageddon's (and stands still)");
+    g_drawFirearmEnter = reinterpret_cast<DrawEnterFn>(rfa::HookFunction(kDrawFirearmEnter, kDrawEnterPrologue, reinterpret_cast<void*>(&DrawFirearmEnter)));
+    g_drawMeleeEnter = reinterpret_cast<DrawEnterFn>(rfa::HookFunction(kDrawMeleeEnter, kDrawEnterPrologue, reinterpret_cast<void*>(&DrawMeleeEnter)));
+    if (!g_drawFirearmEnter || !g_drawMeleeEnter)
+        rfa::Log("Guerrilla men: could not hook the draw actions; a guerrilla in civilian clothes keeps his civilian set when he draws");
     g_resetDispositions = reinterpret_cast<ResetDispositionsFn>(rfa::HookFunction(kResetDispositions, kResetDispositionsPrologue, reinterpret_cast<void*>(&ResetDispositions)));
     if (!g_resetDispositions) rfa::Log("Sides: could not hook the teams' reset; Armageddon's dispositions stay");
     g_humanJump = reinterpret_cast<HumanJumpFn>(rfa::HookFunction(kHumanJump, kHumanJumpPrologue, reinterpret_cast<void*>(&HumanJump)));
@@ -2104,6 +2192,9 @@ extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_SetPlayerSquadMemb
 
 // A civilian converted by morale: the gold head's pop on them, queued as Guerrilla's (5 at most, 250 ms apart).
 extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_Converted(DWORD person) {
+    AcquireSRWLockExclusive(&g_newConvertsLock);
+    g_newConverts.push_back(person);  // Guerrilla's men's set as he joins (GiveConvertsTheirSet)
+    ReleaseSRWLockExclusive(&g_newConvertsLock);
     AcquireSRWLockExclusive(&g_markersLock);
     const int now = MarkerTime();
     const int since = g_converts.empty() ? now : std::max(now, g_converts.back().since + kConvertGap);
@@ -2151,4 +2242,60 @@ extern "C" __declspec(dllexport) int __cdecl GuerrillaPeople_MapMarkers(Guerrill
     }
     ReleaseSRWLockExclusive(&g_markersLock);
     return written;
+}
+
+
+// ---- For the alert session's morale, converts and fighters (2026-11-13; the shared note activities-morale-plan.md, steps 4-6)
+//
+// Guerrilla's guerrilla squads (guerilla_squad_1 to _6) name a team and a size; their members come from the Guerrilla
+// team's squad_progression at the world's tech level, with the zone's human group giving their looks (its progression
+// names Jayde). The world build writes each as one version a district group (GuerrillaDistricts.SquadFor:
+// rfg_<group code>_gsq_<n>, the group's civilians with the progression's level-1 loadouts), for every group a zone uses.
+// This names the version for a place: the zone's spawn resource (ambient.txt) gives its group. Guerrilla's are 1, 2, 3,
+// 4 and 6 (each its size; there is no guerilla_squad_5), so 5 has none; nor has a zone with no group (the wastes).
+extern "C" __declspec(dllexport) const char* __cdecl GuerrillaPeople_GuerrillaSquadAt(int size, float x, float z) {
+    if (size < 1 || size > 6 || size == 5 || !InOurWorld()) return nullptr;
+    const char* resource = AmbientZoneResource(x, z);
+    if (!resource || _strnicmp(resource, "rfg_", 4) != 0 || _stricmp(resource, "rfg_Default") == 0) return nullptr;
+    // The group's code: the first two letters of each word of the resource's name after "rfg_" (rfg_dust_parker: dupa).
+    std::string code;
+    for (const char* word = resource + 4; *word;) {
+        const char* end = strchr(word, '_');
+        const size_t length = end ? static_cast<size_t>(end - word) : strlen(word);
+        code.append(word, std::min<size_t>(length, 2));
+        if (!end) break;
+        word = end + 1;
+    }
+    if (code.empty()) return nullptr;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static std::unordered_map<std::string, std::string> names;  // kept, so the pointer stays good
+    char name[32];
+    sprintf_s(name, "rfg_%s_gsq_%d", code.c_str(), size);
+    AcquireSRWLockExclusive(&lock);
+    const char* kept = names.emplace(name, name).first->second.c_str();
+    ReleaseSRWLockExclusive(&lock);
+    return kept;
+}
+
+// A walker another mod takes over (a civilian turned guerrilla by morale): the walkers let it go to the game's AI.
+// The walkers also let go on their own of one whose team changes.
+extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_LeaveToGame(DWORD person) { AmbientLeaveToGame(person); }
+
+// A squad sent out from its post: its leash is taken off (type 0, no anchor; 0x810990), and with it the refusal of
+// ways out of a guard post's box (HumanPath, which only holds squads on the box leash, type 4).
+// Guerrilla's disable_safehouse_vip (its scripts' action; safehouse_vip_disable RM 0x7909F0): a VIP character (by its
+// name: Carmen, Jorge, Kyle) left out of the safehouses' choice (disable non-zero) or let back in. For the campaign's
+// scripts. Not saved yet (Guerrilla's safehouse_vip_save).
+extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_DisableSafehouseVip(const char* character, int disable) {
+    StoryDisableVip(character, disable != 0);
+}
+
+extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_ReleaseLeash(DWORD squadHandle) {
+    BYTE* squad = squadHandle == kNoHandle ? nullptr : WorldObject(reinterpret_cast<void*>(kWorld), nullptr, squadHandle);
+    if (!squad) return;
+    const int type = *reinterpret_cast<const int*>(squad + kSquadLeashType);
+    if (type == 0) return;
+    SetLeash(squad, nullptr, 0, kNoHandle);
+    RFA_LOG_FIRST(32, "Squads: squad 0x%08X's leash (type %d, anchor 0x%08X) taken off: sent out from its post", squadHandle, type,
+                  *reinterpret_cast<const DWORD*>(squad + kSquadLeashAnchor));
 }

@@ -107,7 +107,8 @@
 // does the same while he walks or runs, Darius (vs_player) in every world and Mason (rfg_mason, the
 // Guerrilla world's player): the mod wraps the heading step, and for the player playing one of those
 // sets, on foot, moving (this frame's movement input, 0x11BE7C4 / 0x11BE7C0), not sprinting, not
-// aiming (0x8BB2F0) and not attacking (the attack buttons, 0x4E4800, and 1.5 s after), it lifts the
+// aiming (fine aim 0x8BB2F0 or a scope, the zoom state player +0x17E4, or the aim button held) and not
+// attacking (the attack buttons, 0x4E4800, and 1.5 s after), it lifts the
 // flag from his entry (the entries are one table, 0x21B7538, kept for the whole game) and lets no
 // camera turn through, as the sprint does; aiming or attacking he faces the camera as before.
 // Standing still, Mason doesn't turn either: Guerrilla turns its player (human_set_steering_heading_offset)
@@ -864,6 +865,11 @@ constexpr DWORD kSprinting = 0x20;
 const char* const kMasonSet = "rfg_mason";  // (Darius's, vs_player, is kDariusSet above)
 
 auto const IsFineAiming = reinterpret_cast<bool(__cdecl*)(const BYTE* player)>(0x8BB2F0);  // player +0x17E4 == 2
+// The player's zoom state (player +0x17E4, set by 0x8BAED0; Guerrilla's player_zoom_state: 0 off, 1 sprint, 2 fine aim,
+// 3 scope) and the aim buttons (the controls "zoom" 0x1D and "zoom_toggle" 0x1E).
+constexpr DWORD kZoomState = 0x17E4;
+constexpr int kZoomFineAim = 2, kZoomScope = 3;
+constexpr int kZoomControl = 0x1D, kZoomToggleControl = 0x1E;
 auto const ControlHeld = reinterpret_cast<bool(__cdecl*)(int control, int controller, int unused)>(0x4E4800);
 const int* const kLocalController = reinterpret_cast<const int*>(0x11C0580);
 const float* const kMoveInputX = reinterpret_cast<const float*>(0x11BE7C4);  // this frame's movement input
@@ -902,8 +908,13 @@ Facing PlayerFacing(BYTE* player, const char** why) {
     const ULONGLONG now = GetTickCount64();
     if (ControlHeld(kPrimaryAttack, controller, 0) || ControlHeld(kAltAttack, controller, 0) || ControlHeld(kMeleeAttack, controller, 0))
         g_lastAttack = now;
-    *why = "fine aiming";
-    if (IsFineAiming(player)) return Facing::Camera;
+    // Aiming (the user, 2026-11-13: "we can still do the 360 movment when adsing"): fine aim (0x8BB2F0), a scope, or
+    // the aim button held, whichever comes first; the plain walk is the only one that turns him all round.
+    *why = "aiming";
+    const int zoom = *reinterpret_cast<const int*>(player + kZoomState);
+    if (IsFineAiming(player) || zoom == kZoomFineAim || zoom == kZoomScope || ControlHeld(kZoomControl, controller, 0) ||
+        ControlHeld(kZoomToggleControl, controller, 0))
+        return Facing::Camera;
     *why = "an attack button in the last 1.5 s";
     if (now - g_lastAttack < kFightingMs) return Facing::Camera;
     *why = "walking";

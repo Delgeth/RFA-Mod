@@ -72,16 +72,19 @@ local Fade_thread = -1
 -- Guerrilla's reload animation, its own (its script, on WeaponFire's is_reloading): as a reload starts the box slides
 -- left over the magazine's count (update_ammo_tween1, 36 units) and the count fades out (hide_cliptext_tween1), the
 -- reticle pulses (reload_pulse_tween); when the reload ends they come back (update_ammo_tween2, hide_cliptext_tween2):
--- the number on the left collapses for the reload and shows again once the gun has refilled. Armageddon's HUD data has
--- no "reloading now", so here a reload runs from its start until the magazine fills up again (Armageddon moves the rounds
--- in at the reload's end): it starts on Armageddon's flash_type 1 (FLASH_TYPE_WEAPON_RELOAD, its own script never reads
--- it), on its reload key (R) with room in the magazine and rounds to fill it, or on an empty magazine with rounds left;
--- it ends on the refill, a change of weapon, or after RELOAD_MOST_SECONDS (a reload cut short). Each start and end is
--- logged (the first RELOAD_LOG_LINES), to learn what the game gives.
+-- the number on the left collapses for the reload and shows again once the gun has refilled, and not again until the
+-- next reload. Armageddon's HUD data has no "reloading now", so here a reload runs from its start until the magazine
+-- fills up again (Armageddon moves the rounds in at the reload's end): it starts on Armageddon's reload key (R) with room
+-- in the magazine and rounds to fill it, or on the magazine running empty with rounds left; it ends on the refill, on
+-- Armageddon's flash_type 1 (FLASH_TYPE_WEAPON_RELOAD, which its own script never reads: the game raises it for a moment
+-- as the rounds go in, the reload's end, never its start), a change of weapon, or after RELOAD_MOST_SECONDS (a reload cut
+-- short). All of it follows primary_weapon_hud's own weapon (the one its ammo is of): reticule_hud's name lags it by an
+-- update when a weapon changes (getting into a turret, the turret's empty magazine was taken for the rifle's).
+-- Each start and end is logged (the first RELOAD_LOG_LINES).
 local FLASH_TYPE_WEAPON_RELOAD = 1
 local RELOAD_KEY = 0x52					-- R, Armageddon's reload key
 local RELOAD_MOST_SECONDS = 5
-local RELOAD_LOG_LINES = 30
+local RELOAD_LOG_LINES = 60
 local Reload = { weapon = nil, rounds = nil, reserve = nil, magazine = 0, flash = nil, active = false, started = 0,
 	key_down = false, logged = 0 }
 
@@ -90,6 +93,12 @@ local function clock()
 		return rfg_handbook_clock()
 	end
 	return 0
+end
+
+-- Seconds since the reload's start, to a hundredth (Armageddon's Lua has no string library: no string.format).
+local function seconds_since_start()
+	local seconds = clock() - Reload.started
+	return tostring(seconds - seconds % 0.01) .. " s"
 end
 
 local function log_reload(text)
@@ -171,32 +180,36 @@ local function send()
 		rounds, reserve, magazine = total, 0, 0
 	end
 	local can_fire = rounds ~= 0
-	-- Reloading now (see Reload above).
+	-- Reloading now (see Reload above), by the ammo's own weapon.
+	local ammo_weapon = Weapon[1] or ""
 	local flash = Weapon[12] or 0
-	if flash ~= Reload.flash then
-		log_reload("flash_type " .. tostring(flash) .. " (" .. tostring(weapon_name) .. ", " .. tostring(rounds) .. " in the magazine)")
-		Reload.flash = flash
-	end
-	if Reload.active and weapon_name ~= Reload.weapon then
+	local flash_rose = flash == FLASH_TYPE_WEAPON_RELOAD and Reload.flash ~= FLASH_TYPE_WEAPON_RELOAD
+	Reload.flash = flash
+	if Reload.active and ammo_weapon ~= Reload.weapon then
 		Reload.active = false
-		log_reload("ended: another weapon")
+		log_reload("ended: another weapon (" .. tostring(Reload.weapon) .. " to " .. tostring(ammo_weapon) .. ")")
 	end
-	if weapon_name == Reload.weapon and Reload.rounds ~= nil and magazine > 0 and rounds > Reload.rounds and
+	if ammo_weapon == Reload.weapon and Reload.rounds ~= nil and magazine > 0 and rounds > Reload.rounds and
 		(reserve == -1 or (Reload.reserve ~= nil and reserve < Reload.reserve)) then
-		log_reload("ended: the magazine filled up (" .. tostring(Reload.rounds) .. " to " .. tostring(rounds) .. ", " .. tostring(weapon_name) .. ")")
+		if Reload.active then
+			log_reload("ended: the magazine filled up (" .. tostring(Reload.rounds) .. " to " .. tostring(rounds) .. ", " ..
+				tostring(ammo_weapon) .. ", " .. seconds_since_start() .. " after its start)")
+		else
+			log_reload("a refill with no reload seen to start (" .. tostring(Reload.rounds) .. " to " .. tostring(rounds) .. ", " .. tostring(ammo_weapon) .. ")")
+		end
 		Reload.active = false
 	elseif not Reload.active and magazine > 0 and rounds == 0 and reserve ~= 0 and Reload.rounds ~= nil and Reload.rounds > 0 and
-		weapon_name == Reload.weapon then
+		ammo_weapon == Reload.weapon then
 		Reload.active = true
 		Reload.started = clock()
-		log_reload("started: the magazine ran empty (" .. tostring(weapon_name) .. ")")
+		log_reload("started: the magazine ran empty (" .. tostring(ammo_weapon) .. ", " .. tostring(reserve) .. " left)")
 	end
-	if flash == FLASH_TYPE_WEAPON_RELOAD and not Reload.active then
-		Reload.active = true
-		Reload.started = clock()
-		log_reload("started: flash_type 1")
+	if flash_rose and Reload.active then
+		Reload.active = false
+		log_reload("ended: flash_type 1, the rounds going in (" .. tostring(ammo_weapon) .. ", " .. tostring(rounds) ..
+			" in the magazine, " .. seconds_since_start() .. " after its start)")
 	end
-	Reload.weapon, Reload.rounds, Reload.reserve, Reload.magazine = weapon_name, rounds, reserve, magazine
+	Reload.weapon, Reload.rounds, Reload.reserve, Reload.magazine = ammo_weapon, rounds, reserve, magazine
 	local is_reloading = Reload.active
 	local targeting = state
 	if targeting < 0 then
@@ -257,11 +270,12 @@ function rfg_ui_hud_reticles_keep_faded()
 				vint_set_property(part, "visible", false)
 			end
 		end
-		-- A reload's start by its key (with room in the magazine and rounds to fill it), and one cut short.
+		-- A reload's start by its key (with rounds in the magazine but room for more, and rounds to fill it: an empty
+		-- magazine starts one by itself, see send; a turret's stays at 0), and one cut short.
 		if Weapon[1] ~= nil and _GetAnyGlobalSilent("rfg_key_down") ~= nil then
 			local down = rfg_key_down(RELOAD_KEY)
 			if down and not Reload.key_down and not Reload.active and Reload.magazine > 0 and Reload.rounds ~= nil and
-				Reload.rounds < Reload.magazine and Reload.reserve ~= 0 then
+				Reload.rounds > 0 and Reload.rounds < Reload.magazine and Reload.reserve ~= 0 then
 				Reload.active = true
 				Reload.started = clock()
 				log_reload("started: the reload key (" .. tostring(Reload.weapon) .. ", " .. tostring(Reload.rounds) .. " of " .. tostring(Reload.magazine) .. ")")

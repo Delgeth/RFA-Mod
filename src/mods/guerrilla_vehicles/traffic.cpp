@@ -42,7 +42,9 @@
 #define RFA_MOD_NAME "guerrilla_vehicles"
 #include "rfa_mod.h"
 #include "crews.h"
+#include "cars.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -61,7 +63,10 @@ constexpr float kSpeed = 9.0f, kMinSpawn = 60.0f, kMaxSpawn = 260.0f, kApart = 3
 constexpr int kCaps[4] = {0, 4, 6, 10};  // Guerrilla's at green alert (max_vehicle_count 0xB41110), by density
 // The world's counts by kind (World +0x308 + kind × 12, the count at +8): people (2) and automobiles (5).
 constexpr DWORD kPeopleCount = 0x1870958, kCarCount = 0x187097C;
-constexpr int kMostPeople = 90, kMostCars = 28;
+// Guerrilla's 90 people (its NPC pool holds 100, as Armageddon's) and 28 cars: its pool's 32 less 4
+// (near_auto_population_cap RM 0xB47170). The pool holds kCarsAtOnce here (cars.h), so the cars' cap keeps
+// Guerrilla's distance from it.
+constexpr int kMostPeople = 90, kMostCars = kCarsAtOnce - (kGuerrillaCars - 28);
 constexpr float kHonkChance = 0.2f, kBailSpeed = 1.5f, kNear = 60.0f;
 
 struct Car {
@@ -100,7 +105,8 @@ void TrySpawn(const BYTE* player, const Zone& zone) {
     const bool night = [] { const int hour = GameHour(); return hour >= 18 || hour < 6; }();
     const int density = std::clamp(night ? zone.night : zone.day, 0, 3);
     if (static_cast<int>(g_cars.size() + g_pending.size()) >= kCaps[density]) return;
-    // Guerrilla's caps on the whole world (do_frame_spawn_vehicle): more than 90 people or 28 cars, no new car.
+    // Guerrilla's caps on the whole world (do_frame_spawn_vehicle): more than 90 people or 28 cars (of its 32), no
+    // new car; here kMostCars of kCarsAtOnce.
     const int people = *reinterpret_cast<const int*>(kPeopleCount), cars = *reinterpret_cast<const int*>(kCarCount);
     RFA_LOG_FIRST(1, "Traffic: the world has %d people and %d cars (no new car above %d or %d)", people, cars, kMostPeople, kMostCars);
     const bool counted = people >= 0 && people < 100000 && cars >= 0 && cars < 100000;
@@ -141,6 +147,7 @@ void TrySpawn(const BYTE* player, const Zone& zone) {
 }
 
 void MadeCar(BYTE* vehicle, const std::string& resource, const std::string& model) {
+    NoteMadeBy(Handle(vehicle), "traffic");
     Car car;
     car.vehicle = Handle(vehicle);
     car.since = GameTime();
@@ -296,15 +303,16 @@ bool ShouldDespawn(Car& car, BYTE* vehicle, BYTE* driver, const V3& player, int 
 }
 
 // ---- Guerrilla's aggressive despawn of cars (do_frame_despawn_auto_aggressive, RM 0xB4DDE0)
-// The world holds 32 cars at once (the automobile pool, guerrilla_vehicles.cpp, Guerrilla's 32); one more is refused
-// with "Ran out of slots for object type (automobile), zone (...)" (world::create_object 0x6D44E0), which
-// Armageddon shows as an error. Guerrilla never gets there: every frame (do_frame_despawn RM 0xB4DE70, outside its
-// timer), while the world has 30 cars or more, it takes one away: one fading out to be despawned (vehicle flags
+// The world holds kCarsAtOnce cars at once (64: the automobile pool, guerrilla_vehicles.cpp; Guerrilla's 32, cars.h);
+// one more is refused with "Ran out of slots for object type (automobile), zone (...)" (world::create_object
+// 0x6D44E0), which Armageddon shows as an error. Guerrilla never gets there: every frame (do_frame_despawn RM
+// 0xB4DE70, outside its timer), while the world has 30 cars or more (its 32 less 2; here kCarsAtOnce less 2), it
+// takes one away: one fading out to be despawned (vehicle flags
 // bit 11) that is off screen, else the farthest car from the player with nobody in it that is off screen
 // (find_farthest_offscreen_auto RM 0xB4D950); world::destroy_object either way. Off screen is Guerrilla's
 // vehicle::is_offscreen (RM 0xB64CA0: the car's box grown by a quarter against the view); here the game's view
 // test on a sphere of 5 m round the car (0x768400), about a big truck's box grown so.
-constexpr int kAggressiveCars = 30;
+constexpr int kAggressiveCars = kCarsAtOnce - (kGuerrillaCars - 30);  // 62
 constexpr DWORD kCarIndices = 0x1870974;     // the automobiles' list (World +0x308 + 5 × 12): their indices (ushort), then +8 how many
 constexpr DWORD kObjectTable = 0x187068C;    // World +0x5C: every object by index
 constexpr DWORD kDespawnAfterFade = 1u << 11;  // vehicle flags (+0x4FB0): m_despawn_after_fade
@@ -324,8 +332,24 @@ bool Empty(BYTE* car) {
 }
 bool BeingDestroyed(const BYTE* object) { return (object[0x55] & 0x80) != 0; }
 
+// The most cars the world has held this run, for the log: each new high from 24 on, with how much of the game's
+// address space is in use then (GlobalMemoryStatusEx: its total less what's free; a 32-bit game has 4 GB), so a
+// run shows what the cars cost beyond their 24 KB slots (their physics, their models' instances, their AI).
+void NoteMostCars(int count) {
+    static int most = 0;
+    if (count <= most || count > 1000) return;
+    most = count;
+    if (count < 24) return;
+    MEMORYSTATUSEX memory{sizeof(memory)};
+    const bool measured = GlobalMemoryStatusEx(&memory) != 0;
+    const unsigned long inUse = measured ? static_cast<unsigned long>((memory.ullTotalVirtual - memory.ullAvailVirtual) >> 20) : 0;
+    RFA_LOG_FIRST(64, "Cars: %d in the world, the most this run (it holds %d; traffic stops at %d, the farthest empty car goes from %d on); the game's "
+                  "address space in use: %lu MB", count, kCarsAtOnce, kMostCars, kAggressiveCars, inUse);
+}
+
 void AggressiveDespawn(BYTE* player) {
     const int count = *reinterpret_cast<const int*>(kCarCount);
+    NoteMostCars(count);
     if (count < kAggressiveCars) return;
     const unsigned short* indices = *reinterpret_cast<const unsigned short* const*>(kCarIndices);
     BYTE* const* objects = *reinterpret_cast<BYTE* const* const*>(kObjectTable);
@@ -349,9 +373,107 @@ void AggressiveDespawn(BYTE* player) {
     }
     BYTE* gone = fading ? fading : farthest;
     if (!gone) return;
-    RFA_LOG_FIRST(40, "Cars: %d in the world (Guerrilla takes one away from 30 on, of 32); %s taken away, %.0f m from the player, off screen", count,
-                  fading ? "one fading out" : "the farthest empty one", Distance(Pos(gone), Pos(player)));
+    RFA_LOG_FIRST(40, "Cars: %d in the world (one taken away from %d on, of %d: Guerrilla's 30 of 32); %s taken away, %.0f m from the player, off screen",
+                  count, kAggressiveCars, kCarsAtOnce, fading ? "one fading out" : "the farthest empty one", Distance(Pos(gone), Pos(player)));
     DestroyObject(kWorld, nullptr, gone, false);
+}
+
+// ---- Vehicles near the player that don't show (the log)
+// A vehicle draws at its fade's alpha (0x60F2B0: while fading in, the time so far over the fade's; while fading out,
+// the rest of it, and 0 once done, when Guerrilla's vehicle_post_sim_fade_despawn (RM 0xB79FB0; Armageddon's
+// 0x60E530) destroys a vehicle to be despawned; else 1), unless it's hidden (+0x4FB0 bit 18, 0x605500). The user
+// found one at the Badlands safehouse (2026-11-13, a Min_ATV_MG2 made with three others after the respawn's reload)
+// with a body and no picture, and the log couldn't tell why (its model's files are whole, the game's fades and
+// despawns are Guerrilla's, nothing of ours removed it). So twice a second, a vehicle within 40 m of the player
+// that would draw at alpha 0, is hidden, or whose model isn't loaded is logged once with its state, and so is the
+// vehicle the player gets into, each time.
+auto const VehicleAlpha = reinterpret_cast<float(__fastcall*)(BYTE* vehicle, void* unused)>(0x60F2B0);
+auto const VehicleCount = reinterpret_cast<int(__fastcall*)(void* world, void* unused)>(0x477090);
+auto const VehicleAt = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, int index)>(0x4770E0);
+constexpr DWORD kFadingIn = 1u << 15, kFadingOut = 1u << 16, kFromNano = 1u << 17, kHidden = 1u << 18;
+constexpr float kLookRadius = 40.0f;
+std::vector<DWORD> g_unseenLogged;
+DWORD g_lastBoarded = kNone;
+int g_nextLook = 0;
+
+// Who made a vehicle: one of the mod's spawners (NoteMadeBy), else a vehicle spawn node whose car it is (node
+// +0xA8: the parked vehicles of Guerrilla's bases, camps and spots), else the game itself (a script, the Spawn
+// menu, the console's drop_car, Armageddon's own).
+auto const NodeCount = reinterpret_cast<int(__fastcall*)(void* world, void* unused)>(0x804C00);
+auto const NodeAt = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, int index)>(0x804C50);
+constexpr DWORD kNodeCar = 0xA8;
+// Its model's streaming (the vehicles' pool, see guerrilla_vehicles.cpp): the record (0x7618A0), reserved (0x75FE90)
+// or in use (0x75FEB0), its container's state (0x909210 on the record's +8, 0x55B3D0: 3 streamed in).
+auto const ModelRecord = reinterpret_cast<void*(__cdecl*)(void* entry)>(0x7618A0);
+auto const ModelReserved = reinterpret_cast<bool(__fastcall*)(void* record, void* unused)>(0x75FE90);
+auto const ModelInUse = reinterpret_cast<bool(__fastcall*)(void* record, void* unused)>(0x75FEB0);
+auto const ModelContainer = reinterpret_cast<int(__fastcall*)(void* record, void* unused)>(0x55B3D0);
+auto const ContainerState = reinterpret_cast<int(__cdecl*)(int container)>(0x909210);
+
+void Spawner(BYTE* vehicle, char* out, size_t size) {
+    if (const char* maker = MadeBy(Handle(vehicle))) { sprintf_s(out, size, "%s", maker); return; }
+    for (int i = 0, n = NodeCount(kWorld, nullptr); i < n; ++i) {
+        BYTE* node = NodeAt(kWorld, nullptr, i);
+        if (node && *reinterpret_cast<const DWORD*>(node + kNodeCar) == Handle(vehicle)) {
+            const V3 at = Pos(node);
+            sprintf_s(out, size, "a parked spot (node 0x%08lX at %.0f %.0f %.0f)", Handle(node), at.x, at.y, at.z);
+            return;
+        }
+    }
+    sprintf_s(out, size, "the game (a script, the Spawn menu, drop_car, Armageddon's own)");
+}
+
+void Streaming(BYTE* entry, char* out, size_t size) {
+    void* record = entry ? ModelRecord(entry) : nullptr;
+    if (!record) { sprintf_s(out, size, "no record"); return; }
+    const int container = ModelContainer(record, nullptr);
+    sprintf_s(out, size, "reserved %d, in use %d, container %s (state %d), loaded %d", ModelReserved(record, nullptr), ModelInUse(record, nullptr),
+              container ? "held" : "none", container ? ContainerState(container) : -1, VehicleLoaded(entry));
+}
+
+void DescribeVisibility(const char* what, BYTE* vehicle, float distance) {
+    const DWORD flags = *reinterpret_cast<const DWORD*>(vehicle + kVehicleFlags);
+    BYTE* entry = *reinterpret_cast<BYTE* const*>(vehicle + 0x3DA8);
+    const BYTE* o = vehicle + 0x54;  // the object's flags
+    const V3 at = Pos(vehicle);
+    char spawner[220], streaming[180];
+    Spawner(vehicle, spawner, sizeof(spawner));
+    Streaming(entry, streaming, sizeof(streaming));
+    const int age = ModelAge(Handle(vehicle));
+    char made[80];
+    if (age >= 0) sprintf_s(made, "; made %d ms after its model streamed in", age);
+    else sprintf_s(made, "; its model was in before its spawn asked");
+    strcat_s(streaming, made);
+    RFA_LOG_FIRST(120, "Vehicles: %s %s (0x%08lX, a %s, at %.0f %.0f %.0f, %.1f m from the player; made by %s): draws at alpha %.2f; fading in %d, "
+                       "fading out %d (from the nano %d), despawn after fade %d, hidden %d; its model: %s; object flags %02X %02X %02X %02X",
+                  what, VehicleNameOf(vehicle), Handle(vehicle),
+                  VehicleSubtype(vehicle, nullptr) == kAutomobile ? "car" : (VehicleSubtype(vehicle, nullptr) == kFlyer ? "flyer" : "walker or other"),
+                  at.x, at.y, at.z, distance, spawner, VehicleAlpha(vehicle, nullptr), (flags & kFadingIn) != 0, (flags & kFadingOut) != 0,
+                  (flags & kFromNano) != 0, (flags & kDespawnAfterFade) != 0, (flags & kHidden) != 0, streaming, o[0], o[1], o[2], o[3]);
+}
+
+void LookForUnseenVehicles(BYTE* player) {
+    const int now = GameTime();
+    if (now < g_nextLook) return;
+    g_nextLook = now + 500;
+    const DWORD in = VehicleOf(player);
+    if (in != g_lastBoarded) {
+        g_lastBoarded = in;
+        if (BYTE* vehicle = in != kNone ? VehicleByHandle(kWorld, nullptr, in) : nullptr) DescribeVisibility("the player got into", vehicle, 0);
+    }
+    const V3 at = Pos(player);
+    for (int i = 0, n = VehicleCount(kWorld, nullptr); i < n; ++i) {
+        BYTE* vehicle = VehicleAt(kWorld, nullptr, i);
+        if (!vehicle) continue;
+        const float distance = Distance(Pos(vehicle), at);
+        if (distance > kLookRadius) continue;
+        const DWORD flags = *reinterpret_cast<const DWORD*>(vehicle + kVehicleFlags);
+        BYTE* entry = *reinterpret_cast<BYTE* const*>(vehicle + 0x3DA8);
+        if (VehicleAlpha(vehicle, nullptr) > 0.05f && !(flags & kHidden) && entry && VehicleLoaded(entry)) continue;
+        if (std::find(g_unseenLogged.begin(), g_unseenLogged.end(), Handle(vehicle)) != g_unseenLogged.end()) continue;
+        if (g_unseenLogged.size() < 200) g_unseenLogged.push_back(Handle(vehicle));
+        DescribeVisibility("near the player, not showing:", vehicle, distance);
+    }
 }
 
 // Every frame on the game's thread (from the spawn nodes' frame, 0x8028B0).
@@ -364,6 +486,7 @@ void TrafficFrame() {
     BYTE* player = Player();
     if (!player) return;
     AggressiveDespawn(player);
+    LookForUnseenVehicles(player);
     const V3 at = Pos(player);
     const int now = GameTime();  // the game's clock: a pause doesn't count
     const DWORD playerVehicle = *reinterpret_cast<const DWORD*>(player + kInVehicle);

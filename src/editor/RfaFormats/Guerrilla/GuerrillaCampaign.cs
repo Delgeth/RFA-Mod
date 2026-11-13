@@ -35,7 +35,12 @@ public static class GuerrillaCampaign
         "activity_spawn.xtbl", "activity_timed_delivery.xtbl", "activity_house_arrest.xtbl", "activity_area_defense.xtbl",
         "activity_riding_shotgun.xtbl", "activity_courier_chase.xtbl", "activity_continuous_attack.xtbl", "raid_data.xtbl",
         "activity_tanks_a_lot.xtbl", "activity_mayhem.xtbl",
+        // Guerrilla's tweak values: what kills and propaganda do to morale.
+        "tweak_table.xtbl",
     ];
+
+    /// <summary>The buildings that change a district by being destroyed: see <see cref="EdfBuildings"/>.</summary>
+    public const string EdfBuildingsFile = "edf_buildings.txt";
 
     /// <summary>The campaign's markers, in mods\guerrilla_campaign\: see <see cref="CampaignObjects"/>.</summary>
     public const string CampaignObjectsFile = @"world\campaign_objects.xml";
@@ -83,7 +88,66 @@ public static class GuerrillaCampaign
         yield return RestrictedAreas(Path.Combine(guerrilla, "build", "pc", "cache"), campaignFolder);
         yield return KillRegions(Path.Combine(guerrilla, "build", "pc", "cache"), campaignFolder);
         yield return CampaignObjects(Path.Combine(guerrilla, "build", "pc", "cache"), guerrillaTables, campaignFolder);
+        yield return EdfBuildings(Path.Combine(guerrilla, "build", "pc", "cache"), guerrillaTables, campaignFolder);
     }
+
+    /// <summary>
+    /// The buildings whose destruction changes a district, for the guerrilla_campaign mod (district_sources.cpp):
+    /// each of Guerrilla's rfg_movers whose gameplay_properties row is the EDF's and gives EDF control, and every
+    /// one with the chunk flag propaganda (its billboards). Armageddon's gameplay_properties reader keeps neither
+    /// the control column nor the team for this, so the numbers come from Guerrilla's own row. A line each:
+    /// building, Guerrilla's handle, its place (op), its points of control, its importance (0 none .. 3 high),
+    /// propaganda (0/1). A building in a zone and again in its p_ file is written once.
+    /// </summary>
+    static string EdfBuildings(string guerrillaCache, Packfile guerrillaMisc, string campaignFolder)
+    {
+        if (guerrillaMisc.Find("gameplay_properties.xtbl") is not { } propertiesEntry) return "EDF buildings: Guerrilla's misc.vpp_pc has no gameplay_properties.xtbl; none written";
+        var rows = new Dictionary<string, (bool Edf, int Importance, float Control, bool Propaganda)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in XtblFile.FromBytes(guerrillaMisc.Read(propertiesEntry)).Entries)
+        {
+            bool edf = string.Equals(entry.ValueOf("team")?.Trim(), "EDF", StringComparison.OrdinalIgnoreCase);
+            int importance = entry.ValueOf("importance")?.Trim().ToUpperInvariant() switch { "LOW" => 1, "MEDIUM" => 2, "HIGH" => 3, _ => 0 };
+            float control = float.TryParse(entry.ValueOf("control")?.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float c) ? c : 0f;
+            bool propaganda = entry.Element("chunk_flags")?.ElementsNamed("Flag").Any(f => string.Equals(f.Value.Trim(), "propaganda", StringComparison.OrdinalIgnoreCase)) == true;
+            rows.TryAdd(XtblFile.EntryName(entry), (edf, importance, control, propaganda));
+        }
+        var zones = Packfile.Open(Path.Combine(guerrillaCache, "zonescript_terr01.vpp_pc"));
+        uint moverClass = NameHashes.ClassHash("rfg_mover");
+        var lines = new List<string> { "# The buildings that change a district by being destroyed, for the guerrilla_campaign mod (written by editor\\GuerrillaBuilder.exe with the people)" };
+        var written = new HashSet<uint>();
+        int edfBuildings = 0, billboards = 0;
+        float points = 0f;
+        static string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+        foreach (var entry in zones.Entries.Where(e => e.Name.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
+                                           .OrderBy(e => e.Name.StartsWith("p_", StringComparison.OrdinalIgnoreCase)).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var o in GuerrillaZones.Objects(zones.Read(entry)).Where(o => o.ClassHash == moverClass))
+            {
+                if (o.Text("gameplay_props")?.Trim() is not { Length: > 0 } name || !rows.TryGetValue(name, out var row)) continue;
+                float control = row.Edf ? ControlPoints(row.Importance, row.Control) : 0f;
+                if (control <= 0f && !row.Propaganda) continue;
+                if (!written.Add(o.Handle)) continue;
+                if (o.Value("op") is not { Length: >= 12 } op) continue;
+                lines.Add($"building {o.Handle:X8} {F(BitConverter.ToSingle(op, 0))} {F(BitConverter.ToSingle(op, 4))} {F(BitConverter.ToSingle(op, 8))} {F(control)} {row.Importance} {(row.Propaganda ? 1 : 0)}");
+                if (control > 0f) { edfBuildings++; points += control; }
+                if (row.Propaganda) billboards++;
+            }
+        Directory.CreateDirectory(campaignFolder);
+        File.WriteAllLines(Path.Combine(campaignFolder, EdfBuildingsFile), lines);
+        return $"EDF buildings: {edfBuildings} give control ({F(points)} points in all), {billboards} are propaganda, in {EdfBuildingsFile}";
+    }
+
+    /// <summary>
+    /// A building's points of EDF control, as object_mover::set_control_value (Re-Mars-tered 0xA13AF0) makes them from
+    /// its gameplay_properties row's importance and control value: low 0, 0.5, 1, 2, 3 give 0, 1, 1, 2, 3 (anything
+    /// else 1); medium 0, 1, 2, 3 give 0, 10, 12, 15 (anything else 10); high 1 gives 80, anything else itself.
+    /// </summary>
+    static float ControlPoints(int importance, float control) => importance switch
+    {
+        1 => control == 0f ? 0f : control == 0.5f || control == 1f ? 1f : control == 2f ? 2f : control == 3f ? 3f : 1f,
+        2 => control == 0f ? 0f : control == 1f ? 10f : control == 2f ? 12f : control == 3f ? 15f : 10f,
+        3 => control == 1f ? 80f : control,
+        _ => 0f,
+    };
 
     /// <summary>
     /// Guerrilla's campaign markers (<see cref="CampaignClasses"/>), every one in its zones and p_ zones, written for
@@ -269,7 +333,7 @@ public static class GuerrillaCampaign
 
     public static IEnumerable<string> Remove(string campaignFolder)
     {
-        foreach (string written in new[] { VehicleTeams, RestrictedAreasFile, KillRegionsFile, CampaignObjectsFile })
+        foreach (string written in new[] { VehicleTeams, RestrictedAreasFile, KillRegionsFile, CampaignObjectsFile, EdfBuildingsFile })
         {
             string file = Path.Combine(campaignFolder, written);
             if (!File.Exists(file)) continue;

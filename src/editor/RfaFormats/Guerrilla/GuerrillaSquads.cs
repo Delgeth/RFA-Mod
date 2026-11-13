@@ -143,19 +143,52 @@ public static class GuerrillaSquads
 
         var written = new List<string>();
         var leftOut = new List<string>();
-        int groupSquads = 0, notPlaced = 0;
+        int groupSquads = 0, notPlaced = 0, forFights = 0;
         // The district versions the world's zones name (the world build's list); the others aren't written, as the
         // game keeps few squads (SquadEntries). Before the world is built, none.
         string placedFile = Path.Combine(worldFolder, PlacedList);
         var placed = File.Exists(placedFile)
             ? File.ReadAllLines(placedFile).Select(l => l.Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // But every guerrilla squad (guerilla_squad_1 to _6) in every group a zone uses (one with any version placed), for
+        // the Red Faction fighters the campaign mod makes near the player by morale (Guerrilla's guerrilla_squad_info,
+        // RM 0x7B6EA0: one guerilla_squad_N where the player is; guerrilla_people's GuerrillaPeople_GuerrillaSquadAt names it).
+        var usedGroups = placed.Select(GuerrillaDistricts.GroupCodeOf).Where(code => code != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var rfg in Read(guerrillaTables, SquadTable).Entries)
         {
             string name = XtblFile.EntryName(rfg), team = rfg.ValueOf("team_name")?.Trim() ?? "";
             int count = int.TryParse(rfg.ValueOf("member_count"), out int c) ? c : 0;
             if (gameSquads.Contains(name)) { leftOut.Add($"{name} (Armageddon has one of that name)"); continue; }
-            if (count < 1 || rfg.ValueOf("special_npc") is { Length: > 0 }) { leftOut.Add($"{name} (story people)"); continue; }
+            if (count < 1) { leftOut.Add($"{name} (no members)"); continue; }
+            if (rfg.ValueOf("special_npc")?.Trim() is { Length: > 0 } special)
+            {
+                if (name.Equals(GuerrillaDistricts.RadioSquad, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Guerrilla's radio operators: a version a group, its member one of the group's own radio operators
+                    // (its "Radio Operator" human group) that the group's resource streams in; none where it has none.
+                    var radios = groups.TryGetValue(GuerrillaDistricts.RadioGroup, out var radioList)
+                        ? radioList.ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    int versions = 0;
+                    foreach (var (group, people) in civiliansOf)
+                    {
+                        var here = people.Where(radios.Contains).ToList();
+                        if (here.Count == 0) continue;
+                        string version = GuerrillaDistricts.SquadFor(name, group == "default" ? null : group);
+                        if (!placed.Contains(version)) { notPlaced++; continue; }
+                        squads.Table!.AddElement(Squad(version, team, 1, [.. here.Select(p => (p, CivilianLoadout, 1.0))], 0));
+                        versions++;
+                    }
+                    written.Add($"{name} (the radio operators: {versions} versions, a group's own)");
+                    continue;
+                }
+                // The story people at the safehouses (guerrilla_people streams in one special NPC and one VIP, as
+                // Guerrilla's resource manager does); the missions' own people are left for the missions.
+                if (!StorySquads.Contains(name)) { leftOut.Add($"{name} (a mission's people: {special})"); continue; }
+                if (!characters.Contains(special)) { leftOut.Add($"{name} (story people: {special} not made)"); continue; }
+                squads.Table!.AddElement(Squad(name, team, 1, [(special, CivilianLoadout, 1.0)], 0));
+                written.Add($"{name} (story: {special})");
+                continue;
+            }
             if (GuerrillaDistricts.FromGroup(name))
             {
                 // A version for each group: its members that group's civilians, a civilian squad unarmed (Armageddon's
@@ -169,7 +202,9 @@ public static class GuerrillaSquads
                     List<(string, string, double)> pool = civilians ? [.. people.Select(p => (p, CivilianLoadout, 1.0))]
                                                                     : [.. people.SelectMany(p => guerrillaLoadouts.Select(l => (p, l.Loadout, l.Weight)))];
                     string version = GuerrillaDistricts.SquadFor(name, group == "default" ? null : group);
-                    if (!placed.Contains(version)) { notPlaced++; continue; }
+                    bool forAFight = !civilians && usedGroups.Contains(GuerrillaDistricts.Code(group == "default" ? null : group));
+                    if (!placed.Contains(version) && !forAFight) { notPlaced++; continue; }
+                    if (!placed.Contains(version)) forFights++;
                     squads.Table!.AddElement(Squad(version, team, count, pool, people.Count));
                     groupSquads++;
                 }
@@ -212,13 +247,13 @@ public static class GuerrillaSquads
         var withThem = characters.Where(c => !everywhere.Contains(c) && containerOf.TryGetValue(c, out var owner) && everywhere.Contains(owner)).Order(StringComparer.OrdinalIgnoreCase).ToList();
         var nowhere = characters.Where(c => !everywhere.Contains(c) && !withThem.Contains(c, StringComparer.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase).ToList();
         foreach (var (resource, list) in resourceLists.OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase))
-            yield return $"Spawn resource: {resource}: {list.Count} of the game's 16 human slots: {string.Join(", ", list)}";
+            yield return $"Spawn resource: {resource}: {list.Count} of the {HumanSlots} a resource may list (the game streams 17 with the player; guerrilla_people's special NPC and VIP take the rest): {string.Join(", ", list)}";
         yield return (withThem.Count > 0 ? $"Spawn resources: with their containers {string.Join(", ", withThem)}" : "Spawn resources:") +
                      (nowhere.Count > 0 ? $"; in no resource (made, but streamed in nowhere yet): {string.Join(", ", nowhere)}" : "") +
                      (playerOverride != null ? $"; the player {playerOverride}" + (player != null ? " (Guerrilla's player, made by the people)" : ", as Armageddon's Default") : "");
         yield return $"Loadouts: {loadoutName.Count} of Guerrilla's ({string.Join(", ", loadoutName.Values)}); not yet, their weapons not ported: {leftOutLoadouts.Count}; with their grenades: {withGrenades.Count}" +
                      (leftOutGrenades.Count > 0 ? $"; grenades not yet: {string.Join(", ", leftOutGrenades)}" : "");
-        yield return $"Squads: {squadEntries} in squads.xtbl of the {SquadEntries} the game keeps, {squadMembers} different members of the {SquadMemberPool} it holds with guerrilla_people (its own 64); district versions the world's zones don't name, left out: {notPlaced}" +
+        yield return $"Squads: {squadEntries} in squads.xtbl of the {SquadEntries} the game keeps, {squadMembers} different members of the {SquadMemberPool} it holds with guerrilla_people (its own 64); district versions the world's zones don't name, left out: {notPlaced}; guerrilla squads written for the fights morale brings (no zone names them): {forFights}" +
                      (placed.Count == 0 ? " (the world isn't built yet: none of the district versions written)" : "");
         yield return $"Names: the squads' {squadNames} bytes of the {SquadNamePool} the game holds with guerrilla_people (its own 1,280), the spawn resources' {resourceNames} of {ResourceNamePool} (its own 1,024)";
         yield return written.Count == 0 ? "Squads: none of Guerrilla's can be had yet" : $"Squads: {written.Count} of Guerrilla's ({groupSquads} versions of its civilian and guerrilla squads, a group each), members picked from its progression at level {Level}: {string.Join(", ", written)}";
@@ -246,6 +281,13 @@ public static class GuerrillaSquads
     /// loadout it knows (0x50BD47, 0x50BD6B), so they take the one Armageddon's own civilians have.
     /// </summary>
     const string CivilianLoadout = "Civilian Melee";
+
+    /// <summary>
+    /// Guerrilla's story people at its safehouses (squads.xtbl, a special_npc each): its special NPCs (Samanya,
+    /// OldCoot, RFC: the special_npc nodes) and safehouse VIPs (Carmen, Jorge, Kyle: the safehouse_vip nodes). Its
+    /// other special_npc squads are its missions' people.
+    /// </summary>
+    public static readonly HashSet<string> StorySquads = new(["Samanya", "OldCoot", "RFC", "Carmen", "Jorge", "Kyle"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// A squad entry of Armageddon's: <paramref name="count"/> members picked from <paramref name="pool"/> (character,
@@ -434,7 +476,7 @@ public static class GuerrillaSquads
     public static int PoolBytes(XtblFile table) =>
         table.Entries.Select(XtblFile.EntryName).Distinct(StringComparer.Ordinal).Sum(n => { int k = n.Length + 1; return k % 2 == 1 ? k + 1 : k + 2; });
 
-    /// <summary>How many characters' containers the game streams in at once (its human allocator, 0x26B07B0: 16 slots).</summary>
+    /// <summary>How many characters a spawn resource may list: the game streams 17 containers at once (its people's stream pool, 0x19728E8, set up at 0xF29530), less the player.</summary>
     const int HumanSlots = 16;
 
     /// <summary>
@@ -503,7 +545,21 @@ public static class GuerrillaSquads
         foreach (var rfg in Read(guerrillaTables, SquadTable).Entries)
         {
             string name = XtblFile.EntryName(rfg), team = rfg.ValueOf("team_name")?.Trim() ?? "";
-            if (gameSquads.Contains(name) || !int.TryParse(rfg.ValueOf("member_count"), out int count) || count < 1 || rfg.ValueOf("special_npc") is { Length: > 0 }) continue;
+            if (gameSquads.Contains(name) || !int.TryParse(rfg.ValueOf("member_count"), out int count) || count < 1) continue;
+            if (rfg.ValueOf("special_npc")?.Trim() is { Length: > 0 } special)
+            {
+                // As Build writes them: the radio operators' version a group with any of its radio operators, and the
+                // safehouses' story people whose characters are made.
+                if (name.Equals(GuerrillaDistricts.RadioSquad, StringComparison.OrdinalIgnoreCase))
+                {
+                    var radios = groups.TryGetValue(GuerrillaDistricts.RadioGroup, out var radioList)
+                        ? radioList.ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var (group, people) in groupPeople)
+                        if (people.Any(radios.Contains)) expected.Add(GuerrillaDistricts.SquadFor(name, group));
+                }
+                else if (StorySquads.Contains(name) && characters.Contains(special)) expected.Add(name);
+                continue;
+            }
             if (GuerrillaDistricts.FromGroup(name))
             {
                 // A version for each group whose resource holds any of its civilians (as Build writes them).

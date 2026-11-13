@@ -48,3 +48,41 @@ std::string ForObject(const char* kind, unsigned handle) {
 }
 
 }  // namespace campaign::save
+
+namespace campaign::save {
+
+std::vector<std::string> Keys(const char* section) {
+    std::vector<std::string> keys;
+    std::vector<wchar_t> text(65536);
+    const DWORD length = GetPrivateProfileSectionW(Wide(section).c_str(), text.data(), static_cast<DWORD>(text.size()), File().c_str());
+    for (const wchar_t* line = text.data(); line < text.data() + length && *line; line += wcslen(line) + 1) {
+        std::string key;
+        for (const wchar_t* c = line; *c && *c != L'='; ++c) key += static_cast<char>(*c);
+        keys.push_back(key);
+    }
+    return keys;
+}
+
+std::string Bytes() {
+    std::string bytes;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, File().c_str(), L"rb") != 0 || !file) return bytes;
+    char buffer[16384];
+    size_t read;
+    while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0) bytes.append(buffer, read);
+    fclose(file);
+    return bytes;
+}
+
+void Replace(const unsigned char* data, int size) {
+    // Windows' profile functions keep no copy: the file itself is the save, so replacing it is enough.
+    DeleteFileW(File().c_str());
+    if (!data || size <= 0) return;
+    CreateDirectoryW(ModFolder().c_str(), nullptr);
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, File().c_str(), L"wb") != 0 || !file) return;
+    fwrite(data, 1, static_cast<size_t>(size), file);
+    fclose(file);
+}
+
+}  // namespace campaign::save

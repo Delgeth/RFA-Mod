@@ -142,12 +142,85 @@ public static class GuerrillaPopulation
     /// Armageddon's Standard). Not these: the patrols' (<see cref="Patrols"/>), the Marauders' ambushes (their
     /// regions, which spawn them as a vehicle drives in, are gone from Armageddon), turrets' and vehicles' crews.
     /// </summary>
+    /// <summary>
+    /// A zone's Marauder ambush regions (marauder_ambush_region, a class Armageddon dropped; Guerrilla's 61 in 25 zones from
+    /// 04_08 to 12_10 hold 136 of its 160 Marauder squad nodes): each region and its squad nodes on foot (squad_vehicle off;
+    /// by handle, with the squad <paramref name="squadFor"/> names, one of <paramref name="squads"/>), and how many of its
+    /// nodes ride (27 in all, for later). The world build places the nodes on foot with no parent and writes the regions for
+    /// guerrilla_people (ambush.cpp), which spawns them as Guerrilla's ambush_region_do_frame does.
+    /// </summary>
+    public static List<(GuerrillaZoneObject Region, List<(uint Handle, string Squad)> OnFoot, int Riding)> AmbushRegions(
+        IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads, Func<string, string> squadFor) =>
+        [.. zone.Values.Where(o => o.ClassHash == AmbushRegion).Select(region =>
+        {
+            var nodes = zone.Values.Where(o => o.ClassHash == SquadNode && o.Parent == region.Handle).ToList();
+            bool Rides(GuerrillaZoneObject n) => n.Value("squad_vehicle")?.Any(b => b != 0) == true;
+            List<(uint, string)> onFoot = [.. nodes.Where(n => !Rides(n)).Select(n => (n.Handle, Squad: squadFor(n.Text("squad_def") ?? "")))
+                                                   .Where(n => squads.Contains(n.Squad))];
+            return (region, onFoot, nodes.Count(Rides));
+        })];
+
+    /// <summary>
+    /// A region's line in ambush_regions.txt: "region", its handle, its place and axes (op: the place, then the right, up and
+    /// forward rows), its box in its own axes (bb: least, most), enabled, the day and night chances (day_trigger_prob,
+    /// night_trigger_prob), the least and most squads it spawns (Guerrilla's MAR_PROP_MIN_SPAWNS / MAX_SPAWNS, whose names
+    /// aren't known: by their hashes). Null when it lacks its place or box.
+    /// </summary>
+    public static string? AmbushRegionLine(GuerrillaZoneObject region)
+    {
+        if (region.Value("op") is not { Length: >= 48 } op || region.Value("bb") is not { Length: >= 24 } bb) return null;
+        var c = System.Globalization.CultureInfo.InvariantCulture;
+        string F(byte[] v, int i) => BitConverter.ToSingle(v, i * 4).ToString("R", c);
+        float Prob(string name) => region.Value(name) is { Length: >= 4 } v ? BitConverter.ToSingle(v) : 0;
+        int Count(uint hash, int fallback) => region.Properties.TryGetValue(hash, out var p) && p.Value.Length >= 4 ? BitConverter.ToInt32(p.Value) : fallback;
+        bool enabled = region.Value("enabled") is not { Length: >= 1 } e || e[0] != 0;
+        return $"region {region.Handle:X8} {string.Join(' ', Enumerable.Range(0, 12).Select(i => F(op, i)))} {string.Join(' ', Enumerable.Range(0, 6).Select(i => F(bb, i)))} " +
+               $"{(enabled ? 1 : 0)} {Prob("day_trigger_prob").ToString("R", c)} {Prob("night_trigger_prob").ToString("R", c)} {Count(AmbushMinSpawns, 1)} {Count(AmbushMaxSpawns, 1)}";
+    }
+
+    static readonly uint AmbushRegion = NameHashes.ClassHash("marauder_ambush_region");
+    const uint AmbushMinSpawns = 0xAD234E6C, AmbushMaxSpawns = 0xB8A89A9E;  // MAR_PROP_MIN_SPAWNS, MAR_PROP_MAX_SPAWNS (RM serialize 0xAA9B40: +0xD8, +0xDC)
+
     public static List<(uint Handle, string Squad)> StandingSquads(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads,
                                                                   Func<string, string> squadFor) =>
-        [.. zone.Values.Where(o => o.ClassHash == SquadNode)
+        [.. zone.Values.Where(o => o.ClassHash == SquadNode && StoryKind(o) == null)
                        .Where(o => o.Parent == None || zone.TryGetValue(o.Parent, out var p) && (p.ClassHash == Building || p.ClassHash == Box || p.ClassHash == ActionNode))
                        .Select(o => (o.Handle, Squad: squadFor(o.Text("squad_def") ?? "")))
                        .Where(s => squads.Contains(s.Squad))];
+
+    /// <summary>
+    /// A squad node's kind of story person, as Guerrilla's resource manager streams them: "special" (its special_npc
+    /// flag: HUMAN_SPECIAL, the one nearest the player; find_local_special_npc_nodes RM 0xB51C30), "vip" (its
+    /// safehouse_vip flag: HUMAN_SAFEHOUSE_VIP, one a safehouse; stream_notify_select_spawn RM 0x790430), or null.
+    /// </summary>
+    public static string? StoryKind(GuerrillaZoneObject node) =>
+        Flag(node, "special_npc") ? "special" : Flag(node, "safehouse_vip") ? "vip" : null;
+
+    static bool Flag(GuerrillaZoneObject o, string name) => o.Value(name) is { Length: > 0 } v && v[0] != 0;
+
+    /// <summary>
+    /// A zone's story people's squad nodes (<see cref="StoryKind"/>) whose squad is one of <paramref name="squads"/>:
+    /// each with its kind and its group, the top of its parents (Guerrilla's find_top_parent_object: a safehouse's
+    /// VIPs share it), placed outside the people's cap (guerrilla_people spawns one special NPC and one VIP at most).
+    /// </summary>
+    public static List<(uint Handle, string Squad, string Kind, uint Group, Vector3 At)> StoryNodes(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone,
+        IReadOnlySet<string> squads, Func<string, string> squadFor)
+    {
+        var list = new List<(uint, string, string, uint, Vector3)>();
+        foreach (var o in zone.Values.Where(o => o.ClassHash == SquadNode))
+        {
+            if (StoryKind(o) is not { } kind) continue;
+            string squad = squadFor(o.Text("squad_def") ?? "");
+            if (!squads.Contains(squad)) continue;
+            uint top = o.Handle;
+            for (var at = o; at.Parent != None && zone.TryGetValue(at.Parent, out var parent); at = parent) top = parent.Handle;
+            var at3 = o.Value("OP") is { Length: >= 12 } op
+                ? new Vector3(BitConverter.ToSingle(op, 0), BitConverter.ToSingle(op, 4), BitConverter.ToSingle(op, 8))
+                : (o.BoundsMin + o.BoundsMax) / 2;
+            list.Add((o.Handle, squad, kind, top, at3));
+        }
+        return list;
+    }
 
     /// <summary>
     /// The standing squads each zone keeps (<see cref="StandingSquads"/>): every 3 × 3 block of zones holds at most
@@ -210,6 +283,8 @@ public static class GuerrillaPopulation
         public int OnOwnCell, OnNearestCell, WithoutCell, LadderPairs, LaddersAlone, LadderTopsAsLadderNodes;
         /// <summary>Pedestrian navpoints with no switched-on cell under them given the nearest (version 4), and those with none within 10 m.</summary>
         public int PedestriansOnNearestCell, PedestriansWithoutCell;
+        /// <summary>Each object placed, by Guerrilla's handle: the handle it has in the zone (Guerrilla's unless taken).</summary>
+        public Dictionary<uint, uint> Handles;
         public float FarthestPedestrianCell;
         /// <summary>Each of these navpoints with its cell found (written as version 4 or not): its handle as placed, the cell's handle.</summary>
         public List<(uint Navpoint, ulong Cell)> Cells;
@@ -463,6 +538,7 @@ public static class GuerrillaPopulation
             handleOf[o.Handle] = handle;
         }
         uint Moved(uint h) => handleOf.TryGetValue(h, out uint m) ? m : None;
+        nodal.Handles = new Dictionary<uint, uint>(handleOf);
 
         var objects = new List<ZoneObject>();
         ZoneObject Make(GuerrillaZoneObject o, IEnumerable<NewProperty> properties) =>

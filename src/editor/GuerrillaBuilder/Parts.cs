@@ -292,6 +292,9 @@ static class Parts
         if (options.Props != null) used.Add(props.Count == 0 ? "no objects" : $"objects {string.Join(",", props)}");
         log.Line($"Building {zones.Count} of Guerrilla's zones (a few minutes for all of them)...");
         GuerrillaWorld.Build(setup.Guerrilla!, setup.Game!, setup.Overrides, setup.WorldFolder, zones, GuerrillaWorld.DefaultStart, log.Line, props, propZones);
+        // Where Mason wakes after a death (guerrilla_save's respawn): Guerrilla's safehouses' spots and player starts.
+        try { log.Line(GuerrillaRespawns.Write(Path.Combine(setup.Guerrilla!, "build", "pc", "cache"), Path.Combine(setup.ModFolder, "mods", "guerrilla_save"))); }
+        catch (Exception e) when (e is IOException or InvalidDataException or System.Xml.XmlException) { log.Line($"Respawns: not written ({e.Message}); guerrilla_save uses the safehouses' own places"); }
         log.Line($"Materials: {GuerrillaMaterials.LayeredMaterials:N0} given their layer (dirt, grime, snow, logos) as a decal, " +
                  $"{GuerrillaMaterials.ThirdUvDecals:N0} their decal at the third UV set");
         return string.Join(", ", used);
@@ -370,6 +373,7 @@ static class Parts
             Path.Combine(cache, "table.vpp_pc", "territories.xtbl"),
             Path.Combine(cache, "misc.vpp_pc", "bitmaps_pc"),
             Path.Combine(cache, "effects.vpp_pc", "vfx_containers.asm_pc"),
+            Path.Combine(setup.ModFolder, "mods", "guerrilla_save", GuerrillaRespawns.File),
         };
         if (Directory.Exists(cache))
         {

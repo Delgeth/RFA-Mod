@@ -70,8 +70,10 @@ public static class GuerrillaWorld
     /// ladders, Mason's coat cloth, the kill regions and the campaign's markers, which the mods read.
     /// 6 (v0.6.2-beta): the kiosks (their list, screen effects and broadcast banks) and the building
     /// list for the minimap, which the mods read; the HUD's documents change with guerrilla_hud.dll.
+    /// 7 (v0.6.3-beta): the safehouses' respawn spots, the story people's nodes, the Marauder ambush
+    /// regions, the deep pits left open, and Guerrilla's 9/3/2 district people lists.
     /// </summary>
-    public const int Format = 6;
+    public const int Format = 7;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
@@ -315,7 +317,17 @@ public static class GuerrillaWorld
                 if (heights.TryGetValue((col - 1, row), out var west)) heights[(col, row)][k * S] = west[k * S + last];
                 if (heights.TryGetValue((col, row + 1), out var south)) heights[(col, row)][k] = south[last * S + k];
             }
-        LimitGround(zones, heights, log);
+        // Where Guerrilla placed things (every object of its zones): a hollow with one of them inside it is Guerrilla's
+        // own pit, left open (see LimitGround).
+        var placedAt = new List<Vector3>();
+        var zoneScripts = Packfile.Open(Path.Combine(rfgCache, "zonescript_terr01.vpp_pc"));
+        foreach (var (col, row) in zones)
+            if (zoneScripts.Find($"terr01_{col:00}_{row:00}.rfgzone_pc") is { } zoneEntry)
+                foreach (var o in GuerrillaZones.Objects(zoneScripts.Read(zoneEntry)))
+                    placedAt.Add(o.Value("op") is { Length: >= 12 } op
+                        ? new Vector3(BitConverter.ToSingle(op, 0), BitConverter.ToSingle(op, 4), BitConverter.ToSingle(op, 8))
+                        : (o.BoundsMin + o.BoundsMax) / 2);
+        LimitGround(zones, heights, placedAt, log);
 
         // ---- Each zone's look: its Guerrilla zone's material (four layers), blend and colour maps; and
         // its invisible barriers, which take the place of the terrain template's (ruin01's arena walls).
@@ -902,6 +914,29 @@ public static class GuerrillaWorld
         log($"People: {standingIn.Values.Sum(s => s.Count)} of Guerrilla's squads standing where it puts them ({standingIn.Values.Sum(s => s.Sum(x => Members(x.Squad)))} people)" +
             (standingLeftOut > 0 ? $"; {standingLeftOut} left out to keep {GuerrillaPopulation.MostPeople} people at most within each 3 x 3 block of zones" : "") +
             $"; squads: {string.Join(", ", peopleSquads.Order())}");
+        // Guerrilla's Marauder ambush regions: their squad nodes on foot are placed (not counted in the cap: they spawn only
+        // when their region fires) and the regions written for guerrilla_people (ambush.cpp).
+        var ambushIn = guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.AmbushRegions(z.Value, peopleSquads, SquadsOf(z.Key)));
+        // Guerrilla's story people at the safehouses: their special NPCs' and VIPs' squad nodes, placed outside the cap
+        // (guerrilla_people holds them and spawns one special NPC and one VIP a safehouse, as Guerrilla's resource
+        // manager streams them) and written to story_nodes.txt with their characters (the squad's special_npc).
+        var storyIn = guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.StoryNodes(z.Value, peopleSquads, SquadsOf(z.Key)));
+        var storyCharacter = XtblFile.FromBytes(rfgTables.Read(rfgTables.Find(GuerrillaSquads.SquadTable)!)).Entries
+            .Where(e => e.ValueOf("special_npc")?.Trim() is { Length: > 0 })
+            .ToDictionary(XtblFile.EntryName, e => e.ValueOf("special_npc")!.Trim(), StringComparer.OrdinalIgnoreCase);
+        var storyLines = new List<string>
+        {
+            "; Guerrilla's story people at the safehouses for guerrilla_people's story.cpp, written by the world build.",
+            "; <special|vip> <the squad node's handle as placed> <its squad> <its character> <place x y z> <its group: the top of its parents in Guerrilla's zone> <zone col row>",
+        };
+        int storyNodesPlaced = 0;
+        var ambushLines = new List<string>
+        {
+            "; Guerrilla's Marauder ambush regions (marauder_ambush_region) for guerrilla_people's ambush.cpp, written by the world build.",
+            "; region <handle> <place x y z> <axes: right, up, forward rows> <box least x y z> <box most x y z> <enabled> <day chance> <night chance> <least> <most>",
+            "; node <region> <the squad node's handle as placed> <its squad>",
+        };
+        int ambushNodesPlaced = 0, ambushRiding = 0, ambushRegionsWritten = 0;
         // The squads the zones name, for the people build (GuerrillaSquads.PlacedList): it writes only the district
         // versions placed, as the game keeps few squads.
         {
@@ -912,6 +947,11 @@ public static class GuerrillaWorld
                         placedSquads.Add(SquadsOf(zone)(node.Text("squad_def") ?? ""));
             foreach (var (_, list) in standingIn)
                 foreach (var (_, squad) in list) placedSquads.Add(squad);
+            foreach (var (_, regions) in ambushIn)
+                foreach (var (_, onFoot, _) in regions)
+                    foreach (var (_, squad) in onFoot) placedSquads.Add(squad);
+            foreach (var (_, nodes) in storyIn)
+                foreach (var node in nodes) placedSquads.Add(node.Squad);
             Directory.CreateDirectory(modFolder);
             File.WriteAllLines(Path.Combine(modFolder, GuerrillaSquads.PlacedList), placedSquads);
             log($"People: the zones name {placedSquads.Count} squads ({placedSquads.Count(s => s.StartsWith("rfg_", StringComparison.OrdinalIgnoreCase))} district versions)");
@@ -1044,7 +1084,10 @@ public static class GuerrillaWorld
             }
             // Guerrilla's patrols with their squads and route navpoints, its standing squads, and its pedestrian network.
             var patrolsHere = patrolsIn.GetValueOrDefault((col, row)) ?? [];
-            var standingHere = standingIn.GetValueOrDefault((col, row)) ?? [];
+            var ambushHere = ambushIn.GetValueOrDefault((col, row)) ?? [];
+            var storyHere = storyIn.GetValueOrDefault((col, row)) ?? [];
+            var standingHere = (standingIn.GetValueOrDefault((col, row)) ?? []).Concat(ambushHere.SelectMany(r => r.OnFoot))
+                .Concat(storyHere.Select(n => (n.Handle, n.Squad))).ToList();
             int pedestriansHere = guerrillaObjects.TryGetValue((col, row), out var rfgHere) ? GuerrillaPopulation.Pedestrians(rfgHere).Count : 0;
             pedestriansPlaced += pedestriansHere;
             int nodalHere = rfgHere != null ? GuerrillaPopulation.Nodal(rfgHere).Count : 0;  // its node network (stairs, paths on walls, doors)
@@ -1075,6 +1118,27 @@ public static class GuerrillaWorld
                 laddersAlone += nodalCount.LaddersAlone;
                 ladderTopsAsNodes += nodalCount.LadderTopsAsLadderNodes;
                 transitionCells.AddRange(nodalCount.Cells.Select(c => $"{c.Navpoint:X8} {c.Cell:X16}"));
+                foreach (var (region, onFoot, riding) in ambushHere)
+                {
+                    ambushRiding += riding;
+                    if (GuerrillaPopulation.AmbushRegionLine(region) is not { } regionLine) continue;
+                    ambushLines.Add(regionLine);
+                    ambushRegionsWritten++;
+                    foreach (var (handle, squad) in onFoot)
+                        if (nodalCount.Handles.TryGetValue(handle, out uint placed))
+                        {
+                            ambushLines.Add($"node {region.Handle:X8} {placed:X8} {squad}");
+                            ambushNodesPlaced++;
+                        }
+                }
+                var storyCulture = System.Globalization.CultureInfo.InvariantCulture;
+                foreach (var node in storyHere)
+                    if (nodalCount.Handles.TryGetValue(node.Handle, out uint placedStory) &&
+                        storyCharacter.TryGetValue(GuerrillaDistricts.GuerrillaSquadOf(node.Squad), out var character))
+                    {
+                        storyLines.Add(string.Create(storyCulture, $"{node.Kind} {placedStory:X8} {node.Squad} {character} {node.At.X:R} {node.At.Y:R} {node.At.Z:R} {node.Group:X8} {col} {row}"));
+                        storyNodesPlaced++;
+                    }
                 foreach (var person in people)
                 {
                     zoneFile.Insert(zoneFile.Objects.Count, person);
@@ -1153,6 +1217,12 @@ public static class GuerrillaWorld
             $"nearest (navpoint_data version 4; the farthest {pedestriansFarthestCell:F1} m), {pedestriansWithoutCell} with none within 10 m (the game reports those)");
         // The same cells by navpoint, for guerrilla_people to give them where the game's reading came before their zone's mesh.
         File.WriteAllLines(Path.Combine(modFolder, "transition_cells.txt"), transitionCells);
+        File.WriteAllLines(Path.Combine(modFolder, "ambush_regions.txt"), ambushLines);
+        File.WriteAllLines(Path.Combine(modFolder, "story_nodes.txt"), storyLines);
+        log($"People: {storyNodesPlaced} of Guerrilla's story people's squad nodes at the safehouses placed and written to story_nodes.txt " +
+            $"({storyLines.Count(l => l.StartsWith("special "))} special NPCs', {storyLines.Count(l => l.StartsWith("vip "))} VIPs'; held for guerrilla_people's story.cpp)");
+        log($"People: {ambushRegionsWritten} of Guerrilla's Marauder ambush regions written to ambush_regions.txt, {ambushNodesPlaced} of their squad nodes on foot " +
+            $"placed (held until their region fires: guerrilla_people's ambush.cpp), {ambushRiding} riding ones not yet");
         log($"People: {transitionCells.Count} transitions' and pedestrians' cells written to transition_cells.txt (guerrilla_people gives each its cell once its zone's mesh is in)");
         log($"Vehicles' places: {roadsPlaced} of Guerrilla's roads (each in its zone and its persistent zone), {spotsPlaced} parked vehicles' spots " +
             $"(their groups {GuerrillaVehiclePlaces.GroupPrefix}<Guerrilla's name>, which building the vehicles writes)" +
@@ -1271,8 +1341,15 @@ public static class GuerrillaWorld
     /// sheets hanging in the sky. MaxStep is kept above Guerrilla's own vertical faces (cliffs and
     /// the retaining walls beside its roads, up to about 24 m a metre): a lower one pushes ramps of
     /// ground out from them, into the buildings and onto the roads at their feet.
+    ///
+    /// But a hollow Guerrilla put things in, below where the cap would put the ground (<paramref name="placedAt"/>:
+    /// every object of its zones), is its own pit, meant to be seen and gone into, and keeps Guerrilla's ground: the
+    /// Mohole in the Badlands (193 m deep, its pipes, towers, buildings and effects going down into it) and the deep
+    /// spots of its basin with buildings in them, and the pits Guerrilla's kill regions (trigger_region) wait at the
+    /// bottom of. The 43 others (empty shafts up to 477 m deep) are capped as before.
     /// </summary>
-    static void LimitGround(IReadOnlyList<(int Col, int Row)> zones, Dictionary<(int, int), float[]> heights, Action<string> log)
+    static void LimitGround(IReadOnlyList<(int Col, int Row)> zones, Dictionary<(int, int), float[]> heights, IEnumerable<Vector3> placedAt,
+                            Action<string> log)
     {
         int S = Layout.Samples, last = S - 1;
         int colMin = zones.Min(z => z.Col), colMax = zones.Max(z => z.Col), rowMin = zones.Min(z => z.Row), rowMax = zones.Max(z => z.Row);
@@ -1317,9 +1394,49 @@ public static class GuerrillaWorld
                 queue.Enqueue(next, filled[next]);
             }
         }
-        int plugged = 0, raised = 0;
+        // The hollows deeper than the cap, each a connected set of samples, and those Guerrilla put something in below
+        // the cap.
+        bool Deep(int k) => present[k] && ground[k] < filled[k] - MaxPit;
+        var hollowOf = new Dictionary<int, int>();
+        int hollows = 0;
+        var stack = new Stack<int>();
         for (int k = 0; k < ground.Length; k++)
-            if (present[k] && ground[k] < filled[k] - MaxPit) { ground[k] = filled[k] - MaxPit; plugged++; }
+        {
+            if (!Deep(k) || hollowOf.ContainsKey(k)) continue;
+            hollowOf[k] = ++hollows;
+            stack.Push(k);
+            while (stack.TryPop(out int cell))
+            {
+                int cx = cell % acrossX, cz = cell / acrossX;
+                foreach (var (dx, dz) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+                {
+                    int nx = cx + dx, nz = cz + dz;
+                    if (nx < 0 || nz < 0 || nx >= acrossX || nz >= acrossZ) continue;
+                    int next = nz * acrossX + nx;
+                    if (!Deep(next) || hollowOf.ContainsKey(next)) continue;
+                    hollowOf[next] = hollows;
+                    stack.Push(next);
+                }
+            }
+        }
+        var open = new HashSet<int>();
+        float originX = (colMin - 8) * ZoneWidth, originZ = (7 - rowMax) * ZoneWidth;  // the world place of sample (0, 0)
+        foreach (var at in placedAt)
+        {
+            float spacing = Layout.StepsPerSample * Layout.GridStep;  // metres from one sample to the next
+            int cx = (int)MathF.Round((at.X - originX) / spacing), cz = (int)MathF.Round((at.Z - originZ) / spacing);
+            if (cx < 0 || cz < 0 || cx >= acrossX || cz >= acrossZ) continue;
+            int k = cz * acrossX + cx;
+            if (hollowOf.TryGetValue(k, out int hollow) && at.Y < filled[k] - MaxPit) open.Add(hollow);
+        }
+        int plugged = 0, raised = 0, kept = 0;
+        for (int k = 0; k < ground.Length; k++)
+        {
+            if (!Deep(k)) continue;
+            if (open.Contains(hollowOf[k])) { kept++; continue; }
+            ground[k] = filled[k] - MaxPit;
+            plugged++;
+        }
         for (bool changed = true; changed;)
         {
             changed = false;
@@ -1347,7 +1464,8 @@ public static class GuerrillaWorld
                 for (int x = 0; x <= last; x++)
                     heights[(col, row)][z * S + x] = ground[(j * last + z) * acrossX + i * last + x];
         }
-        log($"Ground: {plugged:N0} samples raised to within {MaxPit} m of their hollow's spill, {raised:N0} so no drop is over {MaxStep} m a sample");
+        log($"Ground: {hollows - open.Count} hollows deeper than {MaxPit} m below their spill capped there ({plugged:N0} samples raised), {open.Count} left " +
+            $"open as Guerrilla's own pits with its objects in them ({kept:N0} samples); {raised:N0} raised so no drop is over {MaxStep} m a sample");
     }
 
     /// <summary>A Guerrilla texture's name in our world (its name's hash, so every alias is as short and the names in our files never grow).</summary>

@@ -90,5 +90,14 @@ bool StartDemolitionsMaster(const char* level);  // by the table row's name, for
 // progress (the campaign's save over the zone's demolitions_master_complete); false for other nodes
 // until their kinds are ported. Kept in memory, so it is cheap to ask every frame.
 bool NodeDone(unsigned node);
+// The nodes' progress read again from the campaign's save (after a game save was loaded).
+void ReloadProgress();
+// For the HUD and the death hook: demolitions master's screen now (false: none), the HUD's answer (the
+// briefing: 1 accept, 0 cancel; the results: close), the use prompt at a node (Guerrilla's icon, 0 none),
+// the player's death.
+bool DemolitionsScreen(Screen& screen);
+void DemolitionsChoose(int accept);
+int DemolitionsUsePrompt();
+void DemolitionsPlayerDied();
 
 }  // namespace campaign::activities

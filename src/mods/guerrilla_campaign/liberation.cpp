@@ -48,6 +48,7 @@
 #include "alert_sources.h"
 #include "restricted_areas.h"
 #include "handle_kinds.h"
+#include "messages.h"
 #include "save.h"
 #include "script_words.h"
 #include "tables.h"
@@ -89,6 +90,8 @@ void LoadDistricts() {
                 district.control = entry.Number("Control", district.controlMax);
                 district.moraleMax = entry.Number("Morale_max", 100.0f);
                 district.morale = entry.Number("Morale");
+                district.controlStart = district.control;
+                district.moraleStart = district.morale;
                 district.liberatedTech = entry.Int("liberated_tech");
                 district.liberatedMarauder = entry.Int("liberated_marauder");
                 district.liberatedEdf = entry.Int("liberated_edf");
@@ -164,7 +167,19 @@ bool g_useTemporaryMorale = false;
 float g_temporaryMorale = 0.0f;
 constexpr float kTemporaryMoraleMax = 1000.0f;
 float g_moraleOffset = 0.0f;
-constexpr float kMoraleBoost = 1.0f;  // difficulty MORALE_BOOSTS at Normal (Hard and Insane 0.8)
+// difficulty.xtbl at Easy, Medium, Hard, Insane: MENU_MORALE_BOOSTS and MENU_MORALE_PENALITIES (gains and
+// losses × these), MENU_MORALE_PLAYER_DEATH (the player's death), and the control changes' multiplier,
+// which Guerrilla's table keeps as MENU_CONTROL_PARKER (difficulty item 22; Insane 0.8).
+float g_moraleBoosts[4] = {1.0f, 1.0f, 0.8f, 0.8f};
+float g_moralePenalties[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+float g_playerDeathMorale[4] = {-2.0f, -3.0f, -4.0f, -5.0f};
+float g_controlMultiplier[4] = {1.0f, 1.0f, 1.0f, 0.8f};
+
+// ---- The HUD's tool tips for control and morale (gfm_change_edf_control, gfm_change_district_morale)
+
+constexpr int kControlTipMs = 1500;   // "EDF_Control", while control is under 200
+constexpr float kControlTipBelow = 200.0f;
+constexpr int kMoraleTipMs = 500;     // "Morale", when it rises
 
 // ---- Alert
 
@@ -256,17 +271,30 @@ const tables::Element* DifficultyItem(const tables::Element& in, const char* nam
     return nullptr;
 }
 
+void LoadDifficultyItem(const std::vector<tables::Element>& rows, const char* name, float values[4]) {
+    for (const tables::Element& row : rows)
+        if (const tables::Element* item = DifficultyItem(row, name)) {
+            values[0] = item->Number("Easy", values[0]);
+            values[1] = item->Number("Medium", values[1]);
+            values[2] = item->Number("Hard", values[2]);
+            values[3] = item->Number("Insane", values[3]);
+            return;
+        }
+}
+
 void LoadAlertDifficulty() {
     std::vector<tables::Element> rows;
     if (!tables::Load("difficulty", rows)) return;
-    for (const tables::Element& row : rows)
-        if (const tables::Element* item = DifficultyItem(row, "MENU_ENEMY_ALERT_LEVEL_EVENTS")) {
-            g_alertDifficulty[0] = item->Number("Easy", g_alertDifficulty[0]);
-            g_alertDifficulty[1] = item->Number("Medium", g_alertDifficulty[1]);
-            g_alertDifficulty[2] = item->Number("Hard", g_alertDifficulty[2]);
-            g_alertDifficulty[3] = item->Number("Insane", g_alertDifficulty[3]);
-            return;
-        }
+    LoadDifficultyItem(rows, "MENU_ENEMY_ALERT_LEVEL_EVENTS", g_alertDifficulty);
+    LoadDifficultyItem(rows, "MENU_MORALE_BOOSTS", g_moraleBoosts);
+    LoadDifficultyItem(rows, "MENU_MORALE_PENALITIES", g_moralePenalties);
+    LoadDifficultyItem(rows, "MENU_MORALE_PLAYER_DEATH", g_playerDeathMorale);
+    LoadDifficultyItem(rows, "MENU_CONTROL_PARKER", g_controlMultiplier);
+}
+
+int DifficultyIndex() {
+    const int difficulty = g_gameDifficulty;
+    return difficulty < 0 ? 1 : difficulty > 3 ? 3 : difficulty;
 }
 
 float AlertDifficulty() {
@@ -479,38 +507,67 @@ int PlayerDistrict() {
     return player ? DistrictAt(PositionOf(player)) : -1;
 }
 
-void ChangeEdfControl(float delta, int which) {
+void ChangeEdfControl(float delta, int which, const char* tag, const char* icon) {
     const int index = Resolve(which);
     if (index < 0 || index >= DistrictCount() || delta == 0.0f) return;
     DistrictState& district = g_districts[index];
     if (district.fixedControl) return;
-    delta = roundf(delta);  // × the difficulty's control multiplier: 1 at Normal (Insane 0.8)
+    delta = roundf(delta * g_controlMultiplier[DifficultyIndex()]);
     float control = district.control + delta;
     control = control < 0.0f ? 0.0f : control > district.controlMax ? district.controlMax : control;
     if (control == district.control) return;
+    if (tag) messages::Minor(tag, icon);
     const float before = Percent(district.control, district.controlMax);
+    district.controlBefore = district.control;
+    district.controlChangedAt = GameTime();
+    ++district.changes;
     district.control = control;
     SaveDistrict(district);
     words::PostEdfControlLowered(before, Percent(control, district.controlMax));
-    rfa::Log("%s: EDF control %.0f / %.0f", district.name.c_str(), control, district.controlMax);
+    if (control < kControlTipBelow) messages::Tip("EDF_Control", kControlTipMs);
+    rfa::Log("%s: EDF control %.0f -> %.0f / %.0f%s%s", district.name.c_str(), district.controlBefore, control, district.controlMax, tag ? ", " : "",
+             tag ? tag : "");
     MaybeLiberate(district);
 }
 
-void ChangeMorale(float delta, int which) {
+void ChangeMorale(float delta, int which, const char* tag, const char* icon) {
     const int index = Resolve(which);
-    if (index < 0 || index >= DistrictCount() || delta == 0.0f) return;
+    if (index < 0 || index >= DistrictCount()) return;
+    if (tag) messages::Minor(tag, icon);  // shown even when nothing changes
+    if (delta == 0.0f) return;
     DistrictState& district = g_districts[index];
     if (district.fixedMorale) return;
-    // Whole points, at least one.
-    float step = truncf(delta * (delta < 0.0f ? 1.0f : kMoraleBoost));
+    // Whole points, at least one: gains x MENU_MORALE_BOOSTS, losses x MENU_MORALE_PENALITIES.
+    const int difficulty = DifficultyIndex();
+    float step = truncf(delta * (delta < 0.0f ? g_moralePenalties[difficulty] : g_moraleBoosts[difficulty]));
     if (fabsf(step) < 1.0f) step = delta < 0.0f ? -1.0f : 1.0f;
     float morale = district.morale + step;
     morale = morale < 0.0f ? 0.0f : morale > district.moraleMax ? district.moraleMax : morale;
     if (morale == district.morale) return;
     const float before = Percent(district.morale, district.moraleMax);
+    district.moraleBefore = district.morale;
+    district.moraleChangedAt = GameTime();
+    ++district.changes;
     district.morale = morale;
     SaveDistrict(district);
     words::PostCivilianMoraleChange(before, Percent(morale, district.moraleMax));
+    if (step > 0.0f) messages::Tip("Morale", kMoraleTipMs);
+    rfa::Log("%s: morale %.0f -> %.0f / %.0f (%+.0f%s%s)", district.name.c_str(), district.moraleBefore, morale, district.moraleMax, step, tag ? ", " : "",
+             tag ? tag : "");
+}
+
+float PlayerDeathMorale() { return g_playerDeathMorale[DifficultyIndex()]; }
+
+void ReloadState() {
+    for (DistrictState& district : g_districts) {
+        district.control = district.controlStart;
+        district.morale = district.moraleStart;
+        district.liberated = false;
+        district.controlChangedAt = district.moraleChangedAt = -1;
+        ++district.changes;
+    }
+    LoadSaved();
+    rfa::Log("The campaign's districts read again from its save");
 }
 
 void SetEdfControl(float control, int which) {

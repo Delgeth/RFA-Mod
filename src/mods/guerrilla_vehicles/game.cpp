@@ -80,6 +80,41 @@ float Damage(BYTE* vehicle) {
     return most > 0 ? std::clamp(1.0f - static_cast<float>(now) / most, 0.0f, 1.0f) : 0.0f;
 }
 
+namespace {
+struct Made {
+    DWORD vehicle;
+    const char* maker;
+};
+std::vector<Made> g_made;
+struct Age {
+    DWORD vehicle;
+    int ms;
+};
+std::vector<Age> g_ages;
+}  // namespace
+
+void NoteMadeBy(DWORD vehicle, const char* maker) {
+    if (g_made.size() >= 256) g_made.erase(g_made.begin());
+    g_made.push_back({vehicle, maker});
+}
+
+const char* MadeBy(DWORD vehicle) {
+    for (auto made = g_made.rbegin(); made != g_made.rend(); ++made)
+        if (made->vehicle == vehicle) return made->maker;
+    return nullptr;
+}
+
+void NoteModelAge(DWORD vehicle, int ms) {
+    if (g_ages.size() >= 256) g_ages.erase(g_ages.begin());
+    g_ages.push_back({vehicle, ms});
+}
+
+int ModelAge(DWORD vehicle) {
+    for (auto age = g_ages.rbegin(); age != g_ages.rend(); ++age)
+        if (age->vehicle == vehicle) return age->ms;
+    return -1;
+}
+
 // ---- The files
 
 std::vector<std::string> Split(const std::string& text, char by) {

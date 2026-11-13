@@ -494,6 +494,8 @@ struct Document {
     bool whileOpen = false;  // drawn only while the world map is open
     bool whileShop = false;  // loaded and drawn only while a safehouse's upgrade shop is open
     bool whileCabinet = false;  // loaded and drawn only while Guerrilla's weapon cabinet is open
+    bool whileLiberation = false;  // loaded and drawn only while the district-liberated screen is open
+    bool whileActivity = false;    // loaded and drawn only while an activity's briefing or results screen is open
     bool whileHandbook = false;  // loaded and drawn only while Guerrilla's handbook is open
     bool handbookPicture = false;  // one of the handbook's entries' pictures: loaded while its entry is shown
     bool zoneSet = false;    // one of the four documents of the zones' pictures (ZoneSetDocument)
@@ -589,7 +591,10 @@ bool InOurWorld() {
     return false;
 }
 
-// districts.txt (made by GuerrillaBuilder.exe): "CCRR=name" a zone a line, ; comments.
+std::map<std::string, std::string> g_districtShownNames;  // a district's own name (territories.xtbl) -> as the HUD shows it
+
+// districts.txt (made by GuerrillaBuilder.exe): "CCRR=name" a zone a line, "name:own name=shown name" a district a line
+// (for the guerrilla_campaign mod's districts, named by their own names), ; comments.
 void ReadDistricts() {
     const std::wstring path = rfa::RootDir() + L"\\mods\\guerrilla_hud\\districts.txt";
     FILE* file = nullptr;
@@ -599,6 +604,13 @@ void ReadDistricts() {
     }
     char line[256];
     while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "name:", 5) == 0) {
+            std::string pair = line + 5;
+            while (!pair.empty() && (pair.back() == '\n' || pair.back() == '\r')) pair.pop_back();
+            const size_t equals = pair.find('=');
+            if (equals != std::string::npos) g_districtShownNames[pair.substr(0, equals)] = pair.substr(equals + 1);
+            continue;
+        }
         if (line[0] == ';' || strlen(line) < 6 || line[4] != '=') continue;
         const int column = (line[0] - '0') * 10 + (line[1] - '0');
         const int row = (line[2] - '0') * 10 + (line[3] - '0');
@@ -632,7 +644,11 @@ bool ShopIsOpen();
 void CloseShop(const char* why);
 bool CabinetIsOpen();  // Guerrilla's weapon cabinet (below)
 void CloseCabinet(const char* why, bool giveAmmo);
-bool StationScreenOpen() { return ShopIsOpen() || CabinetIsOpen(); }  // a safehouse's screen (the shop or the cabinet)
+bool LiberationIsOpen();    // Guerrilla's district-liberated screen (below)
+bool ActivityScreenOpen();  // an activity's briefing or results screen (below)
+// A screen of ours that pauses the game and hides the HUD: a safehouse's (the shop or the cabinet), or one the campaign
+// raises (a district liberated, an activity's briefing or results).
+bool StationScreenOpen() { return ShopIsOpen() || CabinetIsOpen() || LiberationIsOpen() || ActivityScreenOpen(); }
 bool HandbookIsOpen();  // Guerrilla's handbook (below)
 bool HandbookClosing();
 void FollowHandbook();
@@ -645,6 +661,16 @@ extern bool g_handbookBackToPauseMenu;
 // One of our screens that pause the game: a safehouse's, or the handbook (also while it closes).
 bool OurScreenOpen() { return StationScreenOpen() || HandbookIsOpen() || HandbookClosing(); }
 void FollowMessages(ULONGLONG hudMs);  // Guerrilla's pickups, use action and saving icon (below)
+void FollowCampaignMessages();         // the campaign's minor messages and tool tips (below)
+void FollowDistricts();                // Guerrilla's control and morale meters' changes (below)
+void OpenLiberation(const std::string& district, float controlMax, int missions, const char* why);  // (below)
+void FollowCampaignScreens();          // the district-liberated screen and the activities' screens (below)
+void AddCampaignScreenCommands();
+void StepCampaignScreens();
+void CloseCampaignScreens(const char* why);
+void ForgetDistricts();
+void ReadHudMessages();
+FARPROC ModExport(const wchar_t* dll, const char* name);  // another mod's export, or null (below)
 void ForgetPickups();
 
 // Where a point of Guerrilla's world (x, z metres) is on its world map picture, in its pixels.
@@ -1028,7 +1054,9 @@ bool AnyHandbookDocumentLoaded() {
 }
 
 // A screen's document, loaded only while it's open (the handbook's, the shop's, the cabinet's; see Wanted).
-bool ScreenDocument(const Document& doc) { return doc.whileHandbook || doc.handbookPicture || doc.whileShop || doc.whileCabinet; }
+bool ScreenDocument(const Document& doc) {
+    return doc.whileHandbook || doc.handbookPicture || doc.whileShop || doc.whileCabinet || doc.whileLiberation || doc.whileActivity;
+}
 
 bool AnyScreenDocumentLoaded() {
     for (const Document& doc : g_documents)
@@ -1063,6 +1091,8 @@ bool HandbookPictureKept(const Document& doc);  // (see "Guerrilla's handbook")
 bool Wanted(const Document& doc) {
     if (doc.whileShop) return ShopIsOpen();
     if (doc.whileCabinet) return CabinetIsOpen();
+    if (doc.whileLiberation) return LiberationIsOpen();
+    if (doc.whileActivity) return ActivityScreenOpen();
     if (doc.whileHandbook) return HandbookIsOpen() || AnyHandbookPictureLoaded();
     if (doc.handbookPicture) {
         if (doc.loaded && HandbookPictureKept(doc)) return true;
@@ -1077,11 +1107,13 @@ bool Wanted(const Document& doc) {
 // While a shop or the weapon cabinet is open only its screen is drawn (Guerrilla hid its HUD for them).
 bool ShouldDraw(const Document& doc, bool hudRuns) {
     const bool shop = ShopIsOpen(), cabinet = CabinetIsOpen(), handbook = HandbookIsOpen();
-    if ((shop || cabinet || handbook) && !(shop && doc.whileShop) && !(cabinet && doc.whileCabinet) &&
-        !(handbook && doc.whileHandbook) && !doc.zoneSet && !doc.handbookPicture && !doc.onTop)
+    const bool liberation = LiberationIsOpen(), activity = ActivityScreenOpen();
+    if ((shop || cabinet || handbook || liberation || activity) && !(shop && doc.whileShop) && !(cabinet && doc.whileCabinet) &&
+        !(handbook && doc.whileHandbook) && !(liberation && doc.whileLiberation) && !(activity && doc.whileActivity) && !doc.zoneSet &&
+        !doc.handbookPicture && !doc.onTop)
         return false;
     return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen) && (!doc.whileShop || shop) && (!doc.whileCabinet || cabinet) &&
-           (!doc.whileHandbook || handbook);
+           (!doc.whileHandbook || handbook) && (!doc.whileLiberation || liberation) && (!doc.whileActivity || activity);
 }
 
 // The draw list draws in the order documents were added to it, and adds a new one last: a document added after one that
@@ -1143,7 +1175,12 @@ void FollowTheWorld() {
         FollowHandbook();
         tool_tips::Step(g_hudFrameMs / 1000.0, g_player && !ObjectIsDead(g_player));
         FollowToolTipTriggers();
-        if (!HandbookIsOpen() && !HandbookClosing()) FollowSafehouses();
+        FollowCampaignMessages();
+        FollowDistricts();
+        AddCampaignScreenCommands();
+        FollowCampaignScreens();
+        StepCampaignScreens();
+        if (!HandbookIsOpen() && !HandbookClosing() && !LiberationIsOpen() && !ActivityScreenOpen()) FollowSafehouses();
         FollowMessages(g_hudFrameMs);
     } else {
         g_view.active = false;
@@ -1336,6 +1373,8 @@ void __cdecl LoadStart() {
     HoldPauseMenu(false);  // before the level's start sets the game's count to 0
     ForgetPickups();  // what the new level gives at its start isn't picked up
     tool_tips::LevelShutdown();  // the tips waiting gone, the game unpaused
+    ForgetDistricts();           // the new level's districts noted, not shown as changes
+    CloseCampaignScreens("a level load");
     int unloaded = 0, forgotten = 0;
     for (Document& doc : g_documents) {
         doc.closedByGame = 0;
@@ -3070,6 +3109,117 @@ void ShowMessage(const std::string& text, bool major, float seconds) {
     g_messages.push_back({major, text, seconds});
 }
 
+// ---- The campaign's messages: Guerrilla's minor messages and tool tips that guerrilla_campaign raises
+//
+// The campaign queues them (GuerrillaCampaign_NextMessage(&tag, &icon, &kind, &ms), 1 while there's one): kind 0 a
+// minor message (hud_message_add_minor: Guerrilla's string tag), kind 2 a minor message whose text takes a number (the
+// number in ms: HM_GUERRILLAS_ASSIST "[IMAGE:...] %ls GUERRILLAS JOINED"), kind 1 a tool tip by its name, ms the
+// number Guerrilla's ui_tool_tips_add_tip was given (its wait before the tip shows). The texts are Guerrilla's
+// (hud_messages.txt, made by GuerrillaBuilder.exe: text|tag|text, its pictures named rfg_...); a number goes in place
+// of the text's first %ls, %s, %d or %i, as Guerrilla's HUD formatted it. A message's icon (the skull, the EDF's and
+// the propaganda's diversion icons) is for Guerrilla's control and morale meters, not shown yet (logged). Taken each
+// HUD update in our worlds, at most kCampaignMessagesAFrame.
+using CampaignNextMessageFn = int(__cdecl*)(const char** tag, const char** icon, int* kind, int* ms);
+constexpr int kCampaignMessageMinor = 0, kCampaignMessageTip = 1, kCampaignMessageCount = 2;
+constexpr int kCampaignMessagesAFrame = 8;
+std::map<std::string, std::string> g_hudMessageTexts;  // Guerrilla's tag -> its text
+
+// Guerrilla's strings by their tag's hash (hud_messages.txt's "hash|XXXXXXXX|text" lines: every string of its hud,
+// activity, menu, scripts and mission strings). A strings file keeps only the hash of each tag, Guerrilla's checksum
+// (CRC-32 of the tag in lower case, no final xor; VintDocument.Hash in the builder), so a tag the campaign gives or one
+// of Guerrilla's scripts sets as a text is looked up by it: Armageddon's string tables don't have Guerrilla's.
+std::map<unsigned, std::string> g_guerrillaStrings;
+
+unsigned TagHash(const char* tag) {
+    unsigned crc = 0;
+    for (const char* c = tag; *c; ++c) {
+        crc ^= static_cast<unsigned char>(tolower(static_cast<unsigned char>(*c)));
+        for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
+    }
+    return crc;
+}
+
+// Guerrilla's text for its string tag, or "" (none given, or not one of its strings).
+std::string GuerrillaText(const char* tag) {
+    if (!tag || !*tag) return "";
+    if (const auto byTag = g_hudMessageTexts.find(tag); byTag != g_hudMessageTexts.end()) return byTag->second;
+    const auto found = g_guerrillaStrings.find(TagHash(tag));
+    return found != g_guerrillaStrings.end() ? found->second : "";
+}
+
+// A text as the builder wrote it: "\n" for a new line.
+std::string Unescaped(const std::string& text) {
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\\' && i + 1 < text.size() && text[i + 1] == 'n') {
+            out += '\n';
+            ++i;
+        } else {
+            out += text[i];
+        }
+    }
+    return out;
+}
+
+void ReadHudMessages() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_hud\\hud_messages.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("No mods\\guerrilla_hud\\hud_messages.txt (editor\\GuerrillaBuilder.exe build hud makes it): the campaign's "
+                 "messages show only their tool tips");
+        return;
+    }
+    char line[4096];  // Guerrilla's longest strings (its menus' descriptions) are a few hundred characters
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == ';') continue;
+        std::vector<std::string> fields(1);
+        for (const char* c = line; *c && *c != '\n' && *c != '\r'; ++c) {
+            if (*c == '|') fields.emplace_back();
+            else fields.back() += *c;
+        }
+        if (fields[0] == "text" && fields.size() >= 3) g_hudMessageTexts[fields[1]] = Unescaped(fields[2]);
+        else if (fields[0] == "hash" && fields.size() >= 3)
+            g_guerrillaStrings[static_cast<unsigned>(strtoul(fields[1].c_str(), nullptr, 16))] = Unescaped(fields[2]);
+    }
+    fclose(file);
+    rfa::Log("The campaign's messages: %zu texts; Guerrilla's strings: %zu", g_hudMessageTexts.size(), g_guerrillaStrings.size());
+}
+
+// Guerrilla's text with the number in place of its first %ls, %s, %d or %i (as Guerrilla's HUD formatted it).
+std::string WithNumber(const std::string& text, int number) {
+    for (const char* mark : {"%ls", "%s", "%d", "%i"}) {
+        const size_t at = text.find(mark);
+        if (at != std::string::npos) return text.substr(0, at) + std::to_string(number) + text.substr(at + strlen(mark));
+    }
+    return text;
+}
+
+void FollowCampaignMessages() {
+    static auto next = reinterpret_cast<CampaignNextMessageFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_NextMessage"));
+    if (!next) return;
+    for (int taken = 0; taken < kCampaignMessagesAFrame; ++taken) {
+        const char* tag = nullptr;
+        const char* icon = nullptr;
+        int kind = 0, ms = 0;
+        if (!next(&tag, &icon, &kind, &ms)) return;
+        if (!tag) continue;
+        if (kind == kCampaignMessageTip) {
+            const bool queued = tool_tips::Add(tag, ms);
+            RFA_LOG_FIRST(40, "The campaign's messages: tool tip %s (wait %d ms)%s", tag, ms, queued ? "" : ", not queued");
+            continue;
+        }
+        const std::string text = GuerrillaText(tag);
+        if (text.empty()) {
+            RFA_LOG_FIRST(20, "The campaign's messages: no text for %s (not among Guerrilla's strings in hud_messages.txt); not shown", tag);
+            continue;
+        }
+        const std::string shown = kind == kCampaignMessageCount ? WithNumber(text, ms) : text;
+        ShowMessage(shown, false);
+        RFA_LOG_FIRST(40, "The campaign's messages: %s%s%s: \"%s\"%s%s", tag, kind == kCampaignMessageCount ? " with " : "",
+                      kind == kCampaignMessageCount ? std::to_string(ms).c_str() : "", shown.c_str(),
+                      icon ? ", icon " : "", icon ? icon : "");
+    }
+}
+
 void ForgetPickups() {
     g_pickups.known = false;
     g_pickups.quietUntil = 0;
@@ -3730,6 +3880,629 @@ int __cdecl LuaMapMarker(lua_State* L) {
     return 8;
 }
 
+// ---- Guerrilla's control and morale meters, from the campaign's districts
+//
+// Guerrilla's HUD script shows its meters on its MoraleUpdate data item (both_morale_update), which its game code filled
+// (hud_ui_process_morale_info RM 0x894AA0) from what its campaign gave as control and morale changed:
+//   - hud_ui_change_control (0x8B2060; from gfm_change_edf_control 0x7B03F3): the district's control as shown
+//     (gfm_get_edf_control_display_value 0x7AB620: whole points rounded down, 1 under 1 point, 0 at none), its percent
+//     of the most (gfm_get_edf_control_percent), the change in whole points and in percent; the district's mission
+//     counts (missions_get_hud_info 0x79E320: in the district, done, locked; one just done, ones just unlocked);
+//   - hud_ui_change_morale (0x8B1FC0; from gfm_change_district_morale 0x7AB46C): morale's percent now and before (the
+//     first change's "before" kept while one waits to show), the change in points. A district's morale shows only if
+//     it is the one shown last or 5 s have gone since that was (0x165769C, timestamp 0x1388).
+//   The script waits for one meter's animation to end before the other's starts (both stand in the same place).
+// The guerrilla_campaign mod keeps the districts (GuerrillaCampaign_District(index, &info): control, morale, their most
+// and before, when each last changed); each HUD update in our worlds they're compared with the last seen, and a change
+// is handed to our script (rfg_district_change) as MoraleUpdate's values. Guerrilla's missions aren't ported: their
+// counts are 0 (no mission slots on the control meter). Not while a level loads; the first look after one only notes
+// where they stand.
+struct CampaignDistrict {
+    const char* name;
+    int index;
+    float control, controlMax, controlBefore;
+    float morale, moraleMax, moraleBefore;
+    float effectiveMorale;
+    int liberated;
+    int controlChangedAt, moraleChangedAt;
+    unsigned changes;
+};
+static_assert(sizeof(CampaignDistrict) == 52, "guerrilla_campaign's DistrictInfo is 52 bytes");
+using CampaignDistrictFn = int(__cdecl*)(int which, CampaignDistrict* info);
+
+constexpr int kMostDistricts = 16;
+constexpr ULONGLONG kMoraleOtherDistrictMs = 5000;
+
+struct DistrictSeen {
+    int controlAt = -1, moraleAt = -1;
+    bool liberated = false;
+};
+
+struct MeterUpdate {
+    bool control = false, morale = false;
+    int current = 0, delta = 0;                     // control as shown, its change in whole points
+    float currentPct = 0.0f, deltaPct = 0.0f;       // 0..1
+    float moralePct = 0.0f, moraleLastPct = 0.0f;   // 0..1
+    float moraleChange = 0.0f;                      // points
+    std::string district;
+};
+
+std::vector<DistrictSeen> g_districtsSeen;
+bool g_districtsKnown = false;
+MeterUpdate g_meterUpdate;
+int g_moraleShownDistrict = -1;
+ULONGLONG g_moraleShownAt = 0;
+
+// gfm_get_edf_control_display_value: whole points rounded down; under 1 point but some, 1.
+int ControlShown(float control) {
+    if (control >= 1.0f) return static_cast<int>(floorf(control));
+    return control > 0.0f ? 1 : 0;
+}
+
+void FollowDistricts() {
+    static auto district = reinterpret_cast<CampaignDistrictFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_District"));
+    if (!district) return;
+    const bool known = g_districtsKnown;
+    const ULONGLONG now = GetTickCount64();
+    for (int i = 0; i < kMostDistricts; ++i) {
+        CampaignDistrict info{};
+        if (!district(i, &info)) break;
+        if (static_cast<int>(g_districtsSeen.size()) <= i) g_districtsSeen.resize(i + 1);
+        DistrictSeen& seen = g_districtsSeen[i];
+        std::string name = info.name ? info.name : "";
+        if (const auto shown = g_districtShownNames.find(name); shown != g_districtShownNames.end()) name = shown->second;
+        if (known && info.controlChangedAt >= 0 && info.controlChangedAt != seen.controlAt && info.controlMax > 0.0f) {
+            MeterUpdate& u = g_meterUpdate;
+            u.control = true;
+            u.current = ControlShown(info.control);
+            u.delta = static_cast<int>(info.control - info.controlBefore);
+            u.currentPct = info.control / info.controlMax;
+            u.deltaPct = (info.control - info.controlBefore) / info.controlMax;
+            u.district = name;
+            RFA_LOG_FIRST(40, "Guerrilla's meters: %s's control %d (%+d, %.0f%%)", name.c_str(), u.current, u.delta, u.currentPct * 100.0f);
+        }
+        if (known && info.moraleChangedAt >= 0 && info.moraleChangedAt != seen.moraleAt && info.moraleMax > 0.0f) {
+            const bool sameDistrict = i == g_moraleShownDistrict;
+            const bool waited = g_moraleShownAt == 0 || now - g_moraleShownAt >= kMoraleOtherDistrictMs;
+            if (sameDistrict || waited) {
+                if (waited) {
+                    g_moraleShownDistrict = i;
+                    g_moraleShownAt = now;
+                }
+                MeterUpdate& u = g_meterUpdate;
+                if (!u.morale) u.moraleLastPct = info.moraleBefore / info.moraleMax;  // the first change's "before"
+                u.morale = true;
+                u.moralePct = info.morale / info.moraleMax;
+                u.moraleChange = info.morale - info.moraleBefore;
+                u.district = name;
+                RFA_LOG_FIRST(40, "Guerrilla's meters: %s's morale %.0f%% (%+.0f)", name.c_str(), u.moralePct * 100.0f, u.moraleChange);
+            } else {
+                RFA_LOG_FIRST(20, "Guerrilla's meters: %s's morale change not shown (another district's shown under 5 s ago)", name.c_str());
+            }
+        }
+        seen.controlAt = info.controlChangedAt;
+        seen.moraleAt = info.moraleChangedAt;
+        // district::liberate_district's screen (hud_ui_district_liberation_show, LUT_LIBERATION) as it's liberated.
+        if (known && info.liberated && !seen.liberated) OpenLiberation(name, info.controlMax, 0, "the campaign liberated it");
+        seen.liberated = info.liberated != 0;
+    }
+    g_districtsKnown = true;
+}
+
+// A level load: the next look notes where the districts stand, showing nothing.
+void ForgetDistricts() {
+    g_districtsKnown = false;
+    g_meterUpdate = MeterUpdate{};
+}
+
+// rfg_district_change() -> control_changed, control, delta, control_pct, delta_pct, morale_changed, morale_pct,
+//   last_morale_pct, morale_change, district: a change for Guerrilla's meters (MoraleUpdate's values, percents 0..1),
+//   taken; nothing when there's none.
+int __cdecl LuaDistrictChange(lua_State* L) {
+    using namespace rfa::game;
+    if (!g_meterUpdate.control && !g_meterUpdate.morale) return 0;
+    const MeterUpdate u = g_meterUpdate;
+    g_meterUpdate = MeterUpdate{};
+    lua_pushboolean(L, u.control);
+    lua_pushnumber(L, u.current);
+    lua_pushnumber(L, u.delta);
+    lua_pushnumber(L, u.currentPct);
+    lua_pushnumber(L, u.deltaPct);
+    lua_pushboolean(L, u.morale);
+    lua_pushnumber(L, u.moralePct);
+    lua_pushnumber(L, u.moraleLastPct);
+    lua_pushnumber(L, u.moraleChange);
+    lua_pushstring(L, u.district.c_str());
+    return 10;
+}
+
+// ---- Guerrilla's screens the campaign raises: a district liberated, and an activity's briefing and results
+//
+// The district-liberated screen (Guerrilla's own game state: hud_ui_district_liberation_show RM 0x856F80 with
+// LUT_LIBERATION, from upgrade_unlock_from_liberation 0x790E20 as district::liberate_district liberates one; _enter
+// 0x846FB0 blurs the screen, loads rfg_ui_district_liberated and puts the HUD's items away; _process_input 0x846910):
+// its document's script runs it on four data items (DistrictLiberated: the district's name and MENU_LIBERATED;
+// DistrictControl: shown, the control's number, the district's mission count; DistrictUpgrade: an upgrade unlocked;
+// DistrictHints: the button and MENU_CONTINUE). Its steps, each on the continue button once the last step's animation
+// has ended (its script calls the game's rfg_dist_lib_tween_end, which clears the game's "busy", 0x1660EEB):
+//   0 the header (the name and LIBERATED); 1 the control's tally: the meter's bar empties (meter_fill_scale_twn_1) and
+//   the number follows it from the most to 0 (_process_control_data 0x856AA0: (the bar's scale / (its start - end) + 1)
+//   x the most); 2 the upgrades the liberation unlocked (up to 3: each level of an upgrade the district unlocks), one
+//   a press; then it closes (the document unloaded, the HUD's items back).
+// Here: opened when the campaign's district turns liberated (FollowDistricts), or by the console's rfg_liberated (to
+// see it); the game paused while it's open, as Guerrilla's state did; the continue keys Enter, Space and the left
+// button (Guerrilla's PC key picture for Enter, key_178, in its hint). Its unlocks: none yet (guerrilla_gear doesn't
+// hold Guerrilla's upgrades to their districts yet). An animation's end not heard of in kScreenStepMostMs: presses
+// are taken anyway, so a missing end can't hold the game.
+//
+// An activity's screens: GuerrillaCampaign_Activity(&ActivityInfo) gives what shows (1 the briefing, waiting for
+// Accept or Cancel; 2 running: the corner panel; 3 the results, waiting for Close) with Guerrilla's string tags;
+// GuerrillaCampaign_ActivityChoose(1 accept / 0 cancel; any value closes the results) answers. The briefing and the
+// results are Guerrilla's rfg_ui_demolitions (DemolitionsInfo; its process_demolitions_data RM 0x844D50: the labels
+// ACT_DM_RESULTS_GOAL_TIME / _YOU_TIME / _PAR_TIME / _BEST_TIME / _SALVAGE, times "%.02d:%.02d", salvage "+%i", the
+// hints MENU_CANCEL and MENU_ACCEPT at the briefing, MENU_CLOSE at the results), shown here with the game paused; the
+// keys only once its script lets them (its rfg_enable_button_input, as its animation ends): Enter accepts or closes,
+// Esc (or Backspace) cancels, and Space or Esc close the results too. Once asked, the campaign waits for the answer:
+// a missing document (or one that never lets the keys in, after kScreenStepMostMs) answers Accept / Close itself. The
+// corner panel is rfg_ui_hud_missions' (its script, fed by ours).
+//
+// The campaign's map rings (GuerrillaCampaign_MapRings: an activity's play area, green, or red while the 5 s to
+// return count): Guerrilla's decals (add_decal 0x873F80: ui_map_icon_circ_fill_outline scaled to the radius), drawn on
+// the minimap by rfg_ui_hud.
+struct CampaignActivity {    // guerrilla_campaign's ActivityInfo
+    int mode, screen;
+    const char* title;
+    const char* subtitle;
+    const char* body;
+    const char* objective;
+    const char* timer;
+    const char* result;
+    const char* failure;
+    const char* weapon[4];
+    int ammo[4];
+    int timeLimit, parTime;  // seconds
+    int bestMs, elapsedMs;
+    int status, success, proTime, outOfRange, salvage;
+};
+static_assert(sizeof(CampaignActivity) == 104, "guerrilla_campaign's ActivityInfo is 104 bytes");
+using CampaignActivityFn = int(__cdecl*)(CampaignActivity* info);
+using CampaignActivityChooseFn = void(__cdecl*)(int accept);
+
+struct CampaignMapRing {     // guerrilla_campaign's MapRing
+    float x, z, radius;
+    unsigned char r, g, b, a;
+    int inverted;
+};
+static_assert(sizeof(CampaignMapRing) == 20, "guerrilla_campaign's MapRing is 20 bytes");
+using CampaignMapRingsFn = int(__cdecl*)(CampaignMapRing* rings, int most);
+
+constexpr ULONGLONG kScreenStepMostMs = 10000;
+constexpr int kActivityBriefing = 1, kActivityRunning = 2, kActivityResults = 3;
+constexpr int kMostMapRings = 8;
+const char* const kEnterKeyPicture = "rfg_key_178";   // Guerrilla's PC key pictures (ui_bms_pc_buttons): Enter
+const char* const kEscKeyPicture = "rfg_key_124";     // and Esc
+
+struct LiberationScreen {
+    bool open = false, paused = false;
+    std::string district;      // as shown
+    float controlMax = 0.0f;
+    int missions = 0;
+    int step = 0;              // 0 the header, 1 the control's tally, 2 the unlocks
+    bool busy = true;          // a step's animation plays: presses wait for its end
+    ULONGLONG busySince = 0;
+    int unlocks = 0, unlock = 0;
+    unsigned version = 0;
+    bool enterDown = true, spaceDown = true, clickDown = true;
+    ULONGLONG lastStep = 0;
+};
+LiberationScreen g_liberation;
+struct PendingLiberation {
+    bool wanted = false;
+    std::string district;
+    float controlMax = 0.0f;
+} g_liberationPending;      // the console's: opened at the next HUD update
+
+struct ActivityScreen {
+    bool asked = false;        // the campaign has a screen up (we asked: it waits for our answer)
+    CampaignActivity info{};
+    std::string title, subtitle, body, objective, timer, result, failure, weapon[4];
+    int screen = 0;            // what the campaign shows: 0 none, 1 briefing, 2 running, 3 results
+    bool open = false, paused = false;  // our briefing or results screen
+    int answered = 0;          // the screen we answered (the campaign may still give it until its next frame)
+    bool input = false;        // its script lets the keys in
+    ULONGLONG openedAt = 0;
+    unsigned version = 0;
+    bool enterDown = true, escDown = true, spaceDown = true;
+    ULONGLONG lastStep = 0;
+};
+ActivityScreen g_activity;
+std::vector<CampaignMapRing> g_mapRings;
+
+bool LiberationIsOpen() { return g_liberation.open; }
+bool ActivityScreenOpen() { return g_activity.open; }
+
+void CloseOtherScreens(const char* why) {
+    if (g_mapOpen) CloseMap(why);
+    CloseShop(why);
+    CloseCabinet(why, false);
+}
+
+void OpenLiberation(const std::string& district, float controlMax, int missions, const char* why) {
+    LiberationScreen& s = g_liberation;
+    if (s.open) return;
+    CloseOtherScreens("the district-liberated screen");
+    const unsigned version = s.version;
+    s = LiberationScreen{};
+    s.version = version + 1;
+    s.open = true;
+    s.district = district;
+    s.controlMax = controlMax;
+    s.missions = missions;
+    s.busySince = GetTickCount64();
+    PauseGame(1, 1, 0, 0);
+    s.paused = true;
+    rfa::Log("District-liberated screen: %s (%s); the game paused", district.c_str(), why);
+}
+
+void CloseLiberation(const char* why) {
+    LiberationScreen& s = g_liberation;
+    if (!s.open) return;
+    s.open = false;
+    if (s.paused) {
+        UnpauseGame(1, 1);
+        s.paused = false;
+    }
+    g_shop.useDown = true;
+    rfa::Log("District-liberated screen closed (%s)", why);
+}
+
+// _process_input: the next step (LUT_LIBERATION: the header, the control's tally, each unlock), or the end.
+void LiberationNext() {
+    LiberationScreen& s = g_liberation;
+    if (s.step == 0) {
+        s.step = 1;
+    } else if (s.step == 1) {
+        if (s.unlocks == 0) {
+            CloseLiberation("its last step");
+            return;
+        }
+        s.step = 2;
+        s.unlock = 0;
+    } else if (++s.unlock >= s.unlocks) {
+        CloseLiberation("its last unlock");
+        return;
+    }
+    s.busy = true;
+    s.busySince = GetTickCount64();
+    ++s.version;
+    RFA_LOG_FIRST(20, "District-liberated screen: step %d", s.step);
+}
+
+void StepLiberation() {
+    LiberationScreen& s = g_liberation;
+    const ULONGLONG now = GetTickCount64();
+    const bool resumed = now - s.lastStep > kHudGoneAfterMs;
+    s.lastStep = now;
+    if (!GameFocused() || resumed) {
+        s.enterDown = s.spaceDown = s.clickDown = true;
+        return;
+    }
+    if (s.busy && now - s.busySince > kScreenStepMostMs) {
+        s.busy = false;
+        rfa::Log("District-liberated screen: step %d's animation never told its end; the keys are taken anyway", s.step);
+    }
+    const bool enter = Pressed(VK_RETURN, s.enterDown);
+    const bool space = Pressed(VK_SPACE, s.spaceDown);
+    const bool click = Pressed(VK_LBUTTON, s.clickDown);
+    if ((enter || space || click) && !s.busy) LiberationNext();
+}
+
+// The campaign's ActivityInfo kept, its texts copied (valid only until the next call).
+void KeepActivity(const CampaignActivity& info) {
+    ActivityScreen& s = g_activity;
+    s.info = info;
+    s.title = info.title ? info.title : "";
+    s.subtitle = info.subtitle ? info.subtitle : "";
+    s.body = info.body ? info.body : "";
+    s.objective = info.objective ? info.objective : "";
+    s.timer = info.timer ? info.timer : "";
+    s.result = info.result ? info.result : "";
+    s.failure = info.failure ? info.failure : "";
+    for (int i = 0; i < 4; ++i) s.weapon[i] = info.weapon[i] ? info.weapon[i] : "";
+}
+
+void OpenActivityScreen(int screen) {
+    ActivityScreen& s = g_activity;
+    CloseOtherScreens("an activity's screen");
+    s.open = true;
+    s.input = false;
+    s.openedAt = GetTickCount64();
+    s.enterDown = s.escDown = s.spaceDown = true;
+    ++s.version;
+    if (!s.paused) {
+        PauseGame(1, 1, 0, 0);
+        s.paused = true;
+    }
+    rfa::Log("Activity screen: the %s of %s; the game paused", screen == kActivityBriefing ? "briefing" : "results", s.title.c_str());
+}
+
+void CloseActivityScreen(const char* why) {
+    ActivityScreen& s = g_activity;
+    if (!s.open) return;
+    s.open = false;
+    if (s.paused) {
+        UnpauseGame(1, 1);
+        s.paused = false;
+    }
+    g_shop.useDown = true;
+    rfa::Log("Activity screen closed (%s)", why);
+}
+
+void AnswerActivity(int accept, const char* why) {
+    static auto choose = reinterpret_cast<CampaignActivityChooseFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_ActivityChoose"));
+    ActivityScreen& s = g_activity;
+    if (choose) choose(accept);
+    s.answered = s.screen;
+    rfa::Log("Activity screen: %s (%s)", s.screen == kActivityBriefing ? (accept ? "Accept" : "Cancel") : "Close", why);
+    CloseActivityScreen(why);
+}
+
+void StepActivityScreen() {
+    ActivityScreen& s = g_activity;
+    const ULONGLONG now = GetTickCount64();
+    const bool resumed = now - s.lastStep > kHudGoneAfterMs;
+    s.lastStep = now;
+    if (!GameFocused() || resumed) {
+        s.enterDown = s.escDown = s.spaceDown = true;
+        return;
+    }
+    if (!s.input && now - s.openedAt > kScreenStepMostMs) {
+        s.input = true;
+        rfa::Log("Activity screen: its script never let the keys in; they're taken anyway");
+    }
+    const bool enter = Pressed(VK_RETURN, s.enterDown);
+    const bool esc = Pressed(VK_ESCAPE, s.escDown) || HeldDown(VK_BACK);
+    const bool space = Pressed(VK_SPACE, s.spaceDown);
+    if (!s.input) return;
+    if (s.screen == kActivityBriefing) {
+        if (enter) AnswerActivity(1, "Enter");
+        else if (esc) {
+            g_full.swallowPauseUntil = GetTickCount64() + kSwallowPauseMs;
+            AnswerActivity(0, "Esc");
+        }
+    } else if (enter || esc || space) {
+        if (esc) g_full.swallowPauseUntil = GetTickCount64() + kSwallowPauseMs;
+        AnswerActivity(1, enter ? "Enter" : esc ? "Esc" : "Space");
+    }
+}
+
+// Each HUD update in our worlds: the campaign's activity and rings asked for, and the console's liberated screen.
+void FollowCampaignScreens() {
+    if (g_liberationPending.wanted) {
+        g_liberationPending.wanted = false;
+        OpenLiberation(g_liberationPending.district, g_liberationPending.controlMax, 0, "the console's rfg_liberated");
+    }
+    static auto activity = reinterpret_cast<CampaignActivityFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_Activity"));
+    static auto choose = ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_ActivityChoose");
+    ActivityScreen& s = g_activity;
+    // Only with both: once asked, the campaign waits for our answer.
+    if (activity && choose) {
+        CampaignActivity info{};
+        const int screen = activity(&info) ? info.screen : 0;
+        if (screen != 0) KeepActivity(info);
+        if (screen != s.screen) {
+            RFA_LOG_FIRST(40, "Activity screen: the campaign shows %d (mode %d, %s)", screen, info.mode, info.title ? info.title : "-");
+            s.answered = 0;
+            ++s.version;
+        }
+        s.screen = screen;
+        const bool asks = (screen == kActivityBriefing || screen == kActivityResults) && s.answered != screen;
+        const Document* doc = FindDocument("rfg_ui_demolitions");
+        if (asks && (!doc || doc->missing)) {
+            AnswerActivity(1, "no rfg_ui_demolitions document");
+        } else if (asks && !s.open) {
+            OpenActivityScreen(screen);
+        } else if (!asks && s.open) {
+            CloseActivityScreen("the campaign's screen ended");
+        }
+    }
+    static auto rings = reinterpret_cast<CampaignMapRingsFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_MapRings"));
+    g_mapRings.clear();
+    if (rings) {
+        CampaignMapRing found[kMostMapRings]{};
+        const int count = rings(found, kMostMapRings);
+        for (int i = 0; i < count && i < kMostMapRings; ++i) g_mapRings.push_back(found[i]);
+    }
+}
+
+// Each HUD update while one is open: its keys.
+void StepCampaignScreens() {
+    if (g_liberation.open) StepLiberation();
+    if (g_activity.open) StepActivityScreen();
+}
+
+// A level load: both closed (an activity's screen answered as Guerrilla's would close: accept, close).
+void CloseCampaignScreens(const char* why) {
+    CloseLiberation(why);
+    CloseActivityScreen(why);
+    g_activity.screen = 0;
+    g_activity.answered = 0;
+    g_liberationPending.wanted = false;
+    g_mapRings.clear();
+}
+
+// The console's rfg_liberated: the district-liberated screen of the player's district (Dust outside them), to see it;
+// nothing changes. Registered as the campaign's commands are (the game's 0xC7BD70; type 3 runs the handler).
+using RegisterCommandFn = void*(__fastcall*)(void* command, void* unused, const char* name, const char* description, int type, void (*handler)());
+auto const RegisterCommand = reinterpret_cast<RegisterCommandFn>(0xC7BD70);
+auto& g_consoleCommandRunning = *reinterpret_cast<int*>(0x28FF1C0);
+using ConsolePrintFn = void(__cdecl*)(const char* format, ...);
+auto const ConsolePrint = reinterpret_cast<ConsolePrintFn>(0xC7C440);
+BYTE g_liberatedCommand[32];
+
+void LiberatedCommand() {
+    if (!g_consoleCommandRunning) return;
+    static auto district = reinterpret_cast<CampaignDistrictFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_District"));
+    CampaignDistrict info{};
+    std::string name = "DUST";
+    float most = 380.0f;
+    if (district && (district(-1, &info) || district(1, &info)) && info.name) {
+        name = info.name;
+        if (const auto shown = g_districtShownNames.find(name); shown != g_districtShownNames.end()) name = shown->second;
+        most = info.controlMax;
+    }
+    g_liberationPending.wanted = true;
+    g_liberationPending.district = name;
+    g_liberationPending.controlMax = most;
+    ConsolePrint("Guerrilla's district-liberated screen for %s (close the console; Enter, Space or a click goes on)\n", name.c_str());
+}
+
+void AddCampaignScreenCommands() {
+    static bool added = false;
+    if (added) return;
+    added = true;
+    RegisterCommand(g_liberatedCommand, nullptr, "rfg_liberated", "Shows Guerrilla's district-liberated screen for your district (to see it; nothing changes)", 3,
+                    &LiberatedCommand);
+}
+
+// rfg_liberation() -> open, version, step, busy, district, label, control_most, missions, hint_key, hint_text
+//   The district-liberated screen: whether it's open; a number that changes with each step; its step (0 the header,
+//   1 the control's tally, 2 the unlocks); whether its animation still plays; the district's name; LIBERATED;
+//   the control's most (the tally starts there); the district's missions; the continue key's picture and CONTINUE.
+int __cdecl LuaLiberation(lua_State* L) {
+    using namespace rfa::game;
+    const LiberationScreen& s = g_liberation;
+    lua_pushboolean(L, s.open);
+    lua_pushnumber(L, s.version);
+    lua_pushnumber(L, s.step);
+    lua_pushboolean(L, s.busy);
+    lua_pushstring(L, s.district.c_str());
+    lua_pushstring(L, GuerrillaText("MENU_LIBERATED").c_str());
+    lua_pushnumber(L, s.controlMax);
+    lua_pushnumber(L, s.missions);
+    lua_pushstring(L, kEnterKeyPicture);
+    lua_pushstring(L, GuerrillaText("MENU_CONTINUE").c_str());
+    return 10;
+}
+
+// rfg_liberation_step_done(): the step's animation has ended (Guerrilla's rfg_dist_lib_tween_end).
+int __cdecl LuaLiberationStepDone(lua_State*) {
+    g_liberation.busy = false;
+    return 0;
+}
+
+// "mm:ss" (Guerrilla's "%.02d:%.02d") of whole seconds; "" for none (below 0).
+std::string MinutesSeconds(int seconds) {
+    if (seconds < 0) return "";
+    char text[16];
+    sprintf_s(text, "%02d:%02d", seconds / 60, seconds % 60);
+    return text;
+}
+
+// A weapon's picture: its icon by its name in Guerrilla's weapons (cabinet.txt), or a picture's name as it is (a
+// layer prop's: renamed rfg_...); "" for none.
+std::string WeaponPicture(const std::string& name) {
+    if (name.empty()) return "";
+    for (const CabinetWeapon& w : g_cabinetWeapons)
+        if (_stricmp(w.guerrilla.c_str(), name.c_str()) == 0) return w.picture;
+    if (_strnicmp(name.c_str(), "rfg_", 4) == 0) return name;
+    if (_strnicmp(name.c_str(), "ui_", 3) == 0) {
+        std::string picture = "rfg_" + name;
+        for (char& c : picture) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        return picture;
+    }
+    RFA_LOG_FIRST(10, "Activity screen: no picture for the weapon %s", name.c_str());
+    return "";
+}
+
+// rfg_activity() -> screen, version, mode, title, subtitle, body, objective, timer, result, failure, limit, par, best,
+//   elapsed, status, success, pro_time, out_of_range, salvage
+//   The campaign's activity (screen 0 none, 1 the briefing, 2 running, 3 the results), its texts as Guerrilla's (from
+//   its tags), its times "mm:ss" ("" for none: limit 0, no best yet); status 0, 1 unstable, 2 destroyed.
+//   rfg_activity_weapon(i) -> picture, rounds: its i-th weapon (1-4), nothing past the last.
+int __cdecl LuaActivity(lua_State* L) {
+    using namespace rfa::game;
+    const ActivityScreen& s = g_activity;
+    const CampaignActivity& i = s.info;
+    lua_pushnumber(L, s.screen);
+    lua_pushnumber(L, s.version);
+    lua_pushnumber(L, i.mode);
+    lua_pushstring(L, GuerrillaText(s.title.c_str()).c_str());
+    lua_pushstring(L, GuerrillaText(s.subtitle.c_str()).c_str());
+    lua_pushstring(L, GuerrillaText(s.body.c_str()).c_str());
+    lua_pushstring(L, GuerrillaText(s.objective.c_str()).c_str());
+    lua_pushstring(L, s.timer.c_str());
+    lua_pushstring(L, GuerrillaText(s.result.c_str()).c_str());
+    lua_pushstring(L, GuerrillaText(s.failure.c_str()).c_str());
+    lua_pushstring(L, MinutesSeconds(i.timeLimit > 0 ? i.timeLimit : -1).c_str());
+    lua_pushstring(L, MinutesSeconds(i.parTime > 0 ? i.parTime : -1).c_str());
+    lua_pushstring(L, MinutesSeconds(i.bestMs > 0 ? (i.bestMs + 999) / 1000 : -1).c_str());
+    lua_pushstring(L, MinutesSeconds(i.elapsedMs >= 0 ? (i.elapsedMs + 999) / 1000 : -1).c_str());
+    lua_pushnumber(L, i.status);
+    lua_pushboolean(L, i.success != 0);
+    lua_pushboolean(L, i.proTime != 0);
+    lua_pushboolean(L, i.outOfRange != 0);
+    lua_pushnumber(L, i.salvage);
+    return 19;
+}
+
+int __cdecl LuaActivityWeapon(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= 4 || g_activity.weapon[index].empty()) return 0;
+    const std::string picture = WeaponPicture(g_activity.weapon[index]);
+    if (picture.empty()) return 0;
+    lua_pushstring(L, picture.c_str());
+    lua_pushnumber(L, g_activity.info.ammo[index]);
+    return 2;
+}
+
+// rfg_screen_input(on): Guerrilla's rfg_enable_button_input, from the activity screen's script (off while its
+//   animation plays).
+int __cdecl LuaScreenInput(lua_State* L) {
+    using namespace rfa::game;
+    g_activity.input = lua_toboolean(L, 1) != 0;
+    return 0;
+}
+
+// rfg_guerrilla_text(tag) -> Guerrilla's text for one of its string tags, or nothing (not a tag of its strings).
+int __cdecl LuaGuerrillaText(lua_State* L) {
+    using namespace rfa::game;
+    if (lua_type(L, 1) != 4) return 0;  // a string (lua_tolstring would turn a number into one in place)
+    const char* tag = lua_tolstring(L, 1, nullptr);
+    if (!tag || !*tag || strchr(tag, ' ')) return 0;
+    const std::string text = GuerrillaText(tag);
+    if (text.empty()) return 0;
+    lua_pushstring(L, text.c_str());
+    return 1;
+}
+
+// rfg_map_rings() -> how many of the campaign's rings show; rfg_map_ring(i) -> map_x, map_y, radius (world map
+//   pixels), r, g, b, a (0-255), inverted.
+int __cdecl LuaMapRings(lua_State* L) {
+    using namespace rfa::game;
+    lua_pushnumber(L, static_cast<double>(g_mapRings.size()));
+    return 1;
+}
+
+int __cdecl LuaMapRing(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_mapRings.size())) return 0;
+    const CampaignMapRing& ring = g_mapRings[index];
+    double mapX = 0, mapY = 0;
+    MapPixels(ring.x, ring.z, mapX, mapY);
+    lua_pushnumber(L, mapX);
+    lua_pushnumber(L, mapY);
+    lua_pushnumber(L, ring.radius / kZoneMetres * kZonePixels);
+    lua_pushnumber(L, ring.r);
+    lua_pushnumber(L, ring.g);
+    lua_pushnumber(L, ring.b);
+    lua_pushnumber(L, ring.a);
+    lua_pushboolean(L, ring.inverted != 0);
+    return 8;
+}
+
 // rfg_map_icon_shown(i) -> whether the i-th line of map_icons.txt is shown now: a M.O.A.B. ("bomb") once
 //   its radio tags are found, everything else always.
 int __cdecl LuaMapIconShown(lua_State* L) {
@@ -4294,6 +5067,15 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_map_explosive", LuaMapExplosive);
     rfa::game::lua_register(L, "rfg_map_markers", LuaMapMarkers);
     rfa::game::lua_register(L, "rfg_map_marker", LuaMapMarker);
+    rfa::game::lua_register(L, "rfg_district_change", LuaDistrictChange);
+    rfa::game::lua_register(L, "rfg_liberation", LuaLiberation);
+    rfa::game::lua_register(L, "rfg_liberation_step_done", LuaLiberationStepDone);
+    rfa::game::lua_register(L, "rfg_activity", LuaActivity);
+    rfa::game::lua_register(L, "rfg_activity_weapon", LuaActivityWeapon);
+    rfa::game::lua_register(L, "rfg_screen_input", LuaScreenInput);
+    rfa::game::lua_register(L, "rfg_guerrilla_text", LuaGuerrillaText);
+    rfa::game::lua_register(L, "rfg_map_rings", LuaMapRings);
+    rfa::game::lua_register(L, "rfg_map_ring", LuaMapRing);
 }
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -4330,6 +5112,15 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         Document cabinet{"rfg_ui_safehouse_weapons"};  // Guerrilla's weapon cabinet, drawn only while it's open
         cabinet.whileCabinet = true;
         g_documents.push_back(cabinet);
+        // The campaign's: an activity's corner panel (with the HUD), the district-liberated screen and an activity's
+        // briefing and results (only while they're open).
+        if (!FindDocument("rfg_ui_hud_missions")) g_documents.push_back({"rfg_ui_hud_missions"});
+        Document liberation{"rfg_ui_district_liberated"};
+        liberation.whileLiberation = true;
+        g_documents.push_back(liberation);
+        Document demolitions{"rfg_ui_demolitions"};
+        demolitions.whileActivity = true;
+        g_documents.push_back(demolitions);
         Document handbook{"rfg_ui_handbook"};  // Guerrilla's handbook, loaded only while it's open (see Wanted)
         handbook.whileHandbook = true;
         g_documents.push_back(handbook);
@@ -4348,6 +5139,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         ReadCabinet();
         ReadHandbook();
         tool_tips::Read();
+        ReadHudMessages();
         // The handbook's entries' pictures' documents, listed before the handbook's own: each pass over the list
         // unloads a picture before the handbook (the opposite of the order they load in; see Wanted).
         std::set<std::string> pictureDocuments;

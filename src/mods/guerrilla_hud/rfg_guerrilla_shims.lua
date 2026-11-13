@@ -71,6 +71,18 @@ local function rfg_vint_set_property(handle, property, ...)
 			return vint_set_property(handle, "text_tag", value)
 		end
 	end
+	-- A text set by one of Guerrilla's string tags (MENU_MISSION_FAILED_TEXT, HM_CONVOY_TITLE, ...): Armageddon's string
+	-- tables haven't Guerrilla's strings, so its text from the mod (rfg_guerrilla_text: Guerrilla's strings by the tag's
+	-- hash); anything else (words, numbers) as it is.
+	if property == "text_tag" then
+		local value = ...
+		if type(value) == "string" and _GetAnyGlobalSilent("rfg_guerrilla_text") ~= nil then
+			local text = rfg_guerrilla_text(value)
+			if text ~= nil then
+				return vint_set_property(handle, property, text)
+			end
+		end
+	end
 	if property == "tint" then
 		local r, g, b = ...
 		return vint_set_property(handle, property, r * 255, g * 255, b * 255)
@@ -130,6 +142,26 @@ Btn_slot_3 = 27
 
 function rfg_get_button_image_name(button)
 	return "null"
+end
+
+-- Its menu buttons (its rfg_ui_globals' Btn_menu_select and Btn_menu_abort; their pictures: none, as above, our
+-- scripts set Guerrilla's PC key pictures), and its screens' button input switched off while their animations play: the
+-- mod reads the keys of our screens, so it's told (rfg_screen_input), if the mod has it.
+Btn_menu_select = 10
+Btn_menu_abort = 11
+
+function rfg_enable_button_input(enable)
+	if _GetAnyGlobalSilent("rfg_screen_input") ~= nil then
+		rfg_screen_input(enable)
+	end
+end
+
+-- Its control and morale colours (its rfg_ui_globals), where Armageddon's own don't have them.
+if not pcall(function() return COLOR_CONTROL end) then
+	COLOR_CONTROL = { R = 0.58, G = 0.05, B = 0 }
+end
+if not pcall(function() return COLOR_MORALE end) then
+	COLOR_MORALE = { R = 0.943, G = 0.78, B = 0.20 }
 end
 
 -- Guerrilla's game filled the world map's data items (FS_HighlightItem, FS_Hints, the group

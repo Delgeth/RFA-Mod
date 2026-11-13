@@ -296,6 +296,25 @@ public static class GuerrillaPlayerAnimations
 
         // What Armageddon's player asks for: its blend tree's names and Darius's set's.
         var (askedStates, askedActions) = Asked(gameTables, Table(gameTables, BaseSet + ".xtbl"));
+        // And what the player's melee moves play (Guerrilla's melee.xtbl, each move's AttackAnim for Player.xtbl): the
+        // game plays a move's action by its name from the swinging weapon's group, so a group cut to the names above
+        // left out the Gutter's combo swings ("melee slow", "melee fast", "melee fast slow", ...; the user, 2026-11-13:
+        // Mason "cant actually use it as there is no attack animations for it"). Only names the action list knows
+        // (the shared anim_actions.xtbl, else Armageddon's own) are kept.
+        var knownActions = Shared("anim_actions.xtbl").Entries.Select(e => e.ValueOf("Name")?.Trim()).OfType<string>()
+                                                         .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var meleeActions = new List<string>();
+        foreach (var move in Table(guerrillaTables, "melee.xtbl").Entries)
+            foreach (var animSet in Descendants(move, "AnimSet"))
+                if (string.Equals(animSet.ValueOf("AnimSetName")?.Trim(), "Player.xtbl", StringComparison.OrdinalIgnoreCase) &&
+                    animSet.ValueOf("AttackAnim")?.Trim() is { Length: > 0 } attack &&
+                    !askedActions.Contains(attack, StringComparer.OrdinalIgnoreCase) && !meleeActions.Contains(attack, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (knownActions.Contains(attack)) meleeActions.Add(attack);
+                    else log.Add($"player animations: melee action \"{attack}\" isn't in the action list; its moves play nothing for the player");
+                }
+        askedActions.AddRange(meleeActions);
+        if (meleeActions.Count > 0) log.Add($"player animations: {meleeActions.Count} actions the player's melee moves play, kept in each group that has them: {string.Join(", ", meleeActions)}");
 
         // What Armageddon's tables have of an animation's entry.
         HashSet<string> Names(string table, string field = "Name") =>

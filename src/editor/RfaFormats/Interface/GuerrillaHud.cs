@@ -47,7 +47,7 @@ public static partial class GuerrillaHud
         new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Icons, GuerrillaTextSizes: true),
         // The minimap; its radar sweep's line (ui_minimap_scan_line, a whole texture in the document's own interface-maps,
         // which Guerrilla's cartographer drew itself: render_scan_line RM 0x863A60).
-        new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player", "ui_minimap_scan_line"]),
+        new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player", "ui_minimap_scan_line", "ui_map_icon_circ_fill_outline"]),
         new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap, .. HintKeys], GuerrillaScript: true, BridgedItems: true,
             ExtraTextures: ["interface-pc"], GuerrillaTextSizes: true),
         // Guerrilla's messages: its message lines, its use prompt (a hand, a ladder, a vehicle, a mission's start, the
@@ -57,8 +57,12 @@ public static partial class GuerrillaHud
         // set_button, set_hints and set_highlight are named as Armageddon's own scripts name theirs, and a global is read
         // from whichever document has it first, so they're renamed rfg_ui_upgrades_....
         new("rfg_ui_messages", ["ui_hud_icon_salvage", "ui_hud_save_icon", "ui_hud_hand_icon", "ui_hud_convoy_car_icon",
-                                "ui_map_icon_mission_start", "ui_hud_icon_upgrade"],
+                                "ui_map_icon_mission_start", "ui_hud_icon_upgrade", .. GuerrillaHudMessages.Pictures],
             GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons, GuerrillaTextSizes: true),
+        // An activity's corner panel (Guerrilla's script for every activity and mission, fed by ours: the timer, the
+        // building's structure). Loaded with the HUD, so it comes before the screens (the shop's first): a texture is
+        // brought by the first document that needs it, and a screen's document is loaded only while it's open.
+        new("rfg_ui_hud_missions", [], GuerrillaScript: true, BridgedItems: true, GuerrillaTextSizes: true),
         new("rfg_ui_upgrades", ["ui_hud_icon_salvage"], GuerrillaScript: true, BridgedItems: true, UpgradePictures: true,
             RenamedGlobals: ["set_header", "set_button", "set_hints", "set_highlight"], GuerrillaTextSizes: true),
         // Guerrilla's weapon cabinet (a safehouse's locker, every ammo crate): the weapons found or bought, to put into
@@ -69,6 +73,13 @@ public static partial class GuerrillaHud
                                          "ui_hud_guerilla_logo_white", "key_20", "key_43", "key_66", "key_89", "key_124"],
             GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons, ExtraTextures: ["interface-pc"],
             RenamedGlobals: ["LOCK", "MAX_ICONS", "handle_icon_scale", "handle_highlight"], GuerrillaTextSizes: true),
+        // The campaign's screens: the district-liberated screen (the PC key Enter, key_178, in its hint) and demolitions
+        // master's briefing and results (Enter and Esc, key_178 and key_124; the weapons' icons). STAMP_PAD is a global of
+        // both rfg_ui_hud_missions and rfg_ui_demolitions: renamed in the latter, which comes and goes.
+        new("rfg_ui_district_liberated", ["key_178"], GuerrillaScript: true, BridgedItems: true, ExtraTextures: ["interface-pc"],
+            GuerrillaTextSizes: true),
+        new("rfg_ui_demolitions", ["key_178", "key_124"], GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons,
+            ExtraTextures: ["interface-pc"], RenamedGlobals: ["STAMP_PAD"], GuerrillaTextSizes: true),
         // Guerrilla's handbook (its pause menu's HANDBOOK): its pages and entries (GuerrillaHandbook, handbook.txt), the
         // weapons' icons its combat page shows, the PC keys A, D and Esc for its hints (ui_bms_pc_buttons: key_48, key_50,
         // key_124). The mod loads it only while it's open, and each entry's own picture from a document of its own, the
@@ -506,6 +517,8 @@ public static partial class GuerrillaHud
         // The handbook's pages and entries.
         report.AddRange(GuerrillaHandbook.Build(guerrillaCache, scriptsFolder));
         report.AddRange(GuerrillaToolTips.Build(guerrillaCache, scriptsFolder));
+        // The texts of the HUD messages the campaign raises.
+        report.AddRange(GuerrillaHudMessages.Build(guerrillaCache, scriptsFolder));
 
         string listsOut = Path.Combine(cacheOut, "interface.vpp_pc");
         Write(Path.Combine(listsOut, "vint_doc_containers.asm_pc"), containers.ToBytes());
@@ -574,6 +587,7 @@ public static partial class GuerrillaHud
             files.Add(Path.Combine(scriptsFolder, GuerrillaWeaponCabinet.FileName));
             files.Add(Path.Combine(scriptsFolder, GuerrillaHandbook.FileName));
             files.Add(Path.Combine(scriptsFolder, GuerrillaToolTips.FileName));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaHudMessages.FileName));
         }
         files.AddRange(OldFiles(overridesFolder));
         var report = new List<string>();
@@ -761,6 +775,7 @@ public static partial class GuerrillaHud
         {
             "; Guerrilla's districts by zone (column and row), as its HUD names them: made by GuerrillaBuilder.exe from",
             "; your copy of Guerrilla (territories.xtbl and its strings). The minimap shows the name of the zone you're in.",
+            "; CCRR=shown name (a zone), name:own name=shown name (a district)",
         };
         int count = 0;
         foreach (Match district in DistrictBlocks().Matches(table))
@@ -769,9 +784,11 @@ public static partial class GuerrillaHud
             string tag = TagValue(district.Value, "Display_name") ?? "TERR_" + name.ToUpperInvariant().Replace(' ', '_');
             string shown = strings.GetValueOrDefault(VintDocument.Hash(tag.ToLowerInvariant()), name);
             foreach (Match index in GridIndexes().Matches(district.Value)) lines.Add($"{index.Groups[1].Value}={shown}");
+            // The district by its own name too (the guerrilla_campaign mod names districts so), for the meters.
+            if (name.Length > 0) lines.Add($"name:{name}={shown}");
             count++;
         }
-        report.Add($"{DistrictsFile}: {count} districts, {lines.Count - 2} zones, names from territories_{Language}.le_strings");
+        report.Add($"{DistrictsFile}: {count} districts, {lines.Count - 3 - count} zones, names from territories_{Language}.le_strings");
         return lines;
     }
 

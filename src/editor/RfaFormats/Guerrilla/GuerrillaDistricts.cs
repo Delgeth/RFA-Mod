@@ -15,8 +15,10 @@ namespace RfaFormats.Guerrilla;
 /// names Jayde, whose looks the group gives).
 ///
 /// Armageddon dropped the populations: a spawn resource names its characters (npc_list), and the game streams
-/// those in, 16 at most at once (its human allocator, 0x26B07B0, set up at 0xA477E2 with 16 slots). A squad names
-/// each member. So here:
+/// those in, 17 at most at once with the player (its people's stream pool, 0x19728E8, set up at 0xF29530 with 17
+/// slots). Guerrilla's 16 human slots hold its 9 guerrilla, 3 EDF and 2 Marauder types, its special NPC and its
+/// safehouse VIP (HUMAN_SPECIAL, HUMAN_SAFEHOUSE_VIP); guerrilla_people streams those two in as Guerrilla does. A
+/// squad names each member. So here:
 ///   - a spawn resource a human group (<see cref="ResourceOf"/>): the EDF and Marauder types Guerrilla's squads
 ///     use at the campaign's start (<see cref="DistrictEdf"/>, <see cref="DistrictMarauders"/>) and as many of the
 ///     group's civilians as the rest of the slots hold (<see cref="CivilianSlots"/>), spread over its list; the
@@ -31,23 +33,36 @@ public static class GuerrillaDistricts
     /// <summary>The zones with no human group (and any group not made): Guerrilla's EDF and Marauders made, and the civilians every group shares.</summary>
     public const string DefaultResource = GuerrillaSquads.SpawnResource;
 
-    /// <summary>How many human slots a district's resource fills (the game's 16, one kept for the player's suit in case it takes one).</summary>
-    public const int Slots = 15;
+    /// <summary>
+    /// How many human slots a district's resource fills: Guerrilla's 9 guerrilla, 3 EDF and 2 Marauder types, which
+    /// leaves the game's 17 room for the player and for the special NPC and safehouse VIP guerrilla_people streams in.
+    /// </summary>
+    public const int Slots = 14;
 
     /// <summary>The EDF types Guerrilla's squads take at the campaign's start (squad_progression, Primary EDF level 1).</summary>
     public static readonly string[] DistrictEdf = ["EDF_Trooper", "EDF_Grunt_Braun", "EDF_Officer_May"];
 
-    /// <summary>The Marauder type Guerrilla's Marauder squads take (Marauder progression).</summary>
-    public static readonly string[] DistrictMarauders = ["Eddie"];
+    /// <summary>
+    /// The Marauder types: Guerrilla's Marauder squads' (its Marauder progression's level 1: Eddie) and the next of its
+    /// Default Marauder group (Eddie, Slade, Muir), its 2 Marauder slots.
+    /// </summary>
+    public static readonly string[] DistrictMarauders = ["Eddie", "Slade"];
 
     /// <summary>The civilians in every one of Guerrilla's district groups, for the zones with none.</summary>
     public static readonly string[] SharedCivilians = ["Bev", "Torvald", "Olga", "Dustin"];
 
-    /// <summary>A district resource's slots for its group's civilians.</summary>
-    public const int CivilianSlots = Slots - 3 - 1;
+    /// <summary>A district resource's slots for its group's civilians (Guerrilla's 9).</summary>
+    public const int CivilianSlots = Slots - 3 - 2;
+
+    /// <summary>
+    /// Guerrilla's radio operators' squad: its member is whoever of the "Radio Operator" group is loaded
+    /// (object_squad::spawn_squad_members with the node's radio_operator flag, get_radio_operator_human_info RM
+    /// 0xA3EF30), none when none is; so a version a group, its member the group's own radio operators.
+    /// </summary>
+    public const string RadioSquad = "Radio_Operator", RadioGroup = "Radio Operator";
 
     /// <summary>Guerrilla's squads whose members come from the zone's group, by their name's start.</summary>
-    static readonly string[] GroupSquads = ["civilian_squad_", "guerilla_squad_"];
+    static readonly string[] GroupSquads = ["civilian_squad_", "guerilla_squad_", RadioSquad];
 
     /// <summary>Whether a squad of Guerrilla's takes its members from the zone's people (civilian and guerrilla squads).</summary>
     public static bool FromGroup(string squad) => GroupSquads.Any(s => squad.StartsWith(s, StringComparison.OrdinalIgnoreCase));
@@ -71,7 +86,7 @@ public static class GuerrillaDistricts
         : string.Concat(Key(group).Split('_', StringSplitOptions.RemoveEmptyEntries).Select(word => word.Length > 2 ? word[..2] : word));
 
     /// <summary>Guerrilla's group squads' kinds, by their name's start, under the short names ours carry.</summary>
-    static readonly (string Start, string Short)[] GroupSquadShort = [("civilian_squad_", "csq"), ("guerilla_squad_", "gsq")];
+    static readonly (string Start, string Short)[] GroupSquadShort = [("civilian_squad_", "csq"), ("guerilla_squad_", "gsq"), (RadioSquad, "rad")];
 
     /// <summary>
     /// A civilian or guerrilla squad's version for a group (civilian_squad_2 in Dust → rfg_du_csq_2; at most
@@ -81,18 +96,26 @@ public static class GuerrillaDistricts
     {
         if (!FromGroup(squad)) return squad;
         var (start, kind) = GroupSquadShort.First(k => squad.StartsWith(k.Start, StringComparison.OrdinalIgnoreCase));
-        string name = $"rfg_{Code(group)}_{kind}_{squad[start.Length..]}";
+        string rest = squad[start.Length..];
+        string name = rest.Length > 0 ? $"rfg_{Code(group)}_{kind}_{rest}" : $"rfg_{Code(group)}_{kind}";
         if (name.Length > MostSquadName)
             throw new InvalidDataException($"the squad name {name} (Guerrilla's {squad} in {group ?? "no group"}) is longer than the {MostSquadName} characters the game takes");
         return name;
     }
 
     /// <summary>Guerrilla's squad a name of <see cref="SquadFor"/>'s is a version of (rfg_du_csq_2 → civilian_squad_2), or the name itself.</summary>
+    /// <summary>The group code in one of our district squad versions' names (rfg_<code>_csq_<n> or rfg_<code>_gsq_<n>), or null.</summary>
+    public static string? GroupCodeOf(string ours)
+    {
+        var parts = ours.Split('_');
+        return parts.Length == 4 && parts[0] == "rfg" && GroupSquadShort.Any(k => k.Short == parts[2]) ? parts[1] : null;
+    }
+
     public static string GuerrillaSquadOf(string ours)
     {
         var parts = ours.Split('_');
-        if (parts.Length == 4 && parts[0] == "rfg" && GroupSquadShort.FirstOrDefault(k => k.Short == parts[2]) is { Start: { } start })
-            return start + parts[3];
+        if ((parts.Length is 3 or 4) && parts[0] == "rfg" && GroupSquadShort.FirstOrDefault(k => k.Short == parts[2]) is { Start: { } start })
+            return parts.Length == 4 ? start + parts[3] : start;
         return ours;
     }
 
@@ -145,8 +168,9 @@ public static class GuerrillaDistricts
     {
         var resources = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var soldiers = made.Where(c => teamOf(c) is { } t && (t.Equals("EDF", StringComparison.OrdinalIgnoreCase) || t.Equals("Marauder", StringComparison.OrdinalIgnoreCase)));
-        var shared = SharedCivilians.Where(made.Contains);
-        resources[DefaultResource] = GuerrillaSquads.ResourceCharacters(soldiers.Concat(shared), containerOf);
+        var shared = SharedCivilians.Where(made.Contains).ToList();
+        var fallback = GuerrillaSquads.ResourceCharacters(soldiers, containerOf);
+        resources[DefaultResource] = GuerrillaSquads.ResourceCharacters(soldiers.Concat(shared.Take(Math.Max(0, Slots - fallback.Count))), containerOf);
         var core = DistrictEdf.Concat(DistrictMarauders).Where(made.Contains).ToList();
         foreach (string group in districtGroups)
             if (groups.TryGetValue(group, out var list))

@@ -17,13 +17,16 @@
 --     where x + y = 59);
 --   - in them, a group turned against the camera, holding Guerrilla's world map picture (a zone
 --     every 85 1/3 pixels, under everything, for the zones whose own pictures aren't loaded) and
---     up to nine zones' own pictures, and over them Guerrilla's map icons near the player (its
---     safehouses and its missions' and activities' starts, from map_icons.txt), each kept upright;
---     under the icons, Guerrilla's blips for the people and vehicles near the player (a dot a person,
---     a marker turned as the vehicle is; who shows and in which colour is Guerrilla's, in the mod:
---     rfg_map_blips), each fading behind Guerrilla's radar sweep, a ring growing on each person it passes;
+--     up to nine zones' own pictures, and over them Guerrilla's blips for the people and vehicles near
+--     the player (a dot a person, a marker turned as the vehicle is; who shows and in which colour is
+--     Guerrilla's, in the mod: rfg_map_blips), each fading behind Guerrilla's radar sweep, a ring growing
+--     on each person it passes;
 --   - over them, not turned, the sweep's line moving down the minimap (see SWEEP_PIXELS_PER_SECOND);
---   - the frame on top: the document's own map element, which GuerrillaBuilder.exe made a picture.
+--   - the frame: the document's own map element, which GuerrillaBuilder.exe made a picture; on its rim
+--     Guerrilla's north marker;
+--   - on top, uncut by the octagon, Guerrilla's map icons near the player (its safehouses and its
+--     missions' and activities' starts, from map_icons.txt), upright, those pinned to the rim sitting
+--     over the frame's border as Guerrilla drew them (see ICON_UNITS and build_map).
 -- How far the minimap shows is Guerrilla's: 40 to 80 metres from the player to the frame's edge, by
 -- its zoom keys (the mod's rfg_minimap_radius), and half the vehicle's speed more while driving. Where the player is, which way the camera looks and which
 -- zone pictures are loaded, the mod tells this script through rfg_map_view() and rfg_map_tiles().
@@ -46,7 +49,17 @@ local RADIUS = 40                       -- Guerrilla's minimap: metres from the 
 local SPEED_RADIUS = 0.5                -- and this much more per m/s of the vehicle's speed
 local TILES = 9
 local ICONS = 24                        -- icons shown at once (the nearest first come first)
-local ICON_SCALE = 0.55                 -- Guerrilla's map icons are 40 x 40 pictures
+local ICON_SCALE = 0.55                 -- the important buildings' icons (40 x 40 pictures; Guerrilla's size not read yet)
+-- Guerrilla's map icons' size (render_sticky_icons RM 0x878180, render_temp_icons 0x870F80, render_icons 0x877C20): each
+-- picture drawn as a square of +-13 screen pixels (0x1661250) times the zoom's scale (1 at its nearest zoom, down to
+-- Minimap_min_icon_scale 0.75 at its widest), whatever the picture's own size; the north marker a square of +-20
+-- (render_north 0x862020, 0x166124C), not zoomed. Guerrilla drew them in screen pixels; its HUD (and this one: the same
+-- project, made for 1280 x 720) is 1.5 screen pixels a frame unit at 1080p (the frame's border, 162 of its 170 units,
+-- measured 243 pixels there), so these are Guerrilla's sizes at 1080p in the frame's units.
+local PIXELS_PER_UNIT = 1.5
+local ICON_UNITS = 2 * 13 / PIXELS_PER_UNIT
+local NORTH_UNITS = 2 * 20 / PIXELS_PER_UNIT
+local ICON_LEAST = 0.75
 -- Guerrilla's map icons on its minimap (cartographer::render_sticky_icons RM 0x878180, the activities' start icons;
 -- the mod's GuerrillaMapIcons gives each its rule): a "sticky" one (a safehouse, a mission's start, a M.O.A.B.) further
 -- than 0.9 of the radius sits on the rim, pointing the way; the others (the activities' starts) show only inside the
@@ -85,6 +98,12 @@ local EXPLOSIVE_UNITS, EXPLOSIVE_RING_UNITS, EXPLOSIVE_RING_SECONDS = 2.5, 7.5, 
 local EXPLOSIVE_COLOURS = { [0] = { 255, 255, 255 }, { 255, 128, 0 }, { 0, 128, 128 } }
 local LOOSE_CHARGE_ALPHA = 0.35
 local MARKERS = 16
+-- The campaign's map rings (an activity's play area: green, red while the 5 s to go back count): Guerrilla's decals
+-- (add_decal RM 0x873F80, render_decals 0x870A20): its filled circle with an outline (ui_map_icon_circ_fill_outline, the
+-- circle filling its picture) as big as the ring, in the ring's colour and alpha, cut by the octagon, drawn over the
+-- blips. An inverted one (shading outside the circle) isn't drawn yet: none comes from the campaign.
+local DECALS = 4
+local DECAL_PICTURE = "rfg_ui_map_icon_circ_fill_outline"
 local CLOSEST_STICKY_MOST = 3
 local CONVERT_POP_MS = 500
 -- Guerrilla's blips (its render_humans and render_vehicles): a person is its dot picture drawn 12 units
@@ -132,7 +151,7 @@ local function two_digits(number)
 end
 
 -- Parts of this document with nothing behind them in Armageddon yet.
-local HIDDEN = { "control_meter", "morale_meter", "action_group", "radio_main", "radio_subtitle_group", "alert_level_group" }
+local HIDDEN = { "action_group", "radio_main", "radio_subtitle_group", "alert_level_group" }
 
 -- Guerrilla's alert light by level (its script's alert_level): the light's and its shine's colour (0 to 1,
 -- as Guerrilla's script gives them; Armageddon's scripts set a tint in 0 to 255), and the shine's pulse (how
@@ -158,10 +177,18 @@ local Has_zoom = false					-- the mod has Guerrilla's minimap zoom (rfg_minimap_
 local Has_tags = false					-- the mod gives the radio tags (rfg_map_radio_tags)
 local Has_others = false				-- the mod asks the other mods (rfg_map_buildings, ...)
 local Icon_tint = {}					-- the tint each icon element shows ("done" or "own")
+local Icons_on_rim = false				-- the icons are in the rim's layer (over the frame; see build_map)
+local Turn_sine, Turn_cosine = 0, 1		-- the map's turn this frame (by the heading), for the rim's layer
+local Icon_units = ICON_UNITS			-- an icon's size this frame (by the zoom)
+local Picture_sizes = {}				-- each picture's own size (unscaled_size), read once
 local Building_handles, Building_shown = {}, {}
+local Building_rim_handles, Building_rim_shown = {}, {}
 local Explosive_handles, Explosive_rings, Explosive_shown = {}, {}, {}
 local Marker_handles, Marker_shown = {}, {}
+local Marker_rim_handles, Marker_rim_shown = {}, {}
 local Tag_handles = {}
+local Decal_handles, Decal_shown = {}, {}
+local Has_rings = false				-- the mod gives the campaign's rings (rfg_map_rings)
 local Tag_shown = {}
 local Ring_handles = {}
 local Ring_shown = {}                   -- the colour each ring element shows, or nil while hidden
@@ -233,6 +260,34 @@ local function picture(name, parent, image)
 	return handle
 end
 
+-- A picture's own size (unscaled_size, as Armageddon's scripts read it), once a picture; 40 x 40 if the game gives none.
+local function picture_size(handle, image)
+	local size = Picture_sizes[image]
+	if size == nil then
+		local ok, w, h = pcall(vint_get_property, handle, "unscaled_size")
+		if not ok or w == nil or h == nil or w <= 0 or h <= 0 then
+			w, h = 40, 40
+		end
+		size = { w, h }
+		Picture_sizes[image] = size
+		log("picture " .. tostring(image) .. ": " .. tostring(w) .. " x " .. tostring(h))
+	end
+	return size[1], size[2]
+end
+
+-- An icon sized as Guerrilla draws it: its picture stretched to a square `units` across (Guerrilla drew every map picture
+-- into the same square, a 33 x 28 one too). The element must show the picture already.
+local function size_icon(handle, image, units)
+	local w, h = picture_size(handle, image)
+	vint_set_property(handle, "scale", units / w, units / h)
+end
+
+-- A point of the turned map (frame units from the middle) where it shows on screen, for the rim's layer: turned as the
+-- map's group is (by -heading about the middle), the sweep's turn.
+local function turned(x, y)
+	return x * Turn_cosine + y * Turn_sine, -x * Turn_sine + y * Turn_cosine
+end
+
 -- Builds the map inside the frame (see the top of this file).
 local function build_map()
 	local frame = find("map_overlay")
@@ -270,8 +325,21 @@ local function build_map()
 		vint_set_property(Tile_handles[i], "depth", 0)
 	end
 
-	-- Guerrilla's map icons (its safehouses, missions and activities: map_icons.txt, through the mod),
-	-- over the map, each kept upright as the map turns.
+	-- Guerrilla draws its map icons after the map's frame, with the octagon's mask lifted (render_mini 0x882130: the frame,
+	-- the waypoint, the north marker, then the pinned important buildings, the sticky icons and the activities' icons):
+	-- on the rim they sit over the frame's border, whole. So they go in a layer of their own over the frame and the
+	-- north marker, not turned (each one's place turned here: see turned). With an older mod (no rfg_sin_cos) they
+	-- stay in the turned map, as before.
+	Icons_on_rim = _GetAnyGlobalSilent("rfg_sin_cos") ~= nil
+	local icon_layer = turn
+	if Icons_on_rim then
+		local rim = make("rfg_minimap_rim", "group", main)
+		vint_set_property(rim, "anchor", x + FRAME / 2, y + FRAME / 2)
+		vint_set_property(rim, "depth", -3)		-- over the north marker (-2) and the frame (-1)
+		Map_handles.rim = rim
+		icon_layer = rim
+	end
+	-- Guerrilla's map icons (its safehouses, missions and activities: map_icons.txt, through the mod), each upright.
 	if rfg_map_icon_count ~= nil then
 		for i = 1, rfg_map_icon_count() do
 			local kind, image, x, y, caption, description, on_world_map, rule = rfg_map_icon(i)
@@ -281,10 +349,9 @@ local function build_map()
 		end
 	end
 	for i = 1, ICONS do
-		Icon_handles[i] = make("rfg_minimap_icon" .. i, "bitmap", turn)
+		Icon_handles[i] = make("rfg_minimap_icon" .. i, "bitmap", icon_layer)
 		vint_set_property(Icon_handles[i], "visible", false)
 		vint_set_property(Icon_handles[i], "auto_offset", "c")
-		vint_set_property(Icon_handles[i], "scale", ICON_SCALE, ICON_SCALE)
 		vint_set_property(Icon_handles[i], "depth", -5)
 	end
 	log(#Icons .. " map icons")
@@ -312,11 +379,20 @@ local function build_map()
 	-- What other mods give: the important buildings, the explosives (with their rings) and the people's markers.
 	Has_others = _GetAnyGlobalSilent("rfg_map_buildings") ~= nil
 	if Has_others then
+		-- The buildings in two sets: pinned (Guerrilla draws them after the frame: the rim's layer) and not (before it,
+		-- masked: the turned map, under the plain icons). The people's markers likewise: sticky ones after the frame,
+		-- plain ones and converts' pops before it.
 		for i = 1, BUILDINGS do
 			Building_handles[i] = make("rfg_minimap_building" .. i, "bitmap", turn)
 			vint_set_property(Building_handles[i], "visible", false)
 			vint_set_property(Building_handles[i], "auto_offset", "c")
 			vint_set_property(Building_handles[i], "scale", ICON_SCALE, ICON_SCALE)
+			vint_set_property(Building_handles[i], "depth", -4)
+			Building_rim_handles[i] = make("rfg_minimap_building_pinned" .. i, "bitmap", icon_layer)
+			vint_set_property(Building_rim_handles[i], "visible", false)
+			vint_set_property(Building_rim_handles[i], "auto_offset", "c")
+			vint_set_property(Building_rim_handles[i], "scale", ICON_SCALE, ICON_SCALE)
+			vint_set_property(Building_rim_handles[i], "depth", -4)	-- under the icons (-5) in the rim's layer
 		end
 		for i = 1, EXPLOSIVES do
 			Explosive_rings[i] = picture("rfg_minimap_explosive_ring" .. i, turn, "rfg_ui_map_icon_ring")
@@ -333,13 +409,27 @@ local function build_map()
 			vint_set_property(Marker_handles[i], "visible", false)
 			vint_set_property(Marker_handles[i], "auto_offset", "c")
 			vint_set_property(Marker_handles[i], "depth", -7)
+			Marker_rim_handles[i] = make("rfg_minimap_marker_sticky" .. i, "bitmap", icon_layer)
+			vint_set_property(Marker_rim_handles[i], "visible", false)
+			vint_set_property(Marker_rim_handles[i], "auto_offset", "c")
+			vint_set_property(Marker_rim_handles[i], "depth", -7)
+		end
+	end
+	-- The campaign's rings, over the blips (Guerrilla drew its decals after them), cut by the octagon.
+	Has_rings = _GetAnyGlobalSilent("rfg_map_rings") ~= nil
+	if Has_rings then
+		for i = 1, DECALS do
+			Decal_handles[i] = picture("rfg_minimap_decal" .. i, turn, DECAL_PICTURE)
+			vint_set_property(Decal_handles[i], "visible", false)
+			vint_set_property(Decal_handles[i], "auto_offset", "c")
+			vint_set_property(Decal_handles[i], "depth", -9)
 		end
 	end
 	-- Guerrilla's north marker, on the frame's rim (not turned, not cut by the octagon).
 	if _GetAnyGlobalSilent("rfg_sin_cos") ~= nil then
 		local north = picture("rfg_minimap_north", main, "rfg_ui_map_icon_north")
 		vint_set_property(north, "auto_offset", "c")
-		vint_set_property(north, "scale", ICON_SCALE, ICON_SCALE)
+		size_icon(north, "rfg_ui_map_icon_north", NORTH_UNITS)
 		vint_set_property(north, "depth", -2)		-- over the frame (-1)
 		Map_handles.north = north
 		Map_handles.centre_x = x + FRAME / 2
@@ -616,8 +706,13 @@ local function place_icons(map_x, map_y, heading, radius, world_scale)
 				end
 				Icon_shown[used] = icon.picture
 			end
-			vint_set_property(handle, "anchor", x, y)
-			vint_set_property(handle, "rotation", heading)
+			size_icon(handle, icon.picture, Icon_units)
+			if Icons_on_rim then
+				vint_set_property(handle, "anchor", turned(x, y))
+			else
+				vint_set_property(handle, "anchor", x, y)
+				vint_set_property(handle, "rotation", heading)
+			end
 			local tint = "own"
 			if Has_others and icon.rule ~= "" and icon.rule ~= "safehouse" and icon.rule ~= "mission" and rfg_map_icon_done(icon.index) then
 				tint = "done"
@@ -685,6 +780,14 @@ local function place_others(map_x, map_y, heading, radius, world_scale)
 	local activity, mission = rfg_activity_running()
 	-- Buildings: pinned while no activity or mission runs; drawn under the plain icons then, over them otherwise.
 	local pinned = not activity and not mission
+	local on_rim = pinned and Icons_on_rim
+	local handles, shown_pictures = Building_handles, Building_shown
+	if on_rim then
+		handles, shown_pictures = Building_rim_handles, Building_rim_shown
+		hide_from(Building_handles, Building_shown, 1, BUILDINGS)
+	else
+		hide_from(Building_rim_handles, Building_rim_shown, 1, BUILDINGS)
+	end
 	local used = 0
 	for i = 1, rfg_map_buildings() do
 		local bx, by, importance = rfg_map_building(i)
@@ -695,17 +798,16 @@ local function place_others(map_x, map_y, heading, radius, world_scale)
 			if importance >= 3 then
 				picture = "rfg_ui_map_icon_phigh"
 			end
-			local handle = show_element(Building_handles, Building_shown, used, picture)
-			vint_set_property(handle, "anchor", x, y)
-			vint_set_property(handle, "rotation", heading)
-			if pinned then
-				vint_set_property(handle, "depth", -6)
+			local handle = show_element(handles, shown_pictures, used, picture)
+			if on_rim then
+				vint_set_property(handle, "anchor", turned(x, y))
 			else
-				vint_set_property(handle, "depth", -4)
+				vint_set_property(handle, "anchor", x, y)
+				vint_set_property(handle, "rotation", heading)
 			end
 		end
 	end
-	hide_from(Building_handles, Building_shown, used + 1, BUILDINGS)
+	hide_from(handles, shown_pictures, used + 1, BUILDINGS)
 	-- Explosives inside the radius, and their rings every 0.5 s.
 	local phase = 0
 	if Sweep.clock ~= nil then
@@ -767,16 +869,26 @@ local function place_others(map_x, map_y, heading, radius, world_scale)
 			allowed[best.i] = true
 		end
 	end
-	used = 0
+	-- Sticky ones (1, 2) in the rim's layer, the others in the turned map; each Guerrilla's icon size.
+	local used, used_rim = 0, 0
 	for i = 1, count do
 		local mx, my, picture, placement, r, g, b, age = rfg_map_marker(i)
 		if placement ~= 2 or allowed[i] then
-			local x, y, shown = on_minimap((mx - map_x) * world_scale, (my - map_y) * world_scale, placement == 1 or placement == 2)
-			if shown and used < MARKERS then
+			local sticky = placement == 1 or placement == 2
+			local x, y, shown = on_minimap((mx - map_x) * world_scale, (my - map_y) * world_scale, sticky)
+			local on_rim = sticky and Icons_on_rim
+			local handle = nil
+			if shown and on_rim and used_rim < MARKERS then
+				used_rim = used_rim + 1
+				handle = show_element(Marker_rim_handles, Marker_rim_shown, used_rim, picture)
+				vint_set_property(handle, "anchor", turned(x, y))
+			elseif shown and not on_rim and used < MARKERS then
 				used = used + 1
-				local handle = show_element(Marker_handles, Marker_shown, used, picture)
+				handle = show_element(Marker_handles, Marker_shown, used, picture)
 				vint_set_property(handle, "anchor", x, y)
 				vint_set_property(handle, "rotation", heading)
+			end
+			if handle ~= nil then
 				if r ~= nil and r >= 0 then
 					vint_set_property(handle, "tint", r, g, b)
 				else
@@ -787,16 +899,17 @@ local function place_others(map_x, map_y, heading, radius, world_scale)
 					if part > 1 then
 						part = 1
 					end
-					vint_set_property(handle, "scale", ICON_SCALE * (1 + 0.75 * part), ICON_SCALE * (1 + 0.75 * part))
+					size_icon(handle, picture, Icon_units * (1 + 0.75 * part))
 					vint_set_property(handle, "alpha", 1 - part)
 				else
-					vint_set_property(handle, "scale", ICON_SCALE, ICON_SCALE)
+					size_icon(handle, picture, Icon_units)
 					vint_set_property(handle, "alpha", 1)
 				end
 			end
 		end
 	end
 	hide_from(Marker_handles, Marker_shown, used + 1, MARKERS)
+	hide_from(Marker_rim_handles, Marker_rim_shown, used_rim + 1, MARKERS)
 end
 
 -- The radio tags not found yet within the radius: a green ring each, over 750 ms of every 3 s (by the sweep's clock,
@@ -833,6 +946,35 @@ local function place_tags(map_x, map_y, radius, world_scale)
 	end
 end
 
+-- The campaign's rings on the turned map (see DECALS).
+local function place_decals(map_x, map_y, world_scale)
+	if not Has_rings then
+		return
+	end
+	local count = rfg_map_rings()
+	for i = 1, DECALS do
+		local handle = Decal_handles[i]
+		if i <= count then
+			local x, y, radius, r, g, b, a, inverted = rfg_map_ring(i)
+			if not Decal_shown[i] then
+				vint_set_property(handle, "visible", true)
+				Decal_shown[i] = true
+				log("ring " .. i .. ": radius " .. tostring(radius) .. " map pixels, colour " .. values(r, g, b, a) ..
+					(inverted and ", inverted (drawn as a plain one)" or ""))
+			end
+			local w, h = picture_size(handle, DECAL_PICTURE)
+			local across = 2 * radius * world_scale
+			vint_set_property(handle, "anchor", (x - map_x) * world_scale, (y - map_y) * world_scale)
+			vint_set_property(handle, "scale", across / w, across / h)
+			vint_set_property(handle, "tint", r, g, b)
+			vint_set_property(handle, "alpha", a / 255)
+		elseif Decal_shown[i] then
+			vint_set_property(handle, "visible", false)
+			Decal_shown[i] = nil
+		end
+	end
+end
+
 -- The north marker on the rim, where north is on the turned map.
 local function place_north(heading)
 	local north = Map_handles.north
@@ -849,6 +991,17 @@ local function place_map(map_x, map_y, heading, speed, shown)
 	local radius = RADIUS
 	if Has_zoom then
 		radius = rfg_minimap_radius()
+	end
+	-- The icons' size by the zoom alone (Guerrilla's scale for them: 1 at 40 m, 0.75 at 80 m, the speed's reach aside).
+	local zoomed_out = (radius - RADIUS) / (WIDEST_RADIUS - RADIUS)
+	if zoomed_out < 0 then
+		zoomed_out = 0
+	elseif zoomed_out > 1 then
+		zoomed_out = 1
+	end
+	Icon_units = ICON_UNITS * (1 - (1 - ICON_LEAST) * zoomed_out)
+	if Icons_on_rim then
+		Turn_sine, Turn_cosine = rfg_sin_cos(heading)
 	end
 	if In_vehicle then
 		radius = radius + SPEED_RADIUS * speed
@@ -884,6 +1037,11 @@ local function place_map(map_x, map_y, heading, speed, shown)
 
 	place_icons(map_x, map_y, heading, radius, world_scale)
 	place_tags(map_x, map_y, radius, world_scale)
+	local decals_ok, decals_problem = pcall(place_decals, map_x, map_y, world_scale)
+	if not decals_ok then
+		Has_rings = false
+		log("the minimap's rings stopped: " .. tostring(decals_problem), true)
+	end
 	place_north(heading)
 	-- What other mods give, on their own: should it fail, the map goes on without it.
 	if Has_others then
@@ -1000,6 +1158,252 @@ local function show_alert()
 	log("alert light " .. band .. " (value " .. tostring(value) .. ")")
 end
 
+-- Guerrilla's control and morale meters: its script's both_morale_update, control_update and morale_update (on its
+-- MoraleUpdate data item), as they were, fed by the mod's rfg_district_change (the guerrilla_campaign mod's districts:
+-- see the mod). The control meter: the EDF's control of the district, its number and its bar going from before to now,
+-- the change beside it; the morale meter the same for the civilians' morale (in percent, the change in points). Both
+-- stand in the same place: one that comes while the other plays waits for it to end. Each shows the district's name
+-- again. Guerrilla's mission slots on the control meter (its district's missions: done, locked, unlocked, active) stay
+-- empty: its missions aren't ported. Its sounds aren't brought over yet (the HUD's interface sounds).
+local HUD_GRAY = { R = 0.31, G = 0.31, B = 0.31 }
+local COLOUR_MORALE = { R = 0.943, G = 0.78, B = 0.20 }		-- Guerrilla's COLOR_MORALE, COLOR_CONTROL
+local COLOUR_CONTROL = { R = 0.58, G = 0.05, B = 0 }
+local METER_MAX = 192											-- its CONTROL_METER_MAX, MORALE_METER_MAX
+local Meters = { control_start = 0, control_duration = -1, morale_start = 0, morale_duration = -1,
+	control_went_down = false, morale_went_down = false, control_done = false, morale_done = false, on = false }
+local Mission_icon_handle, Mission_outline_handle, Mission_lock_handle = {}, {}, {}
+
+-- Guerrilla's round (vint_lib): to the nearest whole number (the game's Lua has no math library).
+local function round(value)
+	return value + 0.5 - (value + 0.5) % 1
+end
+
+-- A tint as Guerrilla's script gave it (0 to 1), as Armageddon's scripts set one (0 to 255).
+local function tint(handle, r, g, b)
+	vint_set_property(handle, "tint", r * 255, g * 255, b * 255)
+end
+
+-- Guerrilla's init_handles_hud and rfg_ui_hud_init for the meters: hidden, their animations stopped, its colours, its
+-- end events.
+local function build_meters()
+	for i = 1, 6 do
+		Mission_icon_handle[i] = find("mission_icon" .. i)
+		Mission_outline_handle[i] = find("mission_outline" .. i)
+		Mission_lock_handle[i] = find("mission_lock" .. i)
+		vint_set_property(Mission_icon_handle[i], "visible", false)
+		vint_set_property(Mission_outline_handle[i], "visible", false)
+		vint_set_property(Mission_outline_handle[i], "alpha", 0.33)
+		vint_set_property(Mission_lock_handle[i], "visible", false)
+	end
+	vint_set_property(find("control_meter"), "visible", false)
+	vint_set_property(find("morale_meter"), "visible", false)
+	for i, name in ipairs({ "control_meter_anim", "control_change_anim", "meter_fill_anim", "morale_meter_anim",
+		"morale_change_anim", "morale_meter_fill_anim", "mission_unlock_anim", "mission_complete_anim", "mission_active_anim" }) do
+		vint_set_child_tween_state(find(name), TWEEN_STATE_DISABLED)
+	end
+	vint_set_property(find("meter_fill_scale_twn_2"), "end_event", "rfg_ui_hud_control_lowered")
+	vint_set_property(find("morale_change_anchor_twn_1"), "end_event", "rfg_ui_hud_morale_altered")
+	vint_set_property(find("control_meter_alpha_twn_2"), "end_event", "rfg_ui_hud_control_ended")
+	vint_set_property(find("morale_meter_alpha_twn_2"), "end_event", "rfg_ui_hud_morale_ended")
+	tint(find("morale_noise"), COLOUR_MORALE.R, COLOUR_MORALE.G, COLOUR_MORALE.B)
+	tint(find("noise"), COLOUR_CONTROL.R, COLOUR_CONTROL.G, COLOUR_CONTROL.B)
+	Meters.on = true
+end
+
+-- Its end events (their sounds aside): play_control_sound_lower, play_morale_sound_alter, end_control, end_morale.
+function rfg_ui_hud_control_lowered()
+	Meters.control_done = true
+end
+
+function rfg_ui_hud_morale_altered()
+	Meters.morale_done = true
+end
+
+function rfg_ui_hud_control_ended()
+	Meters.control_done = false
+end
+
+function rfg_ui_hud_morale_ended()
+	Meters.morale_done = false
+end
+
+-- Guerrilla's set_district_info(true, district_hash, ...) as a meter shows: that district's name with its animation
+-- (the player's own shows again when the player enters another).
+local function show_district_again(name)
+	if name ~= nil and name ~= "" then
+		show_district(name)
+	end
+end
+
+-- Guerrilla's morale_update.
+local function morale_update(current_pct, last_pct, civ_change, offset_time, district)
+	current_pct = current_pct * 100
+	last_pct = last_pct * 100
+	local curr_time = vint_get_time_index()
+	local end_time = Meters.morale_start + Meters.morale_duration
+	local change_number = find("morale_change_number")
+	civ_change = round(civ_change)
+	if civ_change > 0 then
+		vint_set_property(change_number, "text_tag", "+" .. civ_change)
+	else
+		vint_set_property(change_number, "text_tag", "" .. civ_change)
+	end
+	vint_set_property(find("morale_number"), "text_tag", "" .. round(current_pct))
+
+	local last_meterfill_inverse = (METER_MAX - round(last_pct) * (METER_MAX * .01)) * -1
+	local curr_meterfill_inverse = (METER_MAX - round(current_pct) * (METER_MAX * .01)) * -1
+	vint_set_property(find("morale_meter_fill"), "scale", 24, last_meterfill_inverse)
+	local meter = find("morale_meter")
+	vint_set_property(meter, "visible", true)
+	vint_set_property(meter, "alpha", 0)
+
+	local meter_tween1, meter_tween2 = find("morale_meter_fill_scale_twn_1"), find("morale_meter_fill_scale_twn_2")
+	vint_set_property(meter_tween1, "start_value", 24, last_meterfill_inverse)
+	vint_set_property(meter_tween1, "end_value", 24, last_meterfill_inverse)
+	vint_set_property(meter_tween2, "start_value", 24, last_meterfill_inverse)
+	vint_set_property(meter_tween2, "end_value", 24, curr_meterfill_inverse)
+
+	local change_tween1, change_tween2, change_tween3 = find("morale_change_anchor_twn_1"), find("morale_change_anchor_twn_2"),
+		find("morale_change_anchor_twn_3")
+	vint_set_property(change_tween1, "start_value", -10, last_meterfill_inverse * -1)
+	vint_set_property(change_tween1, "end_value", -22, last_meterfill_inverse * -1)
+	vint_set_property(change_tween2, "start_value", -22, last_meterfill_inverse * -1)
+	vint_set_property(change_tween2, "end_value", -22, curr_meterfill_inverse * -1)
+	vint_set_property(change_tween3, "start_value", -22, curr_meterfill_inverse * -1)
+	vint_set_property(change_tween3, "end_value", -10, curr_meterfill_inverse * -1)
+
+	local fade_out = find("morale_fade_out_anim")
+	if Meters.morale_duration <= 0 then
+		Meters.morale_duration = vint_get_anim_duration(fade_out)
+		end_time = -1
+	end
+	Meters.morale_start = curr_time + offset_time
+	vint_set_child_tween_state(fade_out, TWEEN_STATE_WAITING)		-- Guerrilla's TWEEN_STATE_IDLE: both are 0
+	vint_set_property(fade_out, "start_time", Meters.morale_start)
+	local fill_anim = find("morale_meter_fill_anim")
+	vint_set_child_tween_state(fill_anim, TWEEN_STATE_WAITING)
+	vint_set_property(fill_anim, "start_time", Meters.morale_start)
+	vint_set_property(find("morale_change"), "visible", true)
+	local change_anim = find("morale_change_anim")
+	vint_set_child_tween_state(change_anim, TWEEN_STATE_WAITING)
+	vint_set_property(change_anim, "start_time", Meters.morale_start)
+	if end_time < curr_time then
+		local anim = find("morale_meter_anim")
+		vint_set_child_tween_state(anim, TWEEN_STATE_WAITING)
+		vint_set_property(anim, "start_time", Meters.morale_start)
+	end
+	show_district_again(district)
+end
+
+-- Guerrilla's control_update (its mission slots: none, see above).
+local function control_update(current_control, delta_control, current_pct, delta_pct, offset_time, district)
+	local curr_time = vint_get_time_index()
+	local end_time = Meters.control_start + Meters.control_duration
+	local change_group = find("control_change")
+	if delta_control == 0 then
+		vint_set_property(change_group, "visible", false)
+	else
+		vint_set_property(change_group, "visible", true)
+		if delta_control > 0 then
+			vint_set_property(find("control_change_number"), "text_tag", "+" .. delta_control)
+		else
+			vint_set_property(find("control_change_number"), "text_tag", "" .. delta_control)
+		end
+	end
+	vint_set_property(find("control_number"), "text_tag", "" .. current_control)
+
+	local last_pct = current_pct - delta_pct
+	local meter_mask_start = (1.0 - last_pct) * METER_MAX * -1
+	local meter_mask_end = (1.0 - current_pct) * METER_MAX * -1
+	vint_set_property(find("meter_fill"), "scale", 24, meter_mask_start)
+	local meter = find("control_meter")
+	vint_set_property(meter, "visible", true)
+	vint_set_property(meter, "alpha", 0)
+
+	local meter_tween = find("meter_fill_scale_twn_2")
+	vint_set_property(meter_tween, "start_value", 24, meter_mask_start)
+	vint_set_property(meter_tween, "end_value", 24, meter_mask_end)
+	vint_set_property(meter_tween, "state", TWEEN_STATE_RUNNING)
+
+	local change_tween1, change_tween2, change_tween3 = find("control_change_anchor_twn_1"), find("control_change_anchor_twn_2"),
+		find("control_change_anchor_twn_3")
+	vint_set_property(change_tween1, "start_value", 12, meter_mask_start * -1)
+	vint_set_property(change_tween1, "end_value", -22, meter_mask_start * -1)
+	vint_set_property(change_tween2, "start_value", -22, meter_mask_start * -1)
+	vint_set_property(change_tween2, "end_value", -22, meter_mask_end * -1)
+	vint_set_property(change_tween3, "start_value", -22, meter_mask_end * -1)
+	vint_set_property(change_tween3, "end_value", 12, meter_mask_end * -1)
+
+	local fade_out = find("control_fade_out_anim")
+	if Meters.control_duration <= 0 then
+		Meters.control_duration = vint_get_anim_duration(fade_out)
+		end_time = -1
+	end
+	Meters.control_start = curr_time + offset_time
+	vint_set_child_tween_state(fade_out, TWEEN_STATE_WAITING)
+	vint_set_property(fade_out, "start_time", Meters.control_start)
+	local change_anim = find("control_change_anim")
+	vint_set_child_tween_state(change_anim, TWEEN_STATE_WAITING)
+	vint_set_property(change_anim, "start_time", Meters.control_start)
+	local fill_anim = find("meter_fill_anim")
+	vint_set_child_tween_state(fill_anim, TWEEN_STATE_WAITING)
+	vint_set_property(fill_anim, "start_time", Meters.control_start)
+	if end_time < curr_time then
+		local anim = find("control_meter_anim")
+		vint_set_child_tween_state(anim, TWEEN_STATE_WAITING)
+		vint_set_property(anim, "start_time", Meters.control_start)
+	end
+
+	-- The mission slots: Guerrilla's with none in the district (all hidden, no animations).
+	for i = 1, 6 do
+		vint_set_property(Mission_icon_handle[i], "visible", false)
+		vint_set_property(Mission_outline_handle[i], "visible", false)
+		vint_set_property(Mission_lock_handle[i], "visible", false)
+	end
+	for i, name in ipairs({ "mission_active_anim", "mission_complete_anim", "mission_unlock_anim" }) do
+		vint_set_child_tween_state(find(name), TWEEN_STATE_DISABLED)
+	end
+	show_district_again(district)
+end
+
+-- Guerrilla's both_morale_update: a change of control shows at once unless morale's meter plays (then after it), and
+-- the same for morale.
+local function follow_meters()
+	if not Meters.on or _GetAnyGlobalSilent("rfg_district_change") == nil then
+		return
+	end
+	local control_changed, current_control, delta_control, current_pct, delta_pct, morale_changed, morale_pct, last_pct,
+		civ_change, district = rfg_district_change()
+	if control_changed == nil then
+		return
+	end
+	local curr_time = vint_get_time_index()
+	if control_changed then
+		Meters.control_went_down = delta_control < 0
+		local civilian_end_time = Meters.morale_start + Meters.morale_duration
+		local wait = 0
+		if curr_time <= civilian_end_time then
+			wait = civilian_end_time - curr_time
+		end
+		control_update(current_control, delta_control, current_pct, delta_pct, wait, district)
+		log("control meter: " .. tostring(current_control) .. " (" .. tostring(delta_control) .. "), " .. tostring(district), true)
+	end
+	if morale_changed then
+		if civ_change < 0 then
+			Meters.morale_went_down = true
+		elseif civ_change > 0 then
+			Meters.morale_went_down = false
+		end
+		local control_end_time = Meters.control_start + Meters.control_duration
+		local wait = 0
+		if curr_time <= control_end_time then
+			wait = control_end_time - curr_time
+		end
+		morale_update(morale_pct, last_pct, civ_change, wait, district)
+		log("morale meter: " .. tostring(morale_pct) .. " (" .. tostring(civ_change) .. "), " .. tostring(district), true)
+	end
+end
+
 -- One frame: follows the player and the camera.
 local function frame()
 	local active, map_x, map_y, heading, speed, column, row, district, map_open = rfg_map_view()
@@ -1013,6 +1417,11 @@ local function frame()
 			Shown_district = district
 		end
 		show_alert()
+		local ok, problem = pcall(follow_meters)
+		if not ok then
+			Meters.on = false
+			log("the control and morale meters stopped: " .. tostring(problem), true)
+		end
 	end
 	if Log_on and active and (Frames_logged < 3 or Frames_logged == 60) then
 		log("frame " .. Frames_logged .. ": map " .. values(map_x, map_y) .. ", heading " .. tostring(heading) .. ", speed " ..
@@ -1040,7 +1449,7 @@ local function hide_unused()
 	for i, name in ipairs(HIDDEN) do
 		vint_set_property(find(name), "visible", false)
 	end
-	for i, name in ipairs({ "control_meter_anim", "morale_meter_anim", "action_anim", "mini_map_alert_anim", "district_name_anim" }) do
+	for i, name in ipairs({ "action_anim", "mini_map_alert_anim", "district_name_anim" }) do
 		vint_set_child_tween_state(find(name), TWEEN_STATE_DISABLED)
 	end
 end
@@ -1084,6 +1493,10 @@ function rfg_ui_hud_init()
 		return
 	end
 	log_map("built")
+	local meters_built, meters_problem = pcall(build_meters)
+	if not meters_built then
+		log("the control and morale meters couldn't be set up: " .. tostring(meters_problem), true)
+	end
 	Thread = thread_new("rfg_ui_hud_follow")
 	log("init done, thread " .. tostring(Thread))
 end

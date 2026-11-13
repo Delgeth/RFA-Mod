@@ -100,6 +100,14 @@ bool RoadPlace(const V3& around, V3& where, V3& forward);
 void EndWait(BYTE* vehicle);
 // A vehicle's damage, 0 (none) to 1.
 float Damage(BYTE* vehicle);
+// Which of the mod's spawners made a vehicle (traffic, a convoy, the EDF's drive-bys, a safehouse refill), for the
+// log; null for one the mod didn't make. The last 256 are remembered.
+void NoteMadeBy(DWORD vehicle, const char* maker);
+const char* MadeBy(DWORD vehicle);
+// For a vehicle whose spawn waited for its model: how long after the model streamed in it was made (ms; -1 unknown:
+// its model was in before anything asked for it). Noted by the vehicle spawn's hook (guerrilla_vehicles.cpp).
+void NoteModelAge(DWORD vehicle, int ms);
+int ModelAge(DWORD vehicle);
 
 // ---- What GuerrillaBuilder.exe wrote (mods\guerrilla_vehicles\traffic.txt, mods\guerrilla_people\crews.txt)
 struct Zone {

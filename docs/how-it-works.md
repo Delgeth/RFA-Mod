@@ -866,6 +866,17 @@ opened and closed with `MapKey=`).
   later, and each person gets Guerrilla's ring (`ui_map_icon_ring`), growing and fading over the
   first third of the sweep. The game's Lua has no math library, so the mod gives it
   `rfg_sin_cos` for where a blip lands on the turned map.
+- What the guerrilla_campaign mod runs shows on Guerrilla's own HUD parts, fed through its exports: the control and
+  morale meters when a district's EDF control or morale changes, the district-liberated screen, and an activity's
+  briefing, corner panel and results (demolitions master's). Their scripts are Guerrilla's; Guerrilla's game filled
+  their data, so the mod gives the same values, Guerrilla's texts included (Armageddon's string tables don't have
+  them: `hud_messages.txt` holds Guerrilla's strings by their tag's hash). The screens pause the game, as Guerrilla's
+  did. The console's `rfg_liberated` shows the district-liberated screen for your district.
+- The minimap's icons (safehouses, mission and activity starts, pinned buildings, squads' markers)
+  are drawn as Guerrilla drew them, after the frame and uncut by the octagon: in a layer of their
+  own over the frame, so an icon pinned to the rim sits whole over the frame's border. Each is
+  Guerrilla's size: a square 26 pixels across at 1080p, three quarters of that when zoomed out;
+  the north marker 40.
 - The zones' own pictures (13 MB in all), each as Guerrilla made it, come in four documents by
   quarter of the world (`rfg_ui_map_zones_nw`, `_ne`, `_sw`, `_se`), which the mod loads with the HUD
   and keeps until the next level load. Guerrilla streamed each with its zone, but Armageddon's
@@ -1038,7 +1049,11 @@ skeletons, and their dents.
   carving its slots out of a buffer inside the pool object, sized for its count, and Armageddon made two
   of Guerrilla's smaller: parked vehicles' spots (vehicle spawn nodes) 12, Guerrilla's 128
   (`0x805710`), and cars at once 16, Guerrilla's 32 (`0x5F97F0`). The mod replaces both constructors
-  with ones doing the same on buffers of its own for Guerrilla's counts. Every vehicle model the vehicle
+  with ones doing the same on buffers of its own: Guerrilla's 128 spots, and 64 cars, twice Guerrilla's
+  (`cars.h`; 24,045 bytes a car, 1.47 MB in all). The world's list of each kind is as big as its pool
+  (the cars' count is a one-byte value in their type's registration, `0xF23059`, checked to be 16 before
+  it's changed). Flyers (8), walkers (4) and turrets (66, a vehicle's gun among them) keep the game's
+  sizes, the same as Guerrilla's. Every vehicle model the vehicle
   table names also takes a record (the vehicle resource pool `0x1972900`, built at start-up on an array
   of 84): Armageddon's and Guerrilla's models together are more than 84, and a model without one never
   spawns, so the mod builds the records on an array of 255. Each constructor's values are checked first.
@@ -1081,9 +1096,12 @@ skeletons, and their dents.
   for 10 to 15 s. A driver who has seen an explosion, been hit or heard fighting drives off at the car's
   full speed, away from it, and stops only for you on foot. The people in a car that's on fire, wrecked
   or flipped get out (at once if it burns, otherwise once it has nearly stopped) and run off. No new car
-  comes while the world has more than 90 people or 28 cars. A car more than 60 m away whose driver has
+  comes while the world has more than 90 people or 60 cars (Guerrilla's 28 of its 32, kept as far from
+  the 64 the world holds here). A car more than 60 m away whose driver has
   been out of view for 5 s is taken away 20 s after it appeared (10 s if it's beyond 260 m), and any car
-  280 m away. Not yet: pulling off the road for a convoy.
+  280 m away. And as Guerrilla does while its world is nearly full of cars (from 30 of its 32; here 62
+  of 64), each frame one car is taken away: one fading out, else the farthest with nobody in it, out of
+  view either way. Not yet: pulling off the road for a convoy.
 - **Crews and chases** (`crews.cpp`): the EDF's and Marauders' crewed vehicles. The mod drives each
   vehicle's driver the way it drives traffic. The others aboard keep their own AI, so a gunner on a
   vehicle's turret aims and fires at whoever it sees. Going after someone works as in Guerrilla:
