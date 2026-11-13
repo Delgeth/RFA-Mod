@@ -313,7 +313,7 @@ sealed class NewLevel
         t.Occluders = [];
         t.StitchNames = [];
         t.StitchPlacements = [];
-        if (t.LayerMap is { } map) t.LayerMap = map with { Cells = new byte[map.Cells.Length] };
+        if (t.LayerMap is { } layerMap) t.LayerMap = layerMap with { Cells = new byte[layerMap.Cells.Length] };
         void Word(int at, int value) => BitConverter.TryWriteBytes(t.Data.AsSpan(at), value);
         void Float(int at, float value) => BitConverter.TryWriteBytes(t.Data.AsSpan(at), value);
         Float(0x08, bottom); Float(0x14, top);
