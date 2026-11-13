@@ -171,6 +171,17 @@ public partial class LevelEditor : UserControl, IEditorDocument
         if (!context.Assets.IndexReady) context.Assets.IndexBecameReady += OnIndexReady;
     }
 
+    /// <summary>
+    /// The file index was read again (after a new level's archive was written): what wasn't found
+    /// before (the level's ground, level geometry, sky, its other files) is looked for again and drawn.
+    /// </summary>
+    public void FilesIndexedAgain()
+    {
+        related = null;
+        relatedOf.Clear();
+        OnIndexReady();
+    }
+
     void OnIndexReady()
     {
         context.Assets.IndexBecameReady -= OnIndexReady;

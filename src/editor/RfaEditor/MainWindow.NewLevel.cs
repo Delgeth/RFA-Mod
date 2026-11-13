@@ -72,7 +72,7 @@ public partial class MainWindow
 
     // ---- New level ---------------------------------------------------------------------------------
 
-    void OnNewLevel(object sender, RoutedEventArgs e)
+    async void OnNewLevel(object sender, RoutedEventArgs e)
     {
         if (!context.Assets.IndexReady)
         {
@@ -158,10 +158,17 @@ public partial class MainWindow
             Log("  The game reads its map lists at start-up: restart it to see the level in the menu.");
             RefreshOverrideMarks();
             BuildTree();
-            _ = BuildSearchIndexAsync();
+            Task index = BuildSearchIndexAsync();
             string archive = $@"build\pc\cache\{name}.vpp_pc";
             Packfile pack = workspace.Archive(archive);
             if (pack.Find(name + ".rfgzone_pc") is { } zone) OpenLevel(new GameFile(pack, zone, archive, null));
+            // Its ground, level geometry and sky are found through the file index, which is read again
+            // (a minute) to have the new archive: the level is drawn again once it has.
+            Mouse.OverrideCursor = null;
+            Log("  Its ground shows once the editor has read the new level's files (a minute or so).");
+            await index;
+            foreach (var open in documents.Where(d => d.Key.StartsWith($@"level:build\pc\cache\{name}.vpp_pc", StringComparison.OrdinalIgnoreCase)).ToList())
+                if (open.Value.Document is LevelEditor editor) editor.FilesIndexedAgain();
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or InvalidOperationException
                                        or System.Runtime.InteropServices.COMException or FormatException)
