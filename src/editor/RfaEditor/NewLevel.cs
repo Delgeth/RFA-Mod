@@ -286,7 +286,7 @@ sealed class NewLevel
     /// <summary>A file's kind in an asset list (type, allocator, flags, split), as the game's levels list such files.</summary>
     static AsmPrimitive Kind(string file)
     {
-        (byte type, byte allocator, byte flags, byte split) = Path.GetExtension(file).ToLowerInvariant() switch
+        (int type, int allocator, int flags, int split) = Path.GetExtension(file).ToLowerInvariant() switch
         {
             ".rfgzone_pc" => (3, 0, 2, 0),
             ".cterrain_pc" => (4, 0, 6, 0),
@@ -298,7 +298,7 @@ sealed class NewLevel
             ".cpeg_pc" => (1, 1, 6, 1),
             _ => (0, 0, 2, 0),
         };
-        return new AsmPrimitive { Name = file, Type = type, Allocator = allocator, Flags = flags, SplitIndex = split };
+        return new AsmPrimitive { Name = file, Type = (byte)type, Allocator = (byte)allocator, Flags = (byte)flags, SplitIndex = (byte)split };
     }
 
     /// <summary>The ground textures the terrain files' materials name (their .tga names, as the game's textures: .cvbm_pc), but the level's own maps.</summary>

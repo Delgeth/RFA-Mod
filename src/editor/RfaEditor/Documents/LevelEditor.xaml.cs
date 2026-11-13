@@ -1129,7 +1129,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (chosen is ChunkChoice chunk) { if (CanPlaceAt(at, chunk.Chunk)) AddChunk(chunk.Chunk, at); }
         else if (chosen is GeometryChoice piece) AddGeometry(piece.Piece, at);
         else if (chosen is BarrierChoice) AddBarrier(at);
-        else if (chosen is ObjectExample example) AddExample(example, at);
+        else if (chosen is ObjectExample gameExample) AddExample(gameExample, at);
         ViewArea.Focus();
     }
 
