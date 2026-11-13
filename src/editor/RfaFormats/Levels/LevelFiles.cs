@@ -108,6 +108,36 @@ public static class LevelFiles
         return stream.ToArray();
     }
 
+    /// <summary>A strings file without the strings of these tags; null if it has none of them.</summary>
+    public static byte[]? WithoutStrings(byte[] file, IReadOnlyList<string> tags)
+    {
+        var hashes = tags.Select(t => VintDocument.Hash(t.ToLowerInvariant())).ToHashSet();
+        int count = (int)BitConverter.ToUInt32(file, 6);
+        var entries = new List<(uint Hash, byte[] Text)>();
+        int at = 10;
+        for (int i = 0; i < count && at + 6 <= file.Length; i++)
+        {
+            uint hash = BitConverter.ToUInt32(file, at);
+            int length = BitConverter.ToUInt16(file, at + 4);
+            entries.Add((hash, file.AsSpan(at + 6, length).ToArray()));
+            at = (at + 6 + length + 3) & ~3;
+        }
+        if (entries.RemoveAll(e => hashes.Contains(e.Hash)) == 0) return null;
+        using var stream = new MemoryStream();
+        using var w = new BinaryWriter(stream);
+        w.Write(file, 0, 6);
+        w.Write((uint)entries.Count);
+        foreach (var (hash, text) in entries)
+        {
+            w.Write(hash);
+            w.Write((ushort)text.Length);
+            w.Write(text);
+            while (stream.Length % 4 != 0) w.Write((byte)0);
+        }
+        w.Flush();
+        return stream.ToArray();
+    }
+
     /// <summary>
     /// A table (.xtbl) with a copy of one of its rows added after its last row: the row of element
     /// <paramref name="rowTag"/> whose <paramref name="keyTag"/> is <paramref name="key"/>, changed by

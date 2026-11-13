@@ -36,6 +36,13 @@
                         <TextBlock Text="Spawn resources" />
                     </StackPanel>
                 </Button>
+                <Button DockPanel.Dock="Right" Click="OnDeleteLevel" Margin="0,0,8,0"
+                        ToolTip="Deletes a level made with New level, all of it: from its map list, its spawn resources, strings and pictures, and its archive with its edits">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Delete}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Delete level" />
+                    </StackPanel>
+                </Button>
                 <Button DockPanel.Dock="Right" Click="OnNewLevel" Margin="0,0,8,0"
                         ToolTip="Makes a brand-new level for Ruin or Infestation, listed in that mode's map list, with its own preview picture">
                     <StackPanel Orientation="Horizontal">

@@ -341,73 +341,139 @@ sealed class NewLevel
         }
     }
 
-    /// <summary>
-    /// The levels the editor has made (in a mode's list, with no archive of the game's): their file
-    /// names, and whether their archive is still there.
-    /// </summary>
-    public static List<(string Name, Mode Mode, bool Archive)> Made(Workspace workspace)
+    /// <summary>A level the editor made: its file name, the mode whose list has it (null: none, only its files are left), whether its archive is there.</summary>
+    public sealed record MadeLevel(string Name, Mode? Mode, bool Archive)
     {
-        var made = new List<(string, Mode, bool)>();
+        public override string ToString() =>
+            $"{Name}  ({(Mode is { } m ? m.ToString() : "in no map list")}{(Archive ? "" : Mode == null ? ", its edits left" : ", its archive gone")})";
+    }
+
+    /// <summary>
+    /// The levels the editor has made: those in a mode's list with no archive of the game's, and any
+    /// left in no list (a level's archive in overrides\, one archive holding its zone and asset list
+    /// under its own name, or only its edits, in edits\).
+    /// </summary>
+    public static List<MadeLevel> Made(Workspace workspace)
+    {
+        var made = new List<MadeLevel>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool Game(string level) => File.Exists(Path.Combine(workspace.GameFolder, Cache + level + ".vpp_pc"));
+        bool Ours(string level) => File.Exists(Path.Combine(workspace.OverridesFolder, Cache + level + ".vpp_pc"));
         foreach (Mode mode in new[] { Mode.Ruin, Mode.Infestation })
             foreach (string level in LevelsOf(workspace, mode))
+                if (!Game(level) && seen.Add(level)) made.Add(new MadeLevel(level, mode, Ours(level)));
+        // In no list: archives of ours that are a level (its zone and asset list under its name).
+        string cache = Path.Combine(workspace.OverridesFolder, Cache);
+        if (Directory.Exists(cache))
+            foreach (string path in Directory.EnumerateFiles(cache, "*.vpp_pc"))
             {
-                string archive = Cache + level + ".vpp_pc";
-                if (File.Exists(Path.Combine(workspace.GameFolder, archive))) continue;
-                made.Add((level, mode, File.Exists(Path.Combine(workspace.OverridesFolder, archive))));
+                string level = Path.GetFileNameWithoutExtension(path);
+                if (Game(level) || seen.Contains(level)) continue;
+                try
+                {
+                    Packfile pack = Packfile.FromBytes(Path.GetFileName(path), File.ReadAllBytes(path));
+                    if (pack.Find(level + ".rfgzone_pc") == null || pack.Find(level + ".asm_pc") == null) continue;
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException) { continue; }
+                seen.Add(level);
+                made.Add(new MadeLevel(level, null, true));
+            }
+        // Only its edits left.
+        string edits = Path.Combine(workspace.EditsFolder, Cache);
+        if (Directory.Exists(edits))
+            foreach (string folder in Directory.EnumerateDirectories(edits, "*.vpp_pc"))
+            {
+                string level = Path.GetFileNameWithoutExtension(folder);
+                if (Game(level) || Ours(level) || seen.Contains(level)) continue;
+                if (!File.Exists(Path.Combine(folder, level + ".rfgzone_pc")) && !File.Exists(Path.Combine(folder, level + ".asm_pc"))) continue;
+                seen.Add(level);
+                made.Add(new MadeLevel(level, null, false));
             }
         return made;
     }
 
     /// <summary>
-    /// Takes a level the editor made out again: its row in its mode's list (and Infestation's pre-game
-    /// row), its own spawn resources, its pictures, and its archive with its edits. Its strings stay
-    /// (nothing shows them). Returns what was done.
+    /// Deletes a level the editor made, all of it: its rows in both modes' lists (and Infestation's
+    /// pre-game list), its own spawn resources, its name in every language's strings, its pictures
+    /// (their containers and their entries in ui_images.asm_pc), and its archive with its edits and
+    /// the copies kept of them. Returns what was done.
     /// </summary>
-    public List<string> Remove(Mode mode, string name)
+    public List<string> Remove(string name)
     {
         string archive = Cache + name + ".vpp_pc";
         if (File.Exists(Path.Combine(workspace.GameFolder, archive))) throw new InvalidDataException($"{name} is one of the game's own levels");
-        var (tableName, row, key) = TableOf(mode);
-        string table = Encoding.Latin1.GetString(workspace.Read(Tables, tableName));
-        string? resources = LevelFiles.RowValue(table, row, key, name, "resource_reservation");
-        var images = new[] { "image_name", "level_image_name", "Load_image" }
-                     .Select(t => LevelFiles.RowValue(table, row, key, name, t)).OfType<string>().Where(i => i.Length > 0).ToList();
-        if (LevelFiles.WithoutRow(table, row, key, name) is { } without)
+        var images = new List<string>();
+        var resources = new List<string>();
+        foreach (Mode mode in new[] { Mode.Ruin, Mode.Infestation })
         {
-            workspace.WriteOverride(Tables, tableName, Encoding.Latin1.GetBytes(without));
-            report.Add($"{tableName}: its row taken out");
-        }
-        if (mode == Mode.Infestation)
-        {
-            string pregame = Encoding.Latin1.GetString(workspace.Read(Tables, "rf4_mp_pregame.xtbl"));
-            if (LevelFiles.WithoutRow(pregame, "pregame", "Name", name) is { } p)
+            var (tableName, row, key) = TableOf(mode);
+            string table = Encoding.Latin1.GetString(workspace.Read(Tables, tableName));
+            if (LevelFiles.RowValue(table, row, key, name, "resource_reservation") is { Length: > 0 } r) resources.Add(r);
+            images.AddRange(new[] { "image_name", "level_image_name", "Load_image" }
+                            .Select(t => LevelFiles.RowValue(table, row, key, name, t)).OfType<string>().Where(i => i.Length > 0));
+            if (LevelFiles.WithoutRow(table, row, key, name) is { } without)
             {
-                workspace.WriteOverride(Tables, "rf4_mp_pregame.xtbl", Encoding.Latin1.GetBytes(p));
-                report.Add("rf4_mp_pregame.xtbl: its row taken out");
+                workspace.WriteOverride(Tables, tableName, Encoding.Latin1.GetBytes(without));
+                report.Add($"{tableName}: its row taken out");
             }
         }
-        if (resources != null && resources.Equals(name, StringComparison.OrdinalIgnoreCase))  // (its own, as New level made it)
+        string pregame = Encoding.Latin1.GetString(workspace.Read(Tables, "rf4_mp_pregame.xtbl"));
+        if (LevelFiles.WithoutRow(pregame, "pregame", "Name", name) is { } p)
         {
-            string spawn = Encoding.Latin1.GetString(workspace.Read(Tables, "spawn_resource.xtbl"));
+            workspace.WriteOverride(Tables, "rf4_mp_pregame.xtbl", Encoding.Latin1.GetBytes(p));
+            report.Add("rf4_mp_pregame.xtbl: its row taken out");
+        }
+        // Its own spawn resources (as New level named them: as the level), only if no other level names them.
+        string spawn = Encoding.Latin1.GetString(workspace.Read(Tables, "spawn_resource.xtbl"));
+        if (resources.Append(name).Any(r => r.Equals(name, StringComparison.OrdinalIgnoreCase)) && !OthersUse(name))
             if (LevelFiles.WithoutRow(spawn, "spawn_resource_entry", "Name", name) is { } left)
             {
                 workspace.WriteOverride(Tables, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(left));
                 report.Add($"spawn_resource.xtbl: its spawn resources \"{name}\" taken out");
             }
-        }
-        // Its pictures: those it has of its own (a container New level wrote beside interface.vpp_pc).
-        var own = images.Where(i => File.Exists(Path.Combine(workspace.OverridesFolder, Cache, i + ".str2_pc"))).ToList();
-        if (own.Count > 0)
-        {
-            AsmFile list = AsmFile.Read(workspace.Read(Interface, "ui_images.asm_pc"));
-            list.Containers.RemoveAll(c => own.Contains(c.Name, StringComparer.OrdinalIgnoreCase));
-            workspace.WriteOverride(Interface, "ui_images.asm_pc", list.ToBytes());
-            foreach (string image in own) File.Delete(Path.Combine(workspace.OverridesFolder, Cache, image + ".str2_pc"));
-            report.Add($"its pictures {string.Join(", ", own)} taken out");
-        }
-        if (workspace.RemoveNewArchive(archive)) report.Add($"{archive} and its edits deleted");
+        // Its name in every language.
+        string upper = name.ToUpperInvariant();
+        string[] tags = ["RUIN_MAP_" + upper, "RUIN_MAP_" + upper + "_UC", "MP_" + upper + "_NAME", "MP_" + upper + "_NAME_UC"];
+        int languages = 0;
+        foreach (PackfileEntry entry in workspace.Archive(Misc).Entries.Where(e => e.Name.StartsWith("multiplayer_", StringComparison.OrdinalIgnoreCase) && e.Name.EndsWith(".le_strings", StringComparison.OrdinalIgnoreCase)))
+            if (LevelFiles.WithoutStrings(workspace.Read(Misc, entry.Name), tags) is { } fewer)
+            {
+                workspace.WriteOverride(Misc, entry.Name, fewer);
+                languages++;
+            }
+        if (languages > 0) report.Add($"its name taken out of {languages} languages' multiplayer strings");
+        // Its pictures: those of its own (a container New level wrote beside interface.vpp_pc), also
+        // by the names New level gives them, should its row be gone already.
+        images.AddRange(["ui_ruin_" + name, "ui_mp_lobby_" + name, "ui_mp_load_" + name]);
+        var own = images.Distinct(StringComparer.OrdinalIgnoreCase).Where(i => File.Exists(Path.Combine(workspace.OverridesFolder, Cache, i + ".str2_pc"))).ToList();
+        AsmFile list = AsmFile.Read(workspace.Read(Interface, "ui_images.asm_pc"));
+        int listed = list.Containers.RemoveAll(c => own.Contains(c.Name, StringComparer.OrdinalIgnoreCase) ||
+                                                    images.Skip(images.Count - 3).Contains(c.Name, StringComparer.OrdinalIgnoreCase));
+        if (listed > 0) workspace.WriteOverride(Interface, "ui_images.asm_pc", list.ToBytes());
+        foreach (string image in own) File.Delete(Path.Combine(workspace.OverridesFolder, Cache, image + ".str2_pc"));
+        if (own.Count > 0 || listed > 0) report.Add($"its pictures taken out ({string.Join(", ", own)})");
+        // Its archive, its edits and the copies kept.
+        if (workspace.RemoveNewArchive(archive)) report.Add($"{archive}, its edits and the copies kept of them deleted");
         workspace.RefreshOverrides();
         return report;
+    }
+
+    /// <summary>Whether a level other than <paramref name="name"/> names the spawn resources <paramref name="name"/>.</summary>
+    bool OthersUse(string name)
+    {
+        foreach (var (table, row, key) in new[] { TableOf(Mode.Ruin), TableOf(Mode.Infestation), ("missions.xtbl", "mission", "Name") })
+        {
+            string text;
+            try { text = Encoding.Latin1.GetString(workspace.Read(Tables, table)); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException) { continue; }
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, $@"<{row}>.*?</{row}>", System.Text.RegularExpressions.RegexOptions.Singleline))
+            {
+                string k = System.Text.RegularExpressions.Regex.Match(m.Value, $@"<{key}>([^<]*)</{key}>").Groups[1].Value.Trim();
+                string r = System.Text.RegularExpressions.Regex.Match(m.Value, @"<resource_reservation>([^<]*)</resource_reservation>").Groups[1].Value.Trim();
+                if (!k.Equals(name, StringComparison.OrdinalIgnoreCase) && r.Equals(name, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        }
+        return false;
     }
 
     // ---- The mode's list -------------------------------------------------------------------------
