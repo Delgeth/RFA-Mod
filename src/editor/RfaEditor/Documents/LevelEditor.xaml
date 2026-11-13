@@ -390,7 +390,7 @@
                 <TextBlock Text="PROPERTIES" Style="{StaticResource SectionTitle}"
                            ToolTip="As the game's zone schema (Volition's level editor's) describes them. Hover over a property's name for its name in the game, its type and default" />
                 <StackPanel x:Name="PropertyPanel" />
-                <CheckBox x:Name="ShowAllPropertiesBox" Content="Show hidden and read-only properties" Margin="0,8,0,0"
+                <CheckBox x:Name="ShowAllPropertiesBox" Content="Show hidden and read-only properties" Margin="0,8,0,0" IsChecked="True"
                           Checked="OnShowAllPropertiesChanged" Unchecked="OnShowAllPropertiesChanged"
                           ToolTip="Volition's editor hid some properties and kept others read-only (its tools set them: a model's name, a light's curve files). Tick to show and change them anyway" />
             </StackPanel>

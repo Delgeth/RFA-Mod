@@ -67,6 +67,7 @@ sealed class ZonePropertyRows
             bool editable = showAll || !(property.ReadOnly || property.Hidden);
             if (described.TryGetValue(property, out ZoneProperty? value)) yield return row.Described(property, value, editable);
             else if (property.Exported) yield return row.NotSet(property, editable);
+            else if (showAll && property.Type == SchemaType.List && !property.EditorOnly && !property.CombinedExport) yield return row.NotSet(property, editable);
         }
         // Properties of other classes (none in the game's zones), then those the schema doesn't describe.
         foreach (var (property, value) in described.Where(d => !listed.Contains(d.Key)))
@@ -145,8 +146,10 @@ sealed class ZonePropertyRows
                 DockPanel.SetDock(set, Dock.Right);
                 set.Click += (_, _) =>
                 {
-                    byte[] value = property.DefaultValue(rows.choicesOf) ?? [0];
-                    obj.AddProperty(property.ZoneType, NameHashes.PropertyHash(property.ZoneName), value);
+                    if (property.Type == SchemaType.List)  // a list of handles: one, none (FFFFFFFF), to fill in
+                        obj.AddProperty(ZoneProperty.ListType, NameHashes.PropertyHash(property.ZoneName), BitConverter.GetBytes(ZoneObject.None));
+                    else
+                        obj.AddProperty(property.ZoneType, NameHashes.PropertyHash(property.ZoneName), property.DefaultValue(rows.choicesOf) ?? [0]);
                     Finished(laidOut: true);
                 };
                 panel.Children.Add(set);

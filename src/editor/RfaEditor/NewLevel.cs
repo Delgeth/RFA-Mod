@@ -475,11 +475,13 @@ sealed class NewLevel
             int number = int.TryParse(file[(name.Length + 1)..^".ctmesh_pc".Length], out int k) ? k : starts.Count;
             starts.Add((file, number, (int)MathF.Round((old.Origin.X - corner.X) / step), (int)MathF.Round((old.Origin.Y - corner.Y) / step), TerrainSubzone.GroundMaterialOf(files[file])));
         }
-        var xs = starts.Select(s => s.X0).Append(n - 1).Distinct().Order().ToList();
-        var zs = starts.Select(s => s.Z0).Append(m - 1).Distinct().Order().ToList();
-        foreach (var (file, number, x0, z0, material) in starts)
+        // A regular grid of them, numbered across then up (as the game's: sub-zone k is column k % 3, row k / 3,
+        // x and z growing; the game's own overlap and start where their ground does, which isn't a grid).
+        int columns = Math.Max(1, (int)MathF.Round(MathF.Sqrt(starts.Count))), rows = Math.Max(1, (starts.Count + columns - 1) / columns);
+        foreach (var (file, number, _, _, material) in starts)
         {
-            int x1 = xs.First(x => x > x0), z1 = zs.First(z => z > z0);
+            int column = number % columns, row = Math.Min(rows - 1, number / columns);
+            int x0 = column * (n - 1) / columns, x1 = (column + 1) * (n - 1) / columns, z0 = row * (m - 1) / rows, z1 = (row + 1) * (m - 1) / rows;
             var (header, data) = TerrainSubzone.Grid(number, new Vector2(corner.X + x0 * step, corner.Y + z0 * step), x1 - x0, z1 - z0,
                 (x, z) => Inside(x0 + x, z0 + z) && Inside(x0 + x + 1, z0 + z) && Inside(x0 + x, z0 + z + 1) && Inside(x0 + x + 1, z0 + z + 1),
                 (x, z) => heights[(z0 + z) * n + x0 + x], (_, _) => Vector3.UnitY, material, step);
