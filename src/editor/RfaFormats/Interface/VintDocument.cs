@@ -182,6 +182,21 @@ public sealed class VintDocument
 
     public string Text(VintReference reference) => strings[CurrentIndex(reference)];
 
+    /// <summary>A two-float property's value (value type 7: a text_scale, an anchor, ...).</summary>
+    public (float X, float Y) Vector2(VintProperty property)
+    {
+        if (property.ValueType != 7) throw new ArgumentException("not a two-float property", nameof(property));
+        return (BitConverter.ToSingle(body, property.ValueAt), BitConverter.ToSingle(body, property.ValueAt + 4));
+    }
+
+    /// <summary>Changes a two-float property's value in place.</summary>
+    public void SetVector2(VintProperty property, float x, float y)
+    {
+        if (property.ValueType != 7) throw new ArgumentException("not a two-float property", nameof(property));
+        BitConverter.TryWriteBytes(body.AsSpan(property.ValueAt, 4), x);
+        BitConverter.TryWriteBytes(body.AsSpan(property.ValueAt + 4, 4), y);
+    }
+
     /// <summary>Points a reference (a dependency, a metadata value, a string property's value) at this text, added to the table if it isn't there.</summary>
     public void Point(VintReference reference, string text)
     {

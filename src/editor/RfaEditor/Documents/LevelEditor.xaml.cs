@@ -123,6 +123,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         this.zoneName = zoneName;
         Outliner = DocumentParts.Detach(OutlinerPart);
         Inspector = DocumentParts.Detach(InspectorPart);
+        DetachWindowParts();  // its menus, status and Show chips, which the window shows (see LevelEditor.Layout.cs)
         names = context.Assets.ZoneNames;
         propertyRows = new ZonePropertyRows(names, context.Assets.ZoneSchema, context.Assets.Choices);
         zone = ZoneFile.Read(ReadZone());
@@ -312,67 +313,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
     ObjectKind KindOf(ZoneObject obj) => ObjectKind.Of(names.Class(obj.ClassHash), LevelScene.ModelOf(obj) != null);
 
-    /// <summary>
-    /// The outliner: a folder per class of object, with the icon of the kind most of them are, kinds
-    /// in order; then one for each of the zone's other files drawn with it (its mission layers),
-    /// with their objects by class in the same way.
-    /// </summary>
-    void BuildObjectTree(string filter)
-    {
-        ObjectTree.Items.Clear();
-        treeItems.Clear();
-        foreach (TreeViewItem folder in ClassFolders(zone.Objects, filter)) ObjectTree.Items.Add(folder);
-        foreach (RelatedFile file in RelatedFiles())
-        {
-            var group = new TreeViewItem
-            {
-                Header = FolderHeader(file.Icon, Theme.Brush("RelatedBrush"), file.Label, file.Zone.Objects.Count, file.Description),
-                IsExpanded = filter.Length > 0,
-            };
-            foreach (TreeViewItem folder in ClassFolders(file.Zone.Objects, filter)) group.Items.Add(folder);
-            if (group.Items.Count > 0) ObjectTree.Items.Add(group);
-        }
-    }
-
-    /// <summary>A folder per class of the objects that match the filter, as in the outliner.</summary>
-    IEnumerable<TreeViewItem> ClassFolders(IEnumerable<ZoneObject> objects, string filter)
-    {
-        var classes = objects
-            .GroupBy(o => names.Class(o.ClassHash))
-            .Select(g => (Name: g.Key, Kind: g.GroupBy(KindOf).MaxBy(k => k.Count())!.Key, Objects: g.ToList()))
-            .OrderBy(c => ObjectKind.All.IndexOf(c.Kind))
-            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase);
-        foreach (var (name, kind, inClass) in classes)
-        {
-            var matching = inClass.Where(o => filter.Length == 0 || name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
-                                              Label(o).Contains(filter, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (matching.Count == 0) continue;
-            var folder = new TreeViewItem { Header = FolderHeader(kind.Icon, kind.Brush, name, matching.Count, kind.Description), IsExpanded = filter.Length > 0 };
-            foreach (ZoneObject obj in matching.OrderBy(Label, StringComparer.OrdinalIgnoreCase))
-            {
-                var item = new TreeViewItem { Header = Label(obj), Tag = obj };
-                treeItems[obj] = item;
-                folder.Items.Add(item);
-            }
-            yield return folder;
-        }
-    }
-
-    static StackPanel FolderHeader(string iconText, Brush brush, string className, int count, string tip)
-    {
-        var header = new StackPanel { Orientation = Orientation.Horizontal, ToolTip = tip };
-        TextBlock icon = Theme.Icon(iconText, 12, brush);
-        icon.Width = 16;
-        icon.Margin = new Thickness(0, 0, 6, 0);
-        header.Children.Add(icon);
-        header.Children.Add(new TextBlock { Text = className, VerticalAlignment = VerticalAlignment.Center });
-        header.Children.Add(new TextBlock
-        {
-            Text = count.ToString("N0"), Foreground = Theme.Brush("DimTextBrush"), FontSize = 11,
-            Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
-        });
-        return header;
-    }
+    /// <summary>The Scene panel's tree of the zone's objects and the level's parts (see LevelEditor.Scene.cs).</summary>
+    void BuildObjectTree(string filter) => BuildSceneTree(filter);
 
     void OnFilterChanged(object sender, TextChangedEventArgs e)
     {
@@ -1922,11 +1864,11 @@ public partial class LevelEditor : UserControl, IEditorDocument
         gridContent.Content = showGrid ? grid : null;
     }
 
-    /// <summary>Draws only the kinds of objects whose chips are on, in this file and the zone's others.</summary>
+    /// <summary>Draws only the kinds of objects the Scene panel shows, and of them not the objects hidden there one by one, in this file and the zone's others.</summary>
     void ShowKinds()
     {
-        scene?.ShowOnly(kind => !hiddenKinds.Contains(kind));
-        foreach (RelatedFile file in RelatedFiles()) file.Scene?.ShowOnly(kind => !hiddenKinds.Contains(kind));
+        scene?.ShowOnly(kind => !hiddenKinds.Contains(kind), hiddenObjects.Contains);
+        foreach (RelatedFile file in RelatedFiles()) file.Scene?.ShowOnly(kind => !hiddenKinds.Contains(kind), hiddenObjects.Contains);
         ShowAllLinks();
     }
 
@@ -1941,33 +1883,38 @@ public partial class LevelEditor : UserControl, IEditorDocument
     }
 
     /// <summary>
-    /// The "Show" chips: one for each kind of object the zone has (with how many, counting the
-    /// zone's other files drawn with it), one for each of those files, and the level's parts.
+    /// The Scene panel's eyes: one for each kind of object the zone has (with how many, counting the
+    /// zone's other files drawn with it), one for each of those files, and the level's parts. The
+    /// panel's tree is made again with them (see LevelEditor.Scene.cs).
     /// </summary>
     void BuildKindChips()
     {
-        KindChips.Children.Clear();
-        if (scene == null) return;
+        showRows.Clear();
+        if (scene == null)
+        {
+            BuildObjectTree(FilterBox.Text.Trim());
+            return;
+        }
         foreach (ObjectKind kind in ObjectKind.All)
         {
             int count = scene.Count(kind) + RelatedFiles().Sum(file => file.Scene?.Count(kind) ?? 0);
             if (count == 0) continue;
-            KindChips.Children.Add(Chip(kind.Name, kind.Brush, count, kind.Description, !hiddenKinds.Contains(kind), shown =>
+            showRows.Add(Row(kind.Name, kind.Brush, count, kind.Description, !hiddenKinds.Contains(kind), shown =>
             {
                 if (shown) hiddenKinds.Remove(kind);
                 else hiddenKinds.Add(kind);
                 ShowKinds();
-            }));
+            }, kind: kind));
         }
         foreach (RelatedFile file in RelatedFiles())
-            KindChips.Children.Add(Chip(file.Label, Theme.Brush("RelatedBrush"), file.Zone.Objects.Count, file.Description, file.Shown, shown =>
+            showRows.Add(Row(file.Label, Theme.Brush("RelatedBrush"), file.Zone.Objects.Count, file.Description, file.Shown, shown =>
             {
                 file.Shown = shown;
                 ShowRelated();
                 if (!shown && selected != null && relatedOf.GetValueOrDefault(selected) == file) Select(null, focus: false);
-            }));
+            }, file: file));
         if (neighbourZones > 0)
-            KindChips.Children.Add(Chip("Zones around", Theme.Brush("NeighbourBrush"), neighbourZones,
+            showRows.Add(Row("Zones around", Theme.Brush("NeighbourBrush"), neighbourZones,
                 "The zones next to this one: their ground (coloured with their colour maps, as the game colours far-away ground), " +
                 "level geometry and objects' models. They can't be picked; open a zone to work on it.", showNeighbours, shown =>
                 {
@@ -1975,28 +1922,28 @@ public partial class LevelEditor : UserControl, IEditorDocument
                     neighbourContent.Content = shown ? neighbours : null;
                 }));
         if (terrainParts > 0)
-            KindChips.Children.Add(Chip("Terrain", Theme.Brush("TerrainBrush"), null,
+            showRows.Add(Row("Terrain", Theme.Brush("TerrainBrush"), null,
                 "The ground, painted with its texture layers as the game blends them. It can't be picked or changed yet.", showTerrain, shown =>
                 {
                     showTerrain = shown;
                     terrainContent.Content = shown ? terrain : null;
                 }));
         if (foliagePieces > 0)
-            KindChips.Children.Add(Chip("Foliage", Theme.Brush("FoliageBrush"), foliagePieces,
+            showRows.Add(Row("Foliage", Theme.Brush("FoliageBrush"), foliagePieces,
                 "Debris, rubble and rocks the game scatters over the ground from the zone's terrain file. It can't be picked or changed yet.", showFoliage, shown =>
                 {
                     showFoliage = shown;
                     foliageContent.Content = shown ? foliage : null;
                 }));
         if (decalCount > 0)
-            KindChips.Children.Add(Chip("Decals", Theme.Brush("DecalBrush"), decalCount,
+            showRows.Add(Row("Decals", Theme.Brush("DecalBrush"), decalCount,
                 "Pictures laid onto surfaces: trash, blast marks, blood, signs. They can't be picked or changed yet.", showDecals, shown =>
                 {
                     showDecals = shown;
                     decalContent.Content = shown ? decals : null;
                 }));
-        if (geometryPieces > 0)
-            KindChips.Children.Add(Chip("Level geometry", Theme.Brush("LevelGeometryBrush"), geometryPieces,
+        if (geometryPieces > 0 && !geometryLoaded)  // loaded as objects, their kind's own chip shows and hides them
+            showRows.Add(Row("Level geometry", Theme.Brush("LevelGeometryBrush"), geometryPieces,
                 "Rock, cave walls, ledges, roads, bridges and other fixed pieces the zone is built from (its stitch pieces). " +
                 "They can't be picked or changed yet.", showGeometry, shown =>
                 {
@@ -2004,7 +1951,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
                     geometryContent.Content = shown ? geometry : null;
                 }));
         if (Links().Count > 0)
-            KindChips.Children.Add(Chip("Links", Theme.Brush("LinkBrush"), Links().Count,
+            showRows.Add(Row("Links", Theme.Brush("LinkBrush"), Links().Count,
                 "Lines between objects that name each other, each in the colour of the one naming the other, its arrow " +
                 "pointing at the one named: navpoints' paths, roads, patrols, logic handlers and their triggers, animated " +
                 "rigs, objects attached to others. The picked object's links are always shown, and listed in the inspector.",
@@ -2013,25 +1960,17 @@ public partial class LevelEditor : UserControl, IEditorDocument
                     showLinks = shown;
                     ShowAllLinks();
                 }));
-        KindChips.Children.Add(Chip("Grid", null, null, "Lines on the ground every 10 metres", showGrid, shown =>
+        showRows.Add(Row("Grid", null, null, "Lines on the ground every 10 metres", showGrid, shown =>
         {
             showGrid = shown;
             gridContent.Content = shown ? grid : null;
         }));
+        BuildObjectTree(FilterBox.Text.Trim());
     }
 
-    static ToggleButton Chip(string name, Brush? colour, int? count, string tip, bool on, Action<bool> toggled)
-    {
-        var content = new StackPanel { Orientation = Orientation.Horizontal };
-        if (colour != null)
-            content.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = colour, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center });
-        content.Children.Add(new TextBlock { Text = name });
-        if (count != null)
-            content.Children.Add(new TextBlock { Text = count.Value.ToString("N0"), Opacity = 0.6, Margin = new Thickness(6, 0, 0, 0) });
-        var chip = new ToggleButton { Style = Theme.Style("Chip"), Content = content, IsChecked = on, ToolTip = tip };
-        chip.Click += (_, _) => toggled(chip.IsChecked == true);
-        return chip;
-    }
+    /// <summary>A row of the Scene panel with an eye: what it shows and hides, and how many it holds.</summary>
+    static ShowRow Row(string name, Brush? colour, int? count, string tip, bool on, Action<bool> toggled, ObjectKind? kind = null, RelatedFile? file = null) =>
+        new(name, colour, count, tip, on, toggled, kind, file);
 
     /// <summary>The axis widget in the corner: which way X, Y and Z point as seen from the camera.</summary>
     void DrawAxisWidget()
@@ -2090,7 +2029,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
     /// <summary>Whether an object is drawn now: its kind's chip and its file's are on.</summary>
     bool Drawn(ZoneObject obj) =>
-        !hiddenKinds.Contains(KindOf(obj)) && (!relatedOf.TryGetValue(obj, out RelatedFile? file) || file.Shown);
+        !hiddenKinds.Contains(KindOf(obj)) && !hiddenObjects.Contains(obj) && (!relatedOf.TryGetValue(obj, out RelatedFile? file) || file.Shown);
 
     /// <summary>The camera, in the game's space, and how many metres a pixel covers one metre in front of it: for link lines' widths.</summary>
     (Vector3 Eye, double PerMetre) LineView() =>

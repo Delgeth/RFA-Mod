@@ -1,4 +1,6 @@
+using System.Globalization;
 using RfaFormats.Tables;
+using RfaFormats.Zones;
 
 namespace RfaFormats.Guerrilla;
 
@@ -14,6 +16,11 @@ public static class GuerrillaCampaign
     public const string TablesFolder = "tables";
     /// <summary>Each of Guerrilla's vehicles and its team, a line each (name, a tab, the team).</summary>
     public const string VehicleTeams = "vehicle_teams.txt";
+    /// <summary>Guerrilla's restricted areas (the EDF's bases), a line each: see <see cref="RestrictedAreas"/>.</summary>
+    public const string RestrictedAreasFile = "restricted_areas.txt";
+    /// <summary>Guerrilla's kill regions (its pits and minefields), a line each: see <see cref="KillRegions"/>.</summary>
+    public const string KillRegionsFile = "kill_regions.txt";
+    const int MostPolygonPoints = 64;  // restricted_area_polygon_data: vector2[64] each
 
     /// <summary>
     /// The tables the mod reads: the alert level's bands and decay, what each kind of damage and death
@@ -24,6 +31,25 @@ public static class GuerrillaCampaign
     [
         "alert_level.xtbl", "alert_value.xtbl", "difficulty.xtbl", "reinforcement_profile.xtbl", "guerrilla_reinforcement.xtbl",
         "territories.xtbl", "missions.xtbl", "activity.xtbl", "activity_demolitions_master.xtbl",
+        // The other kinds of activity, and where they spawn by themselves.
+        "activity_spawn.xtbl", "activity_timed_delivery.xtbl", "activity_house_arrest.xtbl", "activity_area_defense.xtbl",
+        "activity_riding_shotgun.xtbl", "activity_courier_chase.xtbl", "activity_continuous_attack.xtbl", "raid_data.xtbl",
+        "activity_tanks_a_lot.xtbl", "activity_mayhem.xtbl",
+    ];
+
+    /// <summary>The campaign's markers, in mods\guerrilla_campaign\: see <see cref="CampaignObjects"/>.</summary>
+    public const string CampaignObjectsFile = @"world\campaign_objects.xml";
+
+    /// <summary>
+    /// The classes of Guerrilla's campaign markers: activity, mission and safehouse nodes Armageddon has no code
+    /// for, so the world converter leaves them out and the mod reads them from <see cref="CampaignObjectsFile"/>.
+    /// </summary>
+    static readonly string[] CampaignClasses =
+    [
+        "object_demolitions_master_node", "object_house_arrest_node", "object_raid_node", "object_riding_shotgun_node",
+        "object_delivery_node", "object_area_defense_node", "object_courier_end_point", "object_convoy_end_point",
+        "object_activity_spawn", "object_roadblock_node", "object_mission_start_node", "object_safehouse", "object_upgrade_node",
+        "object_bftp_node",
     ];
 
     public static IEnumerable<string> Build(string guerrilla, string campaignFolder)
@@ -53,16 +79,205 @@ public static class GuerrillaCampaign
             File.WriteAllLines(Path.Combine(campaignFolder, VehicleTeams), lines);
             yield return $"Campaign tables: {lines.Count} vehicles' teams ({lines.Count(l => l.EndsWith("\tEDF", StringComparison.OrdinalIgnoreCase))} the EDF's) in {VehicleTeams}";
         }
+
+        yield return RestrictedAreas(Path.Combine(guerrilla, "build", "pc", "cache"), campaignFolder);
+        yield return KillRegions(Path.Combine(guerrilla, "build", "pc", "cache"), campaignFolder);
+        yield return CampaignObjects(Path.Combine(guerrilla, "build", "pc", "cache"), guerrillaTables, campaignFolder);
+    }
+
+    /// <summary>
+    /// Guerrilla's campaign markers (<see cref="CampaignClasses"/>), every one in its zones and p_ zones, written for
+    /// the guerrilla_campaign mod (its world_objects.cpp) as
+    /// <c>&lt;objects&gt;&lt;object&gt;&lt;class/&gt;&lt;handle/&gt;&lt;parent/&gt;&lt;zone/&gt;&lt;pos/&gt;&lt;property&gt;&lt;name/&gt;&lt;value/&gt;&lt;/property&gt;...&lt;/object&gt;...&lt;/objects&gt;</c>:
+    /// all child elements (the mod's reader keeps no attributes). The handle and parent are Guerrilla's (hex);
+    /// buildings keep Guerrilla's handles in our world (but where the world converter had to give one another),
+    /// so a demolitions master node's parent names its target, and parent_pos says where that is, to find it by its
+    /// place otherwise. The zone is ours (rfg_CC_RR); the place is the object's op position. Each property is named and written by
+    /// Guerrilla's own zone schema (rfg_zonex_format.txt): text, enums and flags as text, a bool as true or false,
+    /// whole and fractional numbers, handles in hex, vectors, matrices, boxes and lists as numbers split by spaces.
+    /// A marker that is in a zone and again in that zone's p_ file (the same handle) is written once.
+    /// </summary>
+    static string CampaignObjects(string guerrillaCache, Packfile guerrillaMisc, string campaignFolder)
+    {
+        if (guerrillaMisc.Find(ZoneSchema.FileName) is not { } schemaEntry) return $"Campaign markers: Guerrilla's misc.vpp_pc has no {ZoneSchema.FileName}; none written";
+        var schema = ZoneSchema.FromBytes(guerrillaMisc.Read(schemaEntry));
+        var zones = Packfile.Open(Path.Combine(guerrillaCache, "zonescript_terr01.vpp_pc"));
+        var wanted = CampaignClasses.ToDictionary(NameHashes.ClassHash, c => c);
+        var written = new HashSet<uint>();
+        var counts = new SortedDictionary<string, int>();
+        int unnamed = 0;
+        var xml = new System.Text.StringBuilder("<objects>\n");
+        static string F(float v) => v.ToString("0.####", CultureInfo.InvariantCulture);
+        static string Escape(string text) => text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+        static string Floats(byte[] v) => string.Join(' ', Enumerable.Range(0, v.Length / 4).Select(i => F(BitConverter.ToSingle(v, i * 4))));
+        static string Words(byte[] v) => string.Join(' ', Enumerable.Range(0, v.Length / 4).Select(i => BitConverter.ToUInt32(v, i * 4).ToString("X8")));
+        static string Value(SchemaType type, byte[] v) => type switch
+        {
+            SchemaType.Bool => v.Length > 0 && v[0] != 0 ? "true" : "false",
+            SchemaType.Int when v.Length >= 4 => BitConverter.ToInt32(v, 0).ToString(CultureInfo.InvariantCulture),
+            SchemaType.Float when v.Length >= 4 => F(BitConverter.ToSingle(v, 0)),
+            SchemaType.Handle when v.Length >= 4 => BitConverter.ToUInt32(v, 0).ToString("X8"),
+            SchemaType.Vector or SchemaType.Matrix or SchemaType.Box or SchemaType.Color => Floats(v),
+            SchemaType.List => Words(v),
+            _ => System.Text.Encoding.Latin1.GetString(v).TrimEnd('\0').Trim(),
+        };
+        // The zones before their p_ files, so a marker in both is named by its zone.
+        var zoneEntries = zones.Entries.Where(e => e.Name.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
+                                       .OrderBy(e => e.Name.StartsWith("p_", StringComparison.OrdinalIgnoreCase)).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        static System.Numerics.Vector3 PlaceOf(GuerrillaZoneObject o) =>
+            o.Value("op") is { Length: >= 12 } op ? new(BitConverter.ToSingle(op, 0), BitConverter.ToSingle(op, 4), BitConverter.ToSingle(op, 8)) : (o.BoundsMin + o.BoundsMax) / 2;
+        // Where each object is, for the markers' parents: the world converter gives a building another handle when
+        // ours already has Guerrilla's (je_dm_05's smokestack, 96030008), so the mod also finds a parent by its place.
+        var placeOf = new Dictionary<uint, System.Numerics.Vector3>();
+        var objectsOf = new Dictionary<string, List<GuerrillaZoneObject>>();
+        foreach (var entry in zoneEntries)
+        {
+            var objects = GuerrillaZones.Objects(zones.Read(entry));
+            objectsOf[entry.Name] = objects;
+            foreach (var o in objects) placeOf.TryAdd(o.Handle, PlaceOf(o));
+        }
+        foreach (var entry in zoneEntries)
+        {
+            string guerrillaZone = Path.GetFileNameWithoutExtension(entry.Name);
+            string zone = "rfg_" + guerrillaZone[(guerrillaZone.LastIndexOf("terr01_", StringComparison.OrdinalIgnoreCase) + "terr01_".Length)..];
+            foreach (var o in objectsOf[entry.Name])
+            {
+                if (!wanted.TryGetValue(o.ClassHash, out string? className) || !written.Add(o.Handle)) continue;
+                counts[className] = counts.GetValueOrDefault(className) + 1;
+                var at = PlaceOf(o);
+                xml.Append($"<object><class>{className}</class><handle>{o.Handle:X8}</handle><parent>{o.Parent:X8}</parent><zone>{zone}</zone>")
+                   .Append($"<pos>{F(at.X)} {F(at.Y)} {F(at.Z)}</pos>");
+                if (o.Parent != 0xFFFFFFFF && placeOf.TryGetValue(o.Parent, out var parentAt)) xml.Append($"<parent_pos>{F(parentAt.X)} {F(parentAt.Y)} {F(parentAt.Z)}</parent_pos>");
+                xml.Append('\n');
+                foreach (var (hash, (_, value)) in o.Properties)
+                {
+                    // op: the place and turn (pos and orient, written together), 12 numbers.
+                    bool placeAndTurn = hash == NameHashes.PropertyHash("op");
+                    var property = placeAndTurn ? null : schema.Property(o.ClassHash, hash);
+                    string name = placeAndTurn ? "op" : property?.Name ?? "";
+                    if (name.Length == 0) { unnamed++; continue; }
+                    string text = placeAndTurn ? Floats(value) : Value(property!.Type, value);
+                    xml.Append($"  <property><name>{Escape(name)}</name><value>{Escape(text)}</value></property>\n");
+                }
+                xml.Append("</object>\n");
+            }
+        }
+        xml.Append("</objects>\n");
+        string file = Path.Combine(campaignFolder, CampaignObjectsFile);
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        File.WriteAllText(file, xml.ToString(), new System.Text.UTF8Encoding(false));
+        return $"Campaign markers: {written.Count} in {CampaignObjectsFile} ({string.Join(", ", counts.Select(c => $"{c.Value} {c.Key}"))})" +
+               (unnamed > 0 ? $"; {unnamed} properties the schema doesn't name left out" : "");
+    }
+
+    /// <summary>
+    /// Guerrilla's kill regions: the trigger_regions whose region_type is "kill human" (25 in its zones: 21 at
+    /// the bottoms of pits and chasms, region_kill_type cliff, and 4 minefields, mine). Armageddon's own
+    /// trigger_region never reads region_type, so the mod does what Guerrilla's trigger_region_do_frame does
+    /// with them. A line each: region, its handle, its zone, cliff or mine, box or sphere, enabled (0/1),
+    /// not_in_mission (0/1), not_in_activity (0/1), then its place and turn (op: position, right, up,
+    /// forward; 12 numbers), its box around that place (bb: least, then most corner; 6 numbers) and its
+    /// radius (outer_radius, for a sphere). A region that is in a zone and again in that zone's p_ file (the
+    /// same handle) is written once.
+    /// </summary>
+    static string KillRegions(string guerrillaCache, string campaignFolder)
+    {
+        var zones = Packfile.Open(Path.Combine(guerrillaCache, "zonescript_terr01.vpp_pc"));
+        uint regionClass = NameHashes.ClassHash("trigger_region");
+        var lines = new List<string> { "# Guerrilla's kill regions, for the guerrilla_campaign mod (written by editor\\GuerrillaBuilder.exe with the people)" };
+        var written = new HashSet<uint>();
+        int cliffs = 0, mines = 0;
+        var problems = new List<string>();
+        static string F(float v) => v.ToString("0.####", CultureInfo.InvariantCulture);
+        static float[]? Floats(GuerrillaZoneObject o, string name)
+        {
+            if (o.Value(name) is not { Length: > 0 } v || v.Length % 4 != 0) return null;
+            var f = new float[v.Length / 4];
+            for (int i = 0; i < f.Length; i++) f[i] = BitConverter.ToSingle(v, i * 4);
+            return f;
+        }
+        // The zones before their p_ files, so a region in both is named by its zone.
+        foreach (var entry in zones.Entries.Where(e => e.Name.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
+                                           .OrderBy(e => e.Name.StartsWith("p_", StringComparison.OrdinalIgnoreCase)).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            string zone = Path.GetFileNameWithoutExtension(entry.Name);
+            foreach (var region in GuerrillaZones.Objects(zones.Read(entry)).Where(o => o.ClassHash == regionClass))
+            {
+                if (!string.Equals(region.Text("region_type")?.Trim(), "kill human", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!written.Add(region.Handle)) continue;
+                bool mine = string.Equals(region.Text("region_kill_type")?.Trim(), "mine", StringComparison.OrdinalIgnoreCase);
+                bool sphere = string.Equals(region.Text("trigger_shape")?.Trim(), "sphere", StringComparison.OrdinalIgnoreCase);
+                bool enabled = region.Value("enabled") is not { Length: > 0 } on || on[0] != 0;  // the schema's default: true
+                string flags = region.Text("trigger_flags") ?? "";
+                bool notInMission = flags.Contains("not_in_mission", StringComparison.OrdinalIgnoreCase);
+                bool notInActivity = flags.Contains("not_in_activity", StringComparison.OrdinalIgnoreCase);
+                float[]? op = Floats(region, "op"), bb = Floats(region, "bb"), radius = Floats(region, "outer_radius");
+                if (op is not { Length: >= 12 } || bb is not { Length: >= 6 })
+                {
+                    problems.Add($"{region.Handle:X8} in {zone} has no place or box");
+                    continue;
+                }
+                lines.Add($"region {region.Handle:X8} {zone} {(mine ? "mine" : "cliff")} {(sphere ? "sphere" : "box")} {(enabled ? 1 : 0)} {(notInMission ? 1 : 0)} {(notInActivity ? 1 : 0)} " +
+                          $"{string.Join(' ', op.Take(12).Select(F))} {string.Join(' ', bb.Take(6).Select(F))} {F(radius is { Length: >= 1 } r ? r[0] : 0f)}");
+                if (mine) mines++;
+                else cliffs++;
+            }
+        }
+        Directory.CreateDirectory(campaignFolder);
+        File.WriteAllLines(Path.Combine(campaignFolder, KillRegionsFile), lines);
+        return $"Kill regions: {cliffs + mines} in {KillRegionsFile} ({cliffs} pits, {mines} minefields)" +
+               (problems.Count > 0 ? $"; left out: {string.Join("; ", problems)}" : "");
+    }
+
+    /// <summary>
+    /// Guerrilla's restricted areas (object_restricted_area, 40 in its zones: its EDF bases), which Armageddon
+    /// has no class for, so the world converter leaves them out. Each is a "yellow" polygon (inside it the
+    /// EDF who see the player take him for an enemy, and the alert level doesn't fall) and a wider "warning"
+    /// polygon (may be empty), in world coordinates (x, z), as object_restricted_area::serialize reads them
+    /// (yellow_polygon, warning_polygon: vector2 each, at most 64), with its disabled and allow_ambient_peds
+    /// switches. A line each: area, its handle, its zone, disabled (0/1), allow_ambient_peds (0/1), the yellow
+    /// polygon's number of points and its points (x z ...), the warning polygon's the same way.
+    /// </summary>
+    static string RestrictedAreas(string guerrillaCache, string campaignFolder)
+    {
+        var zones = Packfile.Open(Path.Combine(guerrillaCache, "zonescript_terr01.vpp_pc"));
+        uint areaClass = NameHashes.ClassHash("object_restricted_area");
+        var lines = new List<string> { "# Guerrilla's restricted areas, for the guerrilla_campaign mod (written by editor\\GuerrillaBuilder.exe with the people)" };
+        int areas = 0, empty = 0;
+        static string F(float v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+        static string Polygon(byte[]? value)
+        {
+            int count = Math.Min((value?.Length ?? 0) / 8, MostPolygonPoints);
+            var parts = new List<string> { count.ToString(CultureInfo.InvariantCulture) };
+            for (int i = 0; i < count; i++) parts.Add($"{F(BitConverter.ToSingle(value!, i * 8))} {F(BitConverter.ToSingle(value!, i * 8 + 4))}");
+            return string.Join(" ", parts);
+        }
+        static string Switch(byte[]? value) => value is { Length: > 0 } && value.Any(b => b != 0) ? "1" : "0";
+        foreach (var entry in zones.Entries.Where(e => e.Name.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase)).OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var area in GuerrillaZones.Objects(zones.Read(entry)).Where(o => o.ClassHash == areaClass))
+            {
+                var yellow = area.Value("yellow_polygon");
+                if ((yellow?.Length ?? 0) < 24) { empty++; continue; }  // fewer than three points: no area
+                lines.Add($"area {area.Handle:X8} {Path.GetFileNameWithoutExtension(entry.Name)} {Switch(area.Value("disabled"))} {Switch(area.Value("allow_ambient_peds"))} " +
+                          $"{Polygon(yellow)} {Polygon(area.Value("warning_polygon"))}");
+                areas++;
+            }
+        Directory.CreateDirectory(campaignFolder);
+        File.WriteAllLines(Path.Combine(campaignFolder, RestrictedAreasFile), lines);
+        return $"Restricted areas: {areas} in {RestrictedAreasFile}" + (empty > 0 ? $" ({empty} without a yellow polygon left out)" : "");
     }
 
     public static IEnumerable<string> Remove(string campaignFolder)
     {
-        string teams = Path.Combine(campaignFolder, VehicleTeams);
-        if (File.Exists(teams))
+        foreach (string written in new[] { VehicleTeams, RestrictedAreasFile, KillRegionsFile, CampaignObjectsFile })
         {
-            File.Delete(teams);
-            yield return $"Deleted {teams}";
+            string file = Path.Combine(campaignFolder, written);
+            if (!File.Exists(file)) continue;
+            File.Delete(file);
+            yield return $"Deleted {file}";
         }
+        string worldFolder = Path.Combine(campaignFolder, Path.GetDirectoryName(CampaignObjectsFile)!);
+        if (Directory.Exists(worldFolder) && !Directory.EnumerateFileSystemEntries(worldFolder).Any()) Directory.Delete(worldFolder);
         string folder = Path.Combine(campaignFolder, TablesFolder);
         if (!Directory.Exists(folder)) yield break;
         foreach (string table in Tables)

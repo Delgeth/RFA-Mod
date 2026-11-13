@@ -30,12 +30,13 @@
 // - the level's decay (40, 40, 45, 50 a second), ramping to 5 × over 25 s, once 20 s have passed
 //   with nothing reported and none of the EDF seeing the player;
 // - above green, 10 when the player is 40 m from where the last report found him, 50 beyond 120 m.
-// The alert never falls while the player is in a tank or a walker. Falling to green forgets where
+// The alert never falls while the player is in a tank or a walker, or in one of the EDF's restricted
+// areas (restricted_areas.cpp). Falling to green forgets where
 // the last report was, and nothing counts for half a second. Missions and activities cap it between
 // two levels, and an activity may hold it still. Not saved: a level starts green.
 //
 // Not ported yet: buildings' damage reports, the EDF's answer to each level (orders, reinforcements),
-// the sounds and tooltip of a level change, restricted areas (in one the alert never falls); what
+// the sounds and tooltip of a level change; what
 // lowers control and morale by itself (EDF buildings destroyed, civilians and guerrillas killed,
 // propaganda destroyed, the player's death); the control and morale meters and messages; the
 // liberation screen, radio lines and unlocks. Guerrilla's difficulty for control and morale is taken
@@ -45,6 +46,7 @@
 #include "liberation.h"
 #include "activities.h"
 #include "alert_sources.h"
+#include "restricted_areas.h"
 #include "handle_kinds.h"
 #include "save.h"
 #include "script_words.h"
@@ -295,7 +297,7 @@ void EvaluateAlertLevel() {
         g_restartDecayWait = true;
         words::PostAlertLevelRaised(level);
     }
-    rfa::Log("Alert level %s (value %.0f)", LevelName(level), g_alertValue);
+    rfa::Log("Alert level %s (value %.0f); the player %s", LevelName(level), g_alertValue, restricted_areas::PlayerPlace().c_str());
 }
 
 // get_decay_delta: nothing until the wait since the last contact is over; then the level's rate,
@@ -336,7 +338,7 @@ void AlertStep() {
     const float away = AwayDecay();
     if (!activities::AlertLocked()) {
         float change = g_nextDelta + growth - decay - away;
-        if (change < 0.0f && alert_sources::PlayerInTankOrWalker()) change = 0.0f;
+        if (change < 0.0f && (alert_sources::PlayerInTankOrWalker() || restricted_areas::PlayerInside())) change = 0.0f;
         if (g_log && (change != 0.0f || seeing > 0))
             rfa::Log("Alert %.0f %+.0f (%s; reports %+.0f, %d of the EDF seeing the player %+.0f, decay -%.0f, away -%.0f)", g_alertValue, change,
                      LevelName(g_alertLevel), g_nextDelta, seeing, growth, decay, away);
@@ -509,6 +511,18 @@ void ChangeMorale(float delta, int which) {
     district.morale = morale;
     SaveDistrict(district);
     words::PostCivilianMoraleChange(before, Percent(morale, district.moraleMax));
+}
+
+void SetEdfControl(float control, int which) {
+    const int index = Resolve(which);
+    if (index < 0 || index >= DistrictCount()) return;
+    DistrictState& district = g_districts[index];
+    const float before = Percent(district.control, district.controlMax);
+    district.control = control < 0.0f ? 0.0f : control > district.controlMax ? district.controlMax : control;
+    SaveDistrict(district);
+    words::PostEdfControlLowered(before, Percent(district.control, district.controlMax));
+    rfa::Log("%s: EDF control set to %.0f / %.0f", district.name.c_str(), district.control, district.controlMax);
+    MaybeLiberate(district);
 }
 
 void SetMorale(float morale, int which) {

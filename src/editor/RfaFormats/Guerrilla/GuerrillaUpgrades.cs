@@ -154,23 +154,68 @@ public static class GuerrillaUpgrades
     /// Its editor notes and effects lists are left out; the jetpack's numbers in Guerrilla's code
     /// (player_update_jetpack: Jetpack_acceleration 18, the climb it tapers to 5 m/s, Jetpack_charge_rate 0.1,
     /// the charge ×2 with the Jetpack Recharge upgrade) are the mod's own.
+    /// How each is worn, a line "wear &lt;item&gt; &lt;Character_Prop&gt; &lt;Item_Prop&gt;" ("-" for none) for its item
+    /// and each of its Sub_Items, from Guerrilla's character.xtbl: Mason's (rfg_PC's) Backpack prop where it lists
+    /// the pack (Thrust on his spine2 by its own Attach_To_Spine2 tag, the jetpack with its straps), else the
+    /// first character's that wears it (Heal on spine2 by Attach_To_Player). An item with no Character_Prop is a
+    /// character model that follows the wearer's bones.
     /// </summary>
     public static string WriteBackpacks(Packfile guerrillaMisc, string gearFolder)
     {
         var file = guerrillaMisc.Find("mp_backpacks.xtbl") ?? throw new InvalidDataException("no mp_backpacks.xtbl in Guerrilla's misc.vpp_pc");
         var lines = new List<string> { "# Guerrilla's backpacks for the guerrilla_gear mod (written by editor\\GuerrillaBuilder.exe with the weapons)" };
-        int packs = 0;
+        var worn = WornItems(guerrillaMisc);
+        // A pack's sfx_alr names an attack-loop-release set of foley_alr.xtbl: its cues, for the mod
+        // ("sfx_attack/sfx_loop/sfx_release <cue>", the weapons build makes their events: GuerrillaWeapons.BackpackMedia).
+        var sets = guerrillaMisc.Find("foley_alr.xtbl") is { } alr
+            ? XtblFile.FromBytes(guerrillaMisc.Read(alr)).Entries.ToDictionary(XtblFile.EntryName, e => e, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, XtblElement>(StringComparer.OrdinalIgnoreCase);
+        int packs = 0, wearing = 0;
         foreach (var pack in XtblFile.FromBytes(guerrillaMisc.Read(file)).Entries)
         {
             string name = XtblFile.EntryName(pack);
             if (!int.TryParse(pack.ValueOf("Unique_ID")?.Trim(), out int id)) continue;
             lines.Add($"pack\t{id}\t{name}");
             Flatten(pack, "", lines);
+            if (pack.Element("activatable")?.Element("activation_effects")?.ValueOf("sfx_alr")?.Trim() is { Length: > 0 } setName &&
+                sets.TryGetValue(setName, out var set))
+                foreach (var (part, key) in new[] { ("Near_Attack", "sfx_attack"), ("Near_Loop", "sfx_loop"), ("Near_Release", "sfx_release") })
+                    if (set.Element("Near")?.ValueOf(part)?.Trim() is { Length: > 0 } cue) lines.Add($"{key}\t{cue}");
+            if (pack.ValueOf("item_name")?.Trim() is { Length: > 0 } item && worn.TryGetValue(item, out var wear))
+            {
+                foreach (var (wornItem, characterProp, itemProp) in wear) lines.Add($"wear\t{wornItem}\t{characterProp}\t{itemProp}");
+                wearing++;
+            }
             packs++;
         }
         Directory.CreateDirectory(gearFolder);
         File.WriteAllLines(Path.Combine(gearFolder, BackpackFile), lines, new UTF8Encoding(false));
-        return $"backpacks: {packs} of Guerrilla's in {Path.Combine(gearFolder, BackpackFile)}";
+        return $"backpacks: {packs} of Guerrilla's ({wearing} with how they're worn) in {Path.Combine(gearFolder, BackpackFile)}";
+    }
+
+    /// <summary>
+    /// Each backpack item Guerrilla's characters wear, with how: the item and its Sub_Items, each with its
+    /// Character_Prop and Item_Prop ("-" for none). Mason's (rfg_PC's) listing first, then the first other's.
+    /// </summary>
+    static Dictionary<string, List<(string Item, string CharacterProp, string ItemProp)>> WornItems(Packfile guerrillaMisc)
+    {
+        var worn = new Dictionary<string, List<(string, string, string)>>(StringComparer.OrdinalIgnoreCase);
+        if (guerrillaMisc.Find("character.xtbl") is not { } file) return worn;
+        static string Field(XtblElement e, string name) => e.ValueOf(name)?.Trim() is { Length: > 0 } v ? v : "-";
+        var characters = XtblFile.FromBytes(guerrillaMisc.Read(file)).Entries
+                                 .OrderBy(c => XtblFile.EntryName(c).Equals("rfg_PC", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ToList();
+        foreach (var character in characters)
+            foreach (var prop in character.Element("Props")?.Elements ?? [])
+                foreach (var item in prop.Element("Items")?.Elements ?? [])
+                {
+                    string name = item.ValueOf("Name")?.Trim() ?? "";
+                    if (!name.StartsWith("multi_object_backpack_", StringComparison.OrdinalIgnoreCase) || worn.ContainsKey(name)) continue;
+                    var list = new List<(string, string, string)> { (name, Field(item, "Character_Prop"), Field(item, "Item_Prop")) };
+                    foreach (var sub in item.Element("Sub_Items")?.Elements ?? [])
+                        if (sub.ValueOf("Name")?.Trim() is { Length: > 0 } subName) list.Add((subName, Field(sub, "Character_Prop"), Field(sub, "Item_Prop")));
+                    worn[name] = list;
+                }
+        return worn;
     }
 
     static readonly HashSet<string> NotValues = new(StringComparer.OrdinalIgnoreCase) { "_Editor", "Name", "Unique_ID" };

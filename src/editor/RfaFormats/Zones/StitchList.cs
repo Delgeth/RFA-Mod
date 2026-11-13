@@ -170,10 +170,23 @@ public sealed class StitchList
         if (pieces.Count == 0) return Write(pieces, textures, decals, zoneMiddle, Vector3.Zero, 0, null);
         var order = Enumerable.Range(0, pieces.Count).OrderBy(i => pieces[i].List).ToList();  // stable: as Write lays them out
         var written = order.Select(i => boxes[i]).ToList();
-        var min = new Vector3(written.Min(b => b.Min.X), written.Min(b => b.Min.Y), written.Min(b => b.Min.Z)) - Vector3.One;
-        var max = new Vector3(written.Max(b => b.Max.X), written.Max(b => b.Max.Y), written.Max(b => b.Max.Z)) + Vector3.One;
-        float size = MathF.Max(max.X - min.X, MathF.Max(max.Y - min.Y, max.Z - min.Z));
-        return Write(pieces, textures, decals, zoneMiddle, min, size, TreeCode(written, min, size));
+        var min = new Vector3(written.Min(b => b.Min.X), written.Min(b => b.Min.Y), written.Min(b => b.Min.Z));
+        var max = new Vector3(written.Max(b => b.Max.X), written.Max(b => b.Max.Y), written.Max(b => b.Max.Z));
+        var (from, size) = TreeFrame(min, max, 1);
+        return Write(pieces, textures, decals, zoneMiddle, from, size, TreeCode(written, from, size));
+    }
+
+    /// <summary>
+    /// A tree's frame round what lies from <paramref name="min"/> to <paramref name="max"/>, with
+    /// <paramref name="margin"/> to spare on every side: where it starts, and its size (one for all
+    /// three axes). Sized so that nothing falls in the frame's last 256th on any axis: a leaf in it
+    /// would need a bound of 256 to be reached (see <see cref="TreeCode"/>), past what a byte holds.
+    /// </summary>
+    public static (Vector3 From, float Size) TreeFrame(Vector3 min, Vector3 max, float margin)
+    {
+        var extent = max - min;
+        float size = (MathF.Max(extent.X, MathF.Max(extent.Y, extent.Z)) + 2 * margin) * 256 / 254;
+        return (min - new Vector3(margin), size);
     }
 
     /// <summary>A box round a piece's own box (<paramref name="min"/> to <paramref name="max"/>) placed in the world: turned by <paramref name="rotation"/> (rows right, up, forward) and moved to <paramref name="position"/>.</summary>
@@ -218,23 +231,44 @@ public sealed class StitchList
     ///   51 01 65).
     /// This writes the plainest of it: halves split on the axis the pieces' middles spread most along
     /// (0x23-0x25, the low half straight after), and each piece's box (0x28, 0x27, 0x26, as the game's
-    /// one-piece trees) before its leaf. Bytes are a 256th of the frame, so boxes are rounded outwards
-    /// to that; no zooming. The same code serves a piece's own collision, its leaves its triangles. A
-    /// tree too long for 16-bit jumps that way (Guerrilla's statues' 8,000-odd triangles) is written
-    /// without the leaves' own boxes, only the splits narrowing each down: about half as long, and as
-    /// right (what a tree finds is tested against the shapes themselves), only less choosy.
+    /// one-piece trees) before its leaf. Bytes are a 256th of the frame (a "cell"), so boxes are rounded
+    /// outwards to that; no zooming. The same code serves a piece's own collision, its leaves its
+    /// triangles. A tree too long for 16-bit jumps that way (Guerrilla's statues' 8,000-odd triangles)
+    /// is written without the leaves' own boxes, only the splits narrowing each down: about half as
+    /// long, and as right (what a tree finds is tested against the shapes themselves), only less choosy.
+    ///
+    /// How Havok reads the bytes (its AABB query, hkpMoppObbVirtualMachine::queryAabbOnTree, the same in
+    /// both games: Armageddon's at 0xB0C1E0, the query box made into cells at 0xB0C990): the query's low
+    /// cell is the cell its lowest point is in, its high cell the one past its highest point's; a split
+    /// a b goes to its low side only if the low cell is under a and to its high side only if the high
+    /// cell is over b; a bound lo hi goes on only if the high cell is at least lo and the low cell under
+    /// hi. So a split's a and a bound's hi are one past the highest cell of what lies under them (as in
+    /// Havok's own trees), and b and lo the lowest cell. A tree whose a and hi were the highest cell
+    /// itself (as this wrote before 2026-11-11) hides the top cell's worth of every leaf, and of its +x
+    /// and +z sides, from anything touching it there: a rock's top let a player sink in. See <see cref="TreeMisses"/>.
     /// </summary>
     public static byte[] TreeCode(IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes, Vector3 from, float size)
     {
         if (boxes.Count is 0 or > 65536) throw new ArgumentException($"{boxes.Count} leaves: a tree holds 1 to 65,536");
-        return TreeCode(boxes, from, size, leafBoxes: true) ?? TreeCode(boxes, from, size, leafBoxes: false)
+        var code = TreeCode(boxes, from, size, leafBoxes: true) ?? TreeCode(boxes, from, size, leafBoxes: false)
             ?? throw new InvalidOperationException("the tree's code is too long for 16-bit jumps");
+        if (TreeMisses(code, from, size, boxes).FirstOrDefault() is { } miss)
+            throw new InvalidOperationException($"the tree written doesn't reach all of leaf {miss.Leaf} (by {miss.Metres:0.00} m)");
+        return code;
     }
 
     static byte[]? TreeCode(IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes, Vector3 from, float size, bool leafBoxes)
     {
-        byte Low(float v, float o) => (byte)Math.Clamp((int)MathF.Floor((v - o) * 256 / size), 0, 255);
-        byte High(float v, float o) => (byte)Math.Clamp((int)MathF.Floor((v - o) * 256 / size), 0, 255);
+        // Cells, as Havok rounds them (with a thousandth of a cell to spare against rounding): the lowest a
+        // box is in, and one past the highest. Nothing may fall in the frame's last cell (see TreeFrame).
+        int Cell(float v, float o, float spare)
+        {
+            float at = (v - o) * 256 / size + spare;
+            if (!(at >= 0 && at < 255)) throw new ArgumentException($"a box reaches past the tree's frame ({at:0.0} of its 256ths, room for 0 to 255)");
+            return (int)MathF.Floor(at);
+        }
+        byte Low(float v, float o) => (byte)Cell(v, o, -0.001f);
+        byte High(float v, float o) => (byte)(Cell(v, o, 0.001f) + 1);
         var lo = boxes.Select(b => new[] { Low(b.Min.X, from.X), Low(b.Min.Y, from.Y), Low(b.Min.Z, from.Z) }).ToArray();
         var hi = boxes.Select(b => new[] { High(b.Max.X, from.X), High(b.Max.Y, from.Y), High(b.Max.Z, from.Z) }).ToArray();
 
@@ -264,6 +298,123 @@ public sealed class StitchList
         }
         Node([.. Enumerable.Range(0, boxes.Count)]);
         return tooLong ? null : [.. code];
+    }
+
+    /// <summary>A leaf a tree doesn't wholly reach: which, how deep the part of it is that a query touching it there misses (metres), and on which side.</summary>
+    public sealed record TreeMiss(int Leaf, float Metres, string Side);
+
+    /// <summary>
+    /// Walks a tree's code (frame from <paramref name="from"/>, <paramref name="size"/> across) the way
+    /// Havok's AABB query does (see <see cref="TreeCode"/>), and returns each of <paramref name="contents"/>
+    /// (leaf n's shape's box) that a query box touching it somewhere wouldn't find: a leaf no path
+    /// reaches, or the part of its box past the planes its path stops queries at, from above (its +x,
+    /// +y, +z sides: a split's a or a bound's hi not past its highest cell) or below (b or lo past its
+    /// lowest), the deepest first. The commands the builder's trees use (splits 10-12, 20-22, 23-25,
+    /// bounds 26-28, leaves 30-4F, 50, 51, leaf offsets 09, 0A); any other is an error.
+    /// </summary>
+    public static List<TreeMiss> TreeMisses(byte[] code, Vector3 from, float size, IReadOnlyList<(Vector3 Min, Vector3 Max)> contents)
+    {
+        // For each leaf, the best path's planes: a query reaches it if its low cell is under above[k] and
+        // its high cell over below[k] on every axis k.
+        var best = new Dictionary<int, (float Metres, string Side)>();
+        float cell = size / 256;
+        void Leaf(int n, int[] above, int[] below)
+        {
+            if (n >= contents.Count) throw new InvalidDataException($"the tree reaches leaf {n}, past its {contents.Count}");
+            var (min, max) = contents[n];
+            float worst = 0;
+            string side = "";
+            for (int k = 0; k < 3; k++)
+            {
+                float low = (min[k] - from[k]) / cell, high = (max[k] - from[k]) / cell;
+                // Touching its top, a query's low cell is the one its top is in: missed if that is above[k] or past.
+                if (high >= above[k] && (high - above[k]) * cell >= worst) { worst = (high - above[k]) * cell; side = "+" + "xyz"[k]; }
+                // Touching its bottom, a query's high cell is one past the one its bottom is in: missed if that is below[k] or under.
+                if (low < below[k] && (below[k] - low) * cell > worst) { worst = (below[k] - low) * cell; side = "-" + "xyz"[k]; }
+            }
+            if (side == "") { best[n] = (0, ""); return; }
+            if (!best.TryGetValue(n, out var was) || (was.Side != "" && worst < was.Metres)) best[n] = (worst, side);
+        }
+        var stack = new Stack<(int At, int[] Above, int[] Below, int Base)>();
+        stack.Push((0, [int.MaxValue, int.MaxValue, int.MaxValue], [int.MinValue, int.MinValue, int.MinValue], 0));
+        while (stack.Count > 0)
+        {
+            var (at, above, below, offset) = stack.Pop();
+            while (true)
+            {
+                if (at >= code.Length) throw new InvalidDataException($"the tree's code runs past its end at {at}");
+                int op = code[at];
+                if (op is >= 0x10 and <= 0x12 or >= 0x23 and <= 0x25)
+                {
+                    int axis = op < 0x20 ? op - 0x10 : op - 0x23, a = code[at + 1], b = code[at + 2];
+                    int low = op < 0x20 ? at + 4 : at + 7 + (code[at + 3] << 8 | code[at + 4]);
+                    int high = op < 0x20 ? at + 4 + code[at + 3] : at + 7 + (code[at + 5] << 8 | code[at + 6]);
+                    int[] lowAbove = [.. above], highBelow = [.. below];
+                    lowAbove[axis] = Math.Min(lowAbove[axis], a);
+                    highBelow[axis] = Math.Max(highBelow[axis], b);
+                    stack.Push((high, above, highBelow, offset));
+                    (at, above) = (low, lowAbove);
+                }
+                else if (op is >= 0x20 and <= 0x22)
+                {
+                    // One cut: the low side if the low cell is at most c, the high side if the high cell is over it.
+                    int axis = op - 0x20, c = code[at + 1];
+                    int[] lowAbove = [.. above], highBelow = [.. below];
+                    lowAbove[axis] = Math.Min(lowAbove[axis], c + 1);
+                    highBelow[axis] = Math.Max(highBelow[axis], c);
+                    stack.Push((at + 3 + code[at + 2], above, highBelow, offset));
+                    (at, above) = (at + 3, lowAbove);
+                }
+                else if (op is >= 0x26 and <= 0x28)
+                {
+                    int axis = op - 0x26;
+                    (above, below) = ([.. above], [.. below]);
+                    below[axis] = Math.Max(below[axis], code[at + 1] - 1);  // the high cell at least lo: over lo - 1
+                    above[axis] = Math.Min(above[axis], code[at + 2]);
+                    at += 3;
+                }
+                else if (op == 0x09) { offset += code[at + 1]; at += 2; }
+                else if (op == 0x0A) { offset += code[at + 1] << 8 | code[at + 2]; at += 3; }
+                else if (op is >= 0x30 and <= 0x4F) { Leaf(offset + op - 0x30, above, below); break; }
+                else if (op == 0x50) { Leaf(offset + code[at + 1], above, below); break; }
+                else if (op == 0x51) { Leaf(offset + (code[at + 1] << 8 | code[at + 2]), above, below); break; }
+                else throw new InvalidDataException($"command 0x{op:X2} at {at}: not one the builder writes");
+            }
+        }
+        var misses = Enumerable.Range(0, contents.Count).Where(n => !best.ContainsKey(n)).Select(n => new TreeMiss(n, float.PositiveInfinity, "not reached")).ToList();
+        misses.AddRange(best.Where(b => b.Value.Side != "").Select(b => new TreeMiss(b.Key, b.Value.Metres, b.Value.Side)));
+        return [.. misses.OrderByDescending(m => m.Metres)];
+    }
+
+    /// <summary>
+    /// The collision trees after a stitch list's pieces, as written there (see <see cref="Write(IReadOnlyList{StitchPieceToWrite}, Vector3, Vector3, float, byte[])"/>):
+    /// each one's frame start as kept (x and z from the zone's middle, y as it is), its scale (2^24 / its
+    /// size) and its code. None in a list without pieces.
+    /// </summary>
+    public static List<(Vector3 From, float Scale, byte[] Code)> Trees(byte[] data)
+    {
+        int I(int at) => BitConverter.ToInt32(data, at);
+        if (data.Length < 0x10 || Encoding.ASCII.GetString(data, 0, 4) != "STCH" || I(4) != Version) throw new InvalidDataException("not a version-11 stitch list");
+        int header = Align4(0x10 + I(8)), at = header + HeaderSize, pieces = 0;
+        for (int list = 0; list < ListCount; list++)
+        {
+            int count = I(header + 0x24 + list * 4), decals = I(header + 0x6C + list * 4);
+            at = Align4(at + 4 + I(at)) + count * PieceSize + decals * DecalSize;
+            pieces += count;
+        }
+        at += pieces * 4;
+        int trees = I(at);
+        at += 4 + trees * 14;
+        var result = new List<(Vector3, float, byte[])>();
+        for (int t = 0; t < trees; t++)
+        {
+            at = (at + 15) & ~15;
+            if (Encoding.ASCII.GetString(data, at, 4) != "MOPP") throw new InvalidDataException($"no MOPP tree at 0x{at:X}");
+            int length = I(at + 24);
+            result.Add((Vector(data, at + 8), F32(data, at + 20), data[(at + 32)..(at + 32 + length)]));
+            at += 32 + length;
+        }
+        return result;
     }
 
     public static StitchList Read(byte[] data)

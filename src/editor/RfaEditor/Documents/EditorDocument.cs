@@ -28,6 +28,16 @@ interface IEditorDocument
     bool ConfirmClose();
 }
 
+/// <summary>
+/// A document with more parts for its workspace's panels than its outliner and inspector (a zone's
+/// Show panel). The workspace asks for each of its panels by the panel's id; null leaves the panel
+/// with a hint.
+/// </summary>
+interface IDocumentParts
+{
+    FrameworkElement? PartFor(string panel);
+}
+
 /// <summary>What documents can use of the editor around them.</summary>
 sealed class EditorContext
 {
@@ -40,8 +50,10 @@ sealed class EditorContext
     /// <summary>Call after files in overrides\ changed, so marks and details are brought up to date.</summary>
     public required Action OverridesChanged { get; init; }
 
-    public required Action<GameFile> OpenTable { get; init; }
-    public required Action<GameFile> OpenLevel { get; init; }
+    // Where a table or a level opens can change after the window is made: its workspaces take them
+    // over when they start (see MainWindow.Shell.cs).
+    public required Action<GameFile> OpenTable { get; set; }
+    public required Action<GameFile> OpenLevel { get; set; }
 }
 
 static class DocumentParts

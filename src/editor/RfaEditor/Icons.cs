@@ -4,82 +4,77 @@ using System.Windows.Media;
 namespace RfaEditor;
 
 /// <summary>
-/// The icons the editor uses: characters of the "Segoe MDL2 Assets" font that comes with Windows
-/// (shown with the "Icon" style in Theme.xaml). XAML uses them as {x:Static local:Icons.Save}.
+/// The icons the editor uses: characters of the Fluent System Icons font (Microsoft's, MIT), which
+/// comes inside WPF UI's DLL, so they show on any PC, Linux under Wine too (shown with the "Icon"
+/// style in Theme.xaml). XAML uses them as {x:Static local:Icons.Save}. Each is the icon's 20-pixel
+/// design, named after it (WPF UI's SymbolRegular lists them all, with their codes).
 /// </summary>
 public static class Icons
 {
     // Panels and the explorer
-    public const string Folder = "";
-    public const string Archive = "";
-    public const string Container = "";
-    public const string Table = "";
-    public const string Texture = "";
-    public const string Model = "";
-    public const string Zone = "";
-    public const string Script = "";
-    public const string Sound = "";
-    public const string Animation = "";
-    public const string Effect = "";
-    public const string Text = "";
-    public const string List = "";
-    public const string File = "";
-    public const string Search = "";
-    public const string Info = "";
-    public const string Log = "";
-    public const string Preview = "";
-    public const string OpenFolder = "";
-    public const string Close = "";
+    public const string Folder = "";      // Folder20
+    public const string Archive = "";     // Archive20
+    public const string Container = "";   // Layer20
+    public const string Table = "";       // Table20
+    public const string Texture = "";     // Image20
+    public const string Model = "";       // Cube20
+    public const string Zone = "";        // Map20
+    public const string Script = "";      // Code20
+    public const string Sound = "";       // Speaker220
+    public const string Animation = "";   // Run20
+    public const string Effect = "";      // Sparkle20
+    public const string Text = "";        // DocumentText20
+    public const string List = "";        // List20
+    public const string File = "";        // Document20
+    public const string Search = "";      // Search20
+    public const string Info = "";        // Info20
+    public const string Log = "";         // TextBulletListLtr20
+    public const string Preview = "";     // Eye20
+    public const string OpenFolder = "";  // FolderOpen20
+    public const string Close = "";       // Dismiss20
 
     // Level editor tools and actions
-    public const string Select = "";
-    public const string Move = "";
-    public const string Rotate = "";
-    public const string Snap = "";
-    public const string Undo = "";
-    public const string Redo = "";
-    public const string Focus = "";
-    public const string ShowAll = "";
-    public const string Save = "";
-    public const string Restore = "";
-    public const string Help = "";
-    public const string Add = "";        // Add (a plus)
-    public const string Duplicate = "";  // Copy
-    public const string Delete = "";     // Delete (a bin)
-    public const string Game = "\uE7FC";       // Game (a controller): show in the running game
-    public const string Link = "\uE71B";       // Link: follow the running game
-    public const string Settled = "\uE896";    // Download (an arrow down to a line): props where the running game has them
-    public const string Display = "\uE7F4";    // A monitor: the Direct3D view
-    public const string Sculpt = "\uE771";     // Personalize (a brush): sculpt the ground
-    public const string Navmesh = "\uE76C";    // A network: paint navmesh cells on/off
-    public const string NavmeshGenerate = "\uE773";  // A plus inside a square: generate navmesh from ground
-    public const string GameLight = "\uE793";  // A sun (Brightness): light the level as the game does
-    public const string TopView = "\uE749";    // A wall: top-down view
-    public const string FrontView = "\uE74B";  // A cone: front view
-    public const string SideView = "\uE74C";   // A cone side: side view
-    public const string IsoView = "\uE74D";    // A cone 3D: isometric view
+    public const string Select = "";      // Cursor20
+    public const string Move = "";        // ArrowMove20
+    public const string Rotate = "";      // ArrowRotateClockwise20
+    public const string Snap = "";        // Grid20
+    public const string Undo = "";        // ArrowUndo20
+    public const string Redo = "";        // ArrowRedo20
+    public const string Focus = "";       // Target20
+    public const string ShowAll = "";     // FullScreenMaximize20
+    public const string Save = "";        // Save20
+    public const string Restore = "";     // ArrowReset20
+    public const string Help = "";        // QuestionCircle20
+    public const string Add = "";         // Add20 (a plus)
+    public const string Duplicate = "";   // Copy20
+    public const string Delete = "";      // Delete20 (a bin)
+    public const string Game = "";        // XboxController20: show in the running game
+    public const string Link = "";        // Link20: follow the running game
+    public const string Settled = "";     // ArrowDownload20: props where the running game has them
+    public const string Display = "";     // Desktop20: the Direct3D view
+    public const string Sculpt = "";      // PaintBrush20: sculpt the ground
+    public const string GameLight = "";   // WeatherSunny20: light the level as the game does
+    public const string Magnets = "";     // PlugConnected20: moved objects join the models near them
+    public const string Live = "";        // ArrowSync20: changes go to the running game as they are made
+    public const string AutoReload = "";  // ArrowClockwise20: the running game loads the level again by itself
+
+    // The Scene panel
+    public const string Shown = "";       // Eye20: drawn
+    public const string Hidden = "";      // EyeOff20: not drawn
+    public const string Terrain = "";     // Earth20: the ground
+    public const string Foliage = "";     // LeafTwo20: debris scattered over the ground
+    public const string Pieces = "";      // CubeTree20: the level geometry's pieces
 
     // Kinds of objects in a level
-    public const string Light = "";
-    public const string Path = "";
-    public const string Start = "";
-    public const string Region = "";
-    public const string Spawn = "";
-    public const string Pickup = "\uE7B8";  // Package
-    public const string Mission = "\uE7C1";  // Flag: a mission layer shown with its zone
-    public const string Locked = "\uE72E";   // Lock: a property Volition's editor kept read-only
-    public const string Marker = "";
-
-    // Additional object kinds
-    public const string Constraint = "";  // Link (chain link)
-    public const string Rig = "";         // Animation (person/skeleton)
-    public const string Logic = "";       // Script (code)
-    public const string Camera = "";      // Preview (camera)
-    public const string Mover = "";       // Model (cube/box)
-    public const string Debris = "";      // Archive (broken pieces)
-    public const string Dummy = "";       // Container (empty box)
-    public const string ForceField = "";  // Zone (shield-like)
-    public const string ClipShape = "";   // Link (clip/boundary)
+    public const string Light = "";       // Lightbulb20
+    public const string Path = "";        // Location20
+    public const string Start = "";       // Flag20
+    public const string Region = "";      // SelectObject20
+    public const string Spawn = "";       // People20
+    public const string Pickup = "";      // Box20
+    public const string Mission = "";     // Flag20: a mission layer shown with its zone
+    public const string Locked = "";      // LockClosed20: a property Volition's editor kept read-only
+    public const string Marker = "";      // Circle20
 }
 
 /// <summary>A kind of file, by its extension: its name, icon and colour in the explorer.</summary>

@@ -72,7 +72,8 @@ public static class PieceCollision
         (0xA1937CBD, "hkpListShape"), (0x90B29D39, "hkpMoppBvTreeShape"), (0x924C2661, "hkpMoppCode"), (0xB22A5053, "havok_mesh_shape"),
     ];
 
-    const float Radius = 0.01f;
+    /// <summary>The mesh shape's radius: its surface lies this far round its triangles.</summary>
+    public const float Radius = 0.01f;
 
     /// <summary>Whether a model's collision (either game's) is a stitch piece's: one triangle mesh under a tree, not a destructible object's shapes.</summary>
     public static bool IsMesh(byte[] cFile)
@@ -94,22 +95,24 @@ public static class PieceCollision
                 BitConverter.ToSingle(cFile, code + 0x1C), cFile[(p.Data + bytesAt)..(p.Data + bytesAt + length)]);
     }
 
-    /// <summary>Armageddon's collision section for a piece of these triangles: written from nothing, with a tree of ours over them.</summary>
+    /// <summary>Armageddon's collision section for a piece of these triangles: written from nothing, with a tree of ours over them (each triangle's leaf its box widened by the shape's radius, the surface Havok collides with).</summary>
     public static byte[] Section(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> triangles)
     {
         Check(vertices, triangles);
         var min = new Vector3(vertices.Min(v => v.X), vertices.Min(v => v.Y), vertices.Min(v => v.Z));
         var max = new Vector3(vertices.Max(v => v.X), vertices.Max(v => v.Y), vertices.Max(v => v.Z));
-        const float margin = 0.05f;
-        var from = min - new Vector3(margin);
-        float size = MathF.Max(max.X - min.X, MathF.Max(max.Y - min.Y, max.Z - min.Z)) + 2 * margin;
-        var boxes = Enumerable.Range(0, triangles.Count / 3).Select(t =>
-        {
-            Vector3 a = vertices[triangles[3 * t]], b = vertices[triangles[3 * t + 1]], c = vertices[triangles[3 * t + 2]];
-            return (Vector3.Min(a, Vector3.Min(b, c)), Vector3.Max(a, Vector3.Max(b, c)));
-        }).ToList();
+        var (from, size) = StitchList.TreeFrame(min, max, 0.05f);
+        var boxes = TriangleBoxes(vertices, triangles, Radius);
         return Section(vertices, triangles, from, 16777216f / size, StitchList.TreeCode(boxes, from, size));
     }
+
+    /// <summary>Each triangle's box, widened by <paramref name="by"/>.</summary>
+    public static List<(Vector3 Min, Vector3 Max)> TriangleBoxes(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> triangles, float by = 0) =>
+        [.. Enumerable.Range(0, triangles.Count / 3).Select(t =>
+        {
+            Vector3 a = vertices[triangles[3 * t]], b = vertices[triangles[3 * t + 1]], c = vertices[triangles[3 * t + 2]];
+            return (Vector3.Min(a, Vector3.Min(b, c)) - new Vector3(by), Vector3.Max(a, Vector3.Max(b, c)) + new Vector3(by));
+        })];
 
     /// <summary>As <see cref="Section(IReadOnlyList{Vector3}, IReadOnlyList{int})"/> with the tree given: its frame's start, scale (2^24 / its size) and code.</summary>
     public static byte[] Section(IReadOnlyList<Vector3> vertices, IReadOnlyList<int> triangles, Vector3 treeFrom, float treeScale, byte[] treeCode)

@@ -44,16 +44,51 @@ public static partial class GuerrillaHud
         new("rfg_ui_hud_health", ["ui_hud_blood_gradient", "ui_hud_radiation"]),
         new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Reticles),
         new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Icons),
-        new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player"]),
+        // The minimap; its radar sweep's line (ui_minimap_scan_line, a whole texture in the document's own interface-maps,
+        // which Guerrilla's cartographer drew itself: render_scan_line RM 0x863A60).
+        new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player", "ui_minimap_scan_line"]),
         new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap, .. HintKeys], GuerrillaScript: true, BridgedItems: true,
             ExtraTextures: ["interface-pc"]),
-        // Guerrilla's prompts under the reticle (so far its use prompt, at the safehouses' stations), and its upgrade
-        // screen (the safehouses' shops: their upgrades, pictures and blueprints from upgrades.xtbl). The upgrade
-        // screen's set_header, set_button, set_hints and set_highlight are named as Armageddon's own scripts name theirs,
-        // and a global is read from whichever document has it first, so they're renamed rfg_ui_upgrades_....
-        new("rfg_ui_messages", [], GuerrillaScript: true, BridgedItems: true),
+        // Guerrilla's messages: its message lines, its use prompt (a hand, a ladder, a vehicle, a mission's start, the
+        // upgrades), the weapon swap, the pickups beside the reticle (weapons, rounds, salvage) and the saving icon (its
+        // picture is Guerrilla's utility document's, which isn't brought over); and its upgrade screen (the safehouses'
+        // shops: their upgrades, pictures and blueprints from upgrades.xtbl). The upgrade screen's set_header,
+        // set_button, set_hints and set_highlight are named as Armageddon's own scripts name theirs, and a global is read
+        // from whichever document has it first, so they're renamed rfg_ui_upgrades_....
+        new("rfg_ui_messages", ["ui_hud_icon_salvage", "ui_hud_save_icon", "ui_hud_hand_icon", "ui_hud_convoy_car_icon",
+                                "ui_map_icon_mission_start", "ui_hud_icon_upgrade"],
+            GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons),
         new("rfg_ui_upgrades", ["ui_hud_icon_salvage"], GuerrillaScript: true, BridgedItems: true, UpgradePictures: true,
-            RenamedGlobals: ["set_header", "set_button", "set_hints", "set_highlight"]),
+            RenamedGlobals: ["set_header", "set_button", "set_hints", "set_highlight"], GuerrillaTextSizes: true),
+        // Guerrilla's weapon cabinet (a safehouse's locker, every ammo crate): the weapons found or bought, to put into
+        // three of the four slots. Its pictures: the weapons' icons, the teams' logos (the white one in the crate's
+        // ammo line), the PC keys 1 2 3 4 for the slots and Esc for back (ui_bms_pc_buttons: key_20 key_43 key_66
+        // key_89, key_124). Its generic globals renamed (the weapon select has a handle_icon_scale and handle_highlight).
+        new("rfg_ui_safehouse_weapons", ["ui_hud_guerilla_logo_large", "ui_hud_edf_logo_large", "ui_hud_ultor_logo", "ui_hud_marauder_logo",
+                                         "ui_hud_guerilla_logo_white", "key_20", "key_43", "key_66", "key_89", "key_124"],
+            GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons, ExtraTextures: ["interface-pc"],
+            RenamedGlobals: ["LOCK", "MAX_ICONS", "handle_icon_scale", "handle_highlight"], GuerrillaTextSizes: true),
+        // Guerrilla's handbook (its pause menu's HANDBOOK): its pages and entries (GuerrillaHandbook, handbook.txt), the
+        // weapons' icons its combat page shows, the PC keys A, D and Esc for its hints (ui_bms_pc_buttons: key_48, key_50,
+        // key_124). The mod loads it only while it's open, and each entry's own picture from a document of its own, the
+        // picked entry's alone (see the handbook pictures below). Its generic globals renamed (rfg_ui_upgrades has an
+        // ORANGE and a BROWN, and Armageddon's scripts set_header and set_hints).
+        new("rfg_ui_handbook", ["ui_hud_base_square", "key_48", "key_50", "key_124"],
+            GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons, ExtraTextures: ["interface-pc"],
+            RenamedGlobals: ["set_header", "set_page_tab", "add_row", "remove_row", "update_row", "update_row_position", "set_hints",
+                             "set_gameplay", "set_actions", "set_combat", "set_vehicles", "set_background", "set_blast_from_past",
+                             "set_tool_tips", "set_cutscene", "ORANGE", "DARK_ORANGE", "BROWN", "MAX_ROWS", "MAX_PAGES", "Row_handles",
+                             "Num_rows", "Row_base_pos_x", "Row_base_pos_y", "Highlight_bar_size_x", "Highlight_bar_size_y", "Page_base_x",
+                             "Page_base_y", "Scroll_bar_height", "Scroll_bar_top_y", "Scroll_bar_top_x", "Scroll_bar_bottom_y",
+                             "INFO_ROTATION", "Icon_image_name"], GuerrillaTextSizes: true),
+        // Guerrilla's help box: its tool tips (GuerrillaToolTips, tool_tips.txt), one at a time, with their icons. Its
+        // generic globals renamed (Armageddon's HUD has a help box of its own).
+        new("rfg_ui_hud_help", [], GuerrillaScript: true, BridgedItems: true, GuerrillaTextSizes: true, ToolTipPictures: true,
+            RenamedGlobals: ["NUM_SCREEN_COORDS", "Screen_coords", "Screen_coords_handles", "Help_message_main_handle",
+                             "Help_title_handle", "Help_text_handle", "Help_icon_handle", "Help_icon2_handle", "Help_arrow_handle",
+                             "Help_hint_handle", "Help_bg_main", "Help_bg_body", "Help_bg_bottom", "Help_arrows_anim_handle",
+                             "Help_main_anim_handle", "Help_main_alpha_twn_handle", "Help_main_scale_twn_handle", "init_handles_help",
+                             "set_help_data", "set_help_language"]),
     ];
 
     /// <summary>
@@ -96,6 +131,28 @@ public static partial class GuerrillaHud
     };
 
     static readonly uint ImageHash = VintDocument.Hash("image");
+    static readonly uint FontHash = VintDocument.Hash("font");
+    static readonly uint TextScaleHash = VintDocument.Hash("text_scale");
+    static readonly uint ScaleHash = VintDocument.Hash("scale");
+
+    /// <summary>
+    /// How much smaller (or bigger) a text in Guerrilla's font <paramref name="font"/> was than Armageddon's font of
+    /// the same name draws it: Guerrilla's font's height over Armageddon's (a .vf3_pc's u16 at 0x16, the height the
+    /// game measures text with), or null if either game lacks it or they're the same. Measured 2026-11-12: font_body
+    /// 33 / 50 (its letters' widths 0.66 of Armageddon's too: Armageddon's is half as big again); font_header 43 / 49
+    /// (but Guerrilla's letters half as wide again as Armageddon's narrow ones: the height is what's matched);
+    /// font_numbers the same in both.
+    /// </summary>
+    static float? FontScale(Packfile guerrillaInterface, Packfile gameInterface, string font)
+    {
+        static int? Height(Packfile archive, string font) =>
+            archive.Find(font + ".vf3_pc") is { } entry && archive.Read(entry) is { Length: >= 0x18 } data &&
+            BitConverter.ToUInt32(data, 0) == 0x544E4656 /* VFNT */ ? BitConverter.ToUInt16(data, 0x16) : null;
+        int? guerrilla = Height(guerrillaInterface, font), armageddon = Height(gameInterface, font);
+        if (guerrilla is not > 0 || armageddon is not > 0 || guerrilla == armageddon) return null;
+        return (float)guerrilla.Value / armageddon.Value;
+    }
+
     // Our sheet table, in place of the game's bitmap_sheets. Not named rfg_..., so that taking the
     // world's rfg_* files away never takes it with them (see Remove).
     const string SheetTableName = "guerrilla_hud_sheets";
@@ -151,6 +208,45 @@ public static partial class GuerrillaHud
             string script = Path.Combine(scriptsFolder, name + ".lua");
             if (!File.Exists(script)) throw new FileNotFoundException($"our script for {name} is missing", script);
             var document = VintDocument.Read(Read(guerrillaInterface, name + ".vint_doc"));
+
+            // Its texts at Guerrilla's sizes (HudDocument.GuerrillaTextSizes): each text_scale times its font's
+            // FontScale, and the shims told which elements, for the text_scale Guerrilla's script sets.
+            var textScales = new List<(string Element, float Scale)>();
+            if (hud.GuerrillaTextSizes)
+            {
+                var fontScales = new Dictionary<string, float?>(StringComparer.OrdinalIgnoreCase);
+                int unscaled = 0, scaledByElement = 0;
+                foreach (VintElement element in document.Elements().Where(e => e.Type.Equals("text", StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (element.Properties.FirstOrDefault(p => p.NameHash == FontHash && p.ValueType == VintDocument.StringValue) is not { } fontProperty)
+                        continue;
+                    string font = document.Text(fontProperty.AsReference);
+                    if (!fontScales.TryGetValue(font, out float? scale))
+                        fontScales[font] = scale = FontScale(guerrillaInterface, gameInterface, font);
+                    if (scale is not { } by) continue;
+                    var sizes = element.Properties.Where(p => p.NameHash == TextScaleHash && p.ValueType == 7).ToList();
+                    bool byElementScale = sizes.Count == 0;
+                    // Some texts are sized by the element's own scale instead (the shop's rows): that, then. None of
+                    // Guerrilla's scripts sets those texts' scale, so the shims needn't know them.
+                    if (byElementScale) sizes = element.Properties.Where(p => p.NameHash == ScaleHash && p.ValueType == 7).ToList();
+                    if (sizes.Count == 0)
+                    {
+                        unscaled++;  // no size of its own to change (a document's values are changed in place, not added)
+                        continue;
+                    }
+                    foreach (VintProperty size in sizes)
+                    {
+                        var (x, y) = document.Vector2(size);
+                        document.SetVector2(size, x * by, y * by);
+                    }
+                    if (byElementScale) scaledByElement++;
+                    else textScales.Add((element.Name, by));
+                }
+                report.Add($"{name}: {textScales.Count + scaledByElement} texts made Guerrilla's size (" +
+                           string.Join(", ", fontScales.Where(f => f.Value != null).Select(f => $"{f.Key} x{f.Value:0.###}")) + ")" +
+                           (scaledByElement > 0 ? $", {scaledByElement} of them by their element's scale" : "") +
+                           (unscaled > 0 ? $"; {unscaled} with no size of their own left as they are" : ""));
+            }
 
             // The textures it can show: those of the texture files it depends on, from Guerrilla's
             // misc.vpp_pc (always loaded there) or the document's own texture container.
@@ -219,6 +315,7 @@ public static partial class GuerrillaHud
                 _ => hud.ScriptPictures,
             };
             scriptPictures = scriptPictures.Concat(upgradePictures.SelectMany(u => new[] { u.Icon, u.Blueprint }).OfType<string>());
+            if (hud.ToolTipPictures) scriptPictures = scriptPictures.Concat(GuerrillaToolTips.Icons(guerrillaMisc));
             foreach (string picture in scriptPictures.Distinct(StringComparer.OrdinalIgnoreCase))
                 if (TextureFor(picture) is { } texture && !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
                 else if (TextureFor(picture) == null) report.Add($"{name}: its script's picture {picture} isn't in Guerrilla's textures");
@@ -268,6 +365,7 @@ public static partial class GuerrillaHud
             byte[] scriptBytes = guerrillaScript != null
                 ? Encoding.Latin1.GetBytes(GuerrillaScriptFor(name, guerrillaScript,
                                                               File.ReadAllText(Path.Combine(scriptsFolder, ShimsScript), Encoding.Latin1),
+                                                              TextScalesScript(name, textScales) +
                                                               (hud.WeaponPictures == HudWeaponPictures.Reticles ? WeaponReticlesScript(weaponPictures) : "") +
                                                               (hud.UpgradePictures ? UpgradePicturesScript(upgradePictures, picture => TextureFor(picture) != null) : "") +
                                                               File.ReadAllText(script, Encoding.Latin1), sheetOf.Keys, hud.BridgedItems,
@@ -337,12 +435,68 @@ public static partial class GuerrillaHud
         }
         report.Add($"rfg_ui_map_zones_*: {zonePictures} zones' own pictures in {zoneSets.Count} documents ({zonePicturesBytes / 1024} KB in all)");
 
+        // The handbook's entries' pictures, each in a document of its own (GuerrillaHandbook.PictureDocument), as
+        // Guerrilla streamed each entry's container ui_handbook_<x>.str2_pc while its entry was shown: the mod loads the
+        // picked entry's alone, while the handbook is open. All of them at once took 13 MB of the interface's memory
+        // and ran it out as the world loaded (2026-11-12).
+        int handbookPictures = 0, handbookBytes = 0, handbookLargest = 0, handbookConverted = 0;
+        foreach (string picture in GuerrillaHandbook.Pictures(guerrillaMisc))
+        {
+            PegFile? peg = ReadBitmap(guerrillaInterface, picture);
+            if (peg == null || peg.Textures.Count != 1)
+            {
+                report.Add($"Guerrilla's handbook picture {picture} not found; its entry shows none");
+                continue;
+            }
+            // Guerrilla's handbook pictures are 16-bit RGB 565 (format 403), which Armageddon's Direct3D 11 interface
+            // doesn't draw (its own pictures are DXT or 32-bit: a 565 one came out a small grey box, 2026-11-12): made
+            // 32-bit ARGB, as the blueprints are, opaque.
+            PegTexture source = peg.Textures[0];
+            if (source.Format is not (TextureFormat.Dxt1 or TextureFormat.Dxt3 or TextureFormat.Dxt5 or TextureFormat.Argb8888))
+            {
+                byte[] pixels = TextureCodec.Encode(TextureFormat.Argb8888, peg.Decode(source));
+                byte[] header = PegFile.SingleHeader(source.Name, source.Width, source.Height, TextureFormat.Argb8888, 1, source.Flags);
+                var padded = new byte[(pixels.Length + 15) & ~15];
+                Array.Copy(pixels, padded, pixels.Length);
+                peg = PegFile.Read(header, padded);
+                handbookConverted++;
+            }
+            string name = GuerrillaHandbook.PictureDocument(picture);
+            string textureFile = "interface-" + name;
+            (byte[] pegHeader, byte[] pegData) = MergePegs([(peg, peg.Textures[0], Prefix + picture + WholeSheetSuffix + ".tga")]);
+            byte[] documentBytes = VintDocument.TexturesOnly(textureFile, name, name + ".lua");
+            byte[] scriptBytes = Encoding.Latin1.GetBytes(HandbookPictureScript(name));
+            byte[] main = Packfile.CreateContainer(documentTemplate, [(name + ".vint_doc", documentBytes), (name + ".lua", scriptBytes)]);
+            byte[] art = Packfile.CreateContainer(textureTemplate, [(textureFile + ".cpeg_pc", pegHeader), (textureFile + ".gpeg_pc", pegData)]);
+            Write(Path.Combine(cacheOut, name + ".str2_pc"), main);
+            Write(Path.Combine(cacheOut, name + "2.str2_pc"), art);
+            Write(Path.Combine(cacheOut, name + ".vint_doc"), documentBytes);
+            Write(Path.Combine(cacheOut, name + ".lua"), scriptBytes);
+            containers.Containers.RemoveAll(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                                                 c.Name.Equals(name + "2", StringComparison.OrdinalIgnoreCase));
+            containers.Containers.Add(Entry(documentEntry, name, Packfile.FromBytes(name + ".str2_pc", main),
+                [(name + ".vint_doc", 0), (name + ".lua", 1)]));
+            containers.Containers.Add(Entry(textureEntry, name + "2", Packfile.FromBytes(name + "2.str2_pc", art), [(textureFile + ".cpeg_pc", 0)]));
+            documentNames.Add(name);
+            wholeTextures.Add((picture, peg.Textures[0].Width, peg.Textures[0].Height));
+            handbookPictures++;
+            handbookBytes += pegData.Length;
+            handbookLargest = Math.Max(handbookLargest, pegData.Length);
+        }
+        report.Add($"{GuerrillaHandbook.PictureDocumentPrefix}*: {handbookPictures} handbook pictures, a document each (one loaded at a time: " +
+                   $"{handbookLargest / 1024} KB at most; {handbookBytes / 1024} KB in all; {handbookConverted} made 32-bit from 16-bit)");
+
         // The districts' names by zone, in the player's language, for the minimap.
         List<string> districts = DistrictLines(guerrillaMisc, report);
         Directory.CreateDirectory(scriptsFolder);
         File.WriteAllLines(Path.Combine(scriptsFolder, DistrictsFile), districts);
         // Guerrilla's map icons and places, for the minimap and the world map.
         report.AddRange(GuerrillaMapIcons.Build(guerrillaCache, scriptsFolder));
+        // What the safehouses' lockers and the ammo crates' weapon cabinet shows and goes by.
+        report.AddRange(GuerrillaWeaponCabinet.Build(guerrillaCache, scriptsFolder));
+        // The handbook's pages and entries.
+        report.AddRange(GuerrillaHandbook.Build(guerrillaCache, scriptsFolder));
+        report.AddRange(GuerrillaToolTips.Build(guerrillaCache, scriptsFolder));
 
         string listsOut = Path.Combine(cacheOut, "interface.vpp_pc");
         Write(Path.Combine(listsOut, "vint_doc_containers.asm_pc"), containers.ToBytes());
@@ -370,9 +524,10 @@ public static partial class GuerrillaHud
             report.Add($"Removed {Path.GetFileName(old)}, written by an earlier version");
         }
         var wholeNamed = wholeTextures.Where(w => !ZoneMap().IsMatch(w.Name + ".str2_pc")).Select(w => w.Name).ToList();
-        var namedDocuments = documentNames.Where(d => !d.StartsWith("rfg_ui_map_", StringComparison.OrdinalIgnoreCase)).ToList();
+        var namedDocuments = documentNames.Where(d => !d.StartsWith("rfg_ui_map_", StringComparison.OrdinalIgnoreCase) &&
+                                                      !d.StartsWith(GuerrillaHandbook.PictureDocumentPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
         report.Add($"Added {string.Join(", ", namedDocuments)}" +
-                   (documentNames.Count > namedDocuments.Count ? $" and {documentNames.Count - namedDocuments.Count} zone pictures' documents" : "") +
+                   (documentNames.Count > namedDocuments.Count ? $" and {documentNames.Count - namedDocuments.Count} zone and handbook pictures' documents" : "") +
                    " to vint_doc_containers.asm_pc and rfg.vint_proj" +
                    (sheetTable != null ? $", and Guerrilla's sheets {string.Join(", ", sheetsBrought)} (renamed {Prefix}...) and one-picture " +
                                          $"sheets for {string.Join(", ", wholeNamed)}" +
@@ -399,12 +554,17 @@ public static partial class GuerrillaHud
         foreach (string document in Documents.Select(d => d.Name).Concat(ZoneDocuments()))
             foreach (string file in new[] { ".str2_pc", "2.str2_pc", ".vint_doc", ".lua" })
                 files.Add(Path.Combine(cacheOut, document + file));
+        if (Directory.Exists(cacheOut))
+            files.AddRange(Directory.GetFiles(cacheOut, GuerrillaHandbook.PictureDocumentPrefix + "*"));
         if (scriptsFolder != null)
         {
             files.Add(Path.Combine(scriptsFolder, DistrictsFile));
             files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.FileName));
             files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.RadioTagsFile));
             files.Add(Path.Combine(scriptsFolder, GuerrillaMapIcons.SafehousesFile));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaWeaponCabinet.FileName));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaHandbook.FileName));
+            files.Add(Path.Combine(scriptsFolder, GuerrillaToolTips.FileName));
         }
         files.AddRange(OldFiles(overridesFolder));
         var report = new List<string>();
@@ -487,6 +647,23 @@ public static partial class GuerrillaHud
     }
 
     /// <summary>
+    /// For a document whose texts were made Guerrilla's size (HudDocument.GuerrillaTextSizes): which, and by how much,
+    /// for the shims' text_scale (rfg_text_scales). Nothing for the others.
+    /// </summary>
+    static string TextScalesScript(string document, IReadOnlyList<(string Element, float Scale)> scales)
+    {
+        if (scales.Count == 0) return "";
+        const string newline = "\r\n";
+        var text = new StringBuilder();
+        text.Append("-- Its texts made Guerrilla's size by their fonts (GuerrillaBuilder.exe): the text_scale its script sets is too." + newline);
+        text.Append($"rfg_text_scales(\"{document}\", {{" + newline);
+        foreach (var (element, scale) in scales)
+            text.Append($"\t{{ \"{element}\", {scale.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture)} }}," + newline);
+        text.Append("})" + newline + newline);
+        return text.ToString();
+    }
+
+    /// <summary>
     /// For the reticles' script: Guerrilla's weapons' reticles by the picture each weapon names as its icon (the
     /// weapons build names Guerrilla's, "rfg_" + it, and the game gives the HUD the held weapon's), a table
     /// Rfg_weapon_reticles of { reticle, reticle while aiming finely (or nil) }. The first weapon of a picture wins.
@@ -539,6 +716,12 @@ public static partial class GuerrillaHud
     static string TilesScript(string document) =>
         $"-- {document}: Guerrilla's zone pictures for its minimap, made by GuerrillaBuilder.exe from your copy of Guerrilla.\r\n" +
         "-- The document only brings them (the guerrilla_hud mod loads it with the HUD); the minimap and world map show them.\r\n" +
+        $"function {document}_init()\r\nend\r\n\r\nfunction {document}_cleanup()\r\nend\r\n";
+
+    /// <summary>The script of a handbook picture's document: nothing to do, its init and cleanup only.</summary>
+    static string HandbookPictureScript(string document) =>
+        $"-- {document}: one of Guerrilla's handbook pictures, made by GuerrillaBuilder.exe from your copy of Guerrilla.\r\n" +
+        "-- The document only brings it (the guerrilla_hud mod loads it while its entry is shown); the handbook shows it.\r\n" +
         $"function {document}_init()\r\nend\r\n\r\nfunction {document}_cleanup()\r\nend\r\n";
 
     /// <summary>A single bitmap (&lt;name&gt;.cvbm_pc and .gvbm_pc, laid out as a texture file) in its own container &lt;name&gt;.str2_pc.</summary>
@@ -810,10 +993,17 @@ public static partial class GuerrillaHud
 /// <param name="ExtraTextures">Guerrilla's texture files (in its misc.vpp_pc) its script's pictures come from besides the document's own.</param>
 /// <param name="UpgradePictures">It shows Guerrilla's upgrades' pictures (upgrades.xtbl): they come along, and its script gets Rfg_upgrade_pictures.</param>
 /// <param name="RenamedGlobals">Globals of Guerrilla's script named as some of Armageddon's scripts name theirs: renamed &lt;document&gt;_&lt;name&gt;.</param>
+/// <param name="GuerrillaTextSizes">
+/// Its texts drawn at Guerrilla's sizes: Armageddon's fonts of the same names are bigger, so each text's text_scale (or,
+/// lacking one, its scale) is scaled by its font (GuerrillaHud.FontScale), and so is any text_scale its script sets
+/// (the shims, told by rfg_text_scales).
+/// </param>
+/// <param name="ToolTipPictures">It shows Guerrilla's tool tips (tool_tips.xtbl): their icons come along.</param>
 public sealed record HudDocument(string Name, IReadOnlyList<string> ScriptPictures, bool GuerrillaScript = false,
                                  HudWeaponPictures WeaponPictures = HudWeaponPictures.None, bool BridgedItems = false,
                                  IReadOnlyList<string>? ExtraTextures = null, bool UpgradePictures = false,
-                                 IReadOnlyList<string>? RenamedGlobals = null);
+                                 IReadOnlyList<string>? RenamedGlobals = null, bool GuerrillaTextSizes = false,
+                                 bool ToolTipPictures = false);
 
 /// <summary>Which of Guerrilla's weapons' pictures a HUD document brings along (see <see cref="GuerrillaHud.Build"/>).</summary>
 public enum HudWeaponPictures { None, Icons, Reticles }

@@ -1,4 +1,4 @@
-<Window x:Class="RfaEditor.MainWindow"
+<ui:FluentWindow xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml" x:Class="RfaEditor.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:RfaEditor"
@@ -11,7 +11,7 @@
         <!-- Top bar: the editor's name, where the game and your changes are -->
         <Border DockPanel.Dock="Top" Background="{StaticResource PanelHeaderBrush}" BorderBrush="{StaticResource BorderBrush}"
                 BorderThickness="0,0,0,1" Padding="10,5">
-            <DockPanel>
+            <DockPanel x:Name="TopBar">
                 <TextBlock Text="{x:Static local:Icons.Model}" Style="{StaticResource Icon}" FontSize="16"
                            Foreground="{StaticResource AccentBrush}" Margin="0,0,8,0" />
                 <TextBlock Text="RFA Editor" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" Margin="0,0,20,0" />
@@ -175,4 +175,4 @@
             </layout:LayoutRoot>
         </dock:DockingManager>
     </DockPanel>
-</Window>
+</ui:FluentWindow>

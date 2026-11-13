@@ -82,10 +82,30 @@ local function fade_armageddon(alpha)
 	end
 end
 
+-- Each change in what shows (the reticle, the ammo) with what Armageddon gave for it, written to the log (at most
+-- SHOWN_LOG_LINES a load): to tell why the ammo may show with no reticle.
+local SHOWN_LOG_LINES = 60
+local Shown_logged = 0
+local Shown_last = ""
+
+local function log_shown(reticle_shown, ammo_shown)
+	local shown = tostring(reticle_shown) .. " " .. tostring(ammo_shown) .. " " .. tostring(Reticle[1]) .. " " .. tostring(Weapon[1])
+	if shown == Shown_last or Shown_logged >= SHOWN_LOG_LINES or rfa_log == nil then
+		return
+	end
+	Shown_last = shown
+	Shown_logged = Shown_logged + 1
+	rfa_log("[rfg_ui_hud_reticles] reticle " .. tostring(reticle_shown) .. ", ammo " .. tostring(ammo_shown) ..
+		": reticule_hud weapon '" .. tostring(Reticle[1]) .. "' state " .. tostring(Reticle[2]) .. "; primary_weapon_hud weapon '" ..
+		tostring(Weapon[1]) .. "' ammo status " .. tostring(Weapon[7]) .. ", total " .. tostring(Weapon[8]) .. ", clip " ..
+		tostring(Weapon[10]) .. " of " .. tostring(Weapon[9]))
+end
+
 -- Shows or hides Guerrilla's reticle and ammo as Armageddon would show its own.
 local function show_parts()
 	local reticle_shown = not Hud_hidden and Reticle[1] ~= nil and Reticle[1] ~= "" and Reticle[2] ~= RETICULE_STATE_HIDE
 	local ammo_shown = not Hud_hidden and Weapon[7] ~= nil and Weapon[7] ~= AMMO_AREA_STATUS_HIDDEN
+	log_shown(reticle_shown, ammo_shown)
 	vint_set_property(vint_object_find("reticle_main"), "visible", reticle_shown)
 	vint_set_property(vint_object_find("ammo_main"), "visible", ammo_shown)
 	vint_set_property(vint_object_find("charge_main"), "visible", ammo_shown)

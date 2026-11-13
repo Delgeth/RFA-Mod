@@ -11,10 +11,17 @@
     <AssemblyName>RfaEditor</AssemblyName>
     <!-- 64-bit: a level with its zones around needs more than a 32-bit program's 2 GB -->
     <PlatformTarget>x64</PlatformTarget>
+    <!-- Only the English texts of the libraries used (the docking library has 17 languages, each a folder of its own) -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\RfaFormats\RfaFormats.csproj" />
+  </ItemGroup>
+
+  <!-- The Fluent look of the window and every control, and its icon font (WPF UI, MIT) -->
+  <ItemGroup>
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
   </ItemGroup>
 
   <!-- The Direct3D view's shaders, as readable source, compiled when the editor starts -->

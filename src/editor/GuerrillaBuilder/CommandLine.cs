@@ -23,8 +23,9 @@ static class CommandLine
                                                           with the parts built on them
         GuerrillaBuilder.exe status                       says what is built
         GuerrillaBuilder.exe check                        checks the tables built, as the game's reader takes
-                                                          them at start-up (a build ends with this too)
-          <parts>: world hud vehicles weapons people, in any order; they're built in that order, with
+                                                          them at start-up, and the world's rocks' collision,
+                                                          as its physics will (a build ends with this too)
+          <parts>: world hud vehicles weapons people cloth, in any order; they're built in that order, with
           the ones they need that aren't built yet.
         Options for build:
           --guerrilla <folder>          Guerrilla's folder for this run (else GuerrillaDir in rfa_mods.ini)
@@ -89,7 +90,7 @@ static class CommandLine
                 foreach (string word in Names(arg))
                 {
                     var part = Parts.All.Where(p => Parts.Word(p).Equals(word, StringComparison.OrdinalIgnoreCase)).Cast<Part?>().FirstOrDefault();
-                    if (part == null) return Fail($"Unknown part {word}: the parts are world, hud, vehicles, weapons and people.");
+                    if (part == null) return Fail($"Unknown part {word}: the parts are world, hud, vehicles, weapons, people and cloth.");
                     parts.Add(part.Value);
                 }
                 continue;

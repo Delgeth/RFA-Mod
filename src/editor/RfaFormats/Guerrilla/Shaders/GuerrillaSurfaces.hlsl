@@ -27,7 +27,8 @@
 // holes where the mask has neither), 8 the vehicle paints (rfg-edf-vhc: the EDF's camouflage, its
 // tint turning with the angle between the sun and the eye; BrdfKind.x 1 rfg-colorshift: that tint
 // alone, unlit), 9 rfg-ed-oasisroof (a clear coat over a near-black base, its shine and rim fading
-// under the dirt layer); LAYERS 0, 1 or 2: the UV sets past the first the meshes have
+// under the dirt layer), 10 rfg-mp_fuel_gauge (the backpacks' fuel gauge: unlit, its colour map's alpha
+// the shape, lit by the worn pack's fuel, PackFuel); LAYERS 0, 1 or 2: the UV sets past the first the meshes have
 // (standard: Decal_Map_1 at UV1, Decal_Map_2 at UV2; the others: their layer, Environment_Map, at UV1,
 // Decal_Map_1 at UV2); INSTANCED 1 for instanced meshes (each object's matrix in the vertex stream);
 // SKINNED 1 for skinned ones (up to four bones a vertex: the people and their props, and the glass's
@@ -109,6 +110,7 @@ cbuffer Guerrilla : register(b8)  // the guerrilla_world mod's
     float4 SunTowardView;       // (the terrain's)
     float4 View;                // (the terrain's)
     float4 Tint;                // the colour correction (Guerrilla's Tint_color) the colours above already carry
+    float4 PackFuel;            // Guerrilla's mp_fuels for the worn backpack: its fuel, the fuel it needs to go on, 1 while on (0 none worn)
 };
 
 // The ambient lifted toward 4 by a self-illumination, as Guerrilla's shaders lift it: toward 4 before
@@ -452,6 +454,30 @@ void CompositeMask(float4 uv01, out float sub, out float top)
     top = min(dot(a1.rgb, trunc(BrdfDiffuse[1].rgb)), 1);
 }
 
+// rfg-mp_fuel_gauge (FAMILY 10), as Guerrilla's: its vertex shader moves u by the fuel x Diffuse_Map_OffsetU x 10
+// (mp_fuels.x, here PackFuel.x; Scroll.x), its pixel shader samples at u kept to 0.01..0.99; the map's alpha alone is
+// used (the shape). The colour: cyan (0, 0.26, 0.26) with the fuel to go on (min(mp_fuels.y, 0.99) < mp_fuels.x),
+// red without, yellow while on (mp_fuels.z); its level 0.3 off, (sin(saturate(on x time x 200)) + 1) x on x
+// Self_Illumination / 2 on; x max(level x 25, level x 125) x V_ambient_render x 0.4, kept to 0..8; then fogged and
+// tinted as the others (AmbientAbove carries Guerrilla's tint already).
+float2 FuelGaugeUv(float2 uv)
+{
+    uv.x += PackFuel.x * Scroll.x * 10;
+    return float2(clamp(uv.x, 0.01, 0.99), uv.y);
+}
+
+float4 FuelGaugePixel(float2 uv, float fog)
+{
+    const float4 c0 = DiffuseMap.Sample(DiffuseSampler, FuelGaugeUv(uv));
+    float3 colour = min(PackFuel.y, 0.99) < PackFuel.x ? float3(0, 0.26, 0.26) : float3(1, 0, 0);
+    if (PackFuel.z != 0) colour = float3(1, 1, 0);
+    float level = (sin(saturate(PackFuel.z * Time.x * 200)) + 1) * (PackFuel.z * Glow.x);
+    level = level * 0.5 + (PackFuel.z == 1 ? 0 : 0.3);
+    float3 rgb = clamp(colour * max(level * 25, level * 125) * AmbientAbove.rgb * 0.4, 0, 8);
+    rgb = rgb * (1 - fog) + fog * FogColour.rgb;
+    return float4(rgb, saturate(c0.a)) * TintColour;
+}
+
 // How much of the surface is there (its alpha, as SurfacePixel works it out), for the depth and
 // G-buffer passes of alpha-tested materials.
 float SurfaceAlpha(float4 uv01, float4 uv2, float seconds)
@@ -471,6 +497,8 @@ float SurfaceAlpha(float4 uv01, float4 uv2, float seconds)
     float sub, top;
     CompositeMask(uv01, sub, top);
     return min(sub + top, 1);
+#elif FAMILY == 10
+    return DiffuseMap.Sample(DiffuseSampler, FuelGaugeUv(uv01.xy)).a;
 #else
     return 1;
 #endif
@@ -478,6 +506,9 @@ float SurfaceAlpha(float4 uv01, float4 uv2, float seconds)
 
 float4 SurfacePixel(Surface s) : SV_Target
 {
+#if FAMILY == 10
+    return FuelGaugePixel(s.uv01.xy, s.uv2.w);
+#else
     const int3 pixel = int3(s.clip.xy, 0);
     const float4 light = LightBuffer.Load(pixel);
     const float seconds = Time.x;
@@ -717,6 +748,7 @@ float4 SurfacePixel(Surface s) : SV_Target
 
     rgb = rgb * (1 - s.uv2.w) + s.uv2.w * FogColour.rgb;
     return float4(rgb, alpha) * TintColour;
+#endif
 }
 
 // ---- The depth (shadow) and G-buffer passes of alpha-tested materials (CUTOUT), cutting the holes
@@ -832,7 +864,11 @@ GBuffer GeometryPixel(Geometry g)
 #else
     const float2 uvN = g.uv01.xy * Tiling.xy;
 #endif
+#if FAMILY == 10
+    const float3 ts = float3(0, 0, 1);  // the gauge has no normal map
+#else
     const float3 ts = TangentNormal(NormalMap.Sample(NormalSampler, uvN), NormalHeight.x);
+#endif
     float3 n = ts.x * normalize(g.tangent) + ts.y * normalize(g.bitangentId.xyz) + ts.z * normalize(g.normal);
     n = normalize(n);
     GBuffer o;

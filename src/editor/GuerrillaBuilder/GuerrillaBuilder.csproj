@@ -21,10 +21,15 @@
     <ProjectReference Include="..\RfaFormats\RfaFormats.csproj" />
   </ItemGroup>
 
-  <!-- The editor's dark look, so both programs look alike -->
+  <!-- The editor's Fluent look (WPF UI, MIT, with the editor's theme on top), so both programs look alike -->
   <ItemGroup>
     <Page Include="..\RfaEditor\Theme.xaml" Link="Theme.xaml" />
     <Compile Include="..\RfaEditor\DarkTitleBar.cs" Link="DarkTitleBar.cs" />
+    <Compile Include="..\RfaEditor\FluentLook.cs" Link="FluentLook.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
   </ItemGroup>
 
 </Project>

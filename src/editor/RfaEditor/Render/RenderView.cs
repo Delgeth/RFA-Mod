@@ -46,6 +46,15 @@ sealed class RenderView : IDisposable
     public int Width { get; private set; }
     public int Height { get; private set; }
 
+    /// <summary>How many frames have been drawn (a frame is drawn only when something changed).</summary>
+    public int FramesDrawn { get; private set; }
+
+    /// <summary>How long the processor took to give the graphics card the last frame, in milliseconds.</summary>
+    public double CpuMilliseconds { get; private set; }
+
+    /// <summary>How long the graphics card took to draw the last frame it has finished, in milliseconds (its own clock's say).</summary>
+    public double GpuMilliseconds { get; private set; }
+
     public RenderView(GpuDevice gpu) => this.gpu = gpu;
 
     /// <summary>Makes the pictures this size (in pixels); nothing happens if they already are.</summary>
@@ -54,6 +63,7 @@ sealed class RenderView : IDisposable
         width = Math.Max(1, width);
         height = Math.Max(1, height);
         if (width == Width && height == Height && colour != null) return;
+        using var note = HangWatch.While($"making the Direct3D view's pictures {width} x {height}");
         ReleasePictures();
         Width = width;
         Height = height;
@@ -73,9 +83,43 @@ sealed class RenderView : IDisposable
         IntPtr handle = resource.SharedHandle;
         shared9 = gpu.Device9.CreateTexture((uint)width, (uint)height, 1, Vortice.Direct3D9.Usage.RenderTarget, D3D9Format.A8R8G8B8, Pool.Default, ref handle);
         surface9 = shared9.GetSurfaceLevel(0);
-        Image.Lock();
+        HandOver();  // (or at the next Show, if WPF is busy)
+    }
+
+    // ---- Keeping WPF off the shown picture -------------------------------------------------------
+    // WPF's own thread takes the shown picture. That thread can be busy with the windows themselves
+    // (a panel floated out as a window of its own, a window being resized) and, busy so, wait for
+    // the editor's thread; the editor waiting for it without end then stops both, and the window
+    // stops answering. So the view waits a short while at most, and if WPF hasn't let go by then it
+    // tries again at WPF's next turn to draw (WPF's own notes advise TryLock for this).
+
+    static readonly Duration LockWait = new(TimeSpan.FromMilliseconds(100));
+    bool handedOver;  // WPF has the shown picture of this size
+    readonly List<IDisposable> retired = [];  // pictures WPF may still show: let go once it has new ones
+
+    /// <summary>Keeps WPF off the shown picture, if it lets go within <see cref="LockWait"/>; false if it doesn't (nothing to undo then).</summary>
+    bool TryLock()
+    {
+        using (HangWatch.While("waiting for WPF to let go of the Direct3D view's picture"))
+        {
+            if (Image.TryLock(LockWait)) return true;
+            Image.Unlock();  // a try that ran out still counts as a lock in WPF, so it is undone
+            return false;
+        }
+    }
+
+    /// <summary>Gives WPF the shown picture if it hasn't it yet; false if there is none, or WPF is busy.</summary>
+    bool HandOver()
+    {
+        if (surface9 == null) return false;
+        if (handedOver) return true;
+        if (!TryLock()) return false;
         Image.SetBackBuffer(D3DResourceType.IDirect3DSurface9, surface9.NativePointer, enableSoftwareFallback: true);
         Image.Unlock();
+        handedOver = true;
+        foreach (IDisposable old in retired) old.Dispose();  // WPF has let go of them now
+        retired.Clear();
+        return true;
     }
 
     /// <summary>
@@ -86,17 +130,92 @@ sealed class RenderView : IDisposable
     public void Draw(Action<ID3D11DeviceContext> draw, Action<ID3D11DeviceContext>? first = null)
     {
         if (colourView == null || depthView == null || drawn == null) return;
+        using var note = HangWatch.While("drawing a frame of the Direct3D view");
         ID3D11DeviceContext context = gpu.Context;
         if (waiting) Show(wait: true);  // the last frame first: its picture is about to be drawn over
+        var cpu = System.Diagnostics.Stopwatch.StartNew();
+        FrameTimer? timer = StartTiming(context);
         first?.Invoke(context);
         context.OMSetRenderTargets(colourView, depthView);
         context.RSSetViewport(0, 0, Width, Height, 0, 1);
         context.ClearRenderTargetView(colourView, new Vortice.Mathematics.Color4(0, 0, 0, 0));
         context.ClearDepthStencilView(depthView, DepthStencilClearFlags.Depth, 0, 0);
         draw(context);
+        StopTiming(context, timer);
         context.End(drawn);
         context.Flush();
+        CpuMilliseconds = cpu.Elapsed.TotalMilliseconds;
+        FramesDrawn++;
         waiting = true;
+    }
+
+    // ---- How long the card takes ----------------------------------------------------------------
+    // The card stamps its own clock at the start and end of a frame (timestamp queries); the stamps
+    // are read a frame or two later, when they are ready, so nothing waits for them. Three sets
+    // take turns, so a new frame never has to wait for an old one's stamps.
+
+    sealed class FrameTimer(ID3D11Query whole, ID3D11Query start, ID3D11Query end)
+    {
+        public ID3D11Query Whole { get; } = whole;  // gives the clock's ticks a second, and whether the clock was steady
+        public ID3D11Query Start { get; } = start;
+        public ID3D11Query End { get; } = end;
+        public bool Pending { get; set; }
+    }
+
+    readonly List<FrameTimer> timers = [];
+    IntPtr queryResult = System.Runtime.InteropServices.Marshal.AllocHGlobal(16);  // where a stamp is read into
+
+    FrameTimer? StartTiming(ID3D11DeviceContext context)
+    {
+        if (queryResult == IntPtr.Zero) return null;
+        ReadTimers(context);
+        FrameTimer? timer = timers.FirstOrDefault(t => !t.Pending);
+        if (timer == null && timers.Count < 3)
+        {
+            timer = new FrameTimer(gpu.Device.CreateQuery(new QueryDescription(Vortice.Direct3D11.QueryType.TimestampDisjoint)),
+                                   gpu.Device.CreateQuery(new QueryDescription(Vortice.Direct3D11.QueryType.Timestamp)),
+                                   gpu.Device.CreateQuery(new QueryDescription(Vortice.Direct3D11.QueryType.Timestamp)));
+            timers.Add(timer);
+        }
+        if (timer == null) return null;  // all three still waiting: this frame isn't timed
+        context.Begin(timer.Whole);
+        context.End(timer.Start);
+        return timer;
+    }
+
+    static void StopTiming(ID3D11DeviceContext context, FrameTimer? timer)
+    {
+        if (timer == null) return;
+        context.End(timer.End);
+        context.End(timer.Whole);
+        timer.Pending = true;
+    }
+
+    /// <summary>Reads the stamps of the frames the card has finished, without waiting for any.</summary>
+    void ReadTimers(ID3D11DeviceContext context)
+    {
+        foreach (FrameTimer timer in timers.Where(t => t.Pending))
+        {
+            if (!TryRead(context, timer.Whole, out QueryDataTimestampDisjoint clock) ||
+                !TryRead(context, timer.Start, out ulong start) || !TryRead(context, timer.End, out ulong end)) continue;
+            timer.Pending = false;
+            if (!clock.Disjoint && clock.Frequency > 0 && end >= start) GpuMilliseconds = (end - start) * 1000.0 / clock.Frequency;
+        }
+    }
+
+    bool TryRead<T>(ID3D11DeviceContext context, ID3D11Query query, out T value) where T : struct
+    {
+        value = default;
+        uint size = (uint)System.Runtime.InteropServices.Marshal.SizeOf<T>();
+        if (context.GetData(query, queryResult, size, AsyncGetDataFlags.DoNotFlush).Code != 0) return false;  // not ready yet
+        value = System.Runtime.InteropServices.Marshal.PtrToStructure<T>(queryResult);
+        return true;
+    }
+
+    /// <summary>Reads the card's stamps of finished frames now (each time WPF draws, so the time shown keeps up).</summary>
+    public void ReadTiming()
+    {
+        if (queryResult != IntPtr.Zero) ReadTimers(gpu.Context);
     }
 
     /// <summary>
@@ -108,9 +227,11 @@ sealed class RenderView : IDisposable
         if (!waiting || shown == null || colour == null || drawn == null || copied == null) return;
         ID3D11DeviceContext context = gpu.Context;
         if (!wait && !context.IsDataAvailable(drawn)) return;
-        // Lock waits until WPF has taken the last frame and keeps it off the shown picture while
-        // the new one is copied in; the copy must be done before WPF is let back on.
-        Image.Lock();
+        // The lock waits until WPF has taken the last frame and keeps it off the shown picture while
+        // the new one is copied in; the copy must be done before WPF is let back on. If WPF is busy,
+        // the frame waits for its next turn (or, if a newer one is drawn first, that one is shown).
+        using var note = HangWatch.While("handing a frame of the Direct3D view to WPF");
+        if (!HandOver() || !TryLock()) return;
         context.CopyResource(shown, colour);
         context.End(copied);
         context.Flush();
@@ -158,12 +279,24 @@ sealed class RenderView : IDisposable
 
     void ReleasePictures()
     {
-        if (surface9 != null)
+        // WPF may still be showing the shown picture: it is taken from WPF first, or, if WPF is
+        // busy, kept until WPF has the new one (see HandOver).
+        if (surface9 != null && handedOver)
         {
-            Image.Lock();
-            Image.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero);
-            Image.Unlock();
+            if (TryLock())
+            {
+                Image.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero);
+                Image.Unlock();
+            }
+            else
+            {
+                retired.AddRange(new IDisposable?[] { surface9, shared9, shown }.OfType<IDisposable>());
+                surface9 = null;
+                shared9 = null;
+                shown = null;
+            }
         }
+        handedOver = false;
         surface9?.Dispose();
         shared9?.Dispose();
         shown?.Dispose();
@@ -184,8 +317,19 @@ sealed class RenderView : IDisposable
     public void Dispose()
     {
         ReleasePictures();
+        foreach (IDisposable old in retired) old.Dispose();
+        retired.Clear();
         drawn?.Dispose();
         copied?.Dispose();
         drawn = copied = null;
+        foreach (FrameTimer timer in timers)
+        {
+            timer.Whole.Dispose();
+            timer.Start.Dispose();
+            timer.End.Dispose();
+        }
+        timers.Clear();
+        if (queryResult != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(queryResult);
+        queryResult = IntPtr.Zero;
     }
 }

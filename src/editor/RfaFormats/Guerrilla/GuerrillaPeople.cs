@@ -371,6 +371,9 @@ public static class GuerrillaPeople
             var ours = CharacterEntry(entry, description, ported.SetFile, rig, Item, sharedWith, log,
                                       isPlayer ? gameCharacters.Entries.FirstOrDefault(e => XtblFile.EntryName(e).Equals(DariusCharacter, StringComparison.OrdinalIgnoreCase)) : null,
                                       propsOf.GetValueOrDefault(sharedWith ?? name), headsOf.GetValueOrDefault(sharedWith ?? name));
+            // Its footsteps: Guerrilla's entry, which the world's build adds under our name for it (GuerrillaFootsteps).
+            if (ours.Element("FootstepsControl") is { } footsteps && footsteps.Value.Trim().Length > 0)
+                footsteps.Value = GuerrillaFootsteps.NameFor(footsteps.Value.Trim(), worldFolder);
             ourCharacters.Table!.AddElement(ours);
             foreach (string line in log) yield return $"{name}: {line}";
             made.Add(name);
@@ -397,6 +400,8 @@ public static class GuerrillaPeople
             Directory.CreateDirectory(peopleFolder);
             File.WriteAllLines(Path.Combine(peopleFolder, GuerrillaDistricts.CrewList), crewLines);
             yield return $"Crews: {crewLines.Count - 1} lines in {GuerrillaDistricts.CrewList} (each resource's people by team, for the vehicles' crews)";
+            // Where Guerrilla's people walk (GuerrillaAmbient): each zone's walkers by day and night and their resource.
+            yield return GuerrillaAmbient.Write(guerrillaCache, guerrillaTables, peopleFolder);
         }
         // The player's spine bend and arms (Armageddon's tables name Darius's bones), added to what is written there
         // already (the vehicles build adds its walkers' legs to the limb table), ours from an earlier run replaced.
@@ -506,7 +511,8 @@ public static class GuerrillaPeople
             yield return $"{ItemTable}: {removed} of our props' items taken out";
         }
         foreach (string path in new[] { Path.Combine(overrides, AssetList), Path.Combine(worldFolder, CharacterTable), Path.Combine(worldFolder, GuerrillaRagdoll.FileName),
-                                        Path.Combine(peopleFolder, OwnEntries), Path.Combine(peopleFolder, GuerrillaDistricts.CrewList) })
+                                        Path.Combine(peopleFolder, OwnEntries), Path.Combine(peopleFolder, GuerrillaDistricts.CrewList),
+                                        Path.Combine(peopleFolder, GuerrillaAmbient.File) })
             if (File.Exists(path)) { File.Delete(path); yield return $"Deleted {path}"; }
         // The spine bend and limb tables: our rows out; the file goes only if no other build's rows are left in it.
         foreach (string table in new[] { SpinebendTable, LimbTable })
@@ -793,6 +799,7 @@ public static class GuerrillaPeople
                 else files.AddRange(texFiles);
             }
             items[name] = PropItem(rfg, itemDescription);
+            if (GuerrillaCloth.Worn(name)) items[name].Element("Item_Flags")!.AddElement("Flag", "cloth_sim");  // its cloth (the cloth part, GuerrillaCloth)
             made.Add(name);
             log.Add(line + $", {textures.Count} textures" + (missing.Count > 0 ? $" ({missing.Count} not found: {string.Join(", ", missing)})" : ""));
         }
@@ -814,8 +821,12 @@ public static class GuerrillaPeople
     /// with the face's own materials, &lt;Name&gt;.mat_pc in the character's container, on the face's skeleton,
     /// &lt;Name&gt;.rig_pc, else the base head's), made as props Armageddon's prop code wears (<see cref="HeadPropType"/>).
     /// Every head here is on its base head's skeleton: the game holds at most 290 skeletons, and a face's own (32 of
-    /// them) is the base head's bones placed for that face, so its places are moved into the head's vertices instead
-    /// (<see cref="GuerrillaFaces.Rebase"/>).
+    /// them) is only the base head's bones placed for that face. That is enough because the game draws a prop's bones
+    /// with its wearer's finished skin matrices (inherit_bone_transforms: 0xD8A2B0 matches the bones by name, 0xD80850
+    /// copies the wearer's into the prop's), so the prop's own skeleton's places never count: the head's vertices stay
+    /// in the face's own pose, which is its wearer's (every character's skeleton has its face's head and eye bones in
+    /// the same places). Moving them onto the base head's places (2026-11-06 to 11-12) put the eyes 1.5 to 3.5 cm in
+    /// front of the face, or behind it, by how far each face's bones are from the base head's.
     /// Armageddon kept Guerrilla's head code, but it needs the base heads as preloaded items and drops a face's
     /// shape (its morph); a prop needs neither. Each one's mesh (the base head's, from Guerrilla's items.vpp_pc)
     /// is converted dressed with the face's materials and packed as rfg_&lt;Name&gt; with its textures into the
@@ -853,7 +864,7 @@ public static class GuerrillaPeople
             var gEntry = headPack.Find(mesh + ".gcmesh_pc");
             if (cEntry == null || gEntry == null) { waiting.Add($"{face} ({baseHead}.str2_pc has no {mesh}.ccmesh_pc and .gcmesh_pc)"); continue; }
             if (pack.Find(face + ".mat_pc") is not { } materialEntry) { waiting.Add($"{face} (its materials, {face}.mat_pc, aren't in the character's container)"); continue; }
-            // Every face on its base head's skeleton (the game holds 290 at most): a face's own is moved into its vertices.
+            // Every face on its base head's skeleton (the game holds 290 at most); its vertices stay in its own pose (see above).
             string rig = baseHead.ToLowerInvariant() + ".rig_pc", faceRig = face.ToLowerInvariant() + ".rig_pc";
             if (gameTables.Find(rig) != null) { waiting.Add($"{face} (Armageddon has a skeleton {rig} of its own)"); continue; }
             if (guerrillaTables.Find(rig) is not { } rigEntry) { waiting.Add($"{face} (Guerrilla has no {rig})"); continue; }
@@ -869,12 +880,13 @@ public static class GuerrillaPeople
             string skeleton = $"the base head's skeleton {rig}";
             if (guerrillaTables.Find(faceRig) is { } faceRigEntry && !faceRig.Equals(rig, StringComparison.OrdinalIgnoreCase))
             {
-                try
-                {
-                    gFile = GuerrillaFaces.Rebase(cFile, gFile, Rig.Read(guerrillaTables.Read(faceRigEntry)), Rig.Read(guerrillaTables.Read(rigEntry)), out float shifted);
-                    skeleton += $" (the face's own, {faceRig}, moved into its vertices: up to {shifted * 1000:0} mm)";
-                }
-                catch (InvalidDataException e) { waiting.Add($"{face} (its skeleton {faceRig} couldn't be moved onto {rig}: {e.Message})"); continue; }
+                // The face's own skeleton must be the base head's bones (by name and parent), so the wearer's match them.
+                var own = Rig.Read(guerrillaTables.Read(faceRigEntry));
+                var shared = Rig.Read(guerrillaTables.Read(rigEntry));
+                if (own.Bones.Count != shared.Bones.Count ||
+                    !own.Bones.Zip(shared.Bones).All(p => p.First.Name.Equals(p.Second.Name, StringComparison.OrdinalIgnoreCase) && p.First.Parent == p.Second.Parent))
+                { waiting.Add($"{face} (its skeleton {faceRig} isn't {rig}'s bones)"); continue; }
+                skeleton += $" (the face's own, {faceRig}, has the same bones; the head keeps its own pose, its wearer's)";
             }
             var notSkinned = new List<string>();
             var (header, textures) = GuerrillaCharacterMeshes.Convert(cFile, GuerrillaVehicles.Alias, notSkinned, pack.Read(materialEntry));
@@ -923,7 +935,7 @@ public static class GuerrillaPeople
     /// <summary>
     /// A prop's item: Guerrilla's items_3d entry fitted to Armageddon's description (the fields it hasn't left out,
     /// the ones it requires filled), with Armageddon's cast_shadows (its own props cast shadows; Guerrilla has no such
-    /// flag). Cloth (Armageddon's cloth_sim, Guerrilla's .sim_pc files) isn't ported yet: the coat's tails stay stiff.
+    /// flag). An item with cloth of its own (GuerrillaCloth.Worn, the cloth part) gets Armageddon's cloth_sim flag where it is made.
     /// </summary>
     static XtblElement PropItem(XtblElement rfg, FieldDescription description)
     {

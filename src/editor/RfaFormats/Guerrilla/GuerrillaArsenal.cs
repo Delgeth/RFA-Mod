@@ -496,6 +496,11 @@ public static class GuerrillaArsenal
         try { trafficLine = GuerrillaTraffic.Write(guerrillaCache, guerrillaTables, writtenGroups, gunnerVehicles, Path.GetDirectoryName(RigListFile(modFolder))!); }
         catch (Exception error) when (error is IOException or InvalidDataException) { trafficLine = $"Traffic: not written ({error.Message})"; }
         yield return trafficLine;
+        // Guerrilla's safehouses' parked vehicles' spots and areas, for the guerrilla_vehicles mod (see GuerrillaSafehouseVehicles).
+        string safehouseLine;
+        try { safehouseLine = GuerrillaSafehouseVehicles.Write(guerrillaCache, Path.GetDirectoryName(RigListFile(modFolder))!); }
+        catch (Exception error) when (error is IOException or InvalidDataException) { safehouseLine = $"Safehouses: not written ({error.Message})"; }
+        yield return safehouseLine;
         // Guerrilla's flight model's values for each flyer, for the guerrilla_vehicles mod's flyers (Armageddon's reader keeps some only as
         // whole degrees, and the player's limits above overwrite two): name, then FlyerMaxUpThrust, TurnAngvel, TurnAngaccl (revolutions),
         // ThrustOffsetX, ThrustOffsetZ (radians, as Guerrilla's loader makes them), TiltAngvel, TiltAngaccl, SpinBankScalar,

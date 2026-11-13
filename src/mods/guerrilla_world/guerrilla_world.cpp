@@ -125,6 +125,13 @@
 // cells and Armageddon's undergrowth code still loads, scatters and draws. Its random scatter puts
 // every piece at height 0 (it takes the height before looking it up), so the mod replaces it with the
 // same scatter in Guerrilla's order, the pieces on the ground (RandomlyPlace).
+//
+// Buildings breaking: Armageddon still runs Guerrilla's whole support system (anchors to the ground,
+// links between pieces and between buildings, stress), with some of its own numbers in it. In our
+// worlds the mod gives it Guerrilla's: how strongly a piece standing on the ground holds to it
+// (GuerrillaAnchors=), the materials whose strength Armageddon changed and the load a building's
+// weight puts on its links (GuerrillaMaterials=); and it logs what breaks (DestructionLog=). See
+// "Guerrilla's buildings" below.
 #define RFA_MOD_NAME "guerrilla_world"
 #include "rfa_mod.h"
 #include "rfa_game.h"
@@ -191,6 +198,26 @@ auto const StreamRadiusOf = reinterpret_cast<StreamRadiusFn>(0x6B3180);
 constexpr DWORD kSetStreamRadius = 0x6B3100;
 constexpr size_t kSetStreamRadiusPrologue = 6;  // push ebp / mov ebp,esp / sub esp,20h
 SetStreamRadiusFn g_setStreamRadius;
+
+// Where streaming centres: each frame the world's step (0x6C84B0) writes the camera's position
+// (0x11B9C6C; the player's with the console's stream_follows_player) to the world at +0x25D0, and
+// 0x6DB730 hands it to the stream manager's update, 0x6B28B0 (its only caller; thiscall: the
+// manager, the position, a flag). Each layer's box is that position ± its radius, with no give: a
+// cell that leaves the box is unloaded that frame, one that enters it loaded. Near a cell's line the
+// camera swinging round the player (turning to aim, a hammer swing, an explosion's knock, a vehicle's
+// camera) moves the box's edge back and forth over it: a row of sub-zones 340 m off (an 850 m strip of
+// buildings, made again when it comes back) or a column of zones 500 m off unloads and loads again
+// within seconds (in the run of 2026-11-12, 96 of 533 sub-zone loads were one loaded again within
+// 15 s). Guerrilla streams the same way, but its camera draws nothing past 475 m, so its edges are
+// out of sight; ours draw to 1500 m. In our worlds the update is handed a held position instead,
+// moved to the camera only once it has gone StreamSteady= metres from it across the ground (its height
+// always the camera's), so a swing of the camera no longer moves the box.
+constexpr DWORD kStreamUpdate = 0x6B28B0;
+constexpr size_t kStreamUpdatePrologue = 9;  // push ebp / mov ebp,esp / sub esp,6A4h
+using StreamUpdateFn = void(__fastcall*)(void* manager, void* unused, const float* position, int flag);
+StreamUpdateFn g_streamUpdate;
+float g_streamHeld[3] = {};   // the position streaming is centred on in our worlds
+bool g_streamHeldSet = false;
 
 // The zone size: 0x6C0D60(name, &size) gives a world's zone width from its name (a world's or a
 // zone's): 511 m, Guerrilla's, for names starting "mpl_" (left over from Guerrilla's multiplayer
@@ -505,6 +532,17 @@ void ReadStreamRadius() {
     g_streamRadius = radius >= 0 ? radius : kDefaultStreamRadius;
 }
 
+// How far the camera may move, in metres across the ground, before what is loaded around it moves too
+// (StreamSteady=; see kStreamUpdate); 0 moves it every frame, as both games do. Also read again
+// whenever rfa_mods.ini is saved.
+constexpr float kDefaultStreamSteady = 25.0f;
+float g_streamSteady = kDefaultStreamSteady;
+
+void ReadStreamSteady() {
+    const float steady = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"StreamSteady", L"25").c_str()));
+    g_streamSteady = steady >= 0 ? steady : kDefaultStreamSteady;
+}
+
 // Whether our worlds draw their ground as far as Guerrilla does (GroundDetail=; see RunGroundDetail).
 // Also read again whenever rfa_mods.ini is saved.
 bool g_groundDetail = true;
@@ -729,8 +767,10 @@ void FogNumbers(float (&out)[4]) {
     out[3] = TodNumber(kFogDensityOffset);
 }
 
+void BuildingsSettingsChanged();  // (below, with Guerrilla's buildings)
+
 // Once a second: if rfa_mods.ini was saved since, read the brightness, ambient light, sun, colour
-// correction, fog, exposure, sun shafts and clock speed again.
+// correction, fog, exposure, sun shafts, clock speed and the buildings' switches again.
 void CheckSettings() {
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastIniCheck < 1000) return;
@@ -805,6 +845,9 @@ void CheckSettings() {
     const float radiusBefore = g_streamRadius;
     ReadStreamRadius();
     if (g_streamRadius != radiusBefore) rfa::Log("Streaming: radius %.0f m (was %.0f; 0 = the game's own)", g_streamRadius, radiusBefore);
+    const float steadyBefore = g_streamSteady;
+    ReadStreamSteady();
+    if (g_streamSteady != steadyBefore) rfa::Log("Streaming: follows the camera once it has gone %.0f m (was %.0f; 0 = every frame)", g_streamSteady, steadyBefore);
     ReadGroundDetail();
     const float shineBefore = g_shine;
     ReadShine();
@@ -815,6 +858,7 @@ void CheckSettings() {
     const float coronaBefore = g_sunCorona;
     ReadSunCorona();
     if (g_sunCorona != coronaBefore) rfa::Log("Corona: times %.3g (was %.3g)", g_sunCorona, coronaBefore);
+    BuildingsSettingsChanged();
 }
 
 bool InOurWorld() {
@@ -1074,6 +1118,109 @@ void __fastcall SetStreamRadiusHeld(void* manager, void* unused, int layer, floa
         radius = MostRadius(layer);
     }
     g_setStreamRadius(manager, unused, layer, radius);
+}
+
+// What holds streaming up (a diagnosis, in our worlds). In the run of 2026-11-12 13:11 no zone or sub-zone
+// loaded for 19 s while driving (the ground drawn from its colour map alone, the pause menu 11 s late behind
+// the same queue), with no allocation failure logged. Two things can stop it without a word:
+// - The stream I/O paused: 0x913180 ("pause stream_os procesing") and 0x9131D0 (unpause), called only by the
+//   video player (its per-video step 0x8E1380 pauses while a playing video's buffer is low and resumes above
+//   85%; video_player_process_all 0x8E0F60 resumes only in a frame with no video playing, 0x8E10A5), the
+//   blocking load (0x908FC0) and the level load (0xA497E0). That window had video_player_process_all at
+//   138 ms in one frame.
+// - The level heap (level_memmgr 0x26B0320, 246 MB) too full for the next container: its allocator asks
+//   can_alloc first (0x90B740) and the request waits. Its largest free block is 0xCB8470 (thiscall, under the
+//   heap's own lock; the game prints it at 0x98FD0F).
+// So each pause is timed with its caller, each video opened (bink_open 0x8DE840, cdecl: its second argument
+// the file's name) is named, and every 10 s the heap's largest free block is logged with them.
+constexpr DWORD kPauseStreamIo = 0x913180, kResumeStreamIo = 0x9131D0;
+constexpr size_t kStreamIoPrologue = 5;  // push ebp / mov ebp,esp / push 0
+constexpr DWORD kBinkOpen = 0x8DE840;
+constexpr size_t kBinkOpenPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0A0h
+using StreamIoFn = void(__cdecl*)();
+using BinkOpenFn = void*(__cdecl*)(void* first, const char* name, DWORD flags, DWORD fourth);
+using LargestFreeFn = DWORD(__fastcall*)(void* heap, void* unused);
+StreamIoFn g_pauseStreamIo, g_resumeStreamIo;
+BinkOpenFn g_binkOpen;
+auto const LargestFree = reinterpret_cast<LargestFreeFn>(0xCB8470);
+void* const kLevelHeap = reinterpret_cast<void*>(0x26B0320);
+DWORD g_streamPausedAt = 0;         // GetTickCount at the pause now in force (0 none)
+void* g_streamPausedBy = nullptr;   // its caller
+LONG g_streamPauses = 0, g_videosOpened = 0;
+DWORD g_streamPausedMs = 0, g_streamPausedLongest = 0;
+void* g_streamPausedLongestBy = nullptr;
+DWORD g_streamWatchAt = 0;
+
+void __cdecl PauseStreamIo() {
+    if (InOurWorld() && !g_streamPausedAt) {
+        g_streamPausedAt = GetTickCount() | 1;
+        g_streamPausedBy = _ReturnAddress();
+        InterlockedIncrement(&g_streamPauses);
+    }
+    g_pauseStreamIo();
+}
+
+void __cdecl ResumeStreamIo() {
+    if (g_streamPausedAt) {
+        const DWORD ms = GetTickCount() - g_streamPausedAt;
+        g_streamPausedMs += ms;
+        if (ms > g_streamPausedLongest) {
+            g_streamPausedLongest = ms;
+            g_streamPausedLongestBy = g_streamPausedBy;
+        }
+        if (ms >= 1000)
+            RFA_LOG_FIRST(100, "Streaming: the stream I/O was paused %.1f s (by the code at %p; resumed by %p)", ms / 1000.0,
+                          g_streamPausedBy, _ReturnAddress());
+        g_streamPausedAt = 0;
+    }
+    g_resumeStreamIo();
+}
+
+void* __cdecl BinkOpen(void* first, const char* name, DWORD flags, DWORD fourth) {
+    if (InOurWorld()) {
+        InterlockedIncrement(&g_videosOpened);
+        RFA_LOG_FIRST(100, "Streaming: a video opened: %.120s (flags %08lX)", name ? name : "(no name)", flags);
+    }
+    return g_binkOpen(first, name, flags, fourth);
+}
+
+// Every 10 s in our worlds: the level heap's largest free block, and what paused the stream I/O meanwhile.
+void StreamWatchUpdate(bool ours) {
+    if (!ours || !g_pauseStreamIo) return;
+    const DWORD now = GetTickCount();
+    if (now - g_streamWatchAt < 10000) return;
+    g_streamWatchAt = now;
+    const DWORD largest = LargestFree(kLevelHeap, nullptr);
+    const DWORD pausedNow = g_streamPausedAt ? now - g_streamPausedAt : 0;
+    rfa::Log("Streaming (10 s): the level heap's largest free block %.1f MB; the stream I/O paused %ld times for %.1f s in all (the longest "
+             "%.1f s, by %p)%s; %ld videos opened",
+             largest / 1048576.0, g_streamPauses, g_streamPausedMs / 1000.0, g_streamPausedLongest / 1000.0, g_streamPausedLongestBy,
+             pausedNow ? " and paused now" : "", g_videosOpened);
+    if (pausedNow) rfa::Log("Streaming: the stream I/O has been paused %.1f s, by the code at %p", pausedNow / 1000.0, g_streamPausedBy);
+    g_streamPauses = g_videosOpened = 0;
+    g_streamPausedMs = g_streamPausedLongest = 0;
+    g_streamPausedLongestBy = nullptr;
+}
+
+// The stream update, wrapped: in our worlds centred on a held position that follows the camera only
+// once it has gone StreamSteady= metres from it (see kStreamUpdate).
+void __fastcall StreamUpdateSteady(void* manager, void* unused, const float* position, int flag) {
+    if (!position || g_streamSteady <= 0 || !InOurWorld()) {
+        g_streamHeldSet = false;
+        g_streamUpdate(manager, unused, position, flag);
+        return;
+    }
+    const float dx = position[0] - g_streamHeld[0], dz = position[2] - g_streamHeld[2];
+    if (!g_streamHeldSet || dx * dx + dz * dz > g_streamSteady * g_streamSteady) {
+        if (!g_streamHeldSet)
+            RFA_LOG_FIRST(4, "Streaming: what is loaded follows the camera once it has gone %.0f m in world \"%s\" (StreamSteady=)",
+                          g_streamSteady, WorldName());
+        g_streamHeld[0] = position[0];
+        g_streamHeld[2] = position[2];
+        g_streamHeldSet = true;
+    }
+    g_streamHeld[1] = position[1];
+    g_streamUpdate(manager, unused, g_streamHeld, flag);
 }
 
 // Each frame: in our worlds the sub-zones' layer keeps the game's radius but no more than it can
@@ -1493,6 +1640,8 @@ constexpr DWORD kMemoryPoolSize = 0x44, kMemoryPoolTaken = 0x4C;
 // Whether the Guerrilla world's pieces play Guerrilla's own event effects (see "Guerrilla's material events").
 bool g_materialEventsOn = false;
 
+void MusicTestFrame();  // (see "The music's format test")
+
 int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWORD a5, DWORD a6, DWORD a7, DWORD a8, DWORD a9, DWORD a10) {
     // The tenth argument is Armageddon's destruction sound for the event (its own event, its material switches,
     // the event's size), which the effect object plays beside the effect. In the Guerrilla world the effect is
@@ -1504,6 +1653,7 @@ int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWO
     // That pool is filled while the game starts; by the first effect played its use is final.
     RFA_LOG_FIRST(1, "Material effects: %lu of %lu bytes in use", *reinterpret_cast<const DWORD*>(kMaterialEffectPool + kMemoryPoolTaken),
                   *reinterpret_cast<const DWORD*>(kMaterialEffectPool + kMemoryPoolSize));
+    MusicTestFrame();
     const int handle = g_playEffect(effect, where, a3, a4, a5, a6, a7, a8, a9, a10);
     BYTE* visual = effect ? Visual(*reinterpret_cast<int*>(effect + 0x44)) : nullptr;
     const char* name = visual ? reinterpret_cast<const char*>(visual) : "";
@@ -1547,7 +1697,10 @@ int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWO
 // how far from the camera it started, how far its effect moved meanwhile (the game moves the sound with it) and
 // what Wwise said of that sound's game object. A hammer hit's waves are 0.6-1.3 s long. (The first run, 2026-11-11
 // 00:16: four hits in five lasted their wave's length; one in five ended after 60-280 ms, with nothing else
-// starting then.)
+// starting then.) The ends are looked for once a frame, from the effects' frame update: 0xB84D20 finds a
+// handle's game object by walking every sound object in use and its events (0xB814B0, some 4 µs a time), and
+// asked on every effect's sound update (some 200 a frame) for every watched sound it took 15 ms of a frame
+// (2026-11-12).
 constexpr DWORD kWwiseOutput = 0xB97750;
 constexpr size_t kWwiseOutputPrologue = 9;  // push ebp / mov ebp,esp / sub esp,80Ch
 // (Wwise's own declaration, from the exe's export of SetLocalOutput: the error, its text, its level, the playing
@@ -1726,7 +1879,6 @@ void LogStreamMemoryAtStarvation() {
 
 void __fastcall EffectSound(BYTE* effect, void* unused, DWORD start) {
     g_effectSound(effect, unused, start);
-    LogEndedSounds();
     LogWwiseMemory();
     if (!effect) return;
     const DWORD handle = *reinterpret_cast<const DWORD*>(effect + kEffectSoundHandle), event = *reinterpret_cast<const DWORD*>(effect + kEffectSoundEvent);
@@ -4015,7 +4167,22 @@ struct SurfaceConstants {
     float sunTowardView[4];  // the sun's toward, in the camera's space (the terrain lights by the G-buffer's normals, in it)
     float view[4];       // the picture's width and height; the tangents of half the field of view across and up
     float tint[4];       // the colour correction the light above is already multiplied by (Guerrilla's Tint_color)
+    float packFuel[4];   // the worn backpack's gauge (Guerrilla's mp_fuels: fuel, fuel to go on, 1 while on), for its
+                         // rfg-mp_fuel_gauge rewrite (gw_fuelgauge0c); guerrilla_gear's GuerrillaGear_PackGauge, 0s without
 };
+
+// guerrilla_gear.dll's worn backpack's gauge, as Guerrilla's multi_object_backpack::update_render gives it (looked up once).
+using PackGaugeFn = int(__cdecl*)(float* out);
+PackGaugeFn PackGauge() {
+    static PackGaugeFn gauge = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        if (HMODULE gear = GetModuleHandleW(L"guerrilla_gear.dll"))
+            gauge = reinterpret_cast<PackGaugeFn>(GetProcAddress(gear, "GuerrillaGear_PackGauge"));
+    }
+    return gauge;
+}
 
 ID3D11Texture2D* g_ourLightTexture = nullptr;
 ID3D11RenderTargetView* g_ourLightTarget = nullptr;
@@ -4134,6 +4301,7 @@ bool FillSurfaceConstants() {
     constants.sunToward[3] = 1;
     constants.time[0] = Seconds();
     constants.time[3] = NightLevel(g_timeOfDay);
+    if (PackGaugeFn gauge = PackGauge()) gauge(constants.packFuel);
     // The camera's space as DrawLight's: x along its right, y its up, z its forward.
     const float* axes[3] = {&g_cameraRotation[0], &g_cameraRotation[3], &g_cameraRotation[6]};
     for (int i = 0; i < 3; ++i) constants.sunTowardView[i] = toward[0] * axes[i][0] + toward[1] * axes[i][1] + toward[2] * axes[i][2];
@@ -5135,6 +5303,7 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
     }
     RunClock(ours);
     RunStreaming(ours);
+    StreamWatchUpdate(ours);
     RunGroundDetail(ours);
     if (ours && g_fog > 0 && !g_fogFailed && g_context) {
         if (!g_fogDepth || !g_gameConstants) {
@@ -6689,11 +6858,18 @@ void GuerrillaParticleLight() {
 }
 
 void GlassUpdate();  // (below, with Guerrilla's broken glass)
+void BuildingsUpdate();  // (below, with Guerrilla's buildings)
+void TurbinesUpdate(float seconds);  // (below, with Guerrilla's wind turbines)
 
 void __cdecl EffectsUpdate(float seconds) {
+    // The watched effect sounds' ends: once a frame (each look at a sound is a walk through all the game's sound
+    // objects; see "How long an effect's sound played").
+    LogEndedSounds();
     if (InOurWorld()) GuerrillaWindUpdate(seconds);
     else g_wind.started = false;
     GlassUpdate();
+    BuildingsUpdate();
+    TurbinesUpdate(seconds);
     g_effectsUpdate(seconds);
     DustUpdate();
     if (InOurWorld()) GuerrillaParticleLight();
@@ -7330,7 +7506,10 @@ int GuerrillaEventEffect(MaterialEvents& material, int kind, int type, int size,
     return -1;
 }
 
+void CountBreakEvent(int kind);  // (below, with Guerrilla's buildings)
+
 int __cdecl MaterialEffect(int kind, int size, int type, DWORD material, DWORD other, DWORD a6, DWORD a7) {
+    if (InOurWorld()) CountBreakEvent(kind);
     if (kind < 0 || kind >= kEventKinds || kind == kMeleeKind || kind == kBulletKind || size < 0 || size >= kEventSizes || !InOurWorld())
         return g_materialEffect(kind, size, type, material, other, a6, a7);
     const char* name = EffectMaterialName(material & 0xFF);
@@ -7600,6 +7779,121 @@ void MoreStreamRoom() {
     }
     rfa::Log("Stream memory: %lu bytes for the streams' pieces (the game's %lu: %lu pieces where it had %lu) and %lu for their records (the game's %lu)",
              kStreamMemory, kGameStreamMemory, kStreamMemory / 0x6800, kGameStreamMemory / 0x6800, kStreamRecords, kGameStreamRecords);
+}
+
+// ---- The music's format test (console command rfg_music_test)
+//
+// Guerrilla's music is to go into Wwise's own ADPCM (a quarter of uncompressed sound: 590 MB for the campaign's
+// music where our other banks' format would be 2.3 GB). Armageddon's sound engine has that codec built in (its
+// source factory 0xEB0470 makes the ADPCM sources for codec 2 as it makes PCM's for codec 1; the decoder 0xEC0DE0),
+// but none of the game's own banks use it, so one listen is to settle it before the music is built. The world
+// builder makes one score's ambience clips as a bank of ADPCM media and lists them in
+// mods\guerrilla_world\music_test.txt (GuerrillaMusic.BuildFormatTest: "format" and its words, then a line a clip:
+// "clip", its event, its stop event, seconds, rate, channels, bank; tabs between).
+// The command, typed in the game's console in any level: each time it stops the clip before and plays the next of
+// the list, in 2D on the game's music bus, on a sound object of its own (0xB83000 makes one at a place, as the game
+// does for its own lone sounds; 0xB846E0 plays an event on it and gives a handle; 0xB84D20 says whether a handle
+// still plays). It writes to the log what it started and whether the game took it ("STARTED" / "NOT STARTED"),
+// and two seconds later whether the clip is still playing: so silence with "STARTED" and "still playing" is a
+// fault of the sound itself, and "NOT STARTED" or "has ended already" one of the bank or the file (Wwise's own
+// word for it is then in a "Wwise:" line). A command is registered as the campaign mod's is (0xC7BD70: the object,
+// name, description, type 3: a handler without arguments; 0x28FF1C0 is set while it is run and not asked for help).
+struct MusicTestClip {
+    std::string event, stopEvent, bank;
+    float seconds;
+    int rate, channels;
+};
+std::vector<MusicTestClip> g_musicTestClips;
+std::string g_musicTestFormat = "an unnamed format";
+DWORD g_musicTestObject = 0, g_musicTestHandle = 0, g_musicTestStarted = 0;
+int g_musicTestNext = 0, g_musicTestPlaying = -1;
+bool g_musicTestChecked = true;
+BYTE g_musicTestCommand[32];
+
+auto const MakeSoundObject = reinterpret_cast<DWORD(__cdecl*)(const float* place, int zero)>(0xB83000);
+auto const PlaySoundEvent = reinterpret_cast<int(__cdecl*)(DWORD soundObject, DWORD eventId, DWORD* handle, int unused, int delayMs)>(0xB846E0);
+
+// Wwise's id of a name: FNV-1 (32 bits) of its lower-case letters.
+DWORD WwiseNameId(const char* name) {
+    DWORD h = 2166136261u;
+    for (; *name; ++name) h = (h * 16777619u) ^ static_cast<BYTE>(*name >= 'A' && *name <= 'Z' ? *name + 32 : *name);
+    return h;
+}
+
+void LoadMusicTest() {
+    std::vector<BYTE> file;
+    if (!ReadWholeFile(DataFolder() + L"music_test.txt", file)) return;
+    const std::string text(file.begin(), file.end());
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::vector<std::string> words;
+        for (size_t from = 0; from <= line.size();) {
+            size_t tab = line.find('\t', from);
+            if (tab == std::string::npos) tab = line.size();
+            words.push_back(line.substr(from, tab - from));
+            from = tab + 1;
+        }
+        if (words.size() == 2 && words[0] == "format") g_musicTestFormat = words[1];
+        else if (words.size() == 7 && words[0] == "clip")
+            g_musicTestClips.push_back({words[1], words[2], words[6], static_cast<float>(atof(words[3].c_str())), atoi(words[4].c_str()), atoi(words[5].c_str())});
+    }
+}
+
+bool MusicTestPlaying() { return g_musicTestHandle && SoundGameObject(g_musicTestHandle) != 0; }
+
+void MusicTestCommand() {
+    if (!*reinterpret_cast<const int*>(0x28FF1C0)) return;  // asked for its help text, not run
+    if (g_musicTestClips.empty()) LoadMusicTest();
+    if (g_musicTestClips.empty()) {
+        rfa::Log("Music test: mods\\guerrilla_world\\music_test.txt names no clip (build the world part again); nothing played");
+        return;
+    }
+    // The clip before: how it went, and its end.
+    if (g_musicTestPlaying >= 0) {
+        const MusicTestClip& before = g_musicTestClips[g_musicTestPlaying];
+        const bool playing = MusicTestPlaying();
+        rfa::Log("Music test: clip %d (%.1f s long) %s %.1f s after its start", g_musicTestPlaying + 1, before.seconds,
+                 playing ? "was still playing" : "had ended", (GetTickCount() - g_musicTestStarted) / 1000.0f);
+        if (playing) PlaySoundEvent(g_musicTestObject, WwiseNameId(before.stopEvent.c_str()), nullptr, 0, 0);
+    }
+    if (!g_musicTestObject) {
+        const float nowhere[3] = {0.0f, 0.0f, 0.0f};
+        g_musicTestObject = MakeSoundObject(nowhere, 0);
+    }
+    const MusicTestClip& clip = g_musicTestClips[g_musicTestNext];
+    DWORD handle = 0;
+    const int result = g_musicTestObject ? PlaySoundEvent(g_musicTestObject, WwiseNameId(clip.event.c_str()), &handle, 0, 0) : -1;
+    rfa::Log("Music test: clip %d of %u, event %s (bank %s; %s; %d Hz, %d channels, %.1f s): %s (sound object 0x%08lX, handle %lu, result %d)",
+             g_musicTestNext + 1, static_cast<unsigned>(g_musicTestClips.size()), clip.event.c_str(), clip.bank.c_str(), g_musicTestFormat.c_str(), clip.rate,
+             clip.channels, clip.seconds,
+             handle ? "STARTED" : "NOT STARTED (the event or its bank isn't loaded, or the game gave no sound object)", g_musicTestObject, handle, result);
+    g_musicTestHandle = handle;
+    g_musicTestStarted = GetTickCount();
+    g_musicTestPlaying = g_musicTestNext;
+    g_musicTestChecked = handle == 0;
+    g_musicTestNext = (g_musicTestNext + 1) % static_cast<int>(g_musicTestClips.size());
+}
+
+// Each time an effect starts: the command registered (once, the game running by then), and two seconds after a
+// clip's start a line on whether it still plays.
+void MusicTestFrame() {
+    static bool registered;
+    if (!registered) {
+        registered = true;
+        using RegisterCommandFn = void*(__fastcall*)(void* command, void* unused, const char* name, const char* description, int type, void (*handler)());
+        reinterpret_cast<RegisterCommandFn>(0xC7BD70)(g_musicTestCommand, nullptr, "rfg_music_test",
+                                                       "Plays the next clip of the music format test (Guerrilla's ambience as Wwise ADPCM)", 3, &MusicTestCommand);
+        rfa::Log("Music test: console command rfg_music_test added");
+    }
+    if (g_musicTestChecked || GetTickCount() - g_musicTestStarted < 2000) return;
+    g_musicTestChecked = true;
+    rfa::Log("Music test: two seconds on, clip %d %s", g_musicTestPlaying + 1,
+             MusicTestPlaying() ? "is still playing: Wwise took the file and is decoding it"
+                                : "has ended already: it did not play (Wwise's reason, if it gave one, is in a \"Wwise:\" line)");
 }
 
 // ---- How many sounds the game plays at once
@@ -8017,6 +8311,8 @@ const auto ElementPut = reinterpret_cast<ElementPutFn>(0x6A5150);
 using FindFoliageMeshFn = void*(__cdecl*)(const char* name);                                  // 0x972B50, by its ".fmeshx" name
 const auto FindFoliageMesh = reinterpret_cast<FindFoliageMeshFn>(0x972B50);
 int g_growthCallsLogged = 0;  // the first scatters are logged, to see where the pieces go
+int g_growthCalls = 0;        // and every 500th, with the totals so far
+long long g_growthKept = 0, g_growthTried = 0, g_growthNoGround = 0, g_growthUnderRock = 0;
 void* const kCellPool = reinterpret_cast<void*>(0x1859790);
 void* const kCellList = reinterpret_cast<void*>(0x18597AC);
 void* const kGrowthMempool = reinterpret_cast<void*>(0x26AFD68);
@@ -8026,6 +8322,31 @@ const auto kRightVector = reinterpret_cast<const GrowthVector*>(0x290772C);
 // A random number from 0 to 999 over `over` (as the game's: rand() % 1000 / 1000.0).
 double GrowthChance(double over = 1000.0) { return (GrowthRand() % 1000) / over; }
 
+// The ground under a point, as Guerrilla's scatter takes it (havok_terrain_height without its ray: the zone's
+// height field, whatever stands on it). The game's query (0x7748E0) casts a ray from *height + 1 down to
+// -1000 with the terrain-only ray (0x1975F00, layer 0x1C: Guerrilla's COLLIDE_RAY_TERRAIN_ONLY, one layer up in
+// Armageddon, as all its ray layers are), which never stops on a building but does on a rock (the stitch
+// lists' bodies). So it is asked from the top (998: the world ends at 1000), then again from just under each
+// surface it stops on, and the lowest is kept: the ground, under an arch or a mound as much as in the open;
+// under a rock sunk into the ground, that rock's underside, where the piece is hidden inside the rock as
+// Guerrilla's is. False where no ground is loaded. `over`: how many surfaces were found above the lowest.
+bool GroundUnder(float x, float z, float& height, GrowthVector& normal, int& over) {
+    float from = 998.0f;
+    bool found = false;
+    over = 0;
+    for (int surfaces = 0; surfaces < 8; ++surfaces) {
+        float at = from;
+        GrowthVector facing{};
+        if (!GroundAt(&at, x, z, &facing, 0)) break;
+        if (found) ++over;
+        height = at;
+        normal = facing;
+        found = true;
+        from = at - 1.05f;  // the next ray from 5 cm under this surface
+    }
+    return found;
+}
+
 // cells: the active cell of each of the layer's models (null until it has one); count: how many
 // pieces to try; zone: the undergrowth zone (+4 its cell size); layer: the layer; record: the cell's
 // record of the layer (+2 its 64-bit mask of 1 m squares); low, high: the cell's corners (x, z);
@@ -8034,7 +8355,7 @@ void __cdecl RandomlyPlace(GrowthCell** cells, int count, uint8_t* zone, GrowthL
                            const float* low, const float* high, const GrowthVector* middle) {
     RFA_LOG_FIRST(1, "Undergrowth: pieces scattered on the ground (the game's random scatter replaced)");
     const bool logThis = g_growthCallsLogged < 12;
-    int kept = 0, firstModel = -1, withoutGround = 0;
+    int kept = 0, firstModel = -1, withoutGround = 0, underRock = 0;
     GrowthVector firstAt{};
     float firstHeight = 0;
     int totalWeight = 0;
@@ -8049,12 +8370,15 @@ void __cdecl RandomlyPlace(GrowthCell** cells, int count, uint8_t* zone, GrowthL
         offset.x = static_cast<float>((GrowthChance() - 0.5) * across);
         offset.z = static_cast<float>((GrowthChance() - 0.5) * across);
         GrowthVector at{offset.x + middle->x, 0, offset.z + middle->z};
+        // The ground's height there (see GroundUnder; asked from 0, as the game's own scatter asks through
+        // 0x6C4820, the ray began at 1 m and found no ground above it, and no piece was ever kept). Where no
+        // ground is loaded yet (a cell made while a level loads) the piece is left out; its cell is made again
+        // with the rest when the player comes back.
         float height = 0;
         GrowthVector normal{};
-        // (The game's own scatter asks through 0x6C4820, which takes no ground as height 0: the cells
-        // made while a level loads, before its ground is, had their pieces at 0. Such a piece is left
-        // out; its cell is made again with the rest when the player comes back.)
-        if (!GroundAt(&height, at.x, at.z, &normal, 0)) { ++withoutGround; continue; }
+        int over = 0;
+        if (!GroundUnder(at.x, at.z, height, normal, over)) { ++withoutGround; continue; }
+        if (over > 0) ++underRock;
         at.y = height;
         offset.y = at.y - middle->y;
         // Its turn: along the slope if its model says so (the rows the game's orient gives, the second
@@ -8108,12 +8432,19 @@ void __cdecl RandomlyPlace(GrowthCell** cells, int count, uint8_t* zone, GrowthL
         ElementPut(slot, nullptr, &element);
         if (kept++ == 0) { firstModel = m; firstAt = at; firstHeight = height; }
     }
+    g_growthKept += kept;
+    g_growthTried += count;
+    g_growthNoGround += withoutGround;
+    g_growthUnderRock += underRock;
+    if (++g_growthCalls % 500 == 0)
+        rfa::Log("Undergrowth scatter: %d cells scattered so far, %lld of %lld pieces kept (%lld where no ground was loaded yet; %lld under a rock, "
+                 "put on the ground below it)", g_growthCalls, g_growthKept, g_growthTried, g_growthNoGround, g_growthUnderRock);
     if (logThis) {
         ++g_growthCallsLogged;
         const GrowthModel* model = firstModel >= 0 ? &(*layer)->model[firstModel] : nullptr;
-        rfa::Log("Undergrowth scatter: %d of %d pieces kept in the cell at (%.1f, %.1f, %.1f) (%d where no ground is loaded yet), cell size %.3f; "
+        rfa::Log("Undergrowth scatter: %d of %d pieces kept in the cell at (%.1f, %.1f, %.1f) (%d where no ground is loaded yet, %d under a rock), cell size %.3f; "
                  "first %s at (%.1f, %.1f, %.1f), ground %.2f, its mesh %s",
-                 kept, count, middle->x, middle->y, middle->z, withoutGround, cellSize, model && model->name ? model->name : "-", firstAt.x, firstAt.y, firstAt.z,
+                 kept, count, middle->x, middle->y, middle->z, withoutGround, underRock, cellSize, model && model->name ? model->name : "-", firstAt.x, firstAt.y, firstAt.z,
                  firstHeight, model && model->name ? (FindFoliageMesh(model->name) ? "found" : "NOT found") : "-");
     }
 }
@@ -8386,6 +8717,1020 @@ void GlassUpdate() {
              *reinterpret_cast<const float*>(kGlassSettings[4].address), g_glassLod ? "on" : "off");
 }
 
+// ---- Guerrilla's buildings: how they hold to the ground, their materials and load, and what breaks
+//
+// Armageddon's destruction is Guerrilla's code, function for function: a building's pieces are joined by
+// links, the pieces standing on the ground are anchored to it when the building loads, a piece cut off from
+// every anchor falls, and a stress pass breaks links whose load (the weight on them times 9.8 times the
+// stress control's Force_Scalar) is more than they hold. Three of its numbers are Armageddon's own:
+//
+// - How strongly a piece holds to the ground (rfg_destroyable_shape::create_world_anchor, 0x698F30, thiscall:
+//   the shape; the mover, the piece's state; it stores the strength in the state's first word through
+//   0x679E40, only for an anchored piece, the state's +0x18 bit 0). It is a damage buffer: a hit on an
+//   anchored piece wears the anchor down before the piece's links take damage. Guerrilla's
+//   (Re-Mars-tered 0x72FBF0) is the piece's footprint, its box's x by z (the piece's base: box from +0 to
+//   +0x0C), times 256, truncated, times its material's link strength (record +0x40, LinkStrength × 1000)
+//   shifted 8 left, the 64-bit product shifted 16 right; an indestructible piece (base +0x3F bit 0x20)
+//   0x7FFFFFFF. Armageddon's takes the area as the piece's mass over its material's density times the box's
+//   height, which comes to under 1/256 m² for every piece of both games: so every anchor's strength is
+//   its floor of 1, and an anchored foundation or beam gives way at the first hit. With GuerrillaAnchors=1
+//   the mod wraps the function and, after the game's, stores Guerrilla's strength (at least 1, the game's
+//   own floor) for the same pieces the game set one for.
+// - The materials (rfg_materials.xtbl; records of 0x5C bytes from the pointer at 0x155E10C, how many at
+//   0x155E110, the name at +0, Density +0x2C, LinkStrength × 1000 +0x40, StressMultiplier +0x44). Both games'
+//   tables are the same but for two: Steel-SuperStrong's links Armageddon made 5 times weaker (800, not
+//   4000), with a StressMultiplier of 5 (a field Guerrilla hasn't: it multiplies a link group's yield in the
+//   stress pass) to make up for it there; and Stone-Indestructo (LinkStrength 8388, Density 5000; Guerrilla's
+//   2000 and 500).
+// - The stress controls (rfg_stress_controls.xtbl; records of 0x34 bytes from 0x17EE5B0, how many at
+//   0x17EE69C, the name at +0, Force_Scalar +0x2C): Default's Force_Scalar is 0.15 in Armageddon, 0.12 in
+//   Guerrilla, so its buildings' weight is a quarter heavier.
+// With GuerrillaMaterials=1 the mod puts Guerrilla's values in those records while one of our worlds is
+// loaded, and the game's back when another is: each value is checked first, and one that isn't the game's is
+// left alone. The game works a building's link strengths out as it loads (0x697120, thiscall: the shape),
+// so the values are set there too, before the world's first building, as well as each frame.
+//
+// And a log (DestructionLog=1): every 10 s in our worlds, how many of each of the destruction events the
+// game looked up an effect for (the material events: load_balance, stress, detach, groan, shatter,
+// collapse, ...), how many pieces were anchored and with what strength, how many of the game's links
+// between touching buildings are in use (rfg_mover_create_dynamic_link, 0x684A90: a pool of 0x28-byte
+// links at 0x155E9A8, how many taken at 0x15685E8, the limit at 0x684CAE: 1,000; a building that touches
+// another when the pool is full gets no link to it), and how long the frames and the game's physics took.
+// The physics: the main loop times its Havok step (0x774110, "havok_simulate") in microseconds into
+// 0x130860C (0x5417A9-0x5417BE). The game's debris balancer (rfgl, 0x67FDE0) reads it: its load is that
+// time over 10 ms (Guerrilla's over 26.25 ms, Re-Mars-tered 0x715470) plus the debris made lately, and
+// while the load is up it takes debris away, each with the load_balance event. So many load_balance
+// events mean the physics step ran over 10 ms.
+//
+// The three switches are read again whenever rfa_mods.ini is saved (CheckSettings). The stress pass reads
+// the materials and load as it goes, so those change at once; anchors and link strengths are worked out as
+// buildings load, so `level` again loads every building with the new ones.
+constexpr DWORD kCreateWorldAnchor = 0x698F30;
+constexpr size_t kCreateWorldAnchorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,30h
+constexpr DWORD kResetLinkStrengths = 0x697120;
+constexpr size_t kResetLinkStrengthsPrologue = 6;  // push ebp / mov ebp,esp / sub esp,14h
+constexpr DWORD kPieceBase = 0x663570;             // thiscall (the shape; the piece's state): its base
+constexpr DWORD kPieceOwnedBy = 0x665960;          // thiscall (the shape; the piece's state): whether it's the shape's
+constexpr DWORD kMaterialRecord = 0x683A90;        // cdecl (its number): its record, the default's for none
+using CreateWorldAnchorFn = void(__fastcall*)(void* shape, void* unused, void* mover, BYTE* state);
+using ResetLinkStrengthsFn = void(__fastcall*)(void* shape, void* unused);
+using PieceBaseFn = const BYTE*(__fastcall*)(void* shape, void* unused, BYTE* state);
+using PieceOwnedByFn = bool(__fastcall*)(void* shape, void* unused, BYTE* state);
+using MaterialRecordFn = const BYTE*(__cdecl*)(int number);
+CreateWorldAnchorFn g_createWorldAnchor;
+ResetLinkStrengthsFn g_resetLinkStrengths;
+constexpr DWORD kMaterials = 0x155E10C, kMaterialCount = 0x155E110, kMaterialSize = 0x5C;
+constexpr DWORD kStressControls = 0x17EE5B0, kStressControlCount = 0x17EE69C, kStressControlSize = 0x34;
+constexpr DWORD kDynamicLinksTaken = 0x15685E8, kDynamicLinkLimitAt = 0x684CAE, kDynamicLinkCheckAt = 0x684CAA;
+
+// A value of the game's that Guerrilla has otherwise: the record (by its name), the field, both games' values.
+struct GuerrillaValue {
+    bool stress;          // a stress control's, else a material's
+    const char* record;
+    const char* field;
+    DWORD offset;
+    bool whole;           // a whole number, else a float
+    double game, guerrilla;
+    bool set;             // put in by the mod (so put back on leaving)
+};
+GuerrillaValue g_guerrillaValues[] = {
+    {false, "Steel-SuperStrong", "LinkStrength x 1000", 0x40, true, 800000, 4000000, false},
+    {false, "Steel-SuperStrong", "StressMultiplier", 0x44, false, 5.0, 1.0, false},
+    {false, "Stone-Indestructo", "LinkStrength x 1000", 0x40, true, 8388000, 2000000, false},
+    {false, "Stone-Indestructo", "Density", 0x2C, false, 5000.0, 500.0, false},
+    {true, "Default", "Force_Scalar", 0x2C, false, 0.15, 0.12, false},
+};
+
+bool g_anchorsSetting = true, g_materialsSetting = true, g_destructionLog = true;
+bool g_buildingsWorld;     // our world, as last seen
+bool g_anchorsOurs;        // Guerrilla's anchors now
+bool g_materialsOurs;      // Guerrilla's values put in
+CRITICAL_SECTION g_buildingsLock;
+bool g_buildingsReady;
+
+// What happened since the last line of the log.
+LONG g_breakEvents[kEventKinds], g_otherBreakEvents;
+LONG g_anchorsMade, g_anchorsNone, g_anchorsWrapped;
+long long g_anchorLeast = -1, g_anchorMost;
+int g_dynamicLinksMost;
+DWORD g_lastBuildingsLog;
+
+// The frames and the game's physics step, since the last line.
+constexpr DWORD kPhysicsMicroseconds = 0x130860C;
+constexpr double kSlowFrameMs = 1000.0 / 30, kPhysicsBudgetMs = 10.0;
+LARGE_INTEGER g_frameAt;
+int g_frames, g_slowFrames, g_overBudget;
+double g_frameMs, g_frameWorst, g_physicsMs, g_physicsWorst;
+
+// Each frame (from BuildingsUpdate): this frame's time and the game's last physics step's.
+void TimeFrame() {
+    LARGE_INTEGER now, rate;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&rate);
+    if (g_frameAt.QuadPart != 0) {
+        const double ms = static_cast<double>(now.QuadPart - g_frameAt.QuadPart) * 1000.0 / static_cast<double>(rate.QuadPart);
+        // A second or more is a load or a pause, not a frame.
+        if (ms < 1000.0) {
+            ++g_frames;
+            g_frameMs += ms;
+            if (ms > g_frameWorst) g_frameWorst = ms;
+            if (ms > kSlowFrameMs) ++g_slowFrames;
+            const int physics = *reinterpret_cast<const int*>(kPhysicsMicroseconds);
+            const double step = physics > 0 && physics < 10000000 ? physics / 1000.0 : 0.0;
+            g_physicsMs += step;
+            if (step > g_physicsWorst) g_physicsWorst = step;
+            if (step > kPhysicsBudgetMs) ++g_overBudget;
+        }
+    }
+    g_frameAt = now;
+}
+
+// The game's own sections, timed (DestructionLog=1; a diagnostic, for the frames lost while buildings come down).
+// The game names the parts of its frame itself, for its profiler: a section begins with 0xCA1AE0 (thiscall: the
+// section, an object on the caller's stack; its name, then three more; ret 0x10) and ends with 0xCA1DF0
+// (thiscall: the section). The main loop's outermost is "sim frame" (0x540F66, the name at 0xF8AAA4); inside it
+// come "ai_system_do_frame", "rfg_do_frame_pre" (the stress pass), "gameplay_do_frame", "events & holes",
+// "camera doframe" and the rest, and inside those the destruction code's own ("rfg_mover::create_subpieces",
+// "rfg_mover::update_render_subpieces", ...). The game's profiler records nothing unless it is switched on
+// (0xCA1AE0 returns at once otherwise), so the mod times them itself, on the thread that runs "sim frame": each
+// section's time with what it calls, and its own (less the sections inside it). Every 10 s in our worlds in
+// which a sim frame took longer than 1/30 s, a line gives the sim frame's times and the ten sections that took
+// most time of their own.
+constexpr DWORD kSectionBegin = 0xCA1AE0, kSectionEnd = 0xCA1DF0;
+constexpr size_t kSectionBeginPrologue = 6, kSectionEndPrologue = 6;  // push ebp / mov ebp,esp / sub esp,30h (28h)
+constexpr DWORD kSimFrameName = 0xF8AAA4;                             // "sim frame"
+using SectionBeginFn = void(__fastcall*)(void* section, void* unused, const char* name, int a, int b, int c);
+using SectionEndFn = void(__fastcall*)(void* section, void* unused);
+SectionBeginFn g_sectionBegin;
+SectionEndFn g_sectionEnd;
+
+struct SectionTimes {
+    const char* key;          // the game's name for it (the pointer it passes)
+    char name[48];
+    long long own, all;       // in performance-counter ticks, this window
+    long long thisFrame, mostInAFrame;
+    int calls;
+};
+constexpr int kSectionSlots = 2048;  // a power of 2
+constexpr int kMostOpenSections = 96;
+SectionTimes g_sectionTimes[kSectionSlots];
+int g_sectionsKept, g_sectionsDropped;
+struct OpenSection {
+    void* section;
+    SectionTimes* times;
+    long long start, inside;  // when it began; the time of the sections in it so far
+};
+OpenSection g_openSections[kMostOpenSections];
+int g_openCount;
+DWORD g_mainThread;
+volatile bool g_sectionsWanted;      // set each frame by BuildingsUpdate: in our worlds, with DestructionLog=1
+bool g_sectionsOn;                   // what that was at the start of this sim frame
+int g_simFrames, g_slowSimFrames;
+long long g_sectionCalls, g_tickRate;
+DWORD g_lastSectionsLog;
+
+SectionTimes* SectionTimesFor(const char* key) {
+    size_t at = (reinterpret_cast<uintptr_t>(key) >> 2) & (kSectionSlots - 1);
+    for (int probe = 0; probe < kSectionSlots; ++probe, at = (at + 1) & (kSectionSlots - 1)) {
+        SectionTimes& s = g_sectionTimes[at];
+        if (s.key == key) return &s;
+        if (s.key) continue;
+        if (g_sectionsKept >= kSectionSlots * 3 / 4) {
+            ++g_sectionsDropped;
+            return nullptr;
+        }
+        s.key = key;
+        int i = 0;
+        for (; i < static_cast<int>(sizeof(s.name)) - 1 && key[i]; ++i) s.name[i] = key[i];
+        s.name[i] = 0;
+        ++g_sectionsKept;
+        return &s;
+    }
+    return nullptr;
+}
+
+double TicksMs(long long ticks) { return static_cast<double>(ticks) * 1000.0 / static_cast<double>(g_tickRate); }
+
+void ClearSectionTimes() {
+    memset(g_sectionTimes, 0, sizeof(g_sectionTimes));
+    g_sectionsKept = g_sectionsDropped = 0;
+    g_simFrames = 1;  // the frame begun now
+    g_slowSimFrames = 0;
+    g_sectionCalls = 0;
+    g_lastSectionsLog = GetTickCount();
+}
+
+// At each sim frame's start, on the main thread: the last frame's times rolled up, and every 10 s a line if a sim
+// frame was slow.
+void SectionsFrame() {
+    ++g_simFrames;
+    for (SectionTimes& s : g_sectionTimes)
+        if (s.key && s.thisFrame) {
+            if (s.thisFrame > s.mostInAFrame) s.mostInAFrame = s.thisFrame;
+            s.thisFrame = 0;
+        }
+    const DWORD now = GetTickCount();
+    if (now - g_lastSectionsLog < 10000) return;
+    g_lastSectionsLog = now;
+    if (g_slowSimFrames > 0 && g_simFrames > 1) {
+        const double frames = g_simFrames - 1;  // the frame begun now isn't in
+        const SectionTimes* sim = nullptr;
+        std::vector<const SectionTimes*> ranked;
+        for (const SectionTimes& s : g_sectionTimes)
+            if (s.key && s.calls > 0) {
+                ranked.push_back(&s);
+                if (s.key == reinterpret_cast<const char*>(kSimFrameName)) sim = &s;
+            }
+        const size_t shown = std::min<size_t>(ranked.size(), 10);
+        std::partial_sort(ranked.begin(), ranked.begin() + shown, ranked.end(),
+                          [](const SectionTimes* a, const SectionTimes* b) { return a->own > b->own; });
+        std::string line = "Sections (10 s, the game's own, on its main thread): ";
+        char part[256];
+        if (sim) {
+            snprintf(part, sizeof(part), "%d sim frames, %.1f ms on average (the slowest %.1f ms, %d slower than 30 a second); the most time of their own: ",
+                     g_simFrames - 1, TicksMs(sim->all) / frames, TicksMs(sim->mostInAFrame), g_slowSimFrames);
+            line += part;
+        }
+        for (size_t i = 0; i < shown; ++i) {
+            const SectionTimes& s = *ranked[i];
+            snprintf(part, sizeof(part), "%s%s %.2f ms a frame (with what it calls %.2f, the most in a frame %.1f; %.1f times a frame)",
+                     i ? ", " : "", s.name, TicksMs(s.own) / frames, TicksMs(s.all) / frames, TicksMs(s.mostInAFrame), s.calls / frames);
+            line += part;
+        }
+        snprintf(part, sizeof(part), "; %.0f sections timed a frame, %d names", static_cast<double>(g_sectionCalls) / frames, g_sectionsKept);
+        line += part;
+        if (g_sectionsDropped > 0) {
+            snprintf(part, sizeof(part), " (%d more past the table's room, not timed)", g_sectionsDropped);
+            line += part;
+        }
+        rfa::Log("%s", line.c_str());
+    }
+    ClearSectionTimes();
+}
+
+void __fastcall SectionBegin(void* section, void* unused, const char* name, int a, int b, int c) {
+    g_sectionBegin(section, unused, name, a, b, c);
+    if (!name) return;
+    const DWORD thread = GetCurrentThreadId();
+    if (name == reinterpret_cast<const char*>(kSimFrameName)) {
+        // The outermost section: the timer switched on or off here, between frames. What is still open from
+        // before (a frame cut short) is dropped, and the last frame rolled up.
+        const bool wasOn = g_sectionsOn;
+        g_sectionsOn = g_sectionsWanted;
+        g_mainThread = thread;
+        g_openCount = 0;
+        if (g_sectionsOn && !wasOn) ClearSectionTimes();
+        else if (g_sectionsOn) SectionsFrame();
+    }
+    if (!g_sectionsOn || thread != g_mainThread || g_openCount >= kMostOpenSections) return;
+    SectionTimes* times = SectionTimesFor(name);
+    if (!times) return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    g_openSections[g_openCount++] = {section, times, now.QuadPart, 0};
+    ++g_sectionCalls;
+}
+
+void __fastcall SectionEnd(void* section, void* unused) {
+    if (g_sectionsOn && g_openCount > 0 && GetCurrentThreadId() == g_mainThread) {
+        int i = g_openCount - 1;
+        while (i >= 0 && g_openSections[i].section != section) --i;
+        if (i >= 0) {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            const OpenSection& open = g_openSections[i];
+            const long long all = now.QuadPart - open.start;
+            SectionTimes& s = *open.times;
+            s.all += all;
+            s.own += all - open.inside;
+            s.thisFrame += all;
+            ++s.calls;
+            if (s.key == reinterpret_cast<const char*>(kSimFrameName) && TicksMs(all) > kSlowFrameMs) ++g_slowSimFrames;
+            g_openCount = i;  // (any opened in it and never closed are dropped with it)
+            if (i > 0) g_openSections[i - 1].inside += all;
+        }
+    }
+    g_sectionEnd(section, unused);
+}
+
+// Where a value lives: the record named, in the materials or the stress controls; null if none is.
+BYTE* GuerrillaValueAt(const GuerrillaValue& v) {
+    const DWORD count = *reinterpret_cast<const DWORD*>(v.stress ? kStressControlCount : kMaterialCount);
+    BYTE* records = v.stress ? reinterpret_cast<BYTE*>(kStressControls) : *reinterpret_cast<BYTE**>(kMaterials);
+    const DWORD size = v.stress ? kStressControlSize : kMaterialSize;
+    if (!records || count > 255) return nullptr;
+    for (DWORD i = 0; i < count; ++i) {
+        BYTE* record = records + i * size;
+        if (strncmp(reinterpret_cast<const char*>(record), v.record, 0x20) == 0) return record + v.offset;
+    }
+    return nullptr;
+}
+
+double ReadValue(const GuerrillaValue& v, const BYTE* at) {
+    return v.whole ? static_cast<double>(*reinterpret_cast<const int*>(at)) : static_cast<double>(*reinterpret_cast<const float*>(at));
+}
+
+void WriteValue(const GuerrillaValue& v, BYTE* at, double value) {
+    if (v.whole) *reinterpret_cast<int*>(at) = static_cast<int>(value);
+    else *reinterpret_cast<float*>(at) = static_cast<float>(value);
+}
+
+bool SameValue(const GuerrillaValue& v, double a, double b) {
+    return v.whole ? static_cast<int>(a) == static_cast<int>(b) : static_cast<float>(a) == static_cast<float>(b);
+}
+
+// Guerrilla's values in, or the game's back, as `ours` says; each value checked first.
+void SetGuerrillaValues(bool ours, const char* when) {
+    int changed = 0;
+    for (GuerrillaValue& v : g_guerrillaValues) {
+        BYTE* at = GuerrillaValueAt(v);
+        const double from = ours ? v.game : v.guerrilla, to = ours ? v.guerrilla : v.game;
+        if (!ours && !v.set) continue;
+        if (!at) {
+            rfa::Log("Buildings: the game has no %s %s \"%s\"; it stays as it is", v.stress ? "stress control" : "material", v.record, v.field);
+            v.set = false;
+            continue;
+        }
+        const double now = ReadValue(v, at);
+        if (!SameValue(v, now, from)) {
+            rfa::Log("Buildings: %s's %s is %.10g, not the %s %.10g; left as it is", v.record, v.field, now, ours ? "game's" : "mod's", from);
+            v.set = false;
+            continue;
+        }
+        WriteValue(v, at, to);
+        v.set = ours;
+        ++changed;
+        rfa::Log("Buildings: %s's %s %.10g (%s; the game's own %.10g)", v.record, v.field, to, ours ? "Guerrilla's" : "the game's own back", v.game);
+    }
+    rfa::Log("Buildings: %s (%d values, %s)", ours ? "Guerrilla's materials and load in this world" : "the game's own materials and load again", changed, when);
+}
+
+// On entering or leaving our worlds (whenever the game is about to work something out from these values,
+// and each frame): the settings read again on entering, and the values set to match.
+void BuildingsSync(const char* when) {
+    if (!g_buildingsReady) return;
+    const bool world = InOurWorld();
+    if (world == g_buildingsWorld) return;
+    EnterCriticalSection(&g_buildingsLock);
+    if (world != g_buildingsWorld) {
+        g_buildingsWorld = world;
+        if (world) {
+            g_anchorsSetting = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaAnchors", 1) != 0;
+            g_materialsSetting = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaMaterials", 1) != 0;
+            g_destructionLog = rfa::IniInt(L"GuerrillaWorld", L"DestructionLog", 1) != 0;
+        }
+        const bool anchors = world && g_anchorsSetting && g_createWorldAnchor;
+        if (anchors != g_anchorsOurs) {
+            g_anchorsOurs = anchors;
+            rfa::Log(anchors ? "Buildings: pieces on the ground hold to it as Guerrilla's (GuerrillaAnchors=1; %s)"
+                             : "Buildings: pieces on the ground hold to it as the game's own (%s)", when);
+        }
+        const bool materials = world && g_materialsSetting;
+        if (materials != g_materialsOurs) {
+            g_materialsOurs = materials;
+            SetGuerrillaValues(materials, when);
+        }
+    }
+    LeaveCriticalSection(&g_buildingsLock);
+}
+
+void __fastcall ResetLinkStrengths(void* shape, void* unused) {
+    BuildingsSync("before a building's links were worked out");
+    g_resetLinkStrengths(shape, unused);
+}
+
+void __fastcall CreateWorldAnchor(void* shape, void* unused, void* mover, BYTE* state) {
+    BuildingsSync("before a piece was anchored");
+    g_createWorldAnchor(shape, unused, mover, state);
+    if (!g_anchorsOurs || !state) return;
+    // The pieces the game gave a strength: its own, anchored, not indestructible.
+    if (!(*reinterpret_cast<const DWORD*>(state + 0x18) & 1)) return;
+    if (!reinterpret_cast<PieceOwnedByFn>(kPieceOwnedBy)(shape, nullptr, state)) return;
+    const BYTE* base = reinterpret_cast<PieceBaseFn>(kPieceBase)(shape, nullptr, state);
+    if (!base || (base[0x3F] & 0x20)) return;
+    // Guerrilla's: the footprint, times 256, times the material's link strength.
+    const float* box = reinterpret_cast<const float*>(base);  // lowest x, y, z, then highest
+    const float footprint = (box[3] - box[0]) * (box[5] - box[2]);
+    const int area = static_cast<int>(static_cast<double>(footprint) * 256.0);
+    const BYTE* material = reinterpret_cast<MaterialRecordFn>(kMaterialRecord)(base[0x3C]);
+    if (!material) return;
+    const int strength = static_cast<int>(static_cast<unsigned>(*reinterpret_cast<const int*>(material + 0x40)) << 8);
+    // Guerrilla keeps the 32 bits of it as they come (G 0x72FD2E-0x72FD37: no floor, no clamp): 0 for a piece
+    // whose footprint is under 1/256 m² (a pole, an upright panel), negative past 2^31 (a footprint of some
+    // 500 m² of super-strong steel). Either gives way at the first hit there, as the game's floor of 1 does.
+    const int guerrilla = static_cast<int>(static_cast<unsigned>((static_cast<long long>(area) * strength) >> 16));
+    if (guerrilla == 0) InterlockedIncrement(&g_anchorsNone);
+    else if (guerrilla < 0) InterlockedIncrement(&g_anchorsWrapped);
+    const int held = guerrilla < 1 ? 1 : guerrilla;
+    *reinterpret_cast<int*>(state) = held;
+    InterlockedIncrement(&g_anchorsMade);
+    if (g_anchorLeast < 0 || held < g_anchorLeast) g_anchorLeast = held;
+    if (held > g_anchorMost) g_anchorMost = held;
+}
+
+// What the game anchors and links by contact (DestructionLog=1). As a building streams in, it trusts its zone's
+// saved anchors and links (world_anchors, dynamic_links) when the zone's dest_checksum is its file's; else (or
+// with none saved) it finds them itself: Havok's getPenetrations (create_anchors 0x8D8C10) hands each piece
+// touching something to subpiece_collector::set_as_anchor (0x689310, thiscall: the collector; the mover, its
+// piece (short), the other mover or none, its piece (u16); ret 0x10), which anchors a piece touching the world
+// (0x698F30) and links one touching another building (0x684A90: a run-time link, 0x28 bytes from 0x155E9A8, the
+// next free one's number at 0x155E1D8 + 2 × the count taken, 0x15685E8: +0/+2 the two pieces, +4/+6 their
+// depths from the ground, +8/+0x0C the two objects' handles, +0x14 the contact area × 1024). In our worlds every
+// building's zone data is trusted, so this logs only what the game had to work out itself.
+constexpr DWORD kSetAsAnchor = 0x689310;
+constexpr size_t kSetAsAnchorPrologue = 6;  // push ebp / mov ebp,esp / sub esp,18h
+constexpr DWORD kRunTimeLinks = 0x155E9A8, kRunTimeLinkFree = 0x155E1D8, kRunTimeLinkSize = 0x28;
+constexpr DWORD kMoverShape = 0x42A1F0, kPieceState = 0x4A3400;  // thiscall (the mover): its shape; (the shape; a piece): its state
+using SetAsAnchorFn = void(__fastcall*)(void* collector, void* unused, BYTE* mover, int piece, BYTE* other, int otherPiece);
+using MoverShapeFn = void*(__fastcall*)(BYTE* mover, void* unused);
+using PieceStateFn = const BYTE*(__fastcall*)(void* shape, void* unused, int piece);
+SetAsAnchorFn g_setAsAnchor;
+int g_contactLines;
+
+void __fastcall SetAsAnchor(void* collector, void* unused, BYTE* mover, int piece, BYTE* other, int otherPiece) {
+    if (!g_destructionLog || !mover || !InOurWorld() || g_contactLines >= 4000) {
+        g_setAsAnchor(collector, unused, mover, piece, other, otherPiece);
+        return;
+    }
+    const bool pool = rfa::CodeValue(kDynamicLinkCheckAt) == kDynamicLinksTaken;
+    const int takenBefore = pool ? *reinterpret_cast<const int*>(kDynamicLinksTaken) : 0;
+    const DWORD limit = rfa::CodeValue(kDynamicLinkLimitAt);
+    const WORD slot = pool && takenBefore >= 0 && static_cast<DWORD>(takenBefore) < limit
+                          ? *reinterpret_cast<const WORD*>(kRunTimeLinkFree + takenBefore * 2) : 0xFFFF;
+    g_setAsAnchor(collector, unused, mover, piece, other, otherPiece);
+    const DWORD handle = *reinterpret_cast<const DWORD*>(mover + 0x68);
+    const short mine = static_cast<short>(piece);
+    ++g_contactLines;
+    if (!other) {
+        void* shape = reinterpret_cast<MoverShapeFn>(kMoverShape)(mover, nullptr);
+        const BYTE* state = shape ? reinterpret_cast<PieceStateFn>(kPieceState)(shape, nullptr, mine) : nullptr;
+        rfa::Log("Contact: %08lX piece %d touches the world: %s", handle, mine,
+                 state && (*reinterpret_cast<const DWORD*>(state + 0x18) & 1) ? "anchored" : "not anchored");
+        return;
+    }
+    const DWORD otherHandle = *reinterpret_cast<const DWORD*>(other + 0x68);
+    const int takenAfter = pool ? *reinterpret_cast<const int*>(kDynamicLinksTaken) : 0;
+    if (pool && takenAfter == takenBefore + 1 && slot != 0xFFFF) {
+        const BYTE* link = reinterpret_cast<const BYTE*>(kRunTimeLinks + slot * kRunTimeLinkSize);
+        rfa::Log("Contact: %08lX piece %d touches %08lX piece %u: linked (link pieces %u and %u, depths %u and %u, area %d = %.3f m2)",
+                 handle, mine, otherHandle, static_cast<unsigned>(static_cast<WORD>(otherPiece)), *reinterpret_cast<const WORD*>(link),
+                 *reinterpret_cast<const WORD*>(link + 2), *reinterpret_cast<const WORD*>(link + 4), *reinterpret_cast<const WORD*>(link + 6),
+                 *reinterpret_cast<const int*>(link + 0x14), *reinterpret_cast<const int*>(link + 0x14) / 1024.0);
+    } else {
+        rfa::Log("Contact: %08lX piece %d touches %08lX piece %u: no link made", handle, mine, otherHandle,
+                 static_cast<unsigned>(static_cast<WORD>(otherPiece)));
+    }
+}
+
+void CountBreakEvent(int kind) {
+    if (kind >= 0 && kind < kEventKinds) InterlockedIncrement(&g_breakEvents[kind]);
+    else InterlockedIncrement(&g_otherBreakEvents);
+}
+
+void BuildingsUpdate() {
+    BuildingsSync("each frame");
+    g_sectionsWanted = g_buildingsWorld && g_destructionLog && g_sectionBegin && g_sectionEnd;
+    if (!g_buildingsWorld) {
+        g_frameAt.QuadPart = 0;
+        return;
+    }
+    if (g_destructionLog) TimeFrame();
+    const bool pool = rfa::CodeValue(kDynamicLinkCheckAt) == kDynamicLinksTaken;
+    const int links = pool ? *reinterpret_cast<const int*>(kDynamicLinksTaken) : -1;
+    if (links > g_dynamicLinksMost) g_dynamicLinksMost = links;
+    const DWORD now = GetTickCount();
+    if (now - g_lastBuildingsLog < 10000) return;
+    g_lastBuildingsLog = now;
+    LONG events = g_otherBreakEvents;
+    for (LONG n : g_breakEvents) events += n;
+    if (!g_destructionLog) return;
+    std::string line = "Destruction (10 s): ";
+    char part[256];
+    for (int k = 0; k < kEventKinds; ++k)
+        if (g_breakEvents[k] > 0) {
+            snprintf(part, sizeof(part), "%s %ld, ", kEventKindNames[k], g_breakEvents[k]);
+            line += part;
+        }
+    if (g_otherBreakEvents > 0) {
+        snprintf(part, sizeof(part), "other %ld, ", g_otherBreakEvents);
+        line += part;
+    }
+    if (events == 0) line += "no events, ";
+    if (g_anchorsMade > 0) {
+        snprintf(part, sizeof(part), "%ld pieces anchored to the ground, Guerrilla's strength %lld to %lld (the game's own: 1), ", g_anchorsMade,
+                 g_anchorLeast, g_anchorMost);
+        line += part;
+        if (g_anchorsNone > 0) {
+            snprintf(part, sizeof(part), "%ld of them 0 in Guerrilla (a footprint under 1/256 m2; held at 1, the game's floor), ", g_anchorsNone);
+            line += part;
+        }
+        if (g_anchorsWrapped > 0) {
+            snprintf(part, sizeof(part), "%ld past 2^31 (negative in Guerrilla; held at 1, the game's floor), ", g_anchorsWrapped);
+            line += part;
+        }
+    }
+    if (pool) snprintf(part, sizeof(part), "links between buildings %d of %lu in use (the most %d)", links, rfa::CodeValue(kDynamicLinkLimitAt), g_dynamicLinksMost);
+    else snprintf(part, sizeof(part), "the links between buildings can't be counted (the game's code isn't as expected)");
+    line += part;
+    if (g_frames > 0) {
+        snprintf(part, sizeof(part), "; %d frames, %.1f ms on average (the slowest %.1f ms, %d slower than 30 a second); "
+                 "the game's physics %.1f ms a frame on average (the most %.1f ms, %d frames over its debris balancer's 10 ms)",
+                 g_frames, g_frameMs / g_frames, g_frameWorst, g_slowFrames, g_physicsMs / g_frames, g_physicsWorst, g_overBudget);
+        line += part;
+    }
+    rfa::Log("%s", line.c_str());
+    for (LONG& n : g_breakEvents) n = 0;
+    g_otherBreakEvents = g_anchorsMade = g_anchorsNone = g_anchorsWrapped = 0;
+    g_anchorLeast = -1;
+    g_anchorMost = 0;
+    g_frames = g_slowFrames = g_overBudget = 0;
+    g_frameMs = g_frameWorst = g_physicsMs = g_physicsWorst = 0;
+}
+
+// rfa_mods.ini saved (CheckSettings): the three switches read again, and in one of our worlds put in force at
+// once for what the game works out from then on (see the top of this section).
+void BuildingsSettingsChanged() {
+    if (!g_buildingsReady) return;
+    EnterCriticalSection(&g_buildingsLock);
+    const bool anchors = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaAnchors", 1) != 0;
+    const bool materials = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaMaterials", 1) != 0;
+    const bool log = rfa::IniInt(L"GuerrillaWorld", L"DestructionLog", 1) != 0;
+    if (anchors != g_anchorsSetting || materials != g_materialsSetting || log != g_destructionLog) {
+        g_anchorsSetting = anchors;
+        g_materialsSetting = materials;
+        g_destructionLog = log;
+        rfa::Log("Buildings: rfa_mods.ini saved: GuerrillaAnchors=%d, GuerrillaMaterials=%d, DestructionLog=%d", anchors ? 1 : 0, materials ? 1 : 0, log ? 1 : 0);
+        if (g_buildingsWorld) {
+            const bool anchorsOurs = anchors && g_createWorldAnchor;
+            if (anchorsOurs != g_anchorsOurs) {
+                g_anchorsOurs = anchorsOurs;
+                rfa::Log(anchorsOurs ? "Buildings: pieces anchored from now on hold to the ground as Guerrilla's (`level` again anchors every building so)"
+                                     : "Buildings: pieces anchored from now on hold to the ground as the game's own (`level` again anchors every building so)");
+            }
+            if (materials != g_materialsOurs) {
+                g_materialsOurs = materials;
+                SetGuerrillaValues(materials, "rfa_mods.ini saved; `level` again works every building's links out with them");
+            }
+        }
+    }
+    LeaveCriticalSection(&g_buildingsLock);
+}
+
+void InstallBuildings() {
+    InitializeCriticalSection(&g_buildingsLock);
+    const BYTE anchorOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30};
+    const BYTE resetOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14};
+    if (memcmp(reinterpret_cast<const void*>(kCreateWorldAnchor), anchorOpening, sizeof(anchorOpening)) == 0)
+        g_createWorldAnchor = reinterpret_cast<CreateWorldAnchorFn>(
+            rfa::HookFunction(kCreateWorldAnchor, kCreateWorldAnchorPrologue, reinterpret_cast<void*>(&CreateWorldAnchor)));
+    if (!g_createWorldAnchor) rfa::Log("Buildings: could not wrap the game's anchoring (its code isn't as expected); pieces hold to the ground as the game's own");
+    if (memcmp(reinterpret_cast<const void*>(kResetLinkStrengths), resetOpening, sizeof(resetOpening)) == 0)
+        g_resetLinkStrengths = reinterpret_cast<ResetLinkStrengthsFn>(
+            rfa::HookFunction(kResetLinkStrengths, kResetLinkStrengthsPrologue, reinterpret_cast<void*>(&ResetLinkStrengths)));
+    if (!g_resetLinkStrengths) rfa::Log("Buildings: could not watch the links' strengths being worked out; Guerrilla's materials are set each frame only");
+    if (rfa::CodeValue(kDynamicLinkCheckAt) != kDynamicLinksTaken) rfa::Log("Buildings: the links between buildings can't be counted (the game's code isn't as expected)");
+    const BYTE collectorOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x18};
+    if (memcmp(reinterpret_cast<const void*>(kSetAsAnchor), collectorOpening, sizeof(collectorOpening)) == 0)
+        g_setAsAnchor = reinterpret_cast<SetAsAnchorFn>(rfa::HookFunction(kSetAsAnchor, kSetAsAnchorPrologue, reinterpret_cast<void*>(&SetAsAnchor)));
+    if (!g_setAsAnchor) rfa::Log("Buildings: could not watch the game's anchoring by contact (its code isn't as expected); the log won't list it");
+    LARGE_INTEGER rate;
+    QueryPerformanceFrequency(&rate);
+    g_tickRate = rate.QuadPart > 0 ? rate.QuadPart : 1;
+    const BYTE sectionBeginOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30};
+    const BYTE sectionEndOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28};
+    if (memcmp(reinterpret_cast<const void*>(kSectionBegin), sectionBeginOpening, sizeof(sectionBeginOpening)) == 0 &&
+        memcmp(reinterpret_cast<const void*>(kSectionEnd), sectionEndOpening, sizeof(sectionEndOpening)) == 0 &&
+        strcmp(reinterpret_cast<const char*>(kSimFrameName), "sim frame") == 0) {
+        g_sectionEnd = reinterpret_cast<SectionEndFn>(rfa::HookFunction(kSectionEnd, kSectionEndPrologue, reinterpret_cast<void*>(&SectionEnd)));
+        if (g_sectionEnd)
+            g_sectionBegin = reinterpret_cast<SectionBeginFn>(rfa::HookFunction(kSectionBegin, kSectionBeginPrologue, reinterpret_cast<void*>(&SectionBegin)));
+    }
+    if (!g_sectionBegin || !g_sectionEnd) rfa::Log("Buildings: could not time the game's sections (its code isn't as expected); the log won't list them");
+    g_buildingsReady = true;
+}
+
+// ---- Guerrilla's wind turbines
+//
+// A turbine is three movers from one chunk: its tower (an rfg_mover), its blades (an rfg_mover, held to the tower
+// by a hinge that a motor turns: the world builder places them, GuerrillaConstraints) and its motor (a
+// general_mover, the nacelle, whose death plays its electric death effect and the transformer explosion).
+// Guerrilla gives them code of their own (custom_object_set_callbacks, RM 0xAD9670, by level object name):
+// - The tower damaged (windmill_base_damaged_callback, 0xA52520; damage above 0): its motor is watched each frame
+//   (windmill_motor_do_frame_callback, 0xA2C7D0), and once it moves at 1 m/s or more (it falls with the tower),
+//   it is given 1,000 damage of the level-object kind and dies.
+// - The blades damaged (windmill_blade_damaged_callback, 0xA522D0): a 3 s timer starts (again at each hit), and
+//   each frame (0xA51C70) 1.25 s on the motor is given the same 1,000 damage (once), and at 3 s the blades'
+//   constraints are destroyed: the hinge goes and the blades fall off.
+// - The blades turned to a random angle as they load (windmill_blade_stream_in_callback): done by the world builder,
+//   once, in the zone.
+// Armageddon has the same callbacks per mover, set by its own custom_object_set_callbacks (0x7A4650; cdecl: the
+// mover, a flag): by the kind its level object's name has in its own table (the name: the level object
+// properties at [mover+0xB4], whose first field's first field is the name, as at 0x7A46E3). It has no turbines,
+// so ours get its plain mover callbacks. Its slots are Guerrilla's one place later: +0xBC stream-in, +0xC0
+// damaged, +0xC4 destroyed. A callback is cdecl: the event (its type at +0, the object's handle at +4; damage is
+// type 0, with the share of damage at +8, Guerrilla's building_damaged_event) and a notify record, and returns an
+// event_result (Armageddon's mover callback 0x7A4DF0: 2 when it acted, 0 when not).
+// So, in our worlds, the towers' and blades' damaged slots get Guerrilla's code, which first calls the callback
+// Armageddon gave them. The timers and the motor watch run in the effects' frame update. The objects come from
+// the world builder's list (mods\guerrilla_world\turbines.txt: zone, tower, blades, motor, hinge), by handle.
+// Damage is the game's own (apply_damage, virtual +0xA4 in Armageddon, Guerrilla's +0x88 with three more
+// arguments: Armageddon's own calls pass a scale of 1 and zeros, 0x7A21C1), so the motor dies as any other.
+constexpr DWORD kSetMoverCallbacks = 0x7A4650;
+constexpr size_t kSetMoverCallbacksPrologue = 6;  // push ebp / mov ebp,esp / sub esp,20h
+constexpr size_t kMoverLevelObject = 0xB4, kMoverDamagedCallback = 0xC0, kMoverHandle = 0x68;
+// A mover with this flag (its flags at +0xF0) gets no callbacks in either game: Armageddon's setup zeroes them and
+// stops (0x7A46CE), as Guerrilla's does (mover_flags & 4, 0xAD9678). Seen on blades' pieces (their level object's
+// name, made in play), so Guerrilla's turbine code leaves them alone too.
+constexpr size_t kMoverCallbackFlags = 0xF0;
+constexpr DWORD kMoverNoCallbacks = 4;
+constexpr size_t kApplyDamageSlot = 0xA4 / 4;
+constexpr int kDamagedEvent = 0;
+constexpr int kLevelObjectDamage = 4;          // damaged_by_types DBT_LEVEL_OBJECT, as Guerrilla's turbine code gives
+constexpr float kTurbineMotorDamage = 1000.0f;  // Guerrilla's
+constexpr float kMotorMovingSpeed = 1.0f;       // m/s: Guerrilla's motor watch (its body's speed squared ≥ 1)
+constexpr float kBladesMotorAt = 1.25f, kBladesFallAt = 3.0f;  // seconds after the blades' last hit (Guerrilla's 3 s timer, at 1.75 s left)
+
+struct MoverEvent {
+    int type;      // 0 damaged
+    DWORD handle;  // the mover's
+    float share;   // damage's share (damaged)
+};
+using MoverCallbackFn = int(__cdecl*)(const MoverEvent* event, void* notify);
+using SetMoverCallbacksFn = bool(__cdecl*)(BYTE* mover, bool flag);
+SetMoverCallbacksFn g_setMoverCallbacks;
+using GameObjectFromHandleFn = BYTE*(__fastcall*)(void* world, void* unused, DWORD handle);
+auto const GameObjectFromHandle = reinterpret_cast<GameObjectFromHandleFn>(0x6CB9E0);
+using DestroyObjectFn = bool(__fastcall*)(void* world, void* unused, BYTE* object, bool now);
+auto const DestroyGameObject = reinterpret_cast<DestroyObjectFn>(0x6D5450);
+using ApplyDamageFn = bool(__fastcall*)(BYTE* object, void* unused, float amount, int kind, const float* position, const float* direction,
+                                        const BYTE* attacker, DWORD weapon, float scale, int unknown, bool first, bool second);
+
+struct Turbine {
+    DWORD tower, blades, motor, hinge;
+};
+std::vector<Turbine> g_turbines;                              // from turbines.txt
+MoverCallbackFn g_towerDamagedBefore, g_bladesDamagedBefore;  // the damaged callbacks Armageddon gave them
+struct MotorWatch {
+    DWORD motor;
+    float at[3];
+    bool seen;
+};
+std::vector<MotorWatch> g_motorsWatched;  // motors whose tower was damaged (Guerrilla's motor watch)
+struct BladesTimer {
+    size_t turbine;
+    float seconds;    // since the blades' last hit
+    bool motorDone;   // the motor given its damage (Guerrilla zeroes the blades' hit points for it)
+};
+std::vector<BladesTimer> g_bladesTimers;
+// Motors already given their damage: once is enough (the tower keeps taking damage as it falls, and Guerrilla's
+// code would give a dead motor the same again). Forgotten when the turbine's tower is made again.
+std::vector<DWORD> g_motorsKilled;
+
+const char* LevelObjectName(const BYTE* mover) {
+    const BYTE* properties = *reinterpret_cast<BYTE* const*>(mover + kMoverLevelObject);
+    const BYTE* base = properties ? *reinterpret_cast<BYTE* const*>(properties) : nullptr;
+    return base ? *reinterpret_cast<const char* const*>(base) : nullptr;
+}
+
+// A level object name as Guerrilla's turbine code names it: ours carry "rfg_" before Guerrilla's own.
+bool IsTurbinePart(const char* name, const char* part) {
+    if (!name) return false;
+    if (_strnicmp(name, "rfg_", 4) == 0) name += 4;
+    return _stricmp(name, part) == 0;
+}
+
+int TurbineOf(DWORD handle, bool blades) {
+    for (size_t i = 0; i < g_turbines.size(); ++i)
+        if ((blades ? g_turbines[i].blades : g_turbines[i].tower) == handle) return static_cast<int>(i);
+    return -1;
+}
+
+// The motor given Guerrilla's 1,000 damage (it dies as any other: its death effects play).
+bool MotorKilled(DWORD handle) { return std::find(g_motorsKilled.begin(), g_motorsKilled.end(), handle) != g_motorsKilled.end(); }
+
+void KillTurbineMotor(DWORD handle, const char* why) {
+    BYTE* motor = handle != 0xFFFFFFFF && !MotorKilled(handle) ? GameObjectFromHandle(kWorld, nullptr, handle) : nullptr;
+    if (!motor) return;
+    g_motorsKilled.push_back(handle);
+    static const float kNoDirection[3] = {0, 0, 0};
+    float at[3];
+    memcpy(at, motor + 4, sizeof(at));
+    auto const applyDamage = reinterpret_cast<ApplyDamageFn>((*reinterpret_cast<void** const*>(motor))[kApplyDamageSlot]);
+    applyDamage(motor, nullptr, kTurbineMotorDamage, kLevelObjectDamage, at, kNoDirection, nullptr, 0xFFFFFFFF, 1.0f, 0, false, false);
+    RFA_LOG_FIRST(40, "Wind turbines: motor %08lX given %.0f damage (%s)", handle, kTurbineMotorDamage, why);
+}
+
+int __cdecl TowerDamaged(const MoverEvent* event, void* notify) {
+    const int result = g_towerDamagedBefore ? g_towerDamagedBefore(event, notify) : 0;
+    if (!event || event->type != kDamagedEvent || event->share == 0 || !InOurWorld()) return result;
+    const int i = TurbineOf(event->handle, false);
+    if (i < 0) return result;
+    const DWORD motor = g_turbines[i].motor;
+    if (motor != 0xFFFFFFFF && !MotorKilled(motor) &&
+        std::none_of(g_motorsWatched.begin(), g_motorsWatched.end(), [&](const MotorWatch& w) { return w.motor == motor; }))
+        g_motorsWatched.push_back({motor, {}, false});
+    return result ? result : 1;
+}
+
+int __cdecl BladesDamaged(const MoverEvent* event, void* notify) {
+    const int result = g_bladesDamagedBefore ? g_bladesDamagedBefore(event, notify) : 0;
+    if (!event || event->type != kDamagedEvent || !InOurWorld()) return result;
+    const int i = TurbineOf(event->handle, true);
+    if (i < 0) return result;
+    auto timer = std::find_if(g_bladesTimers.begin(), g_bladesTimers.end(), [&](const BladesTimer& t) { return t.turbine == static_cast<size_t>(i); });
+    if (timer == g_bladesTimers.end()) g_bladesTimers.push_back({static_cast<size_t>(i), 0.0f, false});
+    else timer->seconds = 0.0f;  // each hit starts the 3 s again, as Guerrilla's
+    return result ? result : 1;
+}
+
+// Each mover given its callbacks: in our worlds, a turbine's tower and blades get Guerrilla's damaged code.
+bool __cdecl SetMoverCallbacks(BYTE* mover, bool flag) {
+    const bool result = g_setMoverCallbacks(mover, flag);
+    if (!mover || g_turbines.empty() || !InOurWorld()) return result;
+    if (*reinterpret_cast<const DWORD*>(mover + kMoverCallbackFlags) & kMoverNoCallbacks) return result;  // none in either game
+    const char* name = LevelObjectName(mover);
+    const bool tower = IsTurbinePart(name, "0101windmill_a"), blades = !tower && IsTurbinePart(name, "0101windmill_a_blades");
+    if (!tower && !blades) return result;
+    auto& slot = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverDamagedCallback);
+    if (!slot) return result;  // the game gave it none: nor does Guerrilla's turbine code
+    if (tower) {
+        // The turbine made again (its zone loaded again): its motor may be given its damage again.
+        const int i = TurbineOf(*reinterpret_cast<const DWORD*>(mover + kMoverHandle), false);
+        if (i >= 0) g_motorsKilled.erase(std::remove(g_motorsKilled.begin(), g_motorsKilled.end(), g_turbines[i].motor), g_motorsKilled.end());
+    }
+    MoverCallbackFn& before = tower ? g_towerDamagedBefore : g_bladesDamagedBefore;
+    const MoverCallbackFn ours = tower ? &TowerDamaged : &BladesDamaged;
+    if (slot != ours) {
+        if (before && slot != before)
+            RFA_LOG_FIRST(4, "Wind turbines: a %s was given another damaged callback (%p, not %p); Guerrilla's code calls the first", tower ? "tower" : "blades",
+                          reinterpret_cast<void*>(slot), reinterpret_cast<void*>(before));
+        if (!before) before = slot;
+        slot = ours;
+    }
+    RFA_LOG_FIRST(2, "Wind turbines: Guerrilla's turbine code on their towers and blades (%s)", name);
+    return result;
+}
+
+// Each frame in our worlds: the motors watched, and the blades' timers (none kept in any other world).
+void TurbinesUpdate(float seconds) {
+    if (!InOurWorld()) {
+        g_motorsWatched.clear();
+        g_bladesTimers.clear();
+        g_motorsKilled.clear();
+        return;
+    }
+    if (seconds <= 0) return;
+    for (size_t k = 0; k < g_motorsWatched.size();) {
+        MotorWatch& watch = g_motorsWatched[k];
+        BYTE* motor = GameObjectFromHandle(kWorld, nullptr, watch.motor);
+        if (!motor) {
+            g_motorsWatched.erase(g_motorsWatched.begin() + k);
+            continue;
+        }
+        const float* at = reinterpret_cast<const float*>(motor + 4);
+        const float dx = at[0] - watch.at[0], dy = at[1] - watch.at[1], dz = at[2] - watch.at[2];
+        if (watch.seen && dx * dx + dy * dy + dz * dz >= kMotorMovingSpeed * kMotorMovingSpeed * seconds * seconds) {
+            KillTurbineMotor(watch.motor, "it fell with its damaged tower");
+            g_motorsWatched.erase(g_motorsWatched.begin() + k);
+            continue;
+        }
+        memcpy(watch.at, at, sizeof(watch.at));
+        watch.seen = true;
+        ++k;
+    }
+    for (size_t k = 0; k < g_bladesTimers.size();) {
+        BladesTimer& timer = g_bladesTimers[k];
+        const Turbine& turbine = g_turbines[timer.turbine];
+        timer.seconds += seconds;
+        if (timer.seconds >= kBladesMotorAt && !timer.motorDone) {
+            timer.motorDone = true;
+            KillTurbineMotor(turbine.motor, "its blades were hit");
+        }
+        if (timer.seconds >= kBladesFallAt) {
+            if (BYTE* hinge = GameObjectFromHandle(kWorld, nullptr, turbine.hinge)) {
+                DestroyGameObject(kWorld, nullptr, hinge, false);
+                RFA_LOG_FIRST(40, "Wind turbines: blades %08lX come off (their hinge %08lX taken away)", turbine.blades, turbine.hinge);
+            }
+            g_bladesTimers.erase(g_bladesTimers.begin() + k);
+            continue;
+        }
+        ++k;
+    }
+}
+
+void InstallTurbines() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_world\\turbines.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("Wind turbines: no mods\\guerrilla_world\\turbines.txt (build the world); Guerrilla's turbine code is off");
+        return;
+    }
+    char line[256], zone[64];
+    while (fgets(line, sizeof(line), file)) {
+        Turbine t;
+        unsigned long tower, blades, motor, hinge;
+        if (sscanf_s(line, "%63s %lx %lx %lx %lx", zone, static_cast<unsigned>(sizeof(zone)), &tower, &blades, &motor, &hinge) == 5) {
+            t = {tower, blades, motor, hinge};
+            g_turbines.push_back(t);
+        }
+    }
+    fclose(file);
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20};
+    if (memcmp(reinterpret_cast<const void*>(kSetMoverCallbacks), opening, sizeof(opening)) == 0)
+        g_setMoverCallbacks = reinterpret_cast<SetMoverCallbacksFn>(
+            rfa::HookFunction(kSetMoverCallbacks, kSetMoverCallbacksPrologue, reinterpret_cast<void*>(&SetMoverCallbacks)));
+    if (!g_setMoverCallbacks) {
+        g_turbines.clear();
+        rfa::Log("Wind turbines: could not hook the movers' callbacks (the game's code isn't as expected); Guerrilla's turbine code is off");
+        return;
+    }
+    rfa::Log("Wind turbines: %u read from mods\\guerrilla_world\\turbines.txt; Guerrilla's turbine code plays on them in our worlds",
+             static_cast<unsigned>(g_turbines.size()));
+}
+
+// ---- Cutting buildings where something charges through them (for other mods)
+//
+// Guerrilla's Rhino backpack charge (multi_object_backpack::process, RM 0x9F358B), on each step it hits a mover,
+// makes a shape cutter there: shape_cutter_props(the hit's place plus 0.475 × the charge's direction, the player's
+// turn, radius 0.95, the explosion mp_rhino_cutter, the player's handle as source and owner), then
+// world::create_object_internal. A shape cutter is an object the game makes and processes once
+// (shape_cutter_do_frame): it cuts the buildings' pieces inside its radius away and, with an explosion, pushes and
+// damages what's there as that explosion does.
+// Armageddon has the same object, made the same way. Its console command shape_cutter_test (0x694340) makes one
+// with 0x6944E0 (shape_cutter_props: thiscall, the props block; the place, the turn, the radius (outer_radius), the
+// explosion (exp_info), an explosion direction or none (exp_dir), the source and the owner; ret 1Ch; it also sets
+// cause_explosions), 0x695F40 (thiscall on the world: the props and the zone, -1; returns the object) and 0x694580
+// (the props block freed). Guerrilla's exp_info is the explosion's byte id; Armageddon's is the explosion_info
+// itself (the cutter keeps it at +0xA0 and reads it as one), found by name with 0x6EAE30 (cdecl, Guerrilla's
+// explosion_lookup).
+//
+// GuerrillaWorld_CutBuildings is exported for the mods that make such things (guerrilla_gear's Rhino charge). Call
+// it on the game's own thread, as the charge does, once per step it touches a building.
+constexpr DWORD kShapeCutterProps = 0x6944E0, kMakeShapeCutter = 0x695F40, kFreeObjectProps = 0x694580, kExplosionLookup = 0x6EAE30;
+using ShapeCutterPropsFn = void*(__fastcall*)(void* props, void* unused, const float* position, const float* turn, float radius, const void* explosion,
+                                             const float* explosionDirection, DWORD source, DWORD owner);
+using MakeShapeCutterFn = BYTE*(__fastcall*)(void* world, void* unused, void* props, int zone);
+using FreeObjectPropsFn = void(__fastcall*)(void* props, void* unused);
+using ExplosionLookupFn = const void*(__cdecl*)(const char* name);
+
+}  // namespace
+
+// Cuts the buildings' pieces within `radius` metres of `position` away, as Guerrilla's shape cutter does.
+// - position: x, y, z.
+// - turn: the cutter's 3 × 3 rotation, rows right, up, forward (the game's matrix), as Guerrilla passes the
+//   charging player's.
+// - radius: metres (Guerrilla's charge: 0.95).
+// - explosion: an explosion's name in the explosion table, to push and damage what's there as it does
+//   (Guerrilla's charge: "mp_rhino_cutter"), or null for a cut alone.
+// - source: who made it, by handle (the player), also kept as its owner; 0xFFFFFFFF for none.
+// Returns true if the cutter was made.
+extern "C" __declspec(dllexport) bool __cdecl GuerrillaWorld_CutBuildings(const float* position, const float* turn, float radius,
+                                                                          const char* explosion, DWORD source) {
+    if (!position || !turn || !(radius > 0)) return false;
+    static std::string lastName;
+    static const void* lastExplosion = nullptr;
+    const void* info = nullptr;
+    if (explosion && *explosion) {
+        if (lastName != explosion) {
+            lastName = explosion;
+            lastExplosion = reinterpret_cast<ExplosionLookupFn>(kExplosionLookup)(explosion);
+            if (!lastExplosion) RFA_LOG_FIRST(10, "Cutting buildings: no explosion %s in the game's table; cutting without one", explosion);
+        }
+        info = lastExplosion;
+    }
+    alignas(16) BYTE props[64] = {};  // an obj_prop_block (12 bytes in both games), with room to spare
+    reinterpret_cast<ShapeCutterPropsFn>(kShapeCutterProps)(props, nullptr, position, turn, radius, info, nullptr, source, source);
+    BYTE* cutter = reinterpret_cast<MakeShapeCutterFn>(kMakeShapeCutter)(kWorld, nullptr, props, -1);
+    reinterpret_cast<FreeObjectPropsFn>(kFreeObjectProps)(props, nullptr);
+    RFA_LOG_FIRST(10, "Cutting buildings: a cutter of %.2f m at %.1f %.1f %.1f (explosion %s)%s", radius, position[0], position[1], position[2],
+                  info ? explosion : "none", cutter ? "" : ": the game made none");
+    return cutter != nullptr;
+}
+
+namespace {
+
+// ---- Guerrilla's ladders
+//
+// A ladder is an invisible volume on a building that the player and people climb (the world builder places
+// Guerrilla's, each on its building: GuerrillaLadders); Armageddon's ladder code is Guerrilla's. Two things in it
+// are Armageddon's own, and in our worlds they're Guerrilla's:
+//   - What a damaged building does to its ladder. Both games run a callback on a building's damage event (event 0,
+//     the building's handle at +4). Guerrilla's (ladder_building_damaged_callback, RM 0xA36B10): for an rfg_mover
+//     whose percent destroyed is 0 or past 2.5 %, its first ladder child is switched on if the building is whole
+//     (0 %) and fixed (move type RFGM_FIXED), else off; between the two nothing changes. Armageddon's (0x7AB1D0):
+//     every ladder child of a mover off once it's past 0.1 % or not fixed. So a few bullet holes, which leave
+//     Guerrilla's ladder climbable, took Armageddon's away. (Armageddon switches a building's ladders back on when
+//     the building comes back, 0x7AB2C0, as Guerrilla's world reset does; left as it is.)
+//   - The slide's sounds. Sliding down, Guerrilla plays MOV_FOLEY_LADDER_LOOP_01 (ladder_start_slide_sound) and,
+//     landing, stops it and plays MOV_FOLEY_LADDER_RELEASE_01; Armageddon's same code (0x7AAD50, 0x7AA706) posts its
+//     own events, game_audio.xtbl's Slide_Down_Ladder and Slide_Down_Ladder_Land, whose ids the game keeps at
+//     0x13033E0 and 0x13033E4. Each slide's start (the landing always follows one) points both at the weapons
+//     build's events of Guerrilla's cues in our worlds, at Armageddon's elsewhere. (Guerrilla plays the player's
+//     release in 2D; ours plays at him in 3D, which sounds the same.)
+constexpr DWORD kLadderBuildingDamaged = 0x7AB1D0;  // cdecl (event) -> its result: the game's callback on a building's damage
+constexpr size_t kLadderBuildingDamagedPrologue = 6;  // push ebp / mov ebp,esp / sub esp,14h
+constexpr DWORD kLadderSlideSound = 0x7AAD50;  // cdecl (human): the slide's loop started
+constexpr size_t kLadderSlideSoundPrologue = 6;  // push ebp / mov ebp,esp / mov eax,[ebp+8]
+constexpr DWORD kSlideLoopEvent = 0x13033E0, kSlideLandEvent = 0x13033E4;  // the two events' Wwise ids
+constexpr DWORD kLadderGameWorld = 0x1870630;
+constexpr DWORD kLadderMoverFromHandle = 0x424350;  // thiscall (world, handle): the mover of that handle, or null
+constexpr DWORD kLadderObjType = 0x7A, kLadderObjSubtype = 0x7B;  // bytes of an object: its type and subtype
+constexpr DWORD kLadderFirstChild = 0x34, kLadderNextSibling = 0x38;    // an object's children: a ring through each one's sibling
+constexpr DWORD kLadderObjFlags = 0x54;                        // a ladder is switched on while bit 5 of this byte is set
+constexpr DWORD kVtableSetEnabled = 0x8C;                   // a ladder's set_enabled(bool), thiscall
+constexpr DWORD kDamagePct = 0x13C, kMoveType = 0x19D;      // an rfg_mover's percent destroyed (0-1), its move type (byte)
+constexpr int kTypeMover = 2, kSubtypeRfgMover = 1, kTypeLadder = 0xE, kMoveFixed = 0;
+constexpr float kLadderDamageLimit = 0.025f;  // Guerrilla's 2.5 % (RM 0x1694500)
+
+// Wwise's id of a name: FNV-1 (32 bits) of its lower-case letters (as the game's GetIDFromString).
+constexpr DWORD LadderSoundId(const char* name) {
+    DWORD h = 2166136261u;
+    for (; *name; ++name) h = (h * 16777619u) ^ static_cast<BYTE>(*name >= 'A' && *name <= 'Z' ? *name + 32 : *name);
+    return h;
+}
+constexpr DWORD kGuerrillaSlideLoop = LadderSoundId("RFG_MOV_FOLEY_LADDER_LOOP_01");        // the weapons build's (GuerrillaLadders.SlideCues)
+constexpr DWORD kGuerrillaSlideRelease = LadderSoundId("RFG_MOV_FOLEY_LADDER_RELEASE_01");
+
+using LadderBuildingDamagedFn = int(__cdecl*)(const BYTE* event);
+using LadderSlideSoundFn = void(__cdecl*)(BYTE* human);
+using MoverFromHandleFn = BYTE*(__fastcall*)(void* world, void* unused, DWORD handle);
+using SetLadderEnabledFn = bool(__fastcall*)(BYTE* ladder, void* unused, bool enabled);
+LadderBuildingDamagedFn g_ladderBuildingDamaged = nullptr;
+LadderSlideSoundFn g_ladderSlideSound = nullptr;
+bool g_armageddonSlideKept = false;
+DWORD g_armageddonSlideLoop = 0, g_armageddonSlideLand = 0;
+bool g_guerrillaSlideLogged = false;
+
+bool LadderOn(const BYTE* ladder) { return (ladder[kLadderObjFlags] >> 5 & 1) != 0; }
+
+int __cdecl LadderBuildingDamaged(const BYTE* event) {
+    if (!InOurWorld()) return g_ladderBuildingDamaged(event);
+    // Guerrilla's ladder_building_damaged_callback.
+    const int kind = *reinterpret_cast<const int*>(event);
+    const DWORD handle = *reinterpret_cast<const DWORD*>(event + 4);
+    if (kind != 0 || handle == 0xFFFFFFFF) return 0;
+    BYTE* building = reinterpret_cast<MoverFromHandleFn>(kLadderMoverFromHandle)(reinterpret_cast<void*>(kLadderGameWorld), nullptr, handle);
+    if (!building || building[kLadderObjType] != kTypeMover || building[kLadderObjSubtype] != kSubtypeRfgMover) return 0;
+    const float destroyed = *reinterpret_cast<const float*>(building + kDamagePct);
+    const bool whole = destroyed == 0.0f;
+    if (!whole && !(destroyed > kLadderDamageLimit)) return 0;
+    // Its first ladder child.
+    BYTE* const first = *reinterpret_cast<BYTE**>(building + kLadderFirstChild);
+    BYTE* ladder = nullptr;
+    for (BYTE* child = first; child; ) {
+        if (child[kLadderObjType] == kTypeLadder) {
+            ladder = child;
+            break;
+        }
+        child = *reinterpret_cast<BYTE**>(child + kLadderNextSibling);
+        if (child == first) break;
+    }
+    if (!ladder) return 2;
+    const bool on = whole && static_cast<signed char>(building[kMoveType]) == kMoveFixed;
+    const bool was = LadderOn(ladder);
+    auto setEnabled = reinterpret_cast<SetLadderEnabledFn>((*reinterpret_cast<void* const* const*>(ladder))[kVtableSetEnabled / 4]);
+    setEnabled(ladder, nullptr, on);
+    if (LadderOn(ladder) != was)
+        rfa::Log("Ladders: building %08lX %.1f%% destroyed, %s: its ladder %08lX switched %s", handle, destroyed * 100.0f,
+                 static_cast<signed char>(building[kMoveType]) == kMoveFixed ? "fixed" : "moving", *reinterpret_cast<const DWORD*>(ladder + 0x68),
+                 LadderOn(ladder) ? "on" : "off");
+    return 2;
+}
+
+void __cdecl LadderSlideSound(BYTE* human) {
+    DWORD& loop = *reinterpret_cast<DWORD*>(kSlideLoopEvent);
+    DWORD& land = *reinterpret_cast<DWORD*>(kSlideLandEvent);
+    if (!g_armageddonSlideKept) {  // the game's own, read from game_audio.xtbl while it started; nothing changes them but this
+        g_armageddonSlideLoop = loop;
+        g_armageddonSlideLand = land;
+        g_armageddonSlideKept = true;
+    }
+    const bool ours = InOurWorld();
+    loop = ours ? kGuerrillaSlideLoop : g_armageddonSlideLoop;
+    land = ours ? kGuerrillaSlideRelease : g_armageddonSlideLand;
+    if (ours && !g_guerrillaSlideLogged) {
+        g_guerrillaSlideLogged = true;
+        rfa::Log("Ladders: a slide down a ladder plays Guerrilla's RFG_MOV_FOLEY_LADDER_LOOP_01 and, landing, _RELEASE_01 (in place of the game's "
+                 "events %08lX and %08lX)", g_armageddonSlideLoop, g_armageddonSlideLand);
+    }
+    g_ladderSlideSound(human);
+}
+
+void InstallLadders() {
+    const BYTE damagedOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14};
+    const BYTE slideOpening[] = {0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08};
+    if (memcmp(reinterpret_cast<const void*>(kLadderBuildingDamaged), damagedOpening, sizeof(damagedOpening)) == 0)
+        g_ladderBuildingDamaged = reinterpret_cast<LadderBuildingDamagedFn>(
+            rfa::HookFunction(kLadderBuildingDamaged, kLadderBuildingDamagedPrologue, reinterpret_cast<void*>(&LadderBuildingDamaged)));
+    if (memcmp(reinterpret_cast<const void*>(kLadderSlideSound), slideOpening, sizeof(slideOpening)) == 0)
+        g_ladderSlideSound = reinterpret_cast<LadderSlideSoundFn>(
+            rfa::HookFunction(kLadderSlideSound, kLadderSlideSoundPrologue, reinterpret_cast<void*>(&LadderSlideSound)));
+    if (g_ladderBuildingDamaged && g_ladderSlideSound)
+        rfa::Log("Ladders: in our worlds a damaged building's ladder goes by Guerrilla's rule (off past 2.5%% or moving), and a slide down one sounds as Guerrilla's");
+    else
+        rfa::Log("Ladders: the game's code isn't as expected (%s%s); Armageddon's own there", g_ladderBuildingDamaged ? "" : "the damaged building's callback ",
+                 g_ladderSlideSound ? "" : "the slide's sound");
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -8402,6 +9747,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreEmitterRoom();
     MoreMaterialEffectRoom();
     LoadMaterialEvents();
+    InstallBuildings();
+    InstallTurbines();
+    InstallLadders();
     MoreSoundEngineRoom();
     MoreStreamRoom();
     LogSoundLimit();
@@ -8424,6 +9772,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadClockSpeed();
     ReadZoneSize();
     ReadStreamRadius();
+    ReadStreamSteady();
     ReadGroundDetail();
     ReadShine();
     ReadBloom();
@@ -8453,6 +9802,22 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_setStreamRadius = reinterpret_cast<SetStreamRadiusFn>(
         rfa::HookFunction(kSetStreamRadius, kSetStreamRadiusPrologue, reinterpret_cast<void*>(&SetStreamRadiusHeld)));
     if (!g_setStreamRadius) rfa::Log("Could not hook the game's streaming radius; the game's own radii aren't held in those worlds");
+    g_streamUpdate = reinterpret_cast<StreamUpdateFn>(
+        rfa::HookFunction(kStreamUpdate, kStreamUpdatePrologue, reinterpret_cast<void*>(&StreamUpdateSteady)));
+    if (!g_streamUpdate) rfa::Log("Could not hook the game's stream update; StreamSteady= does nothing");
+    {
+        const BYTE ioOpening[] = {0x55, 0x8B, 0xEC, 0x6A, 0x00};
+        const BYTE binkOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
+        if (memcmp(reinterpret_cast<const void*>(kPauseStreamIo), ioOpening, sizeof(ioOpening)) == 0 &&
+            memcmp(reinterpret_cast<const void*>(kResumeStreamIo), ioOpening, sizeof(ioOpening)) == 0) {
+            g_resumeStreamIo = reinterpret_cast<StreamIoFn>(rfa::HookFunction(kResumeStreamIo, kStreamIoPrologue, reinterpret_cast<void*>(&ResumeStreamIo)));
+            if (g_resumeStreamIo)
+                g_pauseStreamIo = reinterpret_cast<StreamIoFn>(rfa::HookFunction(kPauseStreamIo, kStreamIoPrologue, reinterpret_cast<void*>(&PauseStreamIo)));
+        }
+        if (memcmp(reinterpret_cast<const void*>(kBinkOpen), binkOpening, sizeof(binkOpening)) == 0)
+            g_binkOpen = reinterpret_cast<BinkOpenFn>(rfa::HookFunction(kBinkOpen, kBinkOpenPrologue, reinterpret_cast<void*>(&BinkOpen)));
+        if (!g_pauseStreamIo || !g_binkOpen) rfa::Log("Streaming: could not watch the stream I/O's pauses or the videos (the game's code isn't as expected)");
+    }
     g_setAmbient = reinterpret_cast<SetAmbientFn>(rfa::HookFunction(kSetAmbient, kSetAmbientPrologue, reinterpret_cast<void*>(&SetAmbient)));
     g_setBackAmbient = reinterpret_cast<SetAmbientFn>(rfa::HookFunction(kSetBackAmbient, kSetAmbientPrologue, reinterpret_cast<void*>(&SetBackAmbient)));
     if (!g_setAmbient || !g_setBackAmbient) rfa::Log("Could not hook the time of day's ambient light; Ambient= does nothing");
@@ -8470,9 +9835,19 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     // Guerrilla's gameplay properties, draw distances and effects, if the world builder has written them (the
     // game reads the tables while it starts, before any world).
     bool anyTable = false;
+    // The explosions: the builder writes them twice, cutting buildings by Guerrilla's own radii (explosions.xtbl)
+    // and by Armageddon's explosions of the same names (explosions_armageddon_cuts.xtbl); GuerrillaExplosions=0
+    // hands the game the second.
+    const bool guerrillaExplosions = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaExplosions", 1) != 0;
     for (BuiltTable& table : g_builtTables) {
         std::wstring file = DataFolder();
-        for (const char* c = table.name; *c; ++c) file += static_cast<wchar_t>(*c);
+        const bool armageddonCuts = !guerrillaExplosions && strcmp(table.name, "explosions.xtbl") == 0 &&
+                                    GetFileAttributesW((DataFolder() + L"explosions_armageddon_cuts.xtbl").c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (armageddonCuts) file += L"explosions_armageddon_cuts.xtbl";
+        else for (const char* c = table.name; *c; ++c) file += static_cast<wchar_t>(*c);
+        if (strcmp(table.name, "explosions.xtbl") == 0)
+            rfa::Log(armageddonCuts ? "Explosions: they cut buildings by Armageddon's radii for the same names (GuerrillaExplosions=0)"
+                                    : "Explosions: they cut buildings by Guerrilla's own radii, if the world was built with them (GuerrillaExplosions=1)");
         if (ReadWholeFile(file, table.bytes) && !table.bytes.empty()) {
             table.bytes.push_back(0);
             anyTable = true;

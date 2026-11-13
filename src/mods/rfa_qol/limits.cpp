@@ -197,6 +197,8 @@ void DrawWindow() {
         PoolRow("Squads", kSquadPool, 100, "Squads made from the loaded zones' squad spawn nodes, and those dropped in");
         PoolRow("Squad spawn nodes", kSquadNodePool, 384, "Squad spawn nodes in the zones loaded now");
         PoolRow("Squad members", 0x12EFEF0, 64, "Each different squad member (a character, a loadout, a variant) of squads.xtbl; full, the squads after it aren't read");
+        PoolRow("Spawn resources", 0x1969960, 64,
+                "spawn_resource.xtbl's entries that read: Armageddon's and the Guerrilla world's districts'; full, the entries after it are dropped (a zone naming one gets Armageddon's Default)");
         PoolRow("Effect emitters", kEmitterPool, 2200, "One for each emitter of each effect loaded (Armageddon's and Guerrilla's rfg_); full, a load crashes");
         PoolRow("Vehicle spawn groups", kVehicleGroupPool, 32, "spawn_group_vehicle.xtbl: Armageddon's and Guerrilla's (rfg_); full, the game stops while it starts");
         ImGui::EndTable();

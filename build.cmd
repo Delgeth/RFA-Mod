@@ -78,9 +78,10 @@ rem rfa_qol.dll: the quality-of-life mods (borderless, console, fov, video_setti
 rem source file each, in one DLL. The loader skips their old DLLs if an older build left them in bin\mods.
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\rfa_qol\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\rfa_qol.dll" /link /IMPLIB:rfa_qol.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%OUT%\mods\guerrilla_world.dll" /link /IMPLIB:guerrilla_world.lib >> "%LOG%" 2>&1 || goto :fail
-cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_hud\guerrilla_hud.cpp" /Fe"%OUT%\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib >> "%LOG%" 2>&1 || goto :fail
+rem guerrilla_hud.dll: Guerrilla's HUD, and its keys' F7 window (ImGui).
+cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_hud\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\*.cpp" /Fe"%OUT%\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib >> "%LOG%" 2>&1 || goto :fail
-cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\guerrilla_people.cpp" /Fe"%OUT%\mods\guerrilla_people.dll" /link /IMPLIB:guerrilla_people.lib >> "%LOG%" 2>&1 || goto :fail
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\*.cpp" /Fe"%OUT%\mods\guerrilla_people.dll" /link /IMPLIB:guerrilla_people.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_save\guerrilla_save.cpp" /Fe"%OUT%\mods\guerrilla_save.dll" /link /IMPLIB:guerrilla_save.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_campaign.dll: Guerrilla's alert level (and, being made, the rest of its campaign's systems).
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_campaign\*.cpp" /Fe"%OUT%\mods\guerrilla_campaign.dll" /link /IMPLIB:guerrilla_campaign.lib >> "%LOG%" 2>&1 || goto :fail

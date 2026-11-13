@@ -279,6 +279,65 @@ bool ShouldDespawn(Car& car, BYTE* vehicle, BYTE* driver, const V3& player, int 
     return age >= 20000 || away > kMaxSpawn;
 }
 
+// ---- Guerrilla's aggressive despawn of cars (do_frame_despawn_auto_aggressive, RM 0xB4DDE0)
+// The world holds 32 cars at once (the automobile pool, guerrilla_vehicles.cpp, Guerrilla's 32); one more is refused
+// with "Ran out of slots for object type (automobile), zone (...)" (world::create_object 0x6D44E0), which
+// Armageddon shows as an error. Guerrilla never gets there: every frame (do_frame_despawn RM 0xB4DE70, outside its
+// timer), while the world has 30 cars or more, it takes one away: one fading out to be despawned (vehicle flags
+// bit 11) that is off screen, else the farthest car from the player with nobody in it that is off screen
+// (find_farthest_offscreen_auto RM 0xB4D950); world::destroy_object either way. Off screen is Guerrilla's
+// vehicle::is_offscreen (RM 0xB64CA0: the car's box grown by a quarter against the view); here the game's view
+// test on a sphere of 5 m round the car (0x768400), about a big truck's box grown so.
+constexpr int kAggressiveCars = 30;
+constexpr DWORD kCarIndices = 0x1870974;     // the automobiles' list (World +0x308 + 5 × 12): their indices (ushort), then +8 how many
+constexpr DWORD kObjectTable = 0x187068C;    // World +0x5C: every object by index
+constexpr DWORD kDespawnAfterFade = 1u << 11;  // vehicle flags (+0x4FB0): m_despawn_after_fade
+constexpr float kOffscreenRadius = 5.0f;
+auto const DestroyObject = reinterpret_cast<bool(__fastcall*)(void* world, void* unused, BYTE* object, bool flag)>(0x6D5450);
+
+bool Offscreen(const BYTE* car) {
+    V3 middle = Pos(car);
+    middle.y += 1.0f;
+    return !InView(&middle.x, kOffscreenRadius);
+}
+bool Empty(BYTE* car) {
+    const int seats = Seats(car);
+    for (int seat = 0; seat < seats; ++seat)
+        if (SeatOccupant(car, seat)) return false;
+    return true;
+}
+bool BeingDestroyed(const BYTE* object) { return (object[0x55] & 0x80) != 0; }
+
+void AggressiveDespawn(BYTE* player) {
+    const int count = *reinterpret_cast<const int*>(kCarCount);
+    if (count < kAggressiveCars) return;
+    const unsigned short* indices = *reinterpret_cast<const unsigned short* const*>(kCarIndices);
+    BYTE* const* objects = *reinterpret_cast<BYTE* const* const*>(kObjectTable);
+    if (!indices || !objects) return;
+    BYTE* fading = nullptr;
+    BYTE* farthest = nullptr;
+    float farthestAway = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        BYTE* car = objects[indices[i]];
+        if (!car || BeingDestroyed(car)) continue;
+        if (*reinterpret_cast<const DWORD*>(car + kVehicleFlags) & kDespawnAfterFade) {
+            if (Offscreen(car)) { fading = car; break; }
+            continue;
+        }
+        if (!Empty(car)) continue;
+        const float away = Distance(Pos(car), Pos(player));
+        if (away > farthestAway && Offscreen(car)) {
+            farthestAway = away;
+            farthest = car;
+        }
+    }
+    BYTE* gone = fading ? fading : farthest;
+    if (!gone) return;
+    RFA_LOG_FIRST(40, "Cars: %d in the world (Guerrilla takes one away from 30 on, of 32); %s taken away, %.0f m from the player, off screen", count,
+                  fading ? "one fading out" : "the farthest empty one", Distance(Pos(gone), Pos(player)));
+    DestroyObject(kWorld, nullptr, gone, false);
+}
+
 // Every frame on the game's thread (from the spawn nodes' frame, 0x8028B0).
 void TrafficFrame() {
     if (!InTrafficWorld()) {
@@ -288,6 +347,7 @@ void TrafficFrame() {
     }
     BYTE* player = Player();
     if (!player) return;
+    AggressiveDespawn(player);
     const V3 at = Pos(player);
     const int now = GameTime();  // the game's clock: a pause doesn't count
     const DWORD playerVehicle = *reinterpret_cast<const DWORD*>(player + kInVehicle);
@@ -449,6 +509,7 @@ void __cdecl SpawnNodeFrame() {
     gv::ConvoysFrame();
     gv::EdfFrame();
     gv::ChasesFrame();
+    gv::SafehousesFrame();
 }
 
 }  // namespace
@@ -471,5 +532,6 @@ void StartTraffic() {
         gv::StartConvoys();
         gv::StartEdf();
         gv::StartChases();
+        gv::StartSafehouses();
     }
 }

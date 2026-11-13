@@ -18,9 +18,14 @@ namespace RfaFormats.Guerrilla;
 /// </summary>
 public sealed class GuerrillaTextures
 {
-    /// <summary>The archives (in a game's build\pc\cache) holding every texture Guerrilla's effects name and ship.</summary>
+    /// <summary>
+    /// The archives (in a game's build\pc\cache) holding every texture Guerrilla's effects name and ship. mp_common last: the
+    /// backpacks' effects (mp_thrust_*.cefct_pc and the other packs', GuerrillaWeapons.BackpackMedia) are only there (and in each multiplayer
+    /// map's ns_base); a file or texture found in an archive before it is still taken from there.
+    /// </summary>
     public static readonly string[] EffectArchives =
-        ["effects.vpp_pc", "misc.vpp_pc", "items.vpp_pc", "effects_mp.vpp_pc", "terr01_precache.vpp_pc", "terr01_l0.vpp_pc", "terr01_l1.vpp_pc"];
+        ["effects.vpp_pc", "misc.vpp_pc", "items.vpp_pc", "effects_mp.vpp_pc", "terr01_precache.vpp_pc", "terr01_l0.vpp_pc", "terr01_l1.vpp_pc",
+         "mp_common.vpp_pc"];
 
     /// <summary>Where a texture is: its archive, the container in it (null at its top), and its header file.</summary>
     readonly Dictionary<string, (string Archive, string? Container, string Header)> where = new(StringComparer.OrdinalIgnoreCase);

@@ -71,6 +71,19 @@ public static class GuerrillaPlayerAnimations
 
     /// <summary>Armageddon's own animations moved onto Mason's skeleton (<see cref="PlayerRetarget"/>), for the moves Guerrilla hasn't.</summary>
     const string ArmageddonPrefix = "rfgmd_";
+
+    /// <summary>
+    /// The backpacks' own set: Guerrilla's BackPacks (misc.vpp_pc backpacks.xtbl), which its Shockwave and Rhino packs'
+    /// models name as their Anim_set (items_3d character_mesh): the moving parts of the pack itself, not of its wearer.
+    /// Guerrilla's item::stream (RM 0xAA84A2) puts a streamed item's character instance in the state STAND, so a worn
+    /// pack plays its set's "stand" (rhino_idle); nothing of Guerrilla's asks for its other states and actions. Its
+    /// animations are for the packs' own skeletons (no person's), so they are only repacked (<see
+    /// cref="GuerrillaAnimations.Recode"/>), named rfgbp_ + Guerrilla's, and loaded and kept by guerrilla_gear with the
+    /// player's. The set is a second Skeleton_Set in the player's set file (rfg_player.xtbl, else rfg_mason.xtbl), as
+    /// the game's set loader holds 90 set files at most and the people's build leaves only these two to this one.
+    /// </summary>
+    public const string BackpackSetName = "rfg_backpacks", GuerrillaBackpackSet = "BackPacks";
+    const string BackpackSetTable = "backpacks.xtbl", BackpackPrefix = "rfgbp_";
     const string MasonModel = "Mason.cmeshx", MasonRig = "Mason.rigx";  // Guerrilla's rfg_PC's
 
     /// <summary>Mason's bones (Guerrilla's player's 52 and his camera) and those every one of Guerrilla's people's skeletons has.</summary>
@@ -446,6 +459,56 @@ public static class GuerrillaPlayerAnimations
         masonSkeletonSet.AddElement("Name", MasonSetName);
         int masonPlaces = MakeSet(masonSkeletonSet, masonGroups, false, "Mason's animations", "the rest from Armageddon's (below)");
 
+        // The backpacks' own set (see BackpackSetName): Guerrilla's as it is, each state and action Armageddon's
+        // tables know, its animations repacked.
+        var backpackFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);  // Guerrilla's x.animx → ours
+        var backpackSkeletonSet = new XtblElement("Skeleton_Set");
+        int backpackPlaces = 0;
+        if (guerrillaTables.Find(BackpackSetTable) is null)
+            log.Add($"backpacks' set: Guerrilla's {BackpackSetTable} isn't in its misc.vpp_pc; the Shockwave and Rhino packs hold still");
+        else if (Table(guerrillaTables, BackpackSetTable).Entries.FirstOrDefault(e => e.Name.Equals("Skeleton_Set", StringComparison.OrdinalIgnoreCase) &&
+                     string.Equals(e.ValueOf("Name")?.Trim(), GuerrillaBackpackSet, StringComparison.OrdinalIgnoreCase)) is not { } rfgBackpacks)
+            log.Add($"backpacks' set: Guerrilla's {BackpackSetTable} has no set {GuerrillaBackpackSet}; the Shockwave and Rhino packs hold still");
+        else
+        {
+            var gameStates = Names("anim_states.xtbl");
+            var gameActions = Names("anim_actions.xtbl");
+            var unknown = new List<string>();
+            backpackSkeletonSet.AddElement("Name", BackpackSetName);
+            var outGroups = backpackSkeletonSet.AddElement("Groups");
+            foreach (var group in rfgBackpacks.Element("Groups")?.Elements ?? [])
+            {
+                string groupName = group.ValueOf("group")?.Trim() ?? "";
+                if (!ArmageddonGroups.Contains(groupName)) { unknown.Add($"group {groupName}"); continue; }
+                var outGroup = outGroups.AddElement("Group");
+                outGroup.AddElement("group", groupName);
+                foreach (var (list, kind, gameNamed) in new[] { ("States", "State", gameStates), ("Actions", "Action", gameActions) })
+                {
+                    var outList = outGroup.AddElement(list);
+                    foreach (var item in group.Element(list)?.Elements ?? [])
+                    {
+                        if (item.ValueOf("ID")?.Trim() is not { Length: > 0 } id || item.Element("Animation")?.ValueOf("Filename")?.Trim() is not { Length: > 0 } rfgFile) continue;
+                        if (!gameNamed.Contains(id)) { unknown.Add($"{kind.ToLowerInvariant()} \"{id}\""); continue; }
+                        if (!backpackFiles.TryGetValue(rfgFile, out var ours))
+                        {
+                            if (guerrillaAnims.Find(Path.ChangeExtension(rfgFile, ".anim_pc")) is not { } clip) { unreadable.Add($"{rfgFile} (in none of Guerrilla's files)"); continue; }
+                            ours = BackpackPrefix + rfgFile.ToLowerInvariant();
+                            try { animations[Path.ChangeExtension(ours, ".anim_pc")] = GuerrillaAnimations.Recode(guerrillaAnims.Read(clip)); }
+                            catch (Exception e) when (e is InvalidDataException or ArgumentException or IndexOutOfRangeException) { unreadable.Add($"{rfgFile} ({e.Message})"); continue; }
+                            backpackFiles[rfgFile] = ours;
+                        }
+                        var entry = outList.AddElement(kind);
+                        entry.AddElement("ID", id);
+                        entry.AddElement("Animation").AddElement("Filename", ours);
+                        backpackPlaces++;
+                    }
+                }
+            }
+            backpackSkeletonSet.AddElement("_Editor").AddElement("Category", "Entries");
+            log.Add($"backpacks' set: {BackpackSetName} (Guerrilla's {GuerrillaBackpackSet}): {backpackPlaces} states and actions, {backpackFiles.Count} animations repacked" +
+                    (unknown.Count > 0 ? $"; left out, Armageddon's tables haven't them: {string.Join(", ", unknown)}" : ""));
+        }
+
         // Armageddon's own moves for Mason (see MasonSetName).
         var armageddonFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);  // Armageddon's x.animx → ours, on Mason
         // One of Darius's animations for Mason: Guerrilla's own if it is one of Guerrilla's, else moved.
@@ -599,7 +662,7 @@ public static class GuerrillaPlayerAnimations
         var gameNames = new HashSet<string>(fileEntries.Elements.Select(AnimationName).OfType<string>(), StringComparer.OrdinalIgnoreCase);
         var leftOut = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         var ownFiles = new List<string>();
-        foreach (var made in new[] { dariusFiles, masonFiles })
+        foreach (var made in new[] { dariusFiles, masonFiles, backpackFiles })
             foreach (var (rfgFile, ours) in made)
             {
                 if (made == dariusFiles && armageddonOwn.Contains(rfgFile)) continue;  // Armageddon's own, its own entry
@@ -636,8 +699,17 @@ public static class GuerrillaPlayerAnimations
             log.Add($"player animations: left out, the game has no room for {adding} more sets (sets {otherSets} of {MaxAnimSets}, set files {otherSetFiles} of {MaxSetFiles})");
             hasDarius = hasMason = false;
         }
+        // The backpacks' set rides in one of those files: a set more, no file more.
+        bool hasBackpacks = backpackPlaces > 0 && (hasDarius || hasMason);
+        if (hasBackpacks && otherSets + adding + 1 > MaxAnimSets)
+        {
+            log.Add($"backpacks' set: left out, the game has no room for another set (sets {otherSets + adding} of {MaxAnimSets}); the Shockwave and Rhino packs hold still");
+            hasBackpacks = false;
+        }
+        else if (backpackPlaces > 0 && !hasBackpacks) log.Add("backpacks' set: left out with the player's sets (it rides in their file); the Shockwave and Rhino packs hold still");
+        if (hasBackpacks) (hasDarius ? dariusSet : masonSet).Table!.AddElement(backpackSkeletonSet);
         // A set left out takes its animations with it.
-        foreach (var (has, made) in new[] { (hasDarius, dariusFiles), (hasMason, masonFiles), (hasMason, armageddonFiles) })
+        foreach (var (has, made) in new[] { (hasDarius, dariusFiles), (hasMason, masonFiles), (hasMason, armageddonFiles), (hasBackpacks, backpackFiles) })
         {
             if (has) continue;
             foreach (string ours in made.Values.Where(o => !armageddonOwn.Contains(o)))
@@ -711,7 +783,7 @@ public static class GuerrillaPlayerAnimations
                     $"{masonFiles.Count} of Guerrilla's animations ({Megabytes(MasonPrefix):0.0} MB) and {armageddonFiles.Count} of Armageddon's ({Megabytes(ArmageddonPrefix):0.0} MB)), " +
                     $"for a character on Mason's skeleton to name in its Animation_Sets ({MasonSetFile})");
         log.Add($"player animations: in {folder}; the list of animations {fileEntries.Elements.Count()} of the {MaxAnimations} the game holds with guerrilla_vehicles; " +
-                $"set files {otherSetFiles + adding}, sets {otherSets + adding} of {MaxAnimSets}");
+                $"set files {otherSetFiles + adding}, sets {otherSets + adding + (hasBackpacks ? 1 : 0)} of {MaxAnimSets}");
         log.Add($"player animations: every set's states and actions: {total} (the game holds {GameMapPlaces}, {MapPlaces} with the guerrilla_gear mod)");
         if (fileEntries.Elements.Count() > MaxAnimations) log.Add($"WARNING: the list of animations has {fileEntries.Elements.Count()}, more than the {MaxAnimations} the game holds: the ones past it won't play");
         if (total > MapPlaces) log.Add($"WARNING: more states and actions than the {MapPlaces} places guerrilla_gear gives them: the game's memory would be spoilt");

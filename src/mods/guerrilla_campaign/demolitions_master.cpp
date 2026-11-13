@@ -148,6 +148,46 @@ void SaveProgress(unsigned node, const Progress& progress) {
     save::SetInt(section.c_str(), "best_time", progress.bestTime);
 }
 
+// The world's buildings (rfg_mover): how many, and each (Armageddon's 0x4776E0 / 0x477730 on the world).
+// A building's flags (+0x150) bit 4 is game_destroyed, the test Guerrilla's challenge wins by
+// (activity_demolitions_master::activity_should_end: the target's flags.game_destroyed).
+void* const kWorld = reinterpret_cast<void*>(0x1870630);
+using CountFn = int(__fastcall*)(void* world, void* unused);
+using AtFn = BYTE*(__fastcall*)(void* world, void* unused, int index);
+auto const BuildingCount = reinterpret_cast<CountFn>(0x4776E0);
+auto const BuildingAt = reinterpret_cast<AtFn>(0x477730);
+constexpr DWORD kBuildingFlags = 0x150, kGameDestroyed = 1u << 4;
+
+constexpr DWORD kHandle = 0x68;  // an object's handle
+
+bool IsBuilding(const void* object) {
+    if (!object) return false;
+    const int count = BuildingCount(kWorld, nullptr);
+    for (int i = 0; i < count; ++i)
+        if (BuildingAt(kWorld, nullptr, i) == object) return true;
+    return false;
+}
+
+// The building standing at a place (within 2 m of it), or null: for a target the world converter gave
+// another handle, because ours already had Guerrilla's.
+BYTE* BuildingAtPlace(const Vector& place) {
+    BYTE* best = nullptr;
+    float bestDistance = 2.0f * 2.0f;
+    const int count = BuildingCount(kWorld, nullptr);
+    for (int i = 0; i < count; ++i) {
+        BYTE* building = BuildingAt(kWorld, nullptr, i);
+        if (!building) continue;
+        const Vector at = PositionOf(building);
+        const float dx = at.x - place.x, dy = at.y - place.y, dz = at.z - place.z;
+        const float distance = dx * dx + dy * dy + dz * dz;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = building;
+        }
+    }
+    return best;
+}
+
 float FlatDistance(const Vector& a, const Vector& b) {
     const float dx = a.x - b.x, dz = a.z - b.z;
     return sqrtf(dx * dx + dz * dz);
@@ -177,8 +217,30 @@ public:
             rfa::Log("Demolitions master node %08X: no challenge \"%s\"", node.handle, node.Property("demolitions_master_type").c_str());
             return false;
         }
+        // The target must be in the world (a building missing would count as already down). It keeps
+        // Guerrilla's handle, unless the world converter had to give it another: then it is the building
+        // at its place.
+        unsigned target = node.parent;
+        const void* building = ObjectFromHandle(target);
+        if (!IsBuilding(building) && node.hasParentPos) {
+            if (BYTE* atPlace = BuildingAtPlace(node.parentPos)) {
+                rfa::Log("Demolitions master %s: target %08X isn't a building here; the building at its place is %08X", level_->name.c_str(), target,
+                         *reinterpret_cast<const DWORD*>(atPlace + kHandle));
+                building = atPlace;
+                target = *reinterpret_cast<const DWORD*>(atPlace + kHandle);
+            }
+        }
+        if (!building) {
+            rfa::Log("Demolitions master %s: its target building %08X isn't in the world; not started", level_->name.c_str(), node.parent);
+            ConsolePrint("Demolitions master %s: its target building %08X isn't in the world\n", level_->name.c_str(), node.parent);
+            return false;
+        }
         if (!StartSpawn(node.handle, FindBaseData(level_->baseData), liberation::DistrictAt(node.pos))) return false;
-        target_ = node.parent;
+        target_ = target;
+        targetIsBuilding_ = IsBuilding(building);
+        const Vector at = PositionOf(building);
+        rfa::Log("Demolitions master %s: target %08X at (%.0f, %.0f, %.0f), %s, %.0f m from the node", level_->name.c_str(), target_, at.x, at.y, at.z,
+                 targetIsBuilding_ ? "a building" : "NOT one of the world's buildings (won when it is gone)", FlatDistance(at, node.pos));
         progress_ = LoadProgress(node);
         step_ = Step::LoadingLayers;
         if (void* player = Player()) startPosition_ = PositionOf(player);
@@ -288,8 +350,11 @@ protected:
         pollTimer_ -= seconds;
         if (pollTimer_ > 0.0f) return;
         pollTimer_ = kPollPeriod;
-        // activity_should_end: the building down (or gone), out of ammo (not ported).
-        if (targetDown_ || !ObjectFromHandle(target_)) return Ending(true, Success);
+        // activity_should_end: the building down (its game_destroyed flag, the game's event, or gone), out
+        // of ammo (not ported).
+        const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
+        if (building && targetIsBuilding_ && (*reinterpret_cast<const DWORD*>(building + kBuildingFlags) & kGameDestroyed)) targetDown_ = true;
+        if (targetDown_ || !building) return Ending(true, Success);
         NotPorted("the out-of-ammo and death checks");
         void* player = Player();
         if (!player) return;
@@ -395,7 +460,7 @@ private:
     Vector startPosition_{};
     Vector center_{};
     float timeRemaining_ = 0.0f, elapsed_ = 0.0f, rangeTimer_ = 0.0f, postTimer_ = 0.0f, pollTimer_ = 0.0f;
-    bool targetDown_ = false, success_ = false;
+    bool targetDown_ = false, success_ = false, targetIsBuilding_ = false;
     void* listener_ = nullptr;
     unsigned nearNode_ = 0xFFFFFFFF;
 };

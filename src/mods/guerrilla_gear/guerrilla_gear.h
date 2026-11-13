@@ -25,6 +25,16 @@ bool GiveWeapon(BYTE* player, const char* name, std::string& why);
 bool Airborne(BYTE* player);
 float Climb(BYTE* player);
 void Lift(BYTE* player, float climb);
+// Guerrilla's jump boost (apply_jump_boost): sideways x horizontal; up, the climb max(climb, 2) + vertical; down,
+// climb - vertical. Returns the climb before.
+float JumpBoost(BYTE* player, float horizontal, float vertical, bool up);
+// His character controller's velocity (m/s: x, y up, z), and setting it (as Lift: the climb's last-step guard too);
+// false without a controller (not on foot).
+bool Velocity(BYTE* player, float* out);
+bool SetVelocity(BYTE* player, const float* velocity);
+// Where the camera has him look (the game's own look direction, 0x868700: from his eye to what he looks at), without
+// this mod's "standing still, he looks ahead".
+void CameraLook(BYTE* human, float* out);
 }  // namespace gear
 
 namespace upgrades {
@@ -41,6 +51,9 @@ std::string BestHammer();
 int WornBackpack();
 // The level of an upgrade bought (0: none).
 int BoughtLevel(const char* name);
+// The value of the level bought of a weapon's own upgrade (upgrades.txt "Weapon", effect "weapon": 1 the
+// gun, 2 its "... AMMO"), by our weapons.xtbl name; 0 without one.
+int WeaponValue(const char* weapon);
 }  // namespace upgrades
 
 namespace backpacks {
@@ -51,4 +64,10 @@ void Step(BYTE* player);
 // The worn pack's fuel (0 to 1) and whether it is on (the jetpack: pushing), for the window.
 float Fuel();
 bool On();
+// What the worn pack scales the rounds he carries by (Guerrilla's ammo_factor of its active abilities while
+// on, else of its passive ones; 1 for all of Guerrilla's packs).
+float AmmoFactor();
+// A melee hit (the game's thread, from the melee damage pick): Guerrilla's human_combat_unified_melee_hit calls the
+// attacker's pack's attempt_ripple while its abilities have a ripple.
+void MeleeHit(BYTE* attacker, BYTE* target);
 }  // namespace backpacks

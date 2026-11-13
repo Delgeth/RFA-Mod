@@ -80,47 +80,6 @@ public static class GuerrillaFaces
         return baked;
     }
 
-    /// <summary>
-    /// The head's .gcmesh_pc moved from the face's skeleton (<paramref name="face"/>, &lt;face&gt;_head.rig_pc) onto its
-    /// base head's (<paramref name="baseHead"/>), so every face can share the base head's skeleton: the game holds
-    /// at most 290 skeletons at once, and Guerrilla's faces have 32 of their own. A face's skeleton is the base head's
-    /// five bones (spine2, neck, head, the eyes) in the same order, placed for that face (up to 49 mm from the base
-    /// head's), and a rest pose has no rotations, so each vertex is moved by the difference of its bones' places,
-    /// weighted as it is (exact for a vertex on one bone, as most are; a vertex shared by bones that turn apart, at the
-    /// neck, lands within a millimetre or so). Normals and tangents don't change. <paramref name="largest"/> is the
-    /// farthest a vertex moved.
-    /// </summary>
-    public static byte[] Rebase(byte[] cmesh, byte[] gmesh, Rig face, Rig baseHead, out float largest)
-    {
-        if (face.Bones.Count != baseHead.Bones.Count || !face.Bones.Zip(baseHead.Bones).All(p => p.First.Name.Equals(p.Second.Name, StringComparison.OrdinalIgnoreCase) && p.First.Parent == p.Second.Parent))
-            throw new InvalidDataException("the face's skeleton isn't its base head's bones");
-        var (vertexCount, vertexSize, vertexStart) = Vertices(cmesh, gmesh);
-        var shift = face.Bones.Zip(baseHead.Bones, (f, b) => b.Position - f.Position).ToArray();
-        var moved = (byte[])gmesh.Clone();
-        largest = 0;
-        for (int i = 0; i < vertexCount; i++)
-        {
-            int v = vertexStart + i * vertexSize;
-            var move = Vector3.Zero;
-            int total = 0;
-            for (int k = 0; k < 4; k++)
-            {
-                int weight = moved[v + 20 + k], bone = moved[v + 24 + k];
-                if (weight == 0) continue;
-                if (bone >= shift.Length) throw new InvalidDataException($"vertex {i} is on bone {bone} of {shift.Length}");
-                move += shift[bone] * weight;
-                total += weight;
-            }
-            if (total == 0) continue;
-            move /= total;
-            Put(moved, v, F(moved, v) + move.X);
-            Put(moved, v + 4, F(moved, v + 4) + move.Y);
-            Put(moved, v + 8, F(moved, v + 8) + move.Z);
-            largest = Math.Max(largest, move.Length());
-        }
-        return moved;
-    }
-
     /// <summary>Where a character mesh's vertices are in its data file: how many, their size, where they start.</summary>
     static (int Count, int Size, int Start) Vertices(byte[] cmesh, byte[] gmesh)
     {

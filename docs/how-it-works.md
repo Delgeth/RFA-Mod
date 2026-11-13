@@ -86,8 +86,8 @@ src\common\               rfa_mod.h (logging, ini, hooking helpers), rfa_game.h 
 src\overrides\            replacements for files inside the game's archives, same layout as the game
 src\editor\RfaFormats\    C# library that reads and writes the game's file formats (no UI)
 src\editor\RfaEditor\     the editor (C#, WPF desktop app); built into bin\editor\
-src\editor\GuerrillaBuilder\ GuerrillaBuilder.exe: makes Guerrilla's world, HUD, vehicles, weapons and people
-                          usable, from your copy of Guerrilla; built into bin\editor\
+src\editor\GuerrillaBuilder\ GuerrillaBuilder.exe: makes Guerrilla's world, HUD, vehicles, weapons, people and
+                          cloth usable, from your copy of Guerrilla; built into bin\editor\
 config\rfa_mods.ini       the settings template (to bin\ when missing, always to bin\defaults\)
 config\console.ini        console settings template (to bin\ when missing, always to bin\defaults\)
 docs\editor-guide.md      how to use the editor
@@ -659,7 +659,11 @@ converts:
   its material on Armageddon's shaders, and its collision mesh under a Havok MOPP tree written from
   nothing in Armageddon's layout (`PieceCollision`; checked against the game's own 930 stitch pieces
   of that layout). Each zone's stitch list places them, with a collision tree of ours over the
-  zone's pieces. A zone without rocks gets an
+  zone's pieces. Every tree is written to Havok's own rounding (the bound over a piece or triangle
+  ends a step, a 256th of the tree, past the step its top lies in, as Havok's query needs; a bound
+  that ended at that step hid the top of every rock) and walked back the way that query walks it before
+  the build goes on; the builder's check does the same for the whole built world (`CollisionCheck`).
+  A zone without rocks gets an
   empty stitch list, with no tree, which the game's loader skips (Armageddon's own levels put a
   floor piece in such zones; Guerrilla has none).
 - **The navigation meshes** the AI walks and drives on. Armageddon's `.navdata_pc` is Guerrilla's
@@ -859,6 +863,17 @@ opened and closed with `MapKey=`).
   driving. The district's name above it comes from Guerrilla's districts (`territories.xtbl`) and
   their names in its strings (`territories_us.le_strings`), written by the builder to
   `mods\guerrilla_hud\districts.txt`.
+- The minimap's blips: the mod picks the people and vehicles within the minimap's radius by
+  Guerrilla's rules (`rfg_map_blips`, `rfg_map_blip`; who shows by how the player's side takes
+  theirs, the alert level from guerrilla_campaign and the Personnel Detector from guerrilla_gear),
+  and the script draws Guerrilla's dot and vehicle pictures in the turned group. Guerrilla's radar
+  sweep was drawn by its game code, so the script draws it: its line picture
+  (`ui_minimap_scan_line`, from the minimap's own textures) moves down over the map at 150 screen
+  pixels a second through twice the frame's height, by a clock that stands still while the game is
+  paused (`rfg_map_sweep_clock`); each blip's alpha falls from 1 just behind the line to 0 a sweep
+  later, and each person gets Guerrilla's ring (`ui_map_icon_ring`), growing and fading over the
+  first third of the sweep. The game's Lua has no math library, so the mod gives it
+  `rfg_sin_cos` for where a blip lands on the turned map.
 - The zones' own pictures (13 MB in all), each as Guerrilla made it, come in four documents by
   quarter of the world (`rfg_ui_map_zones_nw`, `_ne`, `_sw`, `_se`), which the mod loads with the HUD
   and keeps until the next level load. Guerrilla streamed each with its zone, but Armageddon's
@@ -1869,10 +1884,11 @@ the folders and runs them in order:
   or the mod folder when the mod is in the game folder) and Guerrilla (`GuerrillaDir`, or else the
   Steam Edition in the Steam library Armageddon is in, or another that library's
   `libraryfolders.vdf` names: only files are read).
-- `Parts.cs`: the five parts in their order (world, HUD, vehicles, weapons, people); what each needs
-  built first (the vehicles and weapons name the world's effect and explosion tables, the people
-  carry the weapons), which a build adds when they aren't built; and what goes with a part taken
-  away (everything with the world, the people with the weapons), last built first. It records each
+- `Parts.cs`: the six parts in their order (world, HUD, vehicles, weapons, people, cloth); what each
+  needs built first (the vehicles and weapons name the world's effect and explosion tables, the people
+  carry the weapons, the cloth is worn by the people's props), which a build adds when they aren't
+  built; and what goes with a part taken away (everything with the world, the people with the weapons,
+  the cloth with the people), last built first. It records each
   part in `mods\guerrilla_world\builder.ini` once it's finished (when, by which release from
   `version.txt`, with which options): a part that is there but not recorded (left half-made, or
   built by an older RFA-Mod), built by another release, or a world of another format (`world.txt`)
@@ -1894,13 +1910,46 @@ the folders and runs them in order:
 The code is in `src\editor\`: `RfaFormats` reads and writes the formats (no UI, reusable by other
 tools) and `RfaEditor` is the editor:
 - `MainWindow`: the layout and explorer.
+- `MainWindow.Shell.cs` and `Shell\`: the window's frame and layout. The window is a WPF UI
+  `FluentWindow`: a Fluent title bar (the tab's menus, where its file is, the top bar's buttons),
+  Mica behind it on Windows 11, and a status line. `MainPage` is the layout: dockable panels drawn
+  with AvalonDock in the editor's colours (`DockTheme`), what you open as tabs in the middle, and
+  `DockLayout` keeps where you put the panels in `editor\layout\main.xml`. The window's own XAML
+  still holds the old layout; the shell takes its explorer and preview into `MainPage` at start. A
+  new panel is a `ShellPanel` in `MainPage`'s list; a tab gives the window and the panels more of
+  itself (its menus, its status) through `IDocumentParts`. A zone's outliner is its Scene panel
+  (`Documents\LevelEditor.Scene.cs`): its objects by kind and class, its layers and the level's
+  parts, each row with an eye; `LevelScene` hides objects one by one as well as by kind. Its
+  Assets panel is `Documents\AssetBrowser` (folders, Find, a 3D preview, dragging out), filled
+  and acted on by the level editor through `IAssetSource` (`Documents\LevelEditor.Assets.cs`: the
+  folders, previews with the scene's own models, adding as the Add list does, and the view taking
+  drops where the mouse points). A panel newer than a saved layout starts beside the one its
+  `ShellPanel` names.
 - `Documents\`: the tabs (file preview, table editor, level editor).
 - `Level\`: the level view's camera, gizmo, scene, grid, kinds of objects, inspector parts, level
   geometry and the ground's painter.
-- `Render\`: the Direct3D 11 view.
-- `Theme.xaml`: the dark look of every control (with `Theme.cs` for code).
-- `Icons.cs`: the icons (characters of the Segoe MDL2 Assets font that comes with Windows) and
-  the kinds of files.
+- `Render\`: the Direct3D 11 view. `RenderView` also times each frame: the processor's part with
+  a stopwatch, the graphics card's with its own timestamp queries (read a frame or two later, never
+  waited for); the view's corner shows them (`LevelEditor.Layout.cs`). It never waits on WPF
+  without end: handing WPF a frame or a new picture size takes WPF's lock with `TryLock` (100 ms at
+  most; a try that runs out still counts as a lock and is undone), and if WPF is busy with its
+  windows (a panel floated out, a window resized) the frame waits for WPF's next turn to draw and
+  old pictures are kept until WPF has the new ones.
+- `HangWatch`: if the window's thread doesn't answer for 10 s, `logs\editor.log` says so, with
+  what the editor said it was doing (`HangWatch.While`, in the places that may wait or take long:
+  the Direct3D view's drawing and hand-over, the Assets panel's lists and preview),
+  and when it answers again.
+- The look, Fluent and dark: every control is WPF UI's. `FluentLook.Load` puts it in when the
+  program starts (the Guerrilla builder has `FluentLook.cs` and `Theme.xaml` linked in and does the
+  same): WPF UI's dictionaries, then `Theme.xaml` (the editor's own names for colours, WPF UI's
+  controls a little tighter, and the few looks WPF UI has no control for: tool buttons, the main
+  button, chips, the rail; with `Theme.cs` for code), then the editor's accent colour. WPF UI reads
+  Windows' light or dark setting and its accent colour from the registry (the user accepted that
+  library's reads; the editor's own code never touches the registry).
+- The level view is drawn with Direct3D 11 from the start (`LevelEditor.Layout.cs`); WPF's own 3D
+  still holds the scene for picking, and draws it where Direct3D 11 can't start.
+- `Icons.cs`: the icons (characters of the Fluent System Icons font inside WPF UI's DLL, so they
+  show under Wine too) and the kinds of files.
 - `NumberField.cs`: the draggable number box.
 
 The editor's builds name no folder of the PC they were built on: `src\editor\Directory.Build.props`
@@ -2020,7 +2069,7 @@ everyone's unfinished changes with it, and two builds there at once get in each 
 - To build and check your own work, use `tools\stage.ps1 -Name <you> [-Parts <parts>]`. It mirrors
   `bin\` into `stage\<you>\` (everything but `logs\`; about 2 GB the first time, then only what
   changed) and runs `build.cmd stage\<you>`. Then it runs the Guerrilla builder there: the parts
-  named in `-Parts` (world, hud, vehicles, weapons, people), built over what `bin\` already has, and
+  named in `-Parts` (world, hud, vehicles, weapons, people, cloth), built over what `bin\` already has, and
   its table check; without `-Parts`, only the check. `-NoMirror` builds again on the staging copy as
   it is. Nobody waits for anybody, and nothing reaches `bin\`. A staging copy is for building and
   checking, never for playing.

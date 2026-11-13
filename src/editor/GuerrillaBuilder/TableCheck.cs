@@ -35,7 +35,7 @@ static class TableCheck
         public bool Stops => Kind is "missing" or "too long:";
     }
 
-    /// <summary>Checks the tables; logs what it finds. False if any table has a problem the game would stop on.</summary>
+    /// <summary>Checks the tables, then the world's rocks' collision (<see cref="CollisionCheck"/>), its ladders (<see cref="LadderCheck"/>), the cloth (<see cref="ClothCheck"/>) and the hinges (<see cref="ConstraintCheck"/>); logs what it finds. False if any table has a problem the game would stop on, the rocks' collision trees hide collision, a ladder doesn't hang on its building, a cloth won't load or fit its wearer, or a hinge doesn't join two movers of its zone.</summary>
     public static bool Run(Setup setup, BuildLog log)
     {
         if (setup.Game == null) return true;
@@ -45,6 +45,9 @@ static class TableCheck
         var files = new List<string>();
         foreach (string folder in new[] { Path.Combine(setup.ModFolder, "mods"), setup.Overrides })
             if (Directory.Exists(folder)) files.AddRange(Directory.EnumerateFiles(folder, "*.xtbl", SearchOption.AllDirectories));
+        // Guerrilla's own tables for the guerrilla_campaign mod: only that mod reads them (its own reader), never the game.
+        string campaignTables = Path.Combine(setup.CampaignFolder, GuerrillaCampaign.TablesFolder) + Path.DirectorySeparatorChar;
+        files.RemoveAll(f => f.StartsWith(campaignTables, StringComparison.OrdinalIgnoreCase));
 
         int checkedTables = 0, bad = 0, doubtful = 0;
         foreach (string file in files.Order(StringComparer.OrdinalIgnoreCase))
@@ -94,7 +97,15 @@ static class TableCheck
         log.Line(bad == 0
             ? $"Table check: none of the {checkedTables} tables lacks a field the game requires" + (doubtful > 0 ? $"; {doubtful} have values to look into (above)" : "")
             : $"Table check: {bad} of {checkedTables} tables have entries the game stops on at start-up (above)" + (doubtful > 0 ? $"; {doubtful} have values to look into" : ""));
-        return bad == 0;
+        // And the world's rocks as the game's physics will take them.
+        bool solid = CollisionCheck.Run(setup, log);
+        // And its ladders, each on its building (LadderCheck).
+        bool ladders = LadderCheck.Run(setup, log);
+        // And the cloth, as the game will load and wear it (ClothCheck).
+        bool cloth = ClothCheck.Run(setup, log);
+        // And the hinges, each joining two movers of its zone (ConstraintCheck).
+        bool constraints = ConstraintCheck.Run(setup, log);
+        return bad == 0 && solid && ladders && cloth && constraints;
     }
 
     /// <summary>
@@ -215,5 +226,6 @@ static class TableCheck
     static readonly Dictionary<string, string> RenamedTables = new(StringComparer.OrdinalIgnoreCase)
     {
         ["guerrilla_hud_sheets.xtbl"] = "bitmap_sheets.xtbl",  // the HUD's sheet table (GuerrillaHud)
+        ["explosions_armageddon_cuts.xtbl"] = "explosions.xtbl",  // the explosions cutting by Armageddon's radii (GuerrillaExplosions=0)
     };
 }
