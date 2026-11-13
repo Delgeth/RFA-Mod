@@ -18,10 +18,12 @@
 // squad, its character, its place, its group), once a second in our worlds:
 // - The node spawn (guerrilla_people.cpp's hook) makes nothing for a story node but the one this file spawns.
 // - A character is held in the level's category as Armageddon's level resource holds its own (0x761D20(8, 3, …),
-//   which a level's resource in force allows) and let go through Armageddon's own release (0x760F60 on the
-//   character's pool, its record, the category) with the pools' state (0x19734CC) set to none for that call alone:
-//   that release refuses while a resource is in force, so Armageddon never lets one go on demand. The person spawned
-//   from it is taken away first.
+//   which a level's resource in force allows). It is kept until the game's own resource change lets it go (the
+//   district changing: its state machine 0x762730 drops what the new resource doesn't list): Armageddon's release
+//   (0x760F60) refuses while a resource is in force, and forcing it past that (the pools' state 0x19734CC set to none
+//   for the call, the first piece 4 build) isn't a plain release (0x761020 goes on to 0x760020, which loads and holds
+//   the container, and puts the record on a pool list) and was the likely cause of the 2026-11-13 14:46 crash at
+//   exit. When a slot changes hands, only the person spawned from it is taken away.
 // - Room: the district resources list 14 (Guerrilla's 9 guerrilla, 3 EDF, 2 Marauder types), which with the player
 //   leaves two of the people's 17 stream slots (the pool 0x19728E8) for the special NPC and the VIP.
 // Not here yet: saving the disabled VIPs (safehouse_vip_save RM 0x775540; with the campaign), and the radio
@@ -62,10 +64,6 @@ auto const HumanInfo = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x88D
 auto const CharacterLoaded = reinterpret_cast<bool(__cdecl*)(BYTE* info)>(0x762230);
 auto const CharacterOnItsWay = reinterpret_cast<bool(__cdecl*)(BYTE* info)>(0x764ED0);
 auto const HoldCharacter = reinterpret_cast<bool(__cdecl*)(int category, int categories, BYTE* info)>(0x761D20);
-auto const RecordOf = reinterpret_cast<BYTE*(__cdecl*)(BYTE* info)>(0x761710);   // its stream record, or null
-auto const PoolOf = reinterpret_cast<BYTE*(__cdecl*)(BYTE* record)>(0x761F30);   // the people's or the vehicles' pool
-using ReleaseFn = void(__fastcall*)(BYTE* pool, void*, BYTE* record, int category);
-auto const ReleaseRecord = reinterpret_cast<ReleaseFn>(0x760F60);
 int* const kPoolsState = reinterpret_cast<int*>(0x19734CC);  // not 0 while a level's resource is in force (1-3 changing, 4 in force)
 constexpr int kInForce = 4;
 constexpr int kLevelCategory = 8, kLevelCategories = 3;      // as the level's own resource holds its characters (0x7657A0)
@@ -178,21 +176,15 @@ void Hold(Slot& slot, const std::string& character) {
     else RFA_LOG_FIRST(8, "Story people: %s couldn't be held for the %s slot (the level's category is full?)", character.c_str(), slot.kind);
 }
 
-// Lets a slot go: its person first, then its character (Armageddon's release, see the top).
+// Frees a slot: its person is taken away; its character is kept until the district changes (see the top).
 void Let(Slot& slot) {
     TakeAway(slot.squad);
     slot.squad = kNone;
-    if (!slot.character.empty())
-        if (BYTE* info = HumanInfo(slot.character.c_str()))
-            if (BYTE* record = RecordOf(info))
-                if (BYTE* pool = PoolOf(record)) {
-                    const int state = *kPoolsState;
-                    *kPoolsState = 0;
-                    ReleaseRecord(pool, nullptr, record, kLevelCategory);
-                    *kPoolsState = state;
-                    ++g_released;
-                    RFA_LOG_FIRST(40, "Story people: %s let go from the %s slot", slot.character.c_str(), slot.kind);
-                }
+    if (!slot.character.empty()) {
+        ++g_released;
+        RFA_LOG_FIRST(40, "Story people: the %s slot is free; %s kept until the district changes (the game lets it go then)", slot.kind,
+                      slot.character.c_str());
+    }
     slot.character.clear();
     slot.node = -1;
     slot.group = kNone;
