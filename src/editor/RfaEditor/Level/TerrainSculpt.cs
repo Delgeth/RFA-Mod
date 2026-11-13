@@ -245,7 +245,7 @@ sealed class TerrainSculpt
             why = $"{fieldName} isn't in the game's files";
             return null;
         }
-        // Read the terrain file to get the corner (where the height field's samples start) from its Data section.
+// Read the terrain file to get the corner (where the height field's samples start) from its Data section.
         // This is at terrain_data +0x04 and +0x0C, which the game uses. The sub-zone origins may not align
         // perfectly with the grid (e.g., Guerrilla world zones), so deriving from them causes a
         // terrain/collision mismatch.
@@ -287,7 +287,7 @@ sealed class TerrainSculpt
             why = $"{zone} has no sub-zones with ground";
             return null;
         }
-        var corner = terrain.Corner;
+var corner = terrain.Corner;
         return new TerrainSculpt(zone, fieldName, terrainFile, heightField, corner, parts, read(zone + ".gterrain_pc"));
     }
 

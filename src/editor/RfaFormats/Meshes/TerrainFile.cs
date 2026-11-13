@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 using System.Numerics;
+=======
+>>>>>>> 8014847de61d55f58c38fe57eef35863f9c993d6
 using System.Text;
 
 namespace RfaFormats.Meshes;
@@ -118,7 +121,7 @@ public sealed class TerrainFile
     public MaterialSet? FarMaterial { get; set; }
     public byte[] Occluders { get; set; } = [];
 
-    /// <summary>The zone's corner in the world (x, z), from terrain_data +0x04 and +0x0C. This is where the height field's samples start.</summary>
+/// <summary>The zone's corner in the world (x, z), from terrain_data +0x04 and +0x0C. This is where the height field's samples start.</summary>
     public Vector2 Corner => new(BitConverter.ToSingle(Data, 0x04), BitConverter.ToSingle(Data, 0x0C));
 
     /// <summary>An empty "MCKH" collision section (version 5, its 16 bytes, no models).</summary>
