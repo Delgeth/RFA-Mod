@@ -489,7 +489,7 @@ public sealed class TerrainSubzone
     /// <param name="roads">Road decal meshes to lay after the ground (see the class's notes), or none.</param>
     public static (byte[] Header, byte[] Data) Write(int number, Vector2 origin, IReadOnlyList<GroundVertex> vertices,
                                                      IReadOnlyList<IReadOnlyList<PatchBlock>> patches, float gridStep = GridStep,
-                                                     IReadOnlyList<RoadDecalToWrite>? roads = null)
+                                                     IReadOnlyList<RoadDecalToWrite>? roads = null, uint material = GroundKind)
     {
         const int fields = 0x18;
         byte[] prefix = new byte[fields + 0x48 + LoadArea];
@@ -508,7 +508,7 @@ public sealed class TerrainSubzone
         foreach (var patch in patches) foreach (PatchBlock b in patch) { Mix((int)b.Kind); foreach (int i in b.Strip) Mix(i); }
         if (checksum == 0) checksum = 1;
         byte[] sixFloats = [.. new[] { 1f, 1f, 1f, 0f, 0f, 0f }.SelectMany(BitConverter.GetBytes)];
-        return Write(prefix, fields, checksum, GroundKind, sixFloats, new byte[4], BitConverter.GetBytes(checksum), origin, vertices, patches, gridStep, roads);
+        return Write(prefix, fields, checksum, material, sixFloats, new byte[4], BitConverter.GetBytes(checksum), origin, vertices, patches, gridStep, roads);
     }
 
     /// <summary>The shared part: <paramref name="prefix"/> is the header up to the first patch, its fields at <paramref name="fields"/>.</summary>
@@ -761,6 +761,66 @@ public sealed class TerrainSubzone
             for (int i = 0; i < box.Length; i++) Put(fields + 0x24 + i * 4, box[i]);
         }
         return (h, d);
+    }
+
+    /// <summary>
+    /// The ground material word of a sub-zone's first render block (its low half the kind, 0 for
+    /// ground; its high half what the game's own sub-zones carry), for sub-zones written from nothing
+    /// in the same terrain.
+    /// </summary>
+    public static uint GroundMaterialOf(byte[] header)
+    {
+        int fields = (0x18 + BitConverter.ToInt32(header, 0x14) + 3) & ~3;
+        int block = Enumerable.Range((fields + 0x48) / 4, (header.Length - fields - 0x48) / 4).Select(i => i * 4).First(a => ModelFile.IsMeshBlock(header, a));
+        return U32(header, block + 0x60 + (int)U32(header, block + 0x14) * 48);
+    }
+
+    /// <summary>
+    /// A sub-zone written from nothing: ground at every grid step of a <paramref name="across"/> ×
+    /// <paramref name="down"/> square of steps from <paramref name="origin"/> (both at most 255), the
+    /// squares <paramref name="inside"/> says (their corners' heights and normals as given), two
+    /// triangles each, split and wound as the game's own (see <see cref="Regridded"/>: <paramref name="main"/>
+    /// the diagonal from (x, z) to (x + 1, z + 1), <paramref name="up"/> the winding), in 5 × 5 patches.
+    /// With no square inside, one square deep under the ground (a sub-zone must draw something).
+    /// </summary>
+    public static (byte[] Header, byte[] Data) Grid(int number, Vector2 origin, int across, int down, Func<int, int, bool> inside,
+                                                     Func<int, int, float> height, Func<int, int, Vector3> normal, uint material,
+                                                     float step = GridStep, bool main = false, bool up = false)
+    {
+        if (across < 1 || down < 1 || across > 255 || down > 255) throw new ArgumentException("a sub-zone's ground is 1 to 255 steps across");
+        bool any = false;
+        for (int z = 0; z < down && !any; z++) for (int x = 0; x < across && !any; x++) any = inside(x, z);
+        Func<int, int, bool> In = any ? inside : (x, z) => x == 0 && z == 0;
+        Func<int, int, float> H = any ? height : (_, _) => -500;
+        var index = new Dictionary<(int, int), int>();
+        var vertices = new List<GroundVertex>();
+        int Vertex(int x, int z)
+        {
+            if (index.TryGetValue((x, z), out int i)) return i;
+            index[(x, z)] = vertices.Count;
+            vertices.Add(new GroundVertex(x, z, H(x, z), any ? normal(x, z) : Vector3.UnitY, 0xFF));
+            return vertices.Count - 1;
+        }
+        const int Patches = 5;
+        var patches = new List<IReadOnlyList<PatchBlock>>();
+        for (int pz = 0; pz < Patches; pz++)
+            for (int px = 0; px < Patches; px++)
+            {
+                int x0 = px * across / Patches, x1 = (px + 1) * across / Patches, z0 = pz * down / Patches, z1 = (pz + 1) * down / Patches;
+                var strips = new List<int[]>();
+                for (int z = z0; z < z1; z++)
+                    for (int x = x0; x < x1;)
+                    {
+                        if (!In(x, z)) { x++; continue; }
+                        var run = new List<(int A, int B)>();
+                        int start = x;
+                        while (x < x1 && In(x, z)) x++;
+                        for (int c = start; c <= x; c++) run.Add((Vertex(c, z), Vertex(c, z + 1)));
+                        strips.Add(RowStrip(run, main, up));
+                    }
+                if (strips.Count > 0) patches.Add([new PatchBlock(GroundKind, Join(strips))]);
+            }
+        return Write(number, origin, vertices, patches, step, null, material);
     }
 
     /// <summary>

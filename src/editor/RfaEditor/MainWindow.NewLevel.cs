@@ -95,9 +95,15 @@ public partial class MainWindow
         var fileName = new TextBox { Text = "" };
         var displayName = new TextBox { Text = "" };
         var blank = new CheckBox { Content = "Blank: only its starts, spawns and mode objects", IsChecked = true };
-        var ground = new ComboBox { ItemsSource = new[] { "Flat (to sculpt and paint)", "None (for caves and interiors built from pieces)" }, SelectedIndex = 0 };
-        blank.Checked += (_, _) => ground.IsEnabled = true;
-        blank.Unchecked += (_, _) => ground.IsEnabled = false;
+        var ground = new ComboBox { ItemsSource = new[] { "New, flat (made from nothing: to sculpt and paint)", "None (for caves and interiors built from pieces)" }, SelectedIndex = 0 };
+        var sizes = new[] { 32, 64, 96, 128, 160, 192, 224, 255 };
+        var groundSize = new ComboBox { ItemsSource = sizes.Select(v => v == 255 ? "255 m (the whole zone)" : $"{v} m").ToList(), SelectedIndex = sizes.Length - 1 };
+        var skies = NewLevel.Skies(workspace);
+        var sky = new ComboBox { ItemsSource = skies.Prepend("(the start level's)").ToList(), SelectedIndex = 0, IsEditable = true, MaxDropDownHeight = 400 };
+        void GroundChoices() => groundSize.IsEnabled = ground.IsEnabled && ground.SelectedIndex == 0;
+        ground.SelectionChanged += (_, _) => GroundChoices();
+        blank.Checked += (_, _) => { ground.IsEnabled = true; sky.IsEnabled = true; GroundChoices(); };
+        blank.Unchecked += (_, _) => { ground.IsEnabled = false; sky.IsEnabled = false; GroundChoices(); };
         mode.SelectionChanged += (_, _) => ground.SelectedIndex = mode.SelectedIndex == 0 ? 0 : 1;  // (Infestation's levels have none to flatten)
         var picture = new TextBox { IsReadOnly = true, Text = "" };
         var browse = new Button { Content = "Choose...", Margin = new Thickness(6, 0, 0, 0), MinWidth = 70 };
@@ -119,8 +125,10 @@ public partial class MainWindow
         form.Row("File name", fileName, "The level's file name (its archive, <name>.vpp_pc): lower case letters, digits and _");
         form.Row("Name in the menu", displayName, "What the map list shows (every language)");
         form.Row("", blank, "Off: a full copy of the level, its ground, buildings and scenery too");
-        form.Row("Ground", ground, "Flat: the level's ground, flattened. None: no ground at all (as Infestation's levels in their caves): " +
+        form.Row("Ground", ground, "New: ground made from nothing (flat, at the level's height). None: no ground at all (as Infestation's levels in their caves): " +
                                    "build the floor, walls and ceiling from stitch pieces, terrain pieces and chunks");
+        form.Row("Ground size", groundSize, "How big the new ground is: a square round the level's starts and spawns (the level's middle); past it the level ends in a drop");
+        form.Row("Sky", sky, "The level's sky (the game's sky effects): its environment boxes name it, and its files go with the level");
         form.Row("Preview picture", pictureRow, "Shown for it in the map list (and Infestation's loading screen): fitted to the game's picture size, its middle kept. None: the start level's picture");
         form.Buttons(window, "Make");
         if (window.ShowDialog() != true) return;
@@ -143,7 +151,8 @@ public partial class MainWindow
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null, replace, ground.SelectedIndex == 1);
+            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, blank.IsChecked == true, picture.Text.Length > 0 ? picture.Text : null, replace, ground.SelectedIndex == 1,
+                sizes[Math.Max(0, groundSize.SelectedIndex)], sky.SelectedIndex == 0 || string.IsNullOrWhiteSpace(sky.Text) || sky.Text.StartsWith('(') ? null : sky.Text.Trim());
             Log($"New level {name} ({chosenMode}, from {start}):");
             foreach (string line in report) Log("  " + line);
             Log("  The game reads its map lists at start-up: restart it to see the level in the menu.");
