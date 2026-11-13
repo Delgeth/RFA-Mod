@@ -252,6 +252,14 @@ public partial class LevelEditor
     /// <summary>Objects the game has as objects of its own (level geometry pieces are parts of one mesh there).</summary>
     static bool LiveKind(ZoneObject obj) => !IsGeometry(obj) && !IsBarrier(obj);
 
+    /// <summary>Spawn nodes the game's link puts their squad, vehicle or exo down from as soon as they are made (see rfa_qol's console.cpp).</summary>
+    static readonly HashSet<uint> SpawnsLive =
+        [NameHashes.ClassHash("object_squad_spawn_node"), NameHashes.ClassHash("object_vehicle_spawn_node"), NameHashes.ClassHash("object_exo_spawn_node")];
+
+    /// <summary>Objects the game only puts down as the level loads (pickups, preplaced weapons, turrets): made live, then the level loaded again.</summary>
+    static readonly HashSet<uint> ShownAfterReload =
+        [NameHashes.ClassHash("item"), NameHashes.ClassHash("weapon"), NameHashes.ClassHash("object_turret_spawn_node")];
+
     /// <summary>
     /// A change was made that the game only shows once the level is loaded again (the ground was
     /// sculpted, level geometry changed, an object needs a model the level hasn't loaded). With Auto
@@ -529,7 +537,15 @@ public partial class LevelEditor
         foreach (ZoneObject obj in made)
         {
             liveSent[obj.Handle] = obj.Placement;
-            if (liveCreates++ < 20) context.Log($"Live: {Label(obj)} made in the game.");
+            if (liveCreates++ < 20) context.Log($"Live: {Label(obj)} made in the game" +
+                                                (SpawnsLive.Contains(obj.ClassHash) ? ", and its squad, vehicle or exo spawned there." : "."));
+            // Pickups and turrets are put down by the game as the level loads: they show once it is loaded again.
+            if (ShownAfterReload.Contains(obj.ClassHash))
+            {
+                context.Log($"Live: {Label(obj)} ({names.Class(obj.ClassHash)}) is put down by the game as the level loads: it shows after Save and reload" +
+                            (AutoReloadBox.IsChecked == true ? " (done for you in a moment)." : " (or turn on Auto reload)."));
+                LiveNeedsReload();
+            }
         }
         foreach (uint handle in removed)
         {

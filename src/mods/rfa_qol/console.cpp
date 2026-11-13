@@ -65,6 +65,7 @@
 #include <ctime>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -1637,6 +1638,57 @@ auto const MakeFromStubs = reinterpret_cast<void(__fastcall*)(void* world, void*
 constexpr DWORD kStubNumber = 0x74;  // a stub's place in the lists it is made from (a short)
 constexpr size_t kBlockHeader = 0x38, kBlockHandle = 4;
 
+// A spawn node made live puts its squad, vehicle or exo down at once, as the mission scripts'
+// spawn functions do (a node of the level's own does it when its zone streams in, so one made as the
+// game runs would never): sf_spawn_squad (0x94F710) finds the node (0x425AE0, thiscall on the world:
+// the handle) and spawns its squad (0x800040, thiscall on the node: -1, 0; the squad's handle or -1);
+// sf_spawn_exo (0x94F520): 0x92DE90, then 0x8021C0 (-1); sf_of_spawn_vehicle (0x943510): 0x4B32F0,
+// then 0x7FE5A0 (-1). Each then sets the flag 0x7EE790 sets. What a node spawned is kept by the node's
+// handle, so taking the node away (editor_remove: the editor does that to make it again with new
+// settings, too) takes it away as well.
+auto const FindSquadNode = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x425AE0);
+auto const SpawnSquadFromNode = reinterpret_cast<DWORD(__fastcall*)(BYTE* node, void* unused, int a, int b)>(0x800040);
+auto const FindExoNode = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x92DE90);
+auto const SpawnExoFromNode = reinterpret_cast<DWORD(__fastcall*)(BYTE* node, void* unused, int a)>(0x8021C0);
+auto const FindVehicleNode = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x4B32F0);
+auto const SpawnVehicleFromNode = reinterpret_cast<DWORD(__fastcall*)(BYTE* node, void* unused, int a)>(0x7FE5A0);
+auto const NoteSpawned = reinterpret_cast<void(__cdecl*)()>(0x7EE790);
+std::map<DWORD, DWORD> g_nodeSpawned;  // a live-made node's handle -> what it spawned
+
+// A zone class name's hash, as zone files keep it (the editor's NameHashes.ClassHash).
+constexpr DWORD ClassHash(const char* name) {
+    DWORD hash = 0;
+    for (; *name; ++name) {
+        const char c = *name >= 'A' && *name <= 'Z' ? static_cast<char>(*name - 'A' + 'a') : *name;
+        hash = ((hash << 6) | (hash >> 26)) ^ static_cast<unsigned char>(c);
+    }
+    return hash;
+}
+
+void SpawnFromNode(DWORD handle, DWORD classHash) {
+    void* world = reinterpret_cast<void*>(kObjectList);
+    const char* what = nullptr;
+    DWORD spawned = 0xFFFFFFFF;
+    if (classHash == ClassHash("object_squad_spawn_node")) {
+        what = "squad";
+        if (BYTE* node = FindSquadNode(world, nullptr, handle)) spawned = SpawnSquadFromNode(node, nullptr, -1, 0);
+    } else if (classHash == ClassHash("object_exo_spawn_node")) {
+        what = "exo";
+        if (BYTE* node = FindExoNode(world, nullptr, handle)) spawned = SpawnExoFromNode(node, nullptr, -1);
+    } else if (classHash == ClassHash("object_vehicle_spawn_node")) {
+        what = "vehicle";
+        if (BYTE* node = FindVehicleNode(world, nullptr, handle)) spawned = SpawnVehicleFromNode(node, nullptr, -1);
+    }
+    if (!what) return;
+    if (spawned == 0xFFFFFFFF) {
+        rfa::Log("Editor link: node 0x%08X couldn't spawn its %s (not in its spawn resources, or the game has no room)", static_cast<unsigned>(handle), what);
+        return;
+    }
+    NoteSpawned();
+    g_nodeSpawned[handle] = spawned;
+    rfa::Log("Editor link: node 0x%08X spawned its %s (0x%08X)", static_cast<unsigned>(handle), what, static_cast<unsigned>(spawned));
+}
+
 void MakeEditorObject(DWORD handle) {
     void* world = reinterpret_cast<void*>(kObjectList);
     wchar_t name[40];
@@ -1670,8 +1722,9 @@ void MakeEditorObject(DWORD handle) {
     }
     *reinterpret_cast<WORD*>(stubs[0] + kStubNumber) = 0;
     MakeFromStubs(world, nullptr, 1, stubs, blocks);
-    rfa::Log(stubs[0] && FindObject(world, nullptr, handle) ? "Editor link: made object 0x%08X" : "Editor link: the game couldn't make object 0x%08X from its block",
-             static_cast<unsigned>(handle));
+    const bool made = stubs[0] && FindObject(world, nullptr, handle);
+    rfa::Log(made ? "Editor link: made object 0x%08X" : "Editor link: the game couldn't make object 0x%08X from its block", static_cast<unsigned>(handle));
+    if (made) SpawnFromNode(handle, *reinterpret_cast<DWORD*>(block));
 }
 
 // editor_reload: the level is loaded again (the console's reload_level), and the player then put
@@ -2844,6 +2897,12 @@ bool RunEditorEdit(const std::string& line) {
         return true;
     }
     if (remove) {
+        // What a live-made node spawned goes with it.
+        if (auto spawned = g_nodeSpawned.find(handle); spawned != g_nodeSpawned.end()) {
+            if (FindObject(reinterpret_cast<void*>(kObjectList), nullptr, spawned->second))
+                RemoveObject(reinterpret_cast<void*>(kObjectList), nullptr, spawned->second, 0);
+            g_nodeSpawned.erase(spawned);
+        }
         RemoveObject(reinterpret_cast<void*>(kObjectList), nullptr, handle, 0);
         if (++removed <= 10) rfa::Log("Editor link: removed object 0x%08X", static_cast<unsigned>(handle));
         return true;
