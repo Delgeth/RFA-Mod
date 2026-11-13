@@ -1631,6 +1631,7 @@ void StartTraffic();  // traffic.cpp (with convoys.cpp, edf.cpp, crews.cpp on it
 namespace gv { void StartFlyers(); }  // flyers.cpp
 namespace gv { void StartTurrets(); }  // turrets.cpp
 namespace gv { void StartEntering(); }  // entering.cpp
+namespace gv { void StartRiders(); }  // riders.cpp
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!rfa::game::IsSupportedBuild()) {
@@ -1655,6 +1656,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     HookTurretParts();
     gv::StartTurrets();
     gv::StartEntering();
+    gv::StartRiders();
     HookLights();
     StartTraffic();
     gv::StartFlyers();

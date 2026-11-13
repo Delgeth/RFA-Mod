@@ -76,4 +76,18 @@ const Object* Find(unsigned handle) {
     return nullptr;
 }
 
+const Object* Near(float x, float z, float within) {
+    const Object* best = nullptr;
+    float bestDistance = within * within;
+    for (const Object& object : g_objects) {
+        const float dx = object.pos.x - x, dz = object.pos.z - z;
+        const float distance = dx * dx + dz * dz;
+        if (distance <= bestDistance) {
+            bestDistance = distance;
+            best = &object;
+        }
+    }
+    return best;
+}
+
 }  // namespace campaign::world

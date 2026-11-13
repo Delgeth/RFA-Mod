@@ -186,7 +186,8 @@ Things to know:
   help` lists everything. It's a window program, so start it with `start /wait` in a command
   prompt, or add `| Out-Host` in PowerShell, for the prompt to wait for it.
 - Guerrilla's minimap sits at the bottom left: north turns with the camera, the arrow in the middle
-  is you, and it zooms out as you drive faster. Press Tab (`Map=` under `[GuerrillaKeys]`, or F7 >
+  is you, and it zooms out as you drive faster. Page Up and Page Down zoom it in and out, from 40
+  to 80 metres around you (`MinimapZoomIn=` / `MinimapZoomOut=` under `[GuerrillaKeys]`). Press Tab (`Map=` under `[GuerrillaKeys]`, or F7 >
   Guerrilla > Keys) for the world map, with you on it, and Tab again to close it; the game pauses
   while it's open. The minimap shows each zone's own detailed picture once it has loaded, a moment
   after you come near.

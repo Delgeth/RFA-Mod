@@ -74,6 +74,7 @@ public static partial class GuerrillaMapIcons
         ("object_raid_node", "MAP_ELEMENT_RAID_ICON"),
         ("object_riding_shotgun_node", "MAP_ELEMENT_RIDING_SHOTGUN"),
         ("object_area_defense_node", "MAP_ELEMENT_AREA_DEFENSE"),
+        ("object_delivery_node", "MAP_ELEMENT_GUERRILLA_EXPRESS"),  // Guerrilla Express: a delivery's start (start_node)
     ];
 
     static readonly (string What, string Tag)[] HintTags =
@@ -146,6 +147,7 @@ public static partial class GuerrillaMapIcons
                 }
                 if (!classes.TryGetValue(zoneObject.ClassHash, out var kind) || !elements.TryGetValue(kind.Element, out Element? element)) continue;
                 if (Flag(zoneObject, "DISABLED") == true || Flag(zoneObject, "enabled") == false) continue;  // a house arrest Guerrilla never offers
+                if (kind.Class == "object_delivery_node" && Flag(zoneObject, "start_node") != true) continue;  // only where a delivery starts
                 float x = (zoneObject.BoundsMin.X + zoneObject.BoundsMax.X) / 2, z = (zoneObject.BoundsMin.Z + zoneObject.BoundsMax.Z) / 2;
                 if (placed.Any(p => p.Picture == element.Picture && Math.Abs(p.X - x) < SamePlaceMetres && Math.Abs(p.Z - z) < SamePlaceMetres)) continue;
                 placed.Add((element.Picture, x, z));
@@ -153,7 +155,9 @@ public static partial class GuerrillaMapIcons
                 if (kind.Class == "object_safehouse" && Text(zoneObject.Text("display_name_tag")) is { } safehouse) caption = safehouse;
                 if (kind.Class == "object_mission_start_node" && zoneObject.Text("mission_info") is { } mission &&
                     missionNames.TryGetValue(mission, out string? missionName)) description = missionName;
-                lines.Add(Line("icon", GuerrillaHud.Prefix + element.Picture, x, z, caption, description, element.OnWorldMap));
+                // Its minimap rule (the mod: which of Guerrilla's minimap rules the icon follows), after an empty pair field.
+                lines.Add(Line("icon", GuerrillaHud.Prefix + element.Picture, x, z, caption, description, element.OnWorldMap) + "||" +
+                          MinimapRule(kind.Class));
                 counts[kind.Class] = counts.GetValueOrDefault(kind.Class) + 1;
             }
 
@@ -208,6 +212,25 @@ public static partial class GuerrillaMapIcons
     static string Line(string kind, string picture, float x, float z, string? caption, string? description, bool onWorldMap) =>
         string.Join('|', kind, picture, x.ToString("0.#", CultureInfo.InvariantCulture), z.ToString("0.#", CultureInfo.InvariantCulture),
                     Clean(caption), Clean(description), onWorldMap ? "1" : "0");
+
+    /// <summary>
+    /// Which of Guerrilla's minimap rules an icon of a class follows (RM cartographer::render_sticky_icons 0x878180 and
+    /// the activities' start icons): "safehouse" (only the nearest, pinned to the rim at any distance), "mission"
+    /// (pinned, within 250 m), or an activity's start ("demo", "areadefense", "shotgun", "housearrest", "raid",
+    /// "express": only inside the minimap's circle, by the activity's own conditions).
+    /// </summary>
+    static string MinimapRule(string objectClass) => objectClass switch
+    {
+        "object_safehouse" => "safehouse",
+        "object_mission_start_node" => "mission",
+        "object_demolitions_master_node" => "demo",
+        "object_area_defense_node" => "areadefense",
+        "object_riding_shotgun_node" => "shotgun",
+        "object_house_arrest_node" => "housearrest",
+        "object_raid_node" => "raid",
+        "object_delivery_node" => "express",
+        _ => "",
+    };
 
     static string Number(float value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 

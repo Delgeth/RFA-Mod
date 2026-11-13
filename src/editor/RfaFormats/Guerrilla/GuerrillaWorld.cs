@@ -68,8 +68,10 @@ public static class GuerrillaWorld
     /// 4 (v0.5.11-beta).
     /// 5 (v0.6.0-beta): Guerrilla's hinges (turbines, cranes), the turbine list, transition cells,
     /// ladders, Mason's coat cloth, the kill regions and the campaign's markers, which the mods read.
+    /// 6 (v0.6.2-beta): the kiosks (their list, screen effects and broadcast banks) and the building
+    /// list for the minimap, which the mods read; the HUD's documents change with guerrilla_hud.dll.
     /// </summary>
-    public const int Format = 5;
+    public const int Format = 6;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
@@ -523,6 +525,11 @@ public static class GuerrillaWorld
         log($"Gameplay properties: {gameplay.EntryOf.Count} of Guerrilla's entries named by the objects, {gameplay.Added} added to Armageddon's table with Guerrilla's settings " +
             $"(the rest are Armageddon entries with the same settings); names {gameplay.PoolBytes:N0} bytes of the mod's {GuerrillaGameplay.NamePool:N0} (mods\\guerrilla_world\\gameplay_properties.xtbl)");
         string? GameplayProps(string name) => gameplay.EntryOf.GetValueOrDefault(name);
+        // The buildings' list for guerrilla_world (Guerrilla's minimap; see GuerrillaBuildingList), by these entries.
+        var buildingEntries = GuerrillaBuildingList.Entries(gameplay.Text);
+        var buildingLines = new List<string>();
+        // Guerrilla's kiosks for guerrilla_kiosks (see GuerrillaKiosks): the movers with the kiosk flag, and its tables.
+        var kiosks = new GuerrillaKiosks(rfgTables, gameplay.Text);
         // Guerrilla's draw distances (see GuerrillaLod): the LOD classes those gameplay entries name.
         var lod = GuerrillaLod.Build(misc, rfgTables, gameplay.LodOf.Values);
         File.WriteAllBytes(Path.Combine(modFolder, "lod_properties.xtbl"), lod.Text);
@@ -553,7 +560,8 @@ public static class GuerrillaWorld
         var effectSounds = new GuerrillaSoundBanks(rfgCache, rfgTables, EffectSoundPart, EffectSoundBankPrefix);
         var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"),
                                                        [.. dustEffects, .. vehicleEffects.Effects, .. GuerrillaWeapons.Effects(rfgTables),
-                                                        .. GuerrillaMaterialEvents.Effects(rfgTables), .. GuerrillaFootsteps.Effects(rfgTables)],
+                                                        .. GuerrillaMaterialEvents.Effects(rfgTables), .. GuerrillaFootsteps.Effects(rfgTables),
+                                                        .. GuerrillaKiosks.Effects(rfgTables)],
                                                        DlcExplosions(game), [.. vehicleEffects.Explosions, .. GuerrillaWeapons.Explosions(rfgTables)],
                                                        (cue, explosion) => effectSounds.EffectSound(cue, explosion) is { } sound
                                                            ? new GuerrillaEffectTables.Sound(sound.Event, sound.HeardTo) : null,
@@ -1092,6 +1100,8 @@ public static class GuerrillaWorld
                 foreach (var pickup in pickups) zoneFile.Insert(zoneFile.Objects.Count, pickup);
                 pickupsPlaced += pickups.Count;
             }
+            buildingLines.AddRange(GuerrillaBuildingList.Lines(zone, zoneFile.Objects, buildingEntries));
+            kiosks.Add(zone, zoneFile.Objects);
             byte[] zoneBytes = GuerrillaMovers.WithLinks(zoneFile.ToBytes(), links);
             // The persistent zone: the player start again (as the game's own levels keep one there), and
             // no district or mission (0, as the game's persistent zones); the zone's roads again, as Guerrilla's.
@@ -1155,6 +1165,10 @@ public static class GuerrillaWorld
         log($"Hinges: {hingesPlaced} of Guerrilla's placed on the objects they join, {hingesWithMotors} turned by a motor (the wind turbines' blades, the " +
             $"mining machine's)" + (hingesLeftOut > 0 ? $"; {hingesLeftOut} left out, an object they join not placed" : ""));
         File.WriteAllLines(Path.Combine(modFolder, GuerrillaConstraints.TurbineList), turbineLines);
+        File.WriteAllLines(Path.Combine(modFolder, GuerrillaBuildingList.FileName), buildingLines);
+        log($"Buildings: {buildingLines.Count} movers written to {GuerrillaBuildingList.FileName} (chunk, importance, team, destroyed share and place, " +
+            $"for Guerrilla's minimap); {buildingLines.Count(l => l.Split(' ')[4] is "2" or "3")} of medium or high importance");
+        foreach (string line in kiosks.Write(modFolder, rfgCache, game, overrides)) log("Kiosks: " + line);
         log($"Wind turbines: {turbineLines.Count} written to {GuerrillaConstraints.TurbineList}, their blades each turned to its own angle " +
             $"(guerrilla_world plays Guerrilla's turbine code on them)" +
             (turbineLines.Count(l => l.Split(' ')[3] == "FFFFFFFF") is int noMotor and > 0 ? $"; {noMotor} without their motor placed" : ""));

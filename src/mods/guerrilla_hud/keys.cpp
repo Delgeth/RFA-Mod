@@ -2,7 +2,7 @@
 //
 // Guerrilla's PC version let its own actions be bound in its controls menu; Armageddon's controls menu knows only
 // Armageddon's. Until Guerrilla's are added there, this window lists them: click a key, then press the new one (a
-// letter, a digit, Tab, Enter, Space or F1-F12; Esc keeps the old one, Delete leaves the action without a key). Each change is
+// letter, a digit, Tab, Enter, Space, Page Up, Page Down or F1-F12; Esc keeps the old one, Delete leaves the action without a key). Each change is
 // written to rfa_mods.ini at once and used at once. Before [GuerrillaKeys] the map's key was [GuerrillaHud] MapKey and
 // the backpack's [GuerrillaGear] BackpackKey: those are still read where [GuerrillaKeys] has no setting.
 #include "rfa_mod.h"
@@ -37,6 +37,8 @@ KeyAction g_actions[keys::Count] = {
     {L"Left", "Left (the map's pan)", "the left arrow", L"A", nullptr, nullptr},
     {L"Right", "Right (the map's pan)", "the right arrow", L"D", nullptr, nullptr},
     {L"TipContinue", "Close a tool tip that paused the game", "", L"Enter", nullptr, nullptr},
+    {L"MinimapZoomIn", "Minimap: zoom in (to 40 m)", "", L"PageUp", nullptr, nullptr},
+    {L"MinimapZoomOut", "Minimap: zoom out (to 80 m)", "", L"PageDown", nullptr, nullptr},
 };
 constexpr wchar_t kSection[] = L"GuerrillaKeys";
 
@@ -63,12 +65,15 @@ int g_capturing = -1;        // the action waiting for its new key, -1 for none
 bool g_heldAtCapture[256];   // the keys already down as it started waiting (not taken as the new key)
 std::string g_status;
 
-// A key's virtual-key code from its name: a letter or digit, Tab, Enter, Space, or F1-F12; 0 for anything else (or none).
+// A key's virtual-key code from its name: a letter or digit, Tab, Enter, Space, PageUp, PageDown, or F1-F12; 0 for
+// anything else (or none).
 int CodeOf(const std::wstring& name) {
     if (name.size() == 1 && iswalnum(name[0])) return towupper(name[0]);
     if (_wcsicmp(name.c_str(), L"Tab") == 0) return VK_TAB;
     if (_wcsicmp(name.c_str(), L"Enter") == 0) return VK_RETURN;
     if (_wcsicmp(name.c_str(), L"Space") == 0) return VK_SPACE;
+    if (_wcsicmp(name.c_str(), L"PageUp") == 0) return VK_PRIOR;
+    if (_wcsicmp(name.c_str(), L"PageDown") == 0) return VK_NEXT;
     if (name.size() >= 2 && name.size() <= 3 && (name[0] == L'F' || name[0] == L'f')) {
         const int number = _wtoi(name.c_str() + 1);
         if (number >= 1 && number <= 12) return VK_F1 + number - 1;
@@ -81,6 +86,8 @@ std::wstring NameOf(int code) {
     if (code == VK_TAB) return L"Tab";
     if (code == VK_RETURN) return L"Enter";
     if (code == VK_SPACE) return L"Space";
+    if (code == VK_PRIOR) return L"PageUp";
+    if (code == VK_NEXT) return L"PageDown";
     if (code >= VK_F1 && code <= VK_F12) return L"F" + std::to_wstring(code - VK_F1 + 1);
     return L"";
 }
@@ -121,38 +128,77 @@ int SharedWith(int action) {
     return -1;
 }
 
-// While an action waits for its new key: the first key that goes down (not one already held as it started).
-void Capture() {
-    if (g_capturing < 0) return;
-    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
-        g_capturing = -1;
-        g_status = "Kept as it was.";
-        return;
+// The key ImGui saw pressed this frame (the menus' ImGui gets the window's key messages), as a virtual-key code; 0 for
+// none of the keys these can be. While the F7 menus are up the game's console is open, and the key messages are the
+// sure way to see a key then: the keys window took none through GetAsyncKeyState alone (2026-11-12).
+int ImGuiKeyPressed() {
+    for (int i = 0; i < 26; ++i)
+        if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_A + i), false)) return 'A' + i;
+    for (int i = 0; i < 10; ++i)
+        if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + i), false)) return '0' + i;
+    for (int i = 0; i < 12; ++i)
+        if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_F1 + i), false)) return VK_F1 + i;
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) return VK_TAB;
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) return VK_RETURN;
+    if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) return VK_SPACE;
+    if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) return VK_PRIOR;
+    if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) return VK_NEXT;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) return VK_ESCAPE;
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) return VK_DELETE;
+    return 0;
+}
+
+// The first key that goes down, by ImGui, else by GetAsyncKeyState (not one already held as it started); 0 for none.
+int KeyGoneDown(const char*& how) {
+    if (const int code = ImGuiKeyPressed()) {
+        how = "the window's key messages";
+        return code;
     }
-    if (GetAsyncKeyState(VK_DELETE) & 0x8000) {
-        Set(g_capturing, 0);
-        g_capturing = -1;
-        g_status.clear();
-        return;
-    }
-    const int menuKey = MenuKey();
     for (int code = 1; code < 256; ++code) {
         const bool down = (GetAsyncKeyState(code) & 0x8000) != 0;
         if (!down) {
             g_heldAtCapture[code] = false;
             continue;
         }
-        if (g_heldAtCapture[code] || NameOf(code).empty()) continue;
-        if (code == menuKey) {
-            g_status = "That key opens these menus ([Loader] MenuKey); pick another.";
+        if (g_heldAtCapture[code]) continue;
+        if (code == VK_ESCAPE || code == VK_DELETE || !NameOf(code).empty()) {
+            how = "GetAsyncKeyState";
             g_heldAtCapture[code] = true;
-            continue;
+            return code;
         }
-        Set(g_capturing, code);
+    }
+    return 0;
+}
+
+// While an action waits for its new key: the first key that goes down. Each attempt is logged.
+void Capture() {
+    if (g_capturing < 0) return;
+    const char* how = "";
+    const int code = KeyGoneDown(how);
+    if (!code) return;
+    const char* shown = g_actions[g_capturing].shown;
+    if (code == VK_ESCAPE) {
+        rfa::Log("Guerrilla's keys: %s kept as it was (Esc, seen through %s)", shown, how);
+        g_capturing = -1;
+        g_status = "Kept as it was.";
+        return;
+    }
+    if (code == VK_DELETE) {
+        rfa::Log("Guerrilla's keys: %s left without a key (Delete, seen through %s)", shown, how);
+        Set(g_capturing, 0);
         g_capturing = -1;
         g_status.clear();
         return;
     }
+    if (code == MenuKey()) {
+        rfa::Log("Guerrilla's keys: %s: %s opens the F7 menus; not taken", shown, Narrow(NameOf(code)).c_str());
+        g_status = "That key opens these menus ([Loader] MenuKey); pick another.";
+        return;
+    }
+    rfa::Log("Guerrilla's keys: %s: %s pressed (seen through %s)", shown, Narrow(NameOf(code)).c_str(), how);
+    Set(g_capturing, code);
+    g_capturing = -1;
+    g_status.clear();
 }
 
 void Window() {
@@ -164,7 +210,7 @@ void Window() {
     if (!g_windowOpen) g_capturing = -1;
     Capture();
     ImGui::TextWrapped("The keys of Guerrilla's own actions in the Guerrilla world. Click a key, then press the new one: "
-                       "a letter, a digit, Tab, Enter, Space or F1-F12 (Esc keeps the old one, Delete leaves it without a key). "
+                       "a letter, a digit, Tab, Enter, Space, Page Up, Page Down or F1-F12 (Esc keeps the old one, Delete leaves it without a key). "
                        "They're saved in rfa_mods.ini under [GuerrillaKeys] and work at once.");
     ImGui::Spacing();
     if (ImGui::BeginTable("keys", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
@@ -187,6 +233,7 @@ void Window() {
                 g_capturing = i;
                 g_status.clear();
                 for (int code = 0; code < 256; ++code) g_heldAtCapture[code] = (GetAsyncKeyState(code) & 0x8000) != 0;
+                rfa::Log("Guerrilla's keys: waiting for the new key of %s", a.shown);
             }
             ImGui::TableNextColumn();
             const int defaultCode = CodeOf(a.defaultKey);
@@ -241,7 +288,7 @@ void keys::Read() {
         else name = a.defaultKey;
         a.code = CodeOf(name);
         if (!name.empty() && !a.code)
-            rfa::Log("Guerrilla's keys: [GuerrillaKeys] %s=%s isn't a key this mod knows (a letter, a digit, Tab, Enter, Space, F1-F12); %s has none",
+            rfa::Log("Guerrilla's keys: [GuerrillaKeys] %s=%s isn't a key this mod knows (a letter, a digit, Tab, Enter, Space, PageUp, PageDown, F1-F12); %s has none",
                      Narrow(a.name).c_str(), Narrow(name).c_str(), a.shown);
         summary += (summary.empty() ? "" : ", ") + Narrow(a.name) + " " + (a.code ? Narrow(NameOf(a.code)) : "none");
     }

@@ -31,5 +31,7 @@ bool Load();
 // Every object of a class.
 std::vector<const Object*> OfClass(const char* objectClass);
 const Object* Find(unsigned handle);
+// The marker nearest a place on the ground (x, z), within the distance given, or null.
+const Object* Near(float x, float z, float within);
 
 }  // namespace campaign::world

@@ -656,7 +656,7 @@ public static class GuerrillaWeapons
         /// which the world's list (terr01_l0.asm_pc) names. Without them the locker was drawn bright red (the user's
         /// 2026-11-10). Null if the world has none of that name.
         /// </summary>
-        (string Name, byte[] Data)[]? WorldTexture(string texture, Func<string, string> rename, int maxSize)
+        (string Name, byte[] Data)[]? WorldTexture(string texture, Func<string, string> rename, int maxSize = int.MaxValue)
         {
             if (worldTextures == null)
             {
@@ -1846,7 +1846,7 @@ public static class GuerrillaWeapons
             var ownPegs = pack.Entries.Where(e => e.Name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase))
                               .Select(e => PegFile.Read(pack.Read(e), pack.Read(pack.Find(PegFile.DataFileName(e.Name)!)!))).ToList();
             foreach (string texture in textures)
-                if ((GuerrillaBuiltIns.Files(texture, GuerrillaVehicles.Alias(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, GuerrillaVehicles.Alias, OnlyTextureSize)) is { } made &&
+                if ((GuerrillaBuiltIns.Files(texture, GuerrillaVehicles.Alias(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, GuerrillaVehicles.Alias)) is { } made &&
                     !files.Any(x => x.Name.Equals(made[0].Name, StringComparison.OrdinalIgnoreCase)))
                     files.AddRange(made);
             AddContainer(ours, ItemContainer, files);
@@ -1960,11 +1960,15 @@ public static class GuerrillaWeapons
 
             // Whether it gets a _high container (Guerrilla's high_res_map, with its <mesh>_high or <item>_high
             // container's material): then its own container, which the game preloads with every "General
-            // (preloaded)" item into a pool of 17 MB (item_preload, shared with Armageddon's own and its 8.8 MB
-            // low-detail peg: see BaseTextureSize),
-            // carries small copies of its textures (BaseTextureSize) under names of their own (LowAlias), the
-            // _high container the full ones under the usual names, as Armageddon's own guns keep their big
-            // textures out of their own containers. One with no _high keeps its textures, at most OnlyTextureSize.
+            // (preloaded)" item into its item_preload pool, carries the low-detail copies Guerrilla's model names
+            // (its items_containers ones) under names of their own (LowAlias), the _high container the full ones
+            // under the usual names, as Armageddon's own guns keep their big textures out of their own containers.
+            // One with no _high keeps its textures. All at Guerrilla's own sizes, as its game draws them: the low
+            // copies 128 or 256 px (the rail driver's 1024 x 512), the textures of an item with no _high full size
+            // (the backpacks, the ammo box: 512). The pool is 17 MB in the game, 32 MB with the guerrilla_gear mod,
+            // and after the items' containers holds Armageddon's own items_containers.gpeg_pc (8.8 MB); until
+            // 2026-11-12 ours were capped at 128 and 256 px for room (the user's 19:38 run of 2026-11-06, before the
+            // pool was raised).
             bool wantsHigh = g.Element("Item_Flags")?.Elements.Any(e => e.Value.Trim().StartsWith("high_res_map", StringComparison.OrdinalIgnoreCase)) ?? false;
             // Its archive: items.vpp_pc, or items_mp.vpp_pc for the multiplayer's (six of the backpacks).
             var archive = guerrillaItems.Find(name + ".str2_pc") == null && guerrillaItemsMp?.Find(name + ".str2_pc") != null ? guerrillaItemsMp : guerrillaItems;
@@ -1972,7 +1976,6 @@ public static class GuerrillaWeapons
             var highPack = high != null ? archive.OpenContainer(high) : null;
             var materialFile = highPack?.Entries.FirstOrDefault(e => e.Name.EndsWith(".mat_pc", StringComparison.OrdinalIgnoreCase));
             Func<string, string> baseName = materialFile != null ? LowAlias : GuerrillaVehicles.Alias;
-            int baseSize = materialFile != null ? BaseTextureSize : OnlyTextureSize;
 
             // The model, with its low-detail textures.
             var source = archive.Find(name + ".str2_pc");
@@ -2012,8 +2015,8 @@ public static class GuerrillaWeapons
             var missing = new List<string>();
             foreach (string texture in textures)
             {
-                var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName, baseSize) ??
-                               WorldTexture(texture, baseName, baseSize);
+                var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName) ??
+                               WorldTexture(texture, baseName);
                 if (made == null) missing.Add(texture);
                 else if (!files.Any(x => x.Name.Equals(made[0].Name, StringComparison.OrdinalIgnoreCase))) files.AddRange(made);
             }
@@ -2038,8 +2041,8 @@ public static class GuerrillaWeapons
                     files.Add((ourPickup + ".gsmesh_pc", pack.Read(pg!)));
                     foreach (string texture in pTextures)
                     {
-                        var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName, baseSize) ??
-                               WorldTexture(texture, baseName, baseSize);
+                        var made = GuerrillaBuiltIns.Files(texture, baseName(texture)) ?? Single([.. ownPegs, .. lowPegs], texture, baseName) ??
+                               WorldTexture(texture, baseName);
                         if (made == null) missing.Add(texture);
                         else if (!files.Any(x => x.Name.Equals(made[0].Name, StringComparison.OrdinalIgnoreCase))) files.AddRange(made);
                     }
@@ -2301,14 +2304,6 @@ public static class GuerrillaWeapons
         return null;
     }
 
-    /// <summary>
-    /// The biggest side of the textures an item's own container carries when its _high container has them full
-    /// size, and when it has none. The game preloads the containers into its item_preload pool, and after them
-    /// Armageddon's own items_containers.gpeg_pc (8.8 MB, its items' low-detail textures). At the game's 17 MB
-    /// (Armageddon's own containers about 4.7 MB) even 128 px left the peg no room (the user's 19:38 run); the
-    /// guerrilla_gear mod makes the pool 32 MB, and at these sizes ours take about 5.7 MB of it.
-    /// </summary>
-    const int BaseTextureSize = 128, OnlyTextureSize = 256;
 
     /// <summary>
     /// The name of the small copy of a texture an item's own container carries while its _high container has it

@@ -2031,3 +2031,124 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     rfa::Log("Guerrilla's people in world(s) %ls: %u character(s) made by editor\\GuerrillaBuilder.exe", rfa::IniString(L"GuerrillaPeople", L"Worlds", L"rfg").c_str(),
              static_cast<unsigned>(g_people.size()));
 }
+
+
+// ---- Markers for Guerrilla's minimap (the HUD session's request of 2026-11-12; the rules: the shared note
+// minimap-icons-survey.md, items 10, 12 and 25)
+//
+// Guerrilla puts these on its minimap, besides the people blips the HUD already draws:
+//   12/25 a squad's map icon (object_squad's map_icon property, SQUAD_PROP_MAP_ICON, read by object_squad::serialize
+//         RM 0xAAD3DE and squad_creation_parameters::create_squad RM 0x7756ED): its picture on every living member,
+//         plain (NORMAL), sticky (STICKY) or only the 3 nearest sticky (CLOSEST_STICKY; map_icon_types 0, 1, 2;
+//         object_squad::assign_icons_to_members RM 0xA3F700). None of Guerrilla's 663 world squad nodes has one; they
+//         come with missions' and activities' squads, so whatever ports those names the squad here.
+//   25    the player's ally and escort squads (player +0x24C4 / +0x24C8): a sticky ui_map_icon_star_blue on each
+//         member (ally_squad_reassign_icons RM 0xA33FC0, escort_squad_reassign_icons RM 0xA34040). Armageddon has
+//         one script-driven player squad instead (player_squad_add_npc ...); nothing fills either in our worlds yet,
+//         so whatever makes them (the alert session's morale converts, a mission's escort) names each person here.
+//   10    a civilian converted by morale (morale_convert_single_npc RM 0x788EF0 -> add_converted_guerrilla RM
+//         0x874320, up to 5 at once): ui_hud_house_arrest_head_icon in gold (240, 200, 52) on the person for 500 ms,
+//         shrinking and fading, each next one starting 250 ms after the one before, at any distance
+//         (render_guerrilla_converts RM 0x860020). The marker's age says where it is in that.
+// A person in a vehicle is marked at the vehicle (Guerrilla's render_icons uses the vehicle's place). Markers only in
+// our worlds; the dead and the gone are left out.
+struct GuerrillaPeopleMarker {
+    DWORD handle;       // the person
+    float x, y, z;      // where to draw it: the person, or the vehicle it is in
+    const char* icon;   // the picture's name in Guerrilla's minimap_icon_info.xtbl
+    int placement;      // 0 plain (inside the zoom radius), 1 sticky (pinned to the rim), 2 closest sticky (only the 3 nearest), 3 a convert's pop
+    DWORD color;        // 0xAARRGGBB, or 0 for the picture's own colour
+    int ageMs;          // a convert's pop: ms since it began (0-500); -1 for the others
+};
+
+namespace {
+constexpr int kStickyPlacement = 1, kConvertPlacement = 3;
+constexpr DWORD kConvertColor = 0xFFF0C834;   // (240, 200, 52)
+constexpr int kConvertShown = 500, kConvertGap = 250, kMostConverts = 5;  // RM 0x860020, 0x874320
+const char* const kAllyStar = "ui_map_icon_star_blue";
+const char* const kConvertHead = "ui_hud_house_arrest_head_icon";
+constexpr DWORD kHumanVehicle = 0x1160;       // the vehicle a human is in (as guerrilla_vehicles and the HUD read it)
+struct SquadIcon { std::string icon; int placement; };
+struct Convert { DWORD handle; int since; };
+SRWLOCK g_markersLock = SRWLOCK_INIT;
+std::unordered_map<DWORD, SquadIcon> g_squadIcons;       // squad handle -> its map icon
+std::unordered_map<DWORD, int> g_playerSquadPeople;      // person -> 1 ally, 2 escort
+std::vector<Convert> g_converts;                         // the pops still to show, oldest first
+int MarkerTime() { return *reinterpret_cast<const int*>(0x1121300); }  // the game's ms (stops while it is paused)
+
+// Where a person's marker goes: the vehicle it is in, else itself.
+void MarkerPlace(BYTE* human, float* at) {
+    const DWORD vehicleHandle = *reinterpret_cast<const DWORD*>(human + kHumanVehicle);
+    const BYTE* vehicle = vehicleHandle == kNoHandle ? nullptr : WorldObject(reinterpret_cast<void*>(kWorld), nullptr, vehicleHandle);
+    const float* from = reinterpret_cast<const float*>((vehicle ? vehicle : human) + kObjectPlace);
+    at[0] = from[0], at[1] = from[1], at[2] = from[2];
+}
+}  // namespace
+
+// A squad's map icon (Guerrilla's map_icon: the picture's name and its placement, 0 plain, 1 sticky, 2 closest sticky),
+// drawn on each living member; a null or empty picture takes it off.
+extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_SetSquadMapIcon(DWORD squad, const char* icon, int placement) {
+    AcquireSRWLockExclusive(&g_markersLock);
+    if (!icon || !*icon) g_squadIcons.erase(squad);
+    else g_squadIcons[squad] = {icon, placement < 0 || placement > 2 ? 0 : placement};
+    ReleaseSRWLockExclusive(&g_markersLock);
+}
+
+// A person joins (1 ally, 2 escort) or leaves (0) the player's squads: Guerrilla's sticky blue star on them.
+extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_SetPlayerSquadMember(DWORD person, int kind) {
+    AcquireSRWLockExclusive(&g_markersLock);
+    if (kind == 1 || kind == 2) g_playerSquadPeople[person] = kind;
+    else g_playerSquadPeople.erase(person);
+    ReleaseSRWLockExclusive(&g_markersLock);
+}
+
+// A civilian converted by morale: the gold head's pop on them, queued as Guerrilla's (5 at most, 250 ms apart).
+extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_Converted(DWORD person) {
+    AcquireSRWLockExclusive(&g_markersLock);
+    const int now = MarkerTime();
+    const int since = g_converts.empty() ? now : std::max(now, g_converts.back().since + kConvertGap);
+    if (static_cast<int>(g_converts.size()) < kMostConverts) g_converts.push_back({person, since});
+    ReleaseSRWLockExclusive(&g_markersLock);
+}
+
+// The markers to draw now, up to `capacity`; how many were written. Squads' icons and the player's squads first, then
+// the converts' pops.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaPeople_MapMarkers(GuerrillaPeopleMarker* out, int capacity) {
+    if (!out || capacity <= 0 || !InOurWorld()) return 0;
+    void* world = reinterpret_cast<void*>(kWorld);
+    int written = 0;
+    AcquireSRWLockExclusive(&g_markersLock);
+    if (!g_squadIcons.empty() || !g_playerSquadPeople.empty()) {
+        const int people = HumanCount(world, nullptr);
+        for (int i = 0; i < people && written < capacity; ++i) {
+            BYTE* human = HumanAt(world, nullptr, i);
+            if (!human || GoneOrDead(human)) continue;
+            const DWORD handle = ObjectHandle(human, nullptr);
+            if (auto ally = g_playerSquadPeople.find(handle); ally != g_playerSquadPeople.end()) {
+                GuerrillaPeopleMarker& m = out[written++];
+                m = {handle, 0, 0, 0, kAllyStar, kStickyPlacement, 0, -1};
+                MarkerPlace(human, &m.x);
+                if (written >= capacity) break;
+            }
+            BYTE* squad = SquadOfNpc(human);
+            auto icon = squad ? g_squadIcons.find(ObjectHandle(squad, nullptr)) : g_squadIcons.end();
+            if (icon == g_squadIcons.end()) continue;
+            GuerrillaPeopleMarker& m = out[written++];
+            m = {handle, 0, 0, 0, icon->second.icon.c_str(), icon->second.placement, 0, -1};
+            MarkerPlace(human, &m.x);
+        }
+    }
+    const int now = MarkerTime();
+    while (!g_converts.empty() && now - g_converts.front().since > kConvertShown) g_converts.erase(g_converts.begin());
+    for (const Convert& c : g_converts) {
+        if (written >= capacity) break;
+        if (now < c.since) break;  // not begun yet (each starts 250 ms after the one before)
+        BYTE* human = WorldObject(world, nullptr, c.handle);
+        if (!human || GoneOrDead(human)) continue;
+        GuerrillaPeopleMarker& m = out[written++];
+        m = {c.handle, 0, 0, 0, kConvertHead, kConvertPlacement, kConvertColor, now - c.since};
+        MarkerPlace(human, &m.x);
+    }
+    ReleaseSRWLockExclusive(&g_markersLock);
+    return written;
+}

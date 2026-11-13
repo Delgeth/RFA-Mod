@@ -143,6 +143,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#pragma comment(lib, "user32.lib")  // the long frames' watchdog: GetForegroundWindow, GetWindowThreadProcessId
 
 namespace {
 
@@ -8822,12 +8823,165 @@ LARGE_INTEGER g_frameAt;
 int g_frames, g_slowFrames, g_overBudget;
 double g_frameMs, g_frameWorst, g_physicsMs, g_physicsWorst;
 
+// Whether the game's own window is the one in front (a frame with it behind isn't a hitch: the game pauses itself
+// while it isn't in front, and its main loop waits).
+bool GameInFront() {
+    DWORD process = 0;
+    const HWND front = GetForegroundWindow();
+    return front && GetWindowThreadProcessId(front, &process) && process == GetCurrentProcessId();
+}
+
+// Long frames: what the main thread was doing (a diagnosis, with DestructionLog=1, in our worlds). A watchdog thread
+// looks every 50 ms. Once a frame (from one effects update to the next) has run 250 ms, then at 500 ms, 1 s and 2 s,
+// it stops the main thread for an instant, copies its registers and its stack, and lets it go. When the frame ends it
+// logs one line for it: its length and where the main thread was at the last look, with the call chain read from
+// its frame pointers (the game keeps them: push ebp / mov ebp,esp throughout); the game's own addresses as
+// themselves, others as module+offset. Not before 15 s of play in our world (the world's load and its first seconds
+// are long frames by nature), nor for a frame with the game's window behind another (the game pauses itself then):
+// those are left out of the frame times too (the Destruction and Sections lines say how many).
+volatile LONG g_frameNumber;            // frames timed (the watchdog's way of telling one frame from the next)
+volatile LONG g_frameStartTick;         // GetTickCount at the frame's start
+volatile LONG g_frameInBackground;      // this frame had the game's window behind another at some point
+volatile LONG g_simFrameInBackground;   // the same for the sim frame (the Sections line's)
+volatile LONG g_lastFrameEnded = -1;    // the number of the frame that last ended, and its length in ms
+volatile LONG g_lastFrameMs;
+volatile LONG g_playSinceTick;          // GetTickCount when frames began in our world (0 not yet)
+volatile DWORD g_loopThread;            // the thread that runs the frames (the effects update's)
+int g_backgroundFrames;                 // frames left out of the frame times since the last line
+HANDLE g_watchdog;
+
+constexpr size_t kStackCopy = 64 * 1024;  // at most this much of the main thread's stack copied at each look
+constexpr DWORD kLookAtMs[] = {250, 500, 1000, 2000};
+constexpr DWORD kPlayBeforeLooking = 15000;
+constexpr int kChainLength = 20;
+
+// Copies memory that may not be readable; false if it wasn't.
+bool CopyIfReadable(void* to, const void* from, size_t size) {
+    __try {
+        memcpy(to, from, size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// An address as the log shows it: the game's own as itself, else its module's name and offset (or the address).
+void DescribeCodeAddress(DWORD address, char* out, size_t size) {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(address)), &module) || !module ||
+        module == GetModuleHandleW(nullptr)) {
+        snprintf(out, size, "%08lX", address);
+        return;
+    }
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(module, path, MAX_PATH);
+    const char* name = strrchr(path, '\\');
+    snprintf(out, size, "%s+%lX", name ? name + 1 : path, address - static_cast<DWORD>(reinterpret_cast<uintptr_t>(module)));
+}
+
+// One look at the main thread: where it was and its call chain (return addresses, the nearest first).
+struct ThreadLook {
+    DWORD eip;
+    DWORD chain[kChainLength];
+    int chainLength;
+};
+
+// The call chain from a copy of the stack (starting at esp): each frame's saved ebp and return address, followed
+// while they stay inside the copy and go up the stack.
+int FollowFrames(const DWORD* stack, DWORD esp, size_t copied, DWORD ebp, DWORD* chain) {
+    int length = 0;
+    for (DWORD frame = ebp; length < kChainLength;) {
+        if (frame < esp || frame - esp + 8 > copied || (frame - esp) % 4) break;
+        const DWORD* at = stack + (frame - esp) / 4;
+        chain[length++] = at[1];
+        if (at[0] <= frame) break;
+        frame = at[0];
+    }
+    return length;
+}
+
+DWORD WINAPI Watchdog(void*) {
+    HANDLE thread = nullptr;
+    DWORD threadId = 0;
+    LONG watchedFrame = -1;
+    int looks = 0;
+    bool behind = false, haveLook = false;
+    ThreadLook last = {};
+    static DWORD stack[kStackCopy / 4];
+    for (;;) {
+        Sleep(50);
+        const LONG frame = g_frameNumber;
+        if (frame != watchedFrame) {
+            // The frame watched has ended: one line for it, if it was looked at.
+            if (haveLook && !behind && g_lastFrameEnded == watchedFrame) {
+                char where[160], part[160];
+                DescribeCodeAddress(last.eip, where, sizeof(where));
+                std::string chain;
+                for (int i = 0; i < last.chainLength; ++i) {
+                    DescribeCodeAddress(last.chain[i], part, sizeof(part));
+                    chain += i ? ", " : "";
+                    chain += part;
+                }
+                RFA_LOG_FIRST(50, "Long frame: %ld ms; at the last look (%lu ms in) the main thread was at %s, called from %s", g_lastFrameMs,
+                              kLookAtMs[looks - 1], where, chain.empty() ? "(no frames read)" : chain.c_str());
+            }
+            watchedFrame = frame;
+            looks = 0;
+            behind = haveLook = false;
+        }
+        if (!g_destructionLog || !g_buildingsWorld || !g_loopThread || !g_playSinceTick) continue;
+        const DWORD now = GetTickCount();
+        if (now - static_cast<DWORD>(g_playSinceTick) < kPlayBeforeLooking) continue;
+        if (!GameInFront()) {
+            behind = true;
+            InterlockedExchange(&g_frameInBackground, 1);
+            InterlockedExchange(&g_simFrameInBackground, 1);
+            continue;
+        }
+        const LONG elapsed = static_cast<LONG>(now - static_cast<DWORD>(g_frameStartTick));
+        if (looks >= static_cast<int>(sizeof(kLookAtMs) / sizeof(kLookAtMs[0])) || elapsed < static_cast<LONG>(kLookAtMs[looks])) continue;
+        if (threadId != g_loopThread) {
+            if (thread) CloseHandle(thread);
+            threadId = g_loopThread;
+            thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, threadId);
+        }
+        if (!thread) continue;
+        // Stopped only while its registers and stack are copied: nothing here takes a lock the game could hold.
+        CONTEXT context = {};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        size_t copied = 0;
+        if (SuspendThread(thread) == static_cast<DWORD>(-1)) continue;
+        const bool gotContext = GetThreadContext(thread, &context) != 0 && g_frameNumber == frame;
+        if (gotContext)
+            for (copied = sizeof(stack); copied >= 256; copied /= 2)
+                if (CopyIfReadable(stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(context.Esp)), copied)) break;
+        ResumeThread(thread);
+        ++looks;
+        if (!gotContext) continue;
+        last.eip = context.Eip;
+        last.chainLength = copied >= 256 ? FollowFrames(stack, context.Esp, copied, context.Ebp, last.chain) : 0;
+        haveLook = true;
+    }
+}
+
 // Each frame (from BuildingsUpdate): this frame's time and the game's last physics step's.
 void TimeFrame() {
     LARGE_INTEGER now, rate;
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&rate);
-    if (g_frameAt.QuadPart != 0) {
+    const bool front = GameInFront();
+    const bool background = InterlockedExchange(&g_frameInBackground, front ? 0 : 1) != 0 || !front;
+    g_loopThread = GetCurrentThreadId();
+    const DWORD tick = GetTickCount();
+    if (g_frameAt.QuadPart == 0) InterlockedExchange(&g_playSinceTick, static_cast<LONG>(tick | 1));  // frames begin in our world
+    else InterlockedExchange(&g_lastFrameMs, static_cast<LONG>(tick - static_cast<DWORD>(g_frameStartTick)));
+    InterlockedExchange(&g_lastFrameEnded, g_frameNumber);
+    InterlockedExchange(&g_frameStartTick, static_cast<LONG>(tick));
+    InterlockedIncrement(&g_frameNumber);
+    if (g_frameAt.QuadPart != 0 && background) {
+        ++g_backgroundFrames;  // the game behind another window: not a frame of play
+    } else if (g_frameAt.QuadPart != 0) {
         const double ms = static_cast<double>(now.QuadPart - g_frameAt.QuadPart) * 1000.0 / static_cast<double>(rate.QuadPart);
         // A second or more is a load or a pause, not a frame.
         if (ms < 1000.0) {
@@ -8869,7 +9023,8 @@ struct SectionTimes {
     char name[48];
     long long own, all;       // in performance-counter ticks, this window
     long long thisFrame, mostInAFrame;
-    int calls;
+    long long ownThisFrame;   // this frame's own time (taken back out if the frame turns out to have been in the background)
+    int calls, callsThisFrame;
 };
 constexpr int kSectionSlots = 2048;  // a power of 2
 constexpr int kMostOpenSections = 96;
@@ -8885,7 +9040,8 @@ int g_openCount;
 DWORD g_mainThread;
 volatile bool g_sectionsWanted;      // set each frame by BuildingsUpdate: in our worlds, with DestructionLog=1
 bool g_sectionsOn;                   // what that was at the start of this sim frame
-int g_simFrames, g_slowSimFrames;
+int g_simFrames, g_slowSimFrames, g_backgroundSimFrames;
+bool g_simFrameSlow;                 // the sim frame just ended was slow
 long long g_sectionCalls, g_tickRate;
 DWORD g_lastSectionsLog;
 
@@ -8915,7 +9071,7 @@ void ClearSectionTimes() {
     memset(g_sectionTimes, 0, sizeof(g_sectionTimes));
     g_sectionsKept = g_sectionsDropped = 0;
     g_simFrames = 1;  // the frame begun now
-    g_slowSimFrames = 0;
+    g_slowSimFrames = g_backgroundSimFrames = 0;
     g_sectionCalls = 0;
     g_lastSectionsLog = GetTickCount();
 }
@@ -8923,11 +9079,28 @@ void ClearSectionTimes() {
 // At each sim frame's start, on the main thread: the last frame's times rolled up, and every 10 s a line if a sim
 // frame was slow.
 void SectionsFrame() {
-    ++g_simFrames;
+    // A frame with the game's window behind another (the game pauses itself and its loop waits) isn't a frame of
+    // play: its times are taken back out and it is counted apart.
+    const bool front = GameInFront();
+    const bool background = InterlockedExchange(&g_simFrameInBackground, front ? 0 : 1) != 0 || !front;
+    if (background) {
+        ++g_backgroundSimFrames;
+        if (g_simFrameSlow) --g_slowSimFrames;
+    } else {
+        ++g_simFrames;
+    }
+    g_simFrameSlow = false;
     for (SectionTimes& s : g_sectionTimes)
         if (s.key && s.thisFrame) {
-            if (s.thisFrame > s.mostInAFrame) s.mostInAFrame = s.thisFrame;
-            s.thisFrame = 0;
+            if (background) {
+                s.all -= s.thisFrame;
+                s.own -= s.ownThisFrame;
+                s.calls -= s.callsThisFrame;
+            } else if (s.thisFrame > s.mostInAFrame) {
+                s.mostInAFrame = s.thisFrame;
+            }
+            s.thisFrame = s.ownThisFrame = 0;
+            s.callsThisFrame = 0;
         }
     const DWORD now = GetTickCount();
     if (now - g_lastSectionsLog < 10000) return;
@@ -8959,6 +9132,10 @@ void SectionsFrame() {
         }
         snprintf(part, sizeof(part), "; %.0f sections timed a frame, %d names", static_cast<double>(g_sectionCalls) / frames, g_sectionsKept);
         line += part;
+        if (g_backgroundSimFrames > 0) {
+            snprintf(part, sizeof(part), "; %d frames with the game's window behind another left out", g_backgroundSimFrames);
+            line += part;
+        }
         if (g_sectionsDropped > 0) {
             snprintf(part, sizeof(part), " (%d more past the table's room, not timed)", g_sectionsDropped);
             line += part;
@@ -9004,8 +9181,13 @@ void __fastcall SectionEnd(void* section, void* unused) {
             s.all += all;
             s.own += all - open.inside;
             s.thisFrame += all;
+            s.ownThisFrame += all - open.inside;
             ++s.calls;
-            if (s.key == reinterpret_cast<const char*>(kSimFrameName) && TicksMs(all) > kSlowFrameMs) ++g_slowSimFrames;
+            ++s.callsThisFrame;
+            if (s.key == reinterpret_cast<const char*>(kSimFrameName) && TicksMs(all) > kSlowFrameMs) {
+                ++g_slowSimFrames;
+                g_simFrameSlow = true;
+            }
             g_openCount = i;  // (any opened in it and never closed are dropped with it)
             if (i > 0) g_openSections[i - 1].inside += all;
         }
@@ -9238,12 +9420,16 @@ void BuildingsUpdate() {
                  g_frames, g_frameMs / g_frames, g_frameWorst, g_slowFrames, g_physicsMs / g_frames, g_physicsWorst, g_overBudget);
         line += part;
     }
+    if (g_backgroundFrames > 0) {
+        snprintf(part, sizeof(part), "; %d frames with the game's window behind another left out", g_backgroundFrames);
+        line += part;
+    }
     rfa::Log("%s", line.c_str());
     for (LONG& n : g_breakEvents) n = 0;
     g_otherBreakEvents = g_anchorsMade = g_anchorsNone = g_anchorsWrapped = 0;
     g_anchorLeast = -1;
     g_anchorMost = 0;
-    g_frames = g_slowFrames = g_overBudget = 0;
+    g_frames = g_slowFrames = g_overBudget = g_backgroundFrames = 0;
     g_frameMs = g_frameWorst = g_physicsMs = g_physicsWorst = 0;
 }
 
@@ -9296,6 +9482,11 @@ void InstallBuildings() {
     LARGE_INTEGER rate;
     QueryPerformanceFrequency(&rate);
     g_tickRate = rate.QuadPart > 0 ? rate.QuadPart : 1;
+    if (!g_watchdog) {
+        g_watchdog = CreateThread(nullptr, 0, &Watchdog, nullptr, 0, nullptr);
+        if (g_watchdog) SetThreadPriority(g_watchdog, THREAD_PRIORITY_ABOVE_NORMAL);  // to look while the game is busy
+        else rfa::Log("Buildings: could not start the long frames' watchdog; the log won't say what a long frame was doing");
+    }
     const BYTE sectionBeginOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30};
     const BYTE sectionEndOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28};
     if (memcmp(reinterpret_cast<const void*>(kSectionBegin), sectionBeginOpening, sizeof(sectionBeginOpening)) == 0 &&
@@ -9330,21 +9521,22 @@ void InstallBuildings() {
 // damaged, +0xC4 destroyed. A callback is cdecl: the event (its type at +0, the object's handle at +4; damage is
 // type 0, with the share of damage at +8, Guerrilla's building_damaged_event) and a notify record, and returns an
 // event_result (Armageddon's mover callback 0x7A4DF0: 2 when it acted, 0 when not).
-// So, in our worlds, the towers' and blades' damaged slots get Guerrilla's code, which first calls the callback
-// Armageddon gave them. The timers and the motor watch run in the effects' frame update. The objects come from
+// So, in our worlds, every mover's damaged and destroyed slots get ours, which first call the callback Armageddon gave
+// it (kept by its handle, +0x68), then play Guerrilla's turbine code on a turbine's tower and blades (known by
+// handle from the builder's list) and keep each building's state for the minimap (below). The timers and the motor watch run in the effects' frame update. The objects come from
 // the world builder's list (mods\guerrilla_world\turbines.txt: zone, tower, blades, motor, hinge), by handle.
 // Damage is the game's own (apply_damage, virtual +0xA4 in Armageddon, Guerrilla's +0x88 with three more
 // arguments: Armageddon's own calls pass a scale of 1 and zeros, 0x7A21C1), so the motor dies as any other.
 constexpr DWORD kSetMoverCallbacks = 0x7A4650;
 constexpr size_t kSetMoverCallbacksPrologue = 6;  // push ebp / mov ebp,esp / sub esp,20h
-constexpr size_t kMoverLevelObject = 0xB4, kMoverDamagedCallback = 0xC0, kMoverHandle = 0x68;
+constexpr size_t kMoverLevelObject = 0xB4, kMoverDamagedCallback = 0xC0, kMoverDestroyedCallback = 0xC4, kMoverHandle = 0x68;
 // A mover with this flag (its flags at +0xF0) gets no callbacks in either game: Armageddon's setup zeroes them and
 // stops (0x7A46CE), as Guerrilla's does (mover_flags & 4, 0xAD9678). Seen on blades' pieces (their level object's
 // name, made in play), so Guerrilla's turbine code leaves them alone too.
 constexpr size_t kMoverCallbackFlags = 0xF0;
 constexpr DWORD kMoverNoCallbacks = 4;
 constexpr size_t kApplyDamageSlot = 0xA4 / 4;
-constexpr int kDamagedEvent = 0;
+constexpr int kDamagedEvent = 0, kDestroyedEvent = 2;  // the event types (Armageddon's mover callbacks 0x7A4DF0, 0x7A50E0)
 constexpr int kLevelObjectDamage = 4;          // damaged_by_types DBT_LEVEL_OBJECT, as Guerrilla's turbine code gives
 constexpr float kTurbineMotorDamage = 1000.0f;  // Guerrilla's
 constexpr float kMotorMovingSpeed = 1.0f;       // m/s: Guerrilla's motor watch (its body's speed squared ≥ 1)
@@ -9369,7 +9561,11 @@ struct Turbine {
     DWORD tower, blades, motor, hinge;
 };
 std::vector<Turbine> g_turbines;                              // from turbines.txt
-MoverCallbackFn g_towerDamagedBefore, g_bladesDamagedBefore;  // the damaged callbacks Armageddon gave them
+// The damaged and destroyed callbacks the game gave each mover we wrap, by its handle: ours call them first.
+struct MoverCallbacksBefore {
+    MoverCallbackFn damaged, destroyed;
+};
+std::unordered_map<DWORD, MoverCallbacksBefore> g_moverCallbacks;
 struct MotorWatch {
     DWORD motor;
     float at[3];
@@ -9385,19 +9581,6 @@ std::vector<BladesTimer> g_bladesTimers;
 // Motors already given their damage: once is enough (the tower keeps taking damage as it falls, and Guerrilla's
 // code would give a dead motor the same again). Forgotten when the turbine's tower is made again.
 std::vector<DWORD> g_motorsKilled;
-
-const char* LevelObjectName(const BYTE* mover) {
-    const BYTE* properties = *reinterpret_cast<BYTE* const*>(mover + kMoverLevelObject);
-    const BYTE* base = properties ? *reinterpret_cast<BYTE* const*>(properties) : nullptr;
-    return base ? *reinterpret_cast<const char* const*>(base) : nullptr;
-}
-
-// A level object name as Guerrilla's turbine code names it: ours carry "rfg_" before Guerrilla's own.
-bool IsTurbinePart(const char* name, const char* part) {
-    if (!name) return false;
-    if (_strnicmp(name, "rfg_", 4) == 0) name += 4;
-    return _stricmp(name, part) == 0;
-}
 
 int TurbineOf(DWORD handle, bool blades) {
     for (size_t i = 0; i < g_turbines.size(); ++i)
@@ -9420,54 +9603,61 @@ void KillTurbineMotor(DWORD handle, const char* why) {
     RFA_LOG_FIRST(40, "Wind turbines: motor %08lX given %.0f damage (%s)", handle, kTurbineMotorDamage, why);
 }
 
-int __cdecl TowerDamaged(const MoverEvent* event, void* notify) {
-    const int result = g_towerDamagedBefore ? g_towerDamagedBefore(event, notify) : 0;
-    if (!event || event->type != kDamagedEvent || event->share == 0 || !InOurWorld()) return result;
-    const int i = TurbineOf(event->handle, false);
-    if (i < 0) return result;
-    const DWORD motor = g_turbines[i].motor;
-    if (motor != 0xFFFFFFFF && !MotorKilled(motor) &&
-        std::none_of(g_motorsWatched.begin(), g_motorsWatched.end(), [&](const MotorWatch& w) { return w.motor == motor; }))
-        g_motorsWatched.push_back({motor, {}, false});
-    return result ? result : 1;
+// Guerrilla's turbine code on a damaged event (windmill_base_damaged_callback, windmill_blade_damaged_callback).
+void TurbineDamaged(const MoverEvent& event) {
+    if (const int i = TurbineOf(event.handle, false); i >= 0) {
+        const DWORD motor = g_turbines[i].motor;
+        if (event.share != 0 && motor != 0xFFFFFFFF && !MotorKilled(motor) &&
+            std::none_of(g_motorsWatched.begin(), g_motorsWatched.end(), [&](const MotorWatch& w) { return w.motor == motor; }))
+            g_motorsWatched.push_back({motor, {}, false});
+    } else if (const int b = TurbineOf(event.handle, true); b >= 0) {
+        auto timer = std::find_if(g_bladesTimers.begin(), g_bladesTimers.end(), [&](const BladesTimer& t) { return t.turbine == static_cast<size_t>(b); });
+        if (timer == g_bladesTimers.end()) g_bladesTimers.push_back({static_cast<size_t>(b), 0.0f, false});
+        else timer->seconds = 0.0f;  // each hit starts the 3 s again, as Guerrilla's
+    }
 }
 
-int __cdecl BladesDamaged(const MoverEvent* event, void* notify) {
-    const int result = g_bladesDamagedBefore ? g_bladesDamagedBefore(event, notify) : 0;
+void BuildingDamaged(const MoverEvent& event);    // (below, with the buildings for the minimap)
+void BuildingDestroyed(const MoverEvent& event);
+void ForgetBuildingStates();
+
+// Each mover's damaged and destroyed callbacks in our worlds: the game's own first, then what we keep of it.
+int __cdecl MoverDamaged(const MoverEvent* event, void* notify) {
+    const auto found = event ? g_moverCallbacks.find(event->handle) : g_moverCallbacks.end();
+    const int result = found != g_moverCallbacks.end() && found->second.damaged ? found->second.damaged(event, notify) : 0;
     if (!event || event->type != kDamagedEvent || !InOurWorld()) return result;
-    const int i = TurbineOf(event->handle, true);
-    if (i < 0) return result;
-    auto timer = std::find_if(g_bladesTimers.begin(), g_bladesTimers.end(), [&](const BladesTimer& t) { return t.turbine == static_cast<size_t>(i); });
-    if (timer == g_bladesTimers.end()) g_bladesTimers.push_back({static_cast<size_t>(i), 0.0f, false});
-    else timer->seconds = 0.0f;  // each hit starts the 3 s again, as Guerrilla's
-    return result ? result : 1;
+    BuildingDamaged(*event);
+    TurbineDamaged(*event);
+    return result;
 }
 
-// Each mover given its callbacks: in our worlds, a turbine's tower and blades get Guerrilla's damaged code.
+int __cdecl MoverDestroyed(const MoverEvent* event, void* notify) {
+    const auto found = event ? g_moverCallbacks.find(event->handle) : g_moverCallbacks.end();
+    const int result = found != g_moverCallbacks.end() && found->second.destroyed ? found->second.destroyed(event, notify) : 0;
+    if (event && event->type == kDestroyedEvent && InOurWorld()) BuildingDestroyed(*event);
+    return result;
+}
+
+// Each mover given its callbacks: in our worlds, its damaged and destroyed ones wrapped by ours (kept by its handle),
+// for Guerrilla's turbine code and the buildings' state on the minimap. A mover the game gave none keeps none, as in
+// both games.
 bool __cdecl SetMoverCallbacks(BYTE* mover, bool flag) {
     const bool result = g_setMoverCallbacks(mover, flag);
-    if (!mover || g_turbines.empty() || !InOurWorld()) return result;
+    if (!mover || !InOurWorld()) return result;
     if (*reinterpret_cast<const DWORD*>(mover + kMoverCallbackFlags) & kMoverNoCallbacks) return result;  // none in either game
-    const char* name = LevelObjectName(mover);
-    const bool tower = IsTurbinePart(name, "0101windmill_a"), blades = !tower && IsTurbinePart(name, "0101windmill_a_blades");
-    if (!tower && !blades) return result;
-    auto& slot = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverDamagedCallback);
-    if (!slot) return result;  // the game gave it none: nor does Guerrilla's turbine code
-    if (tower) {
-        // The turbine made again (its zone loaded again): its motor may be given its damage again.
-        const int i = TurbineOf(*reinterpret_cast<const DWORD*>(mover + kMoverHandle), false);
-        if (i >= 0) g_motorsKilled.erase(std::remove(g_motorsKilled.begin(), g_motorsKilled.end(), g_turbines[i].motor), g_motorsKilled.end());
-    }
-    MoverCallbackFn& before = tower ? g_towerDamagedBefore : g_bladesDamagedBefore;
-    const MoverCallbackFn ours = tower ? &TowerDamaged : &BladesDamaged;
-    if (slot != ours) {
-        if (before && slot != before)
-            RFA_LOG_FIRST(4, "Wind turbines: a %s was given another damaged callback (%p, not %p); Guerrilla's code calls the first", tower ? "tower" : "blades",
-                          reinterpret_cast<void*>(slot), reinterpret_cast<void*>(before));
-        if (!before) before = slot;
-        slot = ours;
-    }
-    RFA_LOG_FIRST(2, "Wind turbines: Guerrilla's turbine code on their towers and blades (%s)", name);
+    auto& damaged = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverDamagedCallback);
+    auto& destroyed = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverDestroyedCallback);
+    if (!damaged && !destroyed) return result;
+    const DWORD handle = *reinterpret_cast<const DWORD*>(mover + kMoverHandle);
+    MoverCallbacksBefore& before = g_moverCallbacks[handle];
+    if (damaged != &MoverDamaged) before.damaged = damaged;
+    if (destroyed != &MoverDestroyed) before.destroyed = destroyed;
+    if (damaged) damaged = &MoverDamaged;
+    if (destroyed) destroyed = &MoverDestroyed;
+    // A turbine made again (its zone loaded again): its motor may be given its damage again.
+    if (const int i = TurbineOf(handle, false); i >= 0)
+        g_motorsKilled.erase(std::remove(g_motorsKilled.begin(), g_motorsKilled.end(), g_turbines[i].motor), g_motorsKilled.end());
+    RFA_LOG_FIRST(1, "Buildings: their damaged and destroyed callbacks watched in our worlds (Guerrilla's turbine code, the minimap's buildings)");
     return result;
 }
 
@@ -9477,6 +9667,7 @@ void TurbinesUpdate(float seconds) {
         g_motorsWatched.clear();
         g_bladesTimers.clear();
         g_motorsKilled.clear();
+        ForgetBuildingStates();
         return;
     }
     if (seconds <= 0) return;
@@ -9518,33 +9709,108 @@ void TurbinesUpdate(float seconds) {
     }
 }
 
+void LoadBuildingList();  // (below, with the buildings for the minimap)
+
 void InstallTurbines() {
     FILE* file = nullptr;
-    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_world\\turbines.txt").c_str(), L"r") != 0 || !file) {
-        rfa::Log("Wind turbines: no mods\\guerrilla_world\\turbines.txt (build the world); Guerrilla's turbine code is off");
-        return;
-    }
-    char line[256], zone[64];
-    while (fgets(line, sizeof(line), file)) {
-        Turbine t;
-        unsigned long tower, blades, motor, hinge;
-        if (sscanf_s(line, "%63s %lx %lx %lx %lx", zone, static_cast<unsigned>(sizeof(zone)), &tower, &blades, &motor, &hinge) == 5) {
-            t = {tower, blades, motor, hinge};
-            g_turbines.push_back(t);
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_world\\turbines.txt").c_str(), L"r") == 0 && file) {
+        char line[256], zone[64];
+        while (fgets(line, sizeof(line), file)) {
+            unsigned long tower, blades, motor, hinge;
+            if (sscanf_s(line, "%63s %lx %lx %lx %lx", zone, static_cast<unsigned>(sizeof(zone)), &tower, &blades, &motor, &hinge) == 5)
+                g_turbines.push_back({tower, blades, motor, hinge});
         }
+        fclose(file);
     }
-    fclose(file);
+    LoadBuildingList();
     const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20};
     if (memcmp(reinterpret_cast<const void*>(kSetMoverCallbacks), opening, sizeof(opening)) == 0)
         g_setMoverCallbacks = reinterpret_cast<SetMoverCallbacksFn>(
             rfa::HookFunction(kSetMoverCallbacks, kSetMoverCallbacksPrologue, reinterpret_cast<void*>(&SetMoverCallbacks)));
     if (!g_setMoverCallbacks) {
         g_turbines.clear();
-        rfa::Log("Wind turbines: could not hook the movers' callbacks (the game's code isn't as expected); Guerrilla's turbine code is off");
+        rfa::Log("Wind turbines: could not hook the movers' callbacks (the game's code isn't as expected); Guerrilla's turbine code and the "
+                 "buildings' damage on the minimap are off");
         return;
     }
-    rfa::Log("Wind turbines: %u read from mods\\guerrilla_world\\turbines.txt; Guerrilla's turbine code plays on them in our worlds",
-             static_cast<unsigned>(g_turbines.size()));
+    if (g_turbines.empty()) rfa::Log("Wind turbines: no mods\\guerrilla_world\\turbines.txt (build the world); Guerrilla's turbine code is off");
+    else
+        rfa::Log("Wind turbines: %u read from mods\\guerrilla_world\\turbines.txt; Guerrilla's turbine code plays on them in our worlds",
+                 static_cast<unsigned>(g_turbines.size()));
+}
+
+// ---- The buildings, for Guerrilla's minimap (for guerrilla_hud)
+//
+// Guerrilla's minimap (cartographer) draws the buildings near it: once a second it collects every mover in a 250 m
+// box round the map's middle (collect_structures, RM 0x872E80). It draws each as its chunk's top-down picture
+// ("<chunk>_thumb", render_masked_structures 0x86E43A), sized by the mover's box (get_bbox) and turned with it,
+// coloured by its team (get_structure_color 0x862850). On the EDF's buildings of medium or high importance it puts
+// IMPORTANCE_MEDIUM/HIGH icons (get_structure_importance_icon 0x862D30). Next to those that took damage in the last
+// 3 s it puts their health, 1 - min(1, damage / game_destroyed_pct) (render_structures_post 0x86FF50, 0x87D436).
+// The damage is the figure each building's damaged event carries: Guerrilla posts it once a frame for each mover
+// damaged that frame (object_mover_post_damaged_destroyed_events 0xA5F0D0: type 0, the handle, the mover's
+// damage), and its destroyed event (type 2) once.
+// The world builder lists every mover with what doesn't change in play (GuerrillaBuildingList:
+// mods\guerrilla_world\buildings.txt). The game gives the rest: where it is and how it is turned (the object at +4
+// and +0x10), its box (get_bbox, virtual +8: the object's own +0x7C and +0x88), and through the movers' callbacks
+// (above) its damage and when, and whether it was destroyed. GuerrillaWorld_Buildings hands the HUD the loaded ones
+// near a point.
+struct ListedBuilding {
+    DWORD handle, parent;
+    char chunk[64];
+    int importance, team;
+    float destroyedAt;
+    float x, z;
+};
+std::vector<ListedBuilding> g_buildingList;  // from buildings.txt
+struct BuildingState {
+    DWORD damagedAt;  // GetTickCount of its last damaged event (0 none)
+    float damage;     // that event's figure
+    bool destroyed;
+};
+std::unordered_map<DWORD, BuildingState> g_buildingStates;  // by handle, in our worlds
+SRWLOCK g_buildingStatesLock = SRWLOCK_INIT;                 // the events come on the game's thread; the HUD may ask from its own
+
+void LoadBuildingList() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_world\\buildings.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("Buildings: no mods\\guerrilla_world\\buildings.txt (build the world); the minimap gets no buildings");
+        return;
+    }
+    char line[512], zone[64];
+    while (fgets(line, sizeof(line), file)) {
+        ListedBuilding b = {};
+        unsigned long handle, parent;
+        float y;
+        if (sscanf_s(line, "%63s %lx %lx %63s %d %d %f %f %f %f", zone, static_cast<unsigned>(sizeof(zone)), &handle, &parent, b.chunk,
+                     static_cast<unsigned>(sizeof(b.chunk)), &b.importance, &b.team, &b.destroyedAt, &b.x, &y, &b.z) == 10) {
+            b.handle = handle;
+            b.parent = parent;
+            g_buildingList.push_back(b);
+        }
+    }
+    fclose(file);
+    rfa::Log("Buildings: %u read from mods\\guerrilla_world\\buildings.txt, for Guerrilla's minimap", static_cast<unsigned>(g_buildingList.size()));
+}
+
+void BuildingDamaged(const MoverEvent& event) {
+    AcquireSRWLockExclusive(&g_buildingStatesLock);
+    BuildingState& state = g_buildingStates[event.handle];
+    state.damagedAt = GetTickCount() | 1;
+    state.damage = event.share;
+    ReleaseSRWLockExclusive(&g_buildingStatesLock);
+}
+
+void BuildingDestroyed(const MoverEvent& event) {
+    AcquireSRWLockExclusive(&g_buildingStatesLock);
+    g_buildingStates[event.handle].destroyed = true;
+    ReleaseSRWLockExclusive(&g_buildingStatesLock);
+}
+
+void ForgetBuildingStates() {
+    AcquireSRWLockExclusive(&g_buildingStatesLock);
+    if (!g_buildingStates.empty()) g_buildingStates.clear();
+    ReleaseSRWLockExclusive(&g_buildingStatesLock);
 }
 
 // ---- Cutting buildings where something charges through them (for other mods)
@@ -9604,6 +9870,57 @@ extern "C" __declspec(dllexport) bool __cdecl GuerrillaWorld_CutBuildings(const 
     RFA_LOG_FIRST(10, "Cutting buildings: a cutter of %.2f m at %.1f %.1f %.1f (explosion %s)%s", radius, position[0], position[1], position[2],
                   info ? explosion : "none", cutter ? "" : ": the game made none");
     return cutter != nullptr;
+}
+
+// A building near the minimap, for Guerrilla's minimap (see "The buildings, for Guerrilla's minimap").
+struct GuerrillaWorldBuilding {
+    DWORD handle;          // its mover
+    DWORD parent;          // the mover it is a piece of, 0xFFFFFFFF none (Guerrilla's icons leave pieces out)
+    char chunk[64];        // its chunk's name: Guerrilla's minimap draws the picture "<chunk>_thumb"
+    int importance;        // Guerrilla's object_importance_level: -1 unknown, 0 none, 1 low, 2 medium, 3 high
+    int team;              // Guerrilla's human_teams: -1 none, 0 guerrilla, 1 EDF, 2 civilian (neutral), 3 marauder
+    float destroyedAt;     // its game_destroyed_pct: its health is 1 - min(1, damage / destroyedAt)
+    float position[3];     // where it is
+    float turn[9];         // its rotation, rows right, up, forward
+    float boundsMin[3];    // its box in the world (the game's get_bbox), which Guerrilla sizes the picture by
+    float boundsMax[3];
+    float damage;          // its damage, as its last damaged event gave it (0 none yet)
+    int msSinceDamaged;    // milliseconds since that event, -1 never (Guerrilla: a 5 s flash, the health label for 3 s)
+    int destroyed;         // 1 once its destroyed event came
+};
+
+// The loaded buildings whose listed place is within a square of half-width `halfSize` metres round (x, z) (Guerrilla
+// collects a 250 m box once a second), at most `most` of them into `out`. Returns how many it wrote. In a world
+// that isn't ours, none. Call it on the game's thread.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaWorld_Buildings(float x, float z, float halfSize, GuerrillaWorldBuilding* out, int most) {
+    if (!out || most <= 0 || !InOurWorld()) return 0;
+    using GetBoxFn = void(__fastcall*)(BYTE* object, void* unused, float* boundsMin, float* boundsMax);
+    const DWORD now = GetTickCount();
+    int count = 0;
+    AcquireSRWLockShared(&g_buildingStatesLock);
+    for (const ListedBuilding& listed : g_buildingList) {
+        if (count >= most) break;
+        if (fabsf(listed.x - x) > halfSize || fabsf(listed.z - z) > halfSize) continue;
+        BYTE* mover = GameObjectFromHandle(kWorld, nullptr, listed.handle);
+        if (!mover) continue;
+        GuerrillaWorldBuilding& b = out[count++];
+        b.handle = listed.handle;
+        b.parent = listed.parent;
+        memcpy(b.chunk, listed.chunk, sizeof(b.chunk));
+        b.importance = listed.importance;
+        b.team = listed.team;
+        b.destroyedAt = listed.destroyedAt;
+        memcpy(b.position, mover + 4, sizeof(b.position));
+        memcpy(b.turn, mover + 0x10, sizeof(b.turn));
+        reinterpret_cast<GetBoxFn>((*reinterpret_cast<void** const*>(mover))[2])(mover, nullptr, b.boundsMin, b.boundsMax);
+        const auto state = g_buildingStates.find(listed.handle);
+        const bool known = state != g_buildingStates.end();
+        b.damage = known ? state->second.damage : 0.0f;
+        b.msSinceDamaged = known && state->second.damagedAt ? static_cast<int>(now - state->second.damagedAt) : -1;
+        b.destroyed = known && state->second.destroyed ? 1 : 0;
+    }
+    ReleaseSRWLockShared(&g_buildingStatesLock);
+    return count;
 }
 
 namespace {

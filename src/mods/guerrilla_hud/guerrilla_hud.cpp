@@ -414,6 +414,78 @@ bool MenusShown() {
     return want && want(0) != 0;
 }
 
+// ---- Guerrilla's fonts by name
+//
+// An interface text names its font, and the interface finds the font by that name among the game's font names
+// (0xD065D0, at most 7: 0xD06540(name, font) adds one, 0xD064D0 clears them); a name not among them gets font 0
+// (0xD065B0), the console's ug-debug, thin and small. Armageddon's start-up of its fonts (0x5621B0: at the
+// interface's start, 0x5635A0, and on a change of language, 0x5B0538) unloads every font, loads ug-debug,
+// font_body and font_header (0xD061C0(name, the interface_font pool 0x26AF470, -1)) and names them "debug",
+// "font_body" and "font_header". Guerrilla's documents also ask for font_numbers (the reticle's ammo, the
+// shop's prices, the map's numbers) and its messages for font_latin_numbers. Guerrilla's own start-up
+// (Re-Mars-tered's ui_initialize_fonts, 0x89B4D0) loads font_numbers, and names font_latin_numbers its
+// font_body and font_header_latin_numbers its font_header. So after Armageddon's start-up of its fonts, the same
+// here: font_numbers (Armageddon ships it, Guerrilla's file byte for byte, in interface.vpp_pc, and never loads
+// it) loaded into the same pool and named, and the two latin names given Armageddon's font_body and font_header
+// as they stand (0x110AB00, 0x110AAFC, per language). That makes 5 fonts of the 9 the game takes (0xA456FE) and
+// 7 names of its 7. The pool (1.125 MB, 0xA4744F) is checked for room first (a mempool: its size at +0x44, what
+// is used at +0x4C); without room the numbers stay in ug-debug and the log says so.
+using FontLoadFn = int(__cdecl*)(const char* name, void* pool, int);
+using FontNameFn = int(__cdecl*)(const char* name, int font);
+using FontLookupFn = int(__cdecl*)(const char* name);
+using FontStartFn = void(__cdecl*)();
+auto const FontLoad = reinterpret_cast<FontLoadFn>(0xD061C0);      // the font's number, -1 if it didn't load
+auto const FontName = reinterpret_cast<FontNameFn>(0xD06540);      // the name's place, -1 if the 7 are taken
+auto const FontLookup = reinterpret_cast<FontLookupFn>(0xD065D0);  // the name's place, -1 if it isn't named
+BYTE* const kInterfaceFontPool = reinterpret_cast<BYTE*>(0x26AF470);
+auto& g_gameBodyFont = *reinterpret_cast<const int*>(0x110AB00);
+auto& g_gameHeaderFont = *reinterpret_cast<const int*>(0x110AAFC);
+auto& g_fontNameCount = *reinterpret_cast<const unsigned*>(0x2DD7E90);
+constexpr DWORD kFontStart = 0x5621B0;
+constexpr size_t kFontStartPrologue = 6;      // push ebp / mov ebp,esp / sub esp,1Ch
+constexpr unsigned kNumbersFontRoom = 0x10000;  // font_numbers: its .vf3_pc 5.4 KB, its texture 43 KB, and alignment
+FontStartFn g_fontStart;
+
+unsigned FontPoolSize() { return *reinterpret_cast<const unsigned*>(kInterfaceFontPool + 0x44); }
+unsigned FontPoolUsed() { return *reinterpret_cast<const unsigned*>(kInterfaceFontPool + 0x4C); }
+
+void NameGuerrillaFonts() {
+    if (FontLookup("font_numbers") < 0) {
+        const unsigned before = FontPoolUsed();
+        if (FontPoolSize() < before || FontPoolSize() - before < kNumbersFontRoom) {
+            rfa::Log("Guerrilla's fonts: no room for font_numbers in the font pool (%u of %u bytes used); Guerrilla's "
+                     "numbers stay in the console's font", before, FontPoolSize());
+        } else {
+            const int numbers = FontLoad("font_numbers", kInterfaceFontPool, -1);
+            if (numbers < 0)
+                rfa::Log("Guerrilla's fonts: font_numbers did not load; Guerrilla's numbers stay in the console's font");
+            else if (FontName("font_numbers", numbers) < 0)
+                rfa::Log("Guerrilla's fonts: the game's font names are full; font_numbers loaded but not named");
+            else
+                rfa::Log("Guerrilla's fonts: font_numbers loaded (font %d; the font pool %u to %u of %u bytes)", numbers,
+                         before, FontPoolUsed(), FontPoolSize());
+        }
+    }
+    if (FontLookup("font_latin_numbers") < 0 && FontName("font_latin_numbers", g_gameBodyFont) < 0)
+        rfa::Log("Guerrilla's fonts: the game's font names are full; font_latin_numbers not named");
+    if (FontLookup("font_header_latin_numbers") < 0 && FontName("font_header_latin_numbers", g_gameHeaderFont) < 0)
+        rfa::Log("Guerrilla's fonts: the game's font names are full; font_header_latin_numbers not named");
+}
+
+void __cdecl FontStart() {
+    g_fontStart();
+    NameGuerrillaFonts();
+}
+
+void HookFonts() {
+    g_fontStart = reinterpret_cast<FontStartFn>(rfa::HookFunction(kFontStart, kFontStartPrologue, reinterpret_cast<void*>(&FontStart)));
+    if (!g_fontStart) {
+        rfa::Log("Guerrilla's fonts: could not hook the game's start-up of its fonts; Guerrilla's numbers stay in the console's font");
+        return;
+    }
+    if (g_fontNameCount > 0) NameGuerrillaFonts();  // the game's fonts were started before this mod
+}
+
 // ---- The mod
 
 struct Document {
@@ -549,6 +621,9 @@ struct MapIcon {
     std::string caption, description;
     bool onWorldMap = true;
     int pair = -1;          // a M.O.A.B.'s pair number (kind "bomb"), shown once its radio tags are found
+    std::string rule;       // which of Guerrilla's minimap rules it follows (GuerrillaMapIcons.MinimapRule; "" for none)
+    float worldX = 0, worldZ = 0;  // where it is in the world
+    bool done = false;             // its activity done (the campaign's; asked once a second)
 };
 std::vector<MapIcon> g_mapIcons;
 void FollowRadioTags();  // Guerrilla's radio tags (below)
@@ -600,10 +675,13 @@ void ReadMapIcons() {
         icon.kind = fields[0];
         icon.picture = fields[1];
         MapPixels(atof(fields[2].c_str()), atof(fields[3].c_str()), icon.mapX, icon.mapY);
+        icon.worldX = static_cast<float>(atof(fields[2].c_str()));
+        icon.worldZ = static_cast<float>(atof(fields[3].c_str()));
         icon.caption = fields[4];
         icon.description = fields[5];
         icon.onWorldMap = fields[6] != "0";
-        if (fields.size() >= 8) icon.pair = atoi(fields[7].c_str());
+        if (fields.size() >= 8 && !fields[7].empty()) icon.pair = atoi(fields[7].c_str());
+        if (fields.size() >= 9) icon.rule = fields[8];
         g_mapIcons.push_back(icon);
     }
     fclose(file);
@@ -790,6 +868,34 @@ void FollowTheMapKey() {
         else if (!MenusShown()) OpenMap();
     }
     g_mapKeyDown = down;
+}
+
+// Guerrilla's minimap zoom (cartographer::change_minimap_zoom, RM 0x84E210): while the game runs and the player has
+// control, its ZOOM IN / ZOOM OUT MINIMAP keys (CBA_MINIMAP_ZOOM_IN 0x53, _OUT 0x54) take its radius in or out by 50
+// metres a second (Minimap_zoom_speed 50), from 40 to 80 (Minimap_min_radius, _max_radius: +0x16EBC); the minimap
+// then reaches that far plus half the vehicle's speed (determine_map_information_mini 0x872A24). Here its keys are
+// [GuerrillaKeys] MinimapZoomIn / MinimapZoomOut (Guerrilla's PC defaults unknown: its code is encrypted). Its zoom
+// sounds (a loop while it moves) aren't brought over yet.
+constexpr double kMinimapLeastRadius = 40.0, kMinimapMostRadius = 80.0, kMinimapZoomPerSecond = 50.0;
+double g_minimapRadius = kMinimapLeastRadius;
+auto const GamePausedNow = reinterpret_cast<bool(__cdecl*)()>(0x520260);  // Armageddon's pause count above 0
+
+void FollowMinimapZoom(double seconds) {
+    if (g_mapOpen || OurScreenOpen() || MenusShown() || !GameFocused() || GamePausedNow()) return;
+    const int in = keys::Key(keys::MinimapZoomIn), out = keys::Key(keys::MinimapZoomOut);
+    const double before = g_minimapRadius;
+    if (in && HeldDown(in)) g_minimapRadius -= kMinimapZoomPerSecond * seconds;
+    if (out && HeldDown(out)) g_minimapRadius += kMinimapZoomPerSecond * seconds;
+    g_minimapRadius = (std::max)(kMinimapLeastRadius, (std::min)(kMinimapMostRadius, g_minimapRadius));
+    if (g_minimapRadius != before && (g_minimapRadius == kMinimapLeastRadius || g_minimapRadius == kMinimapMostRadius))
+        RFA_LOG_FIRST(20, "Minimap: zoomed %s to %.0f m", g_minimapRadius == kMinimapLeastRadius ? "in" : "out", g_minimapRadius);
+}
+
+// rfg_minimap_radius() -> metres: the minimap's reach before the vehicle's speed (Guerrilla's zoom, 40 to 80).
+int __cdecl LuaMinimapRadius(rfa::game::lua_State* L) {
+    using namespace rfa::game;
+    lua_pushnumber(L, g_minimapRadius);
+    return 1;
 }
 
 // The world map's zone pictures: those of the zones under the view (nearest the middle first, at most
@@ -1032,6 +1138,7 @@ void FollowTheWorld() {
         UpdateMapView();
         if (g_mapOpen) StepFullMap(false);
         else FollowTheMapKey();
+        FollowMinimapZoom(g_hudFrameMs / 1000.0);
         FollowRadioTags();
         FollowHandbook();
         tool_tips::Step(g_hudFrameMs / 1000.0, g_player && !ObjectIsDead(g_player));
@@ -3326,7 +3433,7 @@ int __cdecl LuaMapIconCount(lua_State* L) {
     return 1;
 }
 
-// rfg_map_icon(i) -> kind, picture, map_x, map_y, caption, description, on_world_map
+// rfg_map_icon(i) -> kind, picture, map_x, map_y, caption, description, on_world_map, minimap_rule
 //   The i-th line (1 to the count) of map_icons.txt: kind "icon" (its picture, rfg_ui_map_icon_...),
 //   "place" (a named place, its name in caption), "player" (the player's icon: its picture and texts)
 //   or "text" (a hint of the world map: what it is in caption, its text in description); where it is
@@ -3345,7 +3452,282 @@ int __cdecl LuaMapIcon(lua_State* L) {
     lua_pushstring(L, icon.caption.c_str());
     lua_pushstring(L, icon.description.c_str());
     lua_pushboolean(L, icon.onWorldMap);
-    return 7;
+    lua_pushstring(L, icon.rule.c_str());
+    return 8;
+}
+
+// rfg_map_radio_tags(reach) -> count, and rfg_map_radio_tag(i) -> map_x, map_y
+//   Guerrilla's radio tags the minimap shows (cartographer::collect_bftp_nodes, RM 0x86D450): those not found yet
+//   within `reach` metres of the player (its zoom radius), on Guerrilla's world map picture in its pixels.
+std::vector<std::pair<double, double>> g_tagsInReach;
+
+int __cdecl LuaMapRadioTags(lua_State* L) {
+    using namespace rfa::game;
+    g_tagsInReach.clear();
+    BYTE* player = g_player;
+    const double reach = lua_tonumber(L, 1);
+    if (player && InOurWorld()) {
+        const float* at = reinterpret_cast<const float*>(player + 4);
+        for (const RadioTag& node : g_radioTags) {
+            if (!node.tag || g_tagsFound.count(node.pair)) continue;
+            const double dx = node.x - at[0], dz = node.z - at[2];
+            if (dx * dx + dz * dz > reach * reach) continue;
+            double mapX = 0, mapY = 0;
+            MapPixels(node.x, node.z, mapX, mapY);
+            g_tagsInReach.push_back({mapX, mapY});
+        }
+    }
+    lua_pushnumber(L, static_cast<double>(g_tagsInReach.size()));
+    return 1;
+}
+
+int __cdecl LuaMapRadioTag(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_tagsInReach.size())) return 0;
+    lua_pushnumber(L, g_tagsInReach[index].first);
+    lua_pushnumber(L, g_tagsInReach[index].second);
+    return 2;
+}
+
+// ---- Guerrilla's minimap: what other mods give it
+//
+// Looked up by name in each mod's DLL as it's asked for (an older DLL without one: nothing of it, quietly).
+//   guerrilla_campaign: GuerrillaCampaign_Running (an activity running: Guerrilla hides the activities' starts, and the
+//     important buildings aren't pinned to the rim), GuerrillaCampaign_ActivityDoneAt (an activity's start done: its icon
+//     grey, Completed_icon_color);
+//   guerrilla_world: GuerrillaWorld_Buildings (the buildings in a 250 m box, gathered once a second as Guerrilla's
+//     collect_structures 0x872E80: the important EDF ones' icons, phigh / pmedium, and their health "NN%" for 3 s after
+//     damage, render_bldg_icons 0x86F4D0, render_structures_post 0x86FF50);
+//   guerrilla_gear: GuerrillaGear_PlacedExplosives (remote charges, mines, singularity bombs inside the radius:
+//     collect_projectiles 0x86D000, render_projectiles 0x85FCC0);
+//   guerrilla_people: GuerrillaPeople_MapMarkers (squads' icons, the player's allies' stars, morale's converts).
+struct GuerrillaWorldBuilding {
+    DWORD handle, parent;
+    char chunk[64];
+    int importance;       // -1 unknown, 0 none, 1 low, 2 medium, 3 high
+    int team;             // -1 none, 0 guerrilla, 1 EDF, 2 civilian, 3 marauder
+    float destroyedAt;    // health = 1 - min(1, damage / destroyedAt)
+    float position[3], turn[9], boundsMin[3], boundsMax[3];
+    float damage;
+    int msSinceDamaged;   // -1 never
+    int destroyed;
+};
+static_assert(sizeof(GuerrillaWorldBuilding) == 168, "guerrilla_world's building is 168 bytes");
+struct GuerrillaGearExplosive {
+    float x, y, z;
+    int kind;             // 0 a remote charge, 1 a mine, 2 a singularity bomb
+    int stuck;
+    int players;
+};
+static_assert(sizeof(GuerrillaGearExplosive) == 24, "guerrilla_gear's explosive is 24 bytes");
+struct GuerrillaPeopleMarker {
+    DWORD handle;
+    float x, y, z;
+    const char* icon;     // a picture of minimap_icon_info.xtbl (without our rfg_)
+    int placement;        // 0 plain, 1 sticky, 2 closest sticky, 3 a convert's pop
+    DWORD color;          // 0xAARRGGBB, 0 for the picture's own
+    int ageMs;            // a convert's pop: ms since it began; -1 for the others
+};
+static_assert(sizeof(GuerrillaPeopleMarker) == 32, "guerrilla_people's marker is 32 bytes");
+
+FARPROC ModExport(const wchar_t* dll, const char* name) {
+    HMODULE module = GetModuleHandleW(dll);
+    return module ? GetProcAddress(module, name) : nullptr;
+}
+
+using CampaignRunningFn = int(__cdecl*)(int* activityMode, int* mission);
+using CampaignDoneAtFn = int(__cdecl*)(float x, float z);
+using WorldBuildingsFn = int(__cdecl*)(float x, float z, float halfSize, GuerrillaWorldBuilding* out, int most);
+using GearExplosivesFn = int(__cdecl*)(GuerrillaGearExplosive* out, int most);
+using PeopleMarkersFn = int(__cdecl*)(GuerrillaPeopleMarker* out, int capacity);
+
+// Whether an activity runs, and whether a mission does (the campaign's; neither without it).
+void CampaignRunning(bool& activity, bool& mission) {
+    static auto running = reinterpret_cast<CampaignRunningFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_Running"));
+    activity = mission = false;
+    if (!running) return;
+    int mode = 0, missionOn = 0;
+    activity = running(&mode, &missionOn) != 0;
+    mission = missionOn != 0;
+}
+
+// The activities' starts done, asked of the campaign once a second.
+void FollowActivitiesDone() {
+    static auto doneAt = reinterpret_cast<CampaignDoneAtFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_ActivityDoneAt"));
+    static ULONGLONG askedAt = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!doneAt || (askedAt != 0 && now - askedAt < 1000)) return;
+    askedAt = now;
+    for (MapIcon& icon : g_mapIcons)
+        if (!icon.rule.empty() && icon.rule != "safehouse" && icon.rule != "mission") icon.done = doneAt(icon.worldX, icon.worldZ) != 0;
+}
+
+// The important EDF buildings in Guerrilla's 250 m box, gathered once a second.
+struct MinimapBuilding {
+    double mapX = 0, mapY = 0;
+    int importance = 0;       // 2 medium, 3 high
+    int health = 100;         // per cent
+    int msSinceDamaged = -1;  // at the gathering (-1 never)
+};
+std::vector<MinimapBuilding> g_minimapBuildings;
+ULONGLONG g_buildingsGatheredAt = 0;
+constexpr float kBuildingsHalfBox = 125.0f;  // Guerrilla's 250 m box
+
+void GatherBuildings() {
+    static auto buildings = reinterpret_cast<WorldBuildingsFn>(ModExport(L"guerrilla_world.dll", "GuerrillaWorld_Buildings"));
+    const ULONGLONG now = GetTickCount64();
+    if (!buildings || (g_buildingsGatheredAt != 0 && now - g_buildingsGatheredAt < 1000)) return;
+    g_buildingsGatheredAt = now;
+    g_minimapBuildings.clear();
+    BYTE* player = g_player;
+    if (!player) return;
+    const float* at = reinterpret_cast<const float*>(player + 4);
+    static std::vector<GuerrillaWorldBuilding> found(256);
+    const int count = (std::min)(buildings(at[0], at[2], kBuildingsHalfBox, found.data(), static_cast<int>(found.size())),
+                                 static_cast<int>(found.size()));
+    for (int i = 0; i < count; ++i) {
+        const GuerrillaWorldBuilding& b = found[i];
+        // get_structure_importance_icon (RM 0x862D30): a living EDF building of medium or high importance, not a piece.
+        if (b.destroyed || b.team != 1 || b.importance < 2 || (b.parent != 0 && b.parent != 0xFFFFFFFF)) continue;
+        MinimapBuilding m;
+        MapPixels(b.position[0], b.position[2], m.mapX, m.mapY);
+        m.importance = b.importance;
+        const double broken = b.destroyedAt > 0 ? (std::min)(1.0, static_cast<double>(b.damage) / b.destroyedAt) : 0.0;
+        m.health = static_cast<int>(100.0 * (1.0 - broken) + 0.5);
+        m.msSinceDamaged = b.msSinceDamaged;
+        g_minimapBuildings.push_back(m);
+    }
+}
+
+// rfg_activity_running() -> activity, mission: whether an activity runs now, and a mission (the campaign's; false
+//   without it).
+int __cdecl LuaActivityRunning(lua_State* L) {
+    using namespace rfa::game;
+    bool activity = false, mission = false;
+    CampaignRunning(activity, mission);
+    lua_pushboolean(L, activity);
+    lua_pushboolean(L, mission);
+    return 2;
+}
+
+// rfg_map_icon_done(i) -> whether the i-th line of map_icons.txt is an activity's start that is done (its icon grey).
+int __cdecl LuaMapIconDone(lua_State* L) {
+    using namespace rfa::game;
+    FollowActivitiesDone();
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    lua_pushboolean(L, index >= 0 && index < static_cast<int>(g_mapIcons.size()) && g_mapIcons[index].done);
+    return 1;
+}
+
+// rfg_map_buildings() -> count, and rfg_map_building(i) -> map_x, map_y, importance (2 medium, 3 high), health (%),
+//   ms since it was last damaged (-1 never): the important EDF buildings around the player (guerrilla_world's).
+int __cdecl LuaMapBuildings(lua_State* L) {
+    using namespace rfa::game;
+    GatherBuildings();
+    lua_pushnumber(L, static_cast<double>(g_minimapBuildings.size()));
+    return 1;
+}
+
+int __cdecl LuaMapBuilding(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_minimapBuildings.size())) return 0;
+    const MinimapBuilding& b = g_minimapBuildings[index];
+    lua_pushnumber(L, b.mapX);
+    lua_pushnumber(L, b.mapY);
+    lua_pushnumber(L, b.importance);
+    lua_pushnumber(L, b.health);
+    lua_pushnumber(L, b.msSinceDamaged < 0 ? -1.0 : static_cast<double>(b.msSinceDamaged + (GetTickCount64() - g_buildingsGatheredAt)));
+    return 5;
+}
+
+// rfg_map_explosives(reach) -> count, and rfg_map_explosive(i) -> map_x, map_y, kind (0 charge, 1 mine, 2 singularity
+//   bomb), stuck: the placed explosives within `reach` metres of the player (guerrilla_gear's; everyone's, as Guerrilla).
+struct MinimapExplosive { double mapX, mapY; int kind; bool stuck; };
+std::vector<MinimapExplosive> g_minimapExplosives;
+
+int __cdecl LuaMapExplosives(lua_State* L) {
+    using namespace rfa::game;
+    static auto explosives = reinterpret_cast<GearExplosivesFn>(ModExport(L"guerrilla_gear.dll", "GuerrillaGear_PlacedExplosives"));
+    g_minimapExplosives.clear();
+    BYTE* player = g_player;
+    const double reach = lua_tonumber(L, 1);
+    if (explosives && player && InOurWorld()) {
+        static GuerrillaGearExplosive found[64];
+        const int count = (std::min)(explosives(found, 64), 64);
+        const float* at = reinterpret_cast<const float*>(player + 4);
+        for (int i = 0; i < count; ++i) {
+            const double dx = found[i].x - at[0], dz = found[i].z - at[2];
+            if (dx * dx + dz * dz > reach * reach) continue;
+            MinimapExplosive e{};
+            MapPixels(found[i].x, found[i].z, e.mapX, e.mapY);
+            e.kind = found[i].kind;
+            e.stuck = found[i].stuck != 0;
+            g_minimapExplosives.push_back(e);
+        }
+    }
+    lua_pushnumber(L, static_cast<double>(g_minimapExplosives.size()));
+    return 1;
+}
+
+int __cdecl LuaMapExplosive(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_minimapExplosives.size())) return 0;
+    const MinimapExplosive& e = g_minimapExplosives[index];
+    lua_pushnumber(L, e.mapX);
+    lua_pushnumber(L, e.mapY);
+    lua_pushnumber(L, e.kind);
+    lua_pushboolean(L, e.stuck);
+    return 4;
+}
+
+// rfg_map_markers() -> count, and rfg_map_marker(i) -> map_x, map_y, picture (rfg_...), placement (0 plain, 1 sticky,
+//   2 closest sticky, 3 a convert's pop), r, g, b (-1 for the picture's own colour), age ms (-1 for none): the people's
+//   map markers (guerrilla_people's).
+struct MinimapMarker { double mapX, mapY; std::string picture; int placement; int r, g, b; int ageMs; };
+std::vector<MinimapMarker> g_minimapMarkers;
+
+int __cdecl LuaMapMarkers(lua_State* L) {
+    using namespace rfa::game;
+    static auto markers = reinterpret_cast<PeopleMarkersFn>(ModExport(L"guerrilla_people.dll", "GuerrillaPeople_MapMarkers"));
+    g_minimapMarkers.clear();
+    if (markers && InOurWorld()) {
+        static GuerrillaPeopleMarker found[64];
+        const int count = (std::min)(markers(found, 64), 64);
+        for (int i = 0; i < count; ++i) {
+            if (!found[i].icon || !found[i].icon[0]) continue;
+            MinimapMarker m{};
+            MapPixels(found[i].x, found[i].z, m.mapX, m.mapY);
+            m.picture = std::string("rfg_") + found[i].icon;
+            m.placement = found[i].placement;
+            const DWORD c = found[i].color;
+            m.r = c ? static_cast<int>((c >> 16) & 0xFF) : -1;
+            m.g = c ? static_cast<int>((c >> 8) & 0xFF) : -1;
+            m.b = c ? static_cast<int>(c & 0xFF) : -1;
+            m.ageMs = found[i].ageMs;
+            g_minimapMarkers.push_back(m);
+        }
+    }
+    lua_pushnumber(L, static_cast<double>(g_minimapMarkers.size()));
+    return 1;
+}
+
+int __cdecl LuaMapMarker(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (index < 0 || index >= static_cast<int>(g_minimapMarkers.size())) return 0;
+    const MinimapMarker& m = g_minimapMarkers[index];
+    lua_pushnumber(L, m.mapX);
+    lua_pushnumber(L, m.mapY);
+    lua_pushstring(L, m.picture.c_str());
+    lua_pushnumber(L, m.placement);
+    lua_pushnumber(L, m.r);
+    lua_pushnumber(L, m.g);
+    lua_pushnumber(L, m.b);
+    lua_pushnumber(L, m.ageMs);
+    return 8;
 }
 
 // rfg_map_icon_shown(i) -> whether the i-th line of map_icons.txt is shown now: a M.O.A.B. ("bomb") once
@@ -3817,6 +4199,15 @@ int __cdecl LuaMapSweepClock(lua_State* L) {
     return 1;
 }
 
+// rfg_key_down(code) -> whether that key (a virtual-key code) is held now, and the game's window has the focus: for
+//   the reticle's script, which tells a reload's start by Armageddon's reload key (R) as nothing in its HUD's data says.
+int __cdecl LuaKeyDown(lua_State* L) {
+    using namespace rfa::game;
+    const int code = static_cast<int>(lua_tonumber(L, 1));
+    lua_pushboolean(L, code > 0 && code < 256 && GameFocused() && (GetAsyncKeyState(code) & 0x8000) != 0);
+    return 1;
+}
+
 // rfg_sin_cos(angle) -> sine, cosine (radians): the game's Lua has no math library, and the sweep needs where each
 // blip is on the turned minimap.
 int __cdecl LuaSinCos(lua_State* L) {
@@ -3891,6 +4282,18 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_map_blip", LuaMapBlip);
     rfa::game::lua_register(L, "rfg_map_sweep_clock", LuaMapSweepClock);
     rfa::game::lua_register(L, "rfg_sin_cos", LuaSinCos);
+    rfa::game::lua_register(L, "rfg_key_down", LuaKeyDown);
+    rfa::game::lua_register(L, "rfg_minimap_radius", LuaMinimapRadius);
+    rfa::game::lua_register(L, "rfg_map_radio_tags", LuaMapRadioTags);
+    rfa::game::lua_register(L, "rfg_map_radio_tag", LuaMapRadioTag);
+    rfa::game::lua_register(L, "rfg_activity_running", LuaActivityRunning);
+    rfa::game::lua_register(L, "rfg_map_icon_done", LuaMapIconDone);
+    rfa::game::lua_register(L, "rfg_map_buildings", LuaMapBuildings);
+    rfa::game::lua_register(L, "rfg_map_building", LuaMapBuilding);
+    rfa::game::lua_register(L, "rfg_map_explosives", LuaMapExplosives);
+    rfa::game::lua_register(L, "rfg_map_explosive", LuaMapExplosive);
+    rfa::game::lua_register(L, "rfg_map_markers", LuaMapMarkers);
+    rfa::game::lua_register(L, "rfg_map_marker", LuaMapMarker);
 }
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -3972,6 +4375,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_loadStart = reinterpret_cast<LoadStartFn>(rfa::HookFunction(kLoadStart, kLoadStartPrologue, reinterpret_cast<void*>(&LoadStart)));
     if (!g_loadStart) rfa::Log("Could not hook the start of level loads; a reload may crash when the HUD unloads a map picture after it");
     HookUsableItems();
+    HookFonts();
     std::string documents, worlds;
     for (const Document& doc : g_documents) documents += (documents.empty() ? "" : ", ") + doc.name;
     for (const std::string& world : g_worlds) worlds += (worlds.empty() ? "" : ", ") + world;

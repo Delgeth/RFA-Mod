@@ -85,6 +85,8 @@ cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\*.cpp" /Fe"%OUT%\mods\guerrilla
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_save\guerrilla_save.cpp" /Fe"%OUT%\mods\guerrilla_save.dll" /link /IMPLIB:guerrilla_save.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_campaign.dll: Guerrilla's alert level (and, being made, the rest of its campaign's systems).
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_campaign\*.cpp" /Fe"%OUT%\mods\guerrilla_campaign.dll" /link /IMPLIB:guerrilla_campaign.lib >> "%LOG%" 2>&1 || goto :fail
+rem guerrilla_kiosks.dll: Guerrilla's EDF news kiosks (their screens; the broadcast's voice and music next).
+cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_kiosks\*.cpp" /Fe"%OUT%\mods\guerrilla_kiosks.dll" /link /IMPLIB:guerrilla_kiosks.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_gear.dll: Guerrilla's weapons' room, hammer and movement, and its upgrades' F7 window (ImGui).
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_gear\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_gear.dll" /link /IMPLIB:guerrilla_gear.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_hud's scripts, which editor\GuerrillaBuilder.exe packs with Guerrilla's HUD documents.

@@ -24,7 +24,8 @@ static class TableCheck
 {
     sealed record Problem(string Kind, string Path, string Entry, string Detail)
     {
-        public string Signature => Kind + " " + Path;
+        /// <summary>What makes two problems the same: the kind and field, and for a flag or a choice the value too (each value reported apart).</summary>
+        public string Signature => Kind is "unknown flag in" or "not a choice of" ? Kind + " " + Path + " " + Detail : Kind + " " + Path;
 
         /// <summary>
         /// A missing required field always stops the game's reader ("Could not find required attribute",
@@ -78,7 +79,7 @@ static class TableCheck
                 }
 
             var problems = table.Entries.SelectMany(e => CheckEntry(e, table.Description.Children))
-                                        .Where(p => !allowed.Contains(p.Signature)).ToList();
+                                        .Where(p => !allowed.Contains(p.Signature) && !GameReaderKnows(name, p)).ToList();
             if (problems.Count == 0) continue;
             var stopping = problems.Where(p => p.Stops).ToList();
             var others = problems.Where(p => !p.Stops).ToList();
@@ -221,6 +222,34 @@ static class TableCheck
     }
 
     static string Relative(Setup setup, string file) => Path.GetRelativePath(setup.ModFolder, file);
+
+    /// <summary>
+    /// Flags whose names the game's own reader takes though the table's description doesn't list them (the
+    /// descriptions are older than the game's name lists), by table and field:
+    /// - gameplay_properties.xtbl chunk_flags: the reader's name list (0x24577B0, made at start-up at 0xF38E20), bits
+    ///   0x1 to 0x200000 in this order;
+    /// - level_objects.xtbl's script point effects' Flags: the reader's list at 0x1101514 (read at 0x7ADD9D), bits 0x1
+    ///   to 0x100 in this order.
+    /// </summary>
+    static readonly Dictionary<(string Table, string Field), HashSet<string>> GameFlagNames = new()
+    {
+        [("gameplay_properties.xtbl", "chunk_flags")] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "casts_shadows", "regenerate", "show_on_map", "prevent_anchor", "disable_collapse_effect", "casts_drop_shadows", "regrow_on_stream",
+            "inherit_damage_pct", "invulnerable", "plume_on_death", "one_of_many", "mining", "supply_crate", "touch_terrain", "kiosk", "propaganda",
+            "no_cover", "building", "no_physics", "no_melt_in_magma", "light_as_vehicle", "show_red_reticule",
+        },
+        [("level_objects.xtbl", "Inherited_Attributes/Script_Point_Effects/Script_Point_Effect/Flags")] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Stop Custom on Detach", "Kill on Detach", "Prefix Effect No Loop", "No Bullet Damage", "No Melee Damage", "Kiosk Large Screen",
+            "Kiosk Small Screen", "Night Only", "Kill on Move",
+        },
+    };
+
+    /// <summary>A flag the description doesn't list but the game's own reader takes by that name (<see cref="GameFlagNames"/>).</summary>
+    static bool GameReaderKnows(string table, Problem problem) =>
+        problem.Kind == "unknown flag in" && GameFlagNames.TryGetValue((table.ToLowerInvariant(), problem.Path), out var names) &&
+        names.Contains(problem.Detail.Trim('"'));
 
     /// <summary>Tables the parts write under a name of their own, and the game's table each copies.</summary>
     static readonly Dictionary<string, string> RenamedTables = new(StringComparer.OrdinalIgnoreCase)

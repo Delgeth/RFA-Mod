@@ -222,6 +222,22 @@ const char* Unusable(Car& car, BYTE* vehicle, int now) {
     return now - car.flippedSince >= 1500 ? "it's flipped" : nullptr;
 }
 
+// Whether the game has asked one of the car's people out of his seat: npc +0x1554 bit 21, Guerrilla's npc_flags
+// force_out_of_vehicle (+0xD04 bit 18; Armageddon's word has three more bits first, as tied_up's 2 → 5).
+constexpr DWORD kNpcFlags = 0x1554, kForceOutOfVehicle = 1u << 21;
+bool AskedOut(const Car& car) {
+    for (const Person& person : car.people)
+        if (BYTE* human = HumanByHandle(kWorld, nullptr, person.handle))
+            if (VehicleOf(human) == car.vehicle && (*reinterpret_cast<const DWORD*>(human + kNpcFlags) & kForceOutOfVehicle)) return true;
+    return false;
+}
+
+const char* VehicleNameOf(const BYTE* vehicle) {
+    const BYTE* entry = vehicle ? *reinterpret_cast<const BYTE* const*>(vehicle + 0x3DA8) : nullptr;  // its vehicles.xtbl entry, the name first
+    const char* name = entry ? *reinterpret_cast<const char* const*>(entry) : nullptr;
+    return name && *name ? name : "a car";
+}
+
 // Gives the car and its people back to the game: its people as they were before (their AI no longer
 // told to sit frames out once the car isn't ours).
 void HandBack(Car& car, BYTE* vehicle) {
@@ -403,6 +419,18 @@ void TrafficFrame() {
                 continue;
             }
         }
+        // Someone asked out of his seat (force_out_of_vehicle: the game sets it in its vi_request_npc_exit when another
+        // takes his seat, the player getting in above all): Guerrilla's AI then gets him out (get_out_of_vehicle_goal,
+        // RM 0x5EA660, the highest fitness while it's set), which it can't while he sits frames out. So the car is the
+        // game's from now on, stopped, and he gets out with his exit, as in Guerrilla.
+        if (AskedOut(*car)) {
+            RFA_LOG_FIRST(40, "Traffic: someone in %s is asked out of his seat (another takes it): the car is the game's from now on, and he gets out",
+                          VehicleNameOf(vehicle));
+            StopCar(vehicle);
+            HandBack(*car, vehicle);
+            car = g_cars.erase(car);
+            continue;
+        }
         for (const Person& person : car->people)
             if (BYTE* human = HumanByHandle(kWorld, nullptr, person.handle)) SitOut(human);
         if (!seated || !Driving(driver)) {
@@ -510,6 +538,7 @@ void __cdecl SpawnNodeFrame() {
     gv::EdfFrame();
     gv::ChasesFrame();
     gv::SafehousesFrame();
+    gv::RidersFrame();
 }
 
 }  // namespace

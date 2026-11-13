@@ -394,6 +394,8 @@ static class Parts
         // Its music (so far the format test's bank and list).
         foreach (string line in GuerrillaSoundBanks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder, GuerrillaMusic.Part)) yield return line;
         if (File.Exists(Path.Combine(setup.WorldFolder, GuerrillaMusic.TestList))) File.Delete(Path.Combine(setup.WorldFolder, GuerrillaMusic.TestList));
+        // Its kiosks: the guerrilla_kiosks mod's tables and list.
+        foreach (string line in GuerrillaKiosks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder)) yield return line;
     }
 
     /// <summary>

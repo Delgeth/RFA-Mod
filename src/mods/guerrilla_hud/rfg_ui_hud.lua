@@ -24,8 +24,8 @@
 --     rfg_map_blips), each fading behind Guerrilla's radar sweep, a ring growing on each person it passes;
 --   - over them, not turned, the sweep's line moving down the minimap (see SWEEP_PIXELS_PER_SECOND);
 --   - the frame on top: the document's own map element, which GuerrillaBuilder.exe made a picture.
--- How far the minimap shows is Guerrilla's: 40 metres from the player to the frame's edge, and half
--- the vehicle's speed more while driving. Where the player is, which way the camera looks and which
+-- How far the minimap shows is Guerrilla's: 40 to 80 metres from the player to the frame's edge, by
+-- its zoom keys (the mod's rfg_minimap_radius), and half the vehicle's speed more while driving. Where the player is, which way the camera looks and which
 -- zone pictures are loaded, the mod tells this script through rfg_map_view() and rfg_map_tiles().
 --
 -- The district's name is shown as Guerrilla's HUD shows it when the player enters another district
@@ -42,12 +42,51 @@ local MAP_PIXELS = 1024                 -- Guerrilla's world map picture
 local ZONE_PIXELS = MAP_PIXELS / 12     -- a zone on it (columns and rows 2 to 13)
 local ZONE_METRES = 511
 local TILE_PIXELS = 512                 -- a zone's own picture
-local RADIUS = 40                       -- Guerrilla's minimap: metres from the player to the frame's edge
+local RADIUS = 40                       -- Guerrilla's minimap: metres from the player to the frame's edge (zoomed in)
 local SPEED_RADIUS = 0.5                -- and this much more per m/s of the vehicle's speed
 local TILES = 9
 local ICONS = 24                        -- icons shown at once (the nearest first come first)
 local ICON_SCALE = 0.55                 -- Guerrilla's map icons are 40 x 40 pictures
-local ICON_REACH = 1.5                  -- icons drawn this many radii out (the octagon's corners are 1.41)
+-- Guerrilla's map icons on its minimap (cartographer::render_sticky_icons RM 0x878180, the activities' start icons;
+-- the mod's GuerrillaMapIcons gives each its rule): a "sticky" one (a safehouse, a mission's start, a M.O.A.B.) further
+-- than 0.9 of the radius sits on the rim, pointing the way; the others (the activities' starts) show only inside the
+-- radius. Only the nearest safehouse shows, at any distance; a mission's start within 250 m; a M.O.A.B. within 1000 m
+-- (any sticky icon but a safehouse). A demolitions master's start only at a green alert; an area defense's, riding
+-- shotgun's and house arrest's at green or yellow, a house arrest's only 80 m or more away; a raid's and Guerrilla
+-- Express's at any. Not yet: their hiding while an activity or mission runs, and grey once done (the campaign's).
+local STICKY_RIM = 0.9
+local STICKY_MOST_METRES = 1000
+local MISSION_START_METRES = 250
+local HOUSE_ARREST_LEAST_METRES = 80
+local ALERT_GREEN_MOST, ALERT_YELLOW_MOST = 25, 50   -- rfg_alert's value: 0-25 green, to 50 yellow
+-- The north marker on the minimap's rim, where north is (render_north 0x862020: ui_map_icon_north along the overlay).
+local NORTH_RIM = 80                    -- frame units from the middle: the octagon's edge
+-- Guerrilla's radio tags not found yet within the radius (collect_bftp_nodes 0x86D450, render_blast_from_the_past_tags
+-- 0x860310): a green ring (ui_map_icon_blip, 64 255 64) of +-3.5 at the minimap's scale, growing and fading over 750 ms
+-- of every 3 s.
+local TAGS = 8
+local TAG_RING_UNITS = 2 * 3.5 * 1.5    -- across, at its biggest
+local TAG_RING_SECONDS, TAG_RING_EVERY = 0.75, 3.0
+local TAG_RING_COLOUR = { 64, 255, 64 }
+-- What other mods give the minimap (the mod's rfg_map_* calls; nothing of one whose mod is older):
+--   the campaign: an activity running hides the activities' starts (and doesn't pin the important buildings), a mission
+--   hides the safehouse and missions' starts; a start done is grey (Completed_icon_color 130 130 130);
+--   the world: the important EDF buildings around (render_bldg_icons 0x86F4D0: ui_map_icon_phigh / _pmedium), pinned to
+--   the rim while no activity or mission runs, else only inside the radius;
+--   the gear: placed explosives inside the radius (render_projectiles 0x85FCC0: ui_map_icon_blip 2.5 across and a ring
+--   growing to 7.5 every 0.5 s; a remote charge white and ringed when stuck, else faint grey; a mine orange; a
+--   singularity bomb teal);
+--   the people: their markers (a squad's icon, the player's allies' blue stars, morale's converts' gold heads): plain,
+--   sticky, closest sticky (only the 3 nearest), or a convert's 0.5 s pop.
+local DONE_COLOUR = { 130, 130, 130 }
+local BUILDINGS = 12
+local EXPLOSIVES = 8
+local EXPLOSIVE_UNITS, EXPLOSIVE_RING_UNITS, EXPLOSIVE_RING_SECONDS = 2.5, 7.5, 0.5
+local EXPLOSIVE_COLOURS = { [0] = { 255, 255, 255 }, { 255, 128, 0 }, { 0, 128, 128 } }
+local LOOSE_CHARGE_ALPHA = 0.35
+local MARKERS = 16
+local CLOSEST_STICKY_MOST = 3
+local CONVERT_POP_MS = 500
 -- Guerrilla's blips (its render_humans and render_vehicles): a person is its dot picture drawn 12 units
 -- across, smaller as the minimap zooms out (down to 0.75 of that at its widest, 80 metres); a vehicle is
 -- its marker picture drawn as a square 9.75 metres wide in the world, turned as the vehicle is.
@@ -115,6 +154,15 @@ local Icon_shown = {}                   -- the picture each icon element shows, 
 local Blip_handles = {}
 local Blip_shown = {}                   -- what each blip element shows (its kind and colour), or nil while hidden
 local Blips_on = true
+local Has_zoom = false					-- the mod has Guerrilla's minimap zoom (rfg_minimap_radius)
+local Has_tags = false					-- the mod gives the radio tags (rfg_map_radio_tags)
+local Has_others = false				-- the mod asks the other mods (rfg_map_buildings, ...)
+local Icon_tint = {}					-- the tint each icon element shows ("done" or "own")
+local Building_handles, Building_shown = {}, {}
+local Explosive_handles, Explosive_rings, Explosive_shown = {}, {}, {}
+local Marker_handles, Marker_shown = {}, {}
+local Tag_handles = {}
+local Tag_shown = {}
 local Ring_handles = {}
 local Ring_shown = {}                   -- the colour each ring element shows, or nil while hidden
 local Sweep = { on = false, position = 0, clock = nil, handle = nil, pixels = FRAME, checked = 0, check_at = 5, least_alpha = 0 }
@@ -226,9 +274,9 @@ local function build_map()
 	-- over the map, each kept upright as the map turns.
 	if rfg_map_icon_count ~= nil then
 		for i = 1, rfg_map_icon_count() do
-			local kind, image, x, y = rfg_map_icon(i)
+			local kind, image, x, y, caption, description, on_world_map, rule = rfg_map_icon(i)
 			if kind == "icon" or kind == "bomb" then	-- a M.O.A.B. only once its radio tags are found
-				Icons[#Icons + 1] = { picture = image, x = x, y = y, index = i, bomb = kind == "bomb" }
+				Icons[#Icons + 1] = { picture = image, x = x, y = y, index = i, bomb = kind == "bomb", rule = rule or "" }
 			end
 		end
 	end
@@ -248,6 +296,54 @@ local function build_map()
 		vint_set_property(Blip_handles[i], "visible", false)
 		vint_set_property(Blip_handles[i], "auto_offset", "c")
 		vint_set_property(Blip_handles[i], "depth", -1)
+	end
+
+	-- Guerrilla's radio tags' rings, under the blips.
+	Has_tags = _GetAnyGlobalSilent("rfg_map_radio_tags") ~= nil
+	if Has_tags then
+		for i = 1, TAGS do
+			Tag_handles[i] = picture("rfg_minimap_tag" .. i, turn, "rfg_ui_map_icon_blip")
+			vint_set_property(Tag_handles[i], "visible", false)
+			vint_set_property(Tag_handles[i], "auto_offset", "c")
+			vint_set_property(Tag_handles[i], "tint", TAG_RING_COLOUR[1], TAG_RING_COLOUR[2], TAG_RING_COLOUR[3])
+			vint_set_property(Tag_handles[i], "depth", 0)
+		end
+	end
+	-- What other mods give: the important buildings, the explosives (with their rings) and the people's markers.
+	Has_others = _GetAnyGlobalSilent("rfg_map_buildings") ~= nil
+	if Has_others then
+		for i = 1, BUILDINGS do
+			Building_handles[i] = make("rfg_minimap_building" .. i, "bitmap", turn)
+			vint_set_property(Building_handles[i], "visible", false)
+			vint_set_property(Building_handles[i], "auto_offset", "c")
+			vint_set_property(Building_handles[i], "scale", ICON_SCALE, ICON_SCALE)
+		end
+		for i = 1, EXPLOSIVES do
+			Explosive_rings[i] = picture("rfg_minimap_explosive_ring" .. i, turn, "rfg_ui_map_icon_ring")
+			vint_set_property(Explosive_rings[i], "visible", false)
+			vint_set_property(Explosive_rings[i], "auto_offset", "c")
+			vint_set_property(Explosive_rings[i], "depth", -4)
+			Explosive_handles[i] = make("rfg_minimap_explosive" .. i, "bitmap", turn)
+			vint_set_property(Explosive_handles[i], "visible", false)
+			vint_set_property(Explosive_handles[i], "auto_offset", "c")
+			vint_set_property(Explosive_handles[i], "depth", -4)
+		end
+		for i = 1, MARKERS do
+			Marker_handles[i] = make("rfg_minimap_marker" .. i, "bitmap", turn)
+			vint_set_property(Marker_handles[i], "visible", false)
+			vint_set_property(Marker_handles[i], "auto_offset", "c")
+			vint_set_property(Marker_handles[i], "depth", -7)
+		end
+	end
+	-- Guerrilla's north marker, on the frame's rim (not turned, not cut by the octagon).
+	if _GetAnyGlobalSilent("rfg_sin_cos") ~= nil then
+		local north = picture("rfg_minimap_north", main, "rfg_ui_map_icon_north")
+		vint_set_property(north, "auto_offset", "c")
+		vint_set_property(north, "scale", ICON_SCALE, ICON_SCALE)
+		vint_set_property(north, "depth", -2)		-- over the frame (-1)
+		Map_handles.north = north
+		Map_handles.centre_x = x + FRAME / 2
+		Map_handles.centre_y = y + FRAME / 2
 	end
 
 	-- Guerrilla's radar sweep: its line over the map, not turned with it; a ring for each person.
@@ -431,12 +527,86 @@ local function place_blips(map_x, map_y, heading, radius, scale, world_scale)
 end
 
 -- Guerrilla's icons within reach of the player, upright (the map group turns by -heading).
+-- A square root (the game's Lua has no math library): Newton's way, plenty for screen units.
+local function square_root(value)
+	if value <= 0 then
+		return 0
+	end
+	local root = value
+	if root > 1 then
+		root = value / 2
+	end
+	for i = 1, 20 do
+		root = (root + value / root) / 2
+	end
+	return root
+end
+
+local function alert_bands()
+	local green, yellow = true, true
+	if rfg_alert ~= nil then
+		local running, value = rfg_alert()
+		if running and value ~= nil then
+			green = value <= ALERT_GREEN_MOST
+			yellow = value <= ALERT_YELLOW_MOST
+		end
+	end
+	return green, yellow
+end
+
 local function place_icons(map_x, map_y, heading, radius, world_scale)
-	local reach = radius * ICON_REACH * ZONE_PIXELS / ZONE_METRES	-- in world map pixels
+	local metres = ZONE_METRES / ZONE_PIXELS		-- a world map pixel
+	local edge = FRAME / 2							-- the radius, in frame units
+	local rim = STICKY_RIM * edge
+	local green, yellow = alert_bands()
+	local activity, mission = false, false
+	if Has_others then
+		activity, mission = rfg_activity_running()
+	end
+	-- The nearest safehouse.
+	local nearest, nearest_distance = nil, nil
+	for i, icon in ipairs(Icons) do
+		if icon.rule == "safehouse" then
+			local dx, dy = icon.x - map_x, icon.y - map_y
+			local distance = dx * dx + dy * dy
+			if nearest_distance == nil or distance < nearest_distance then
+				nearest, nearest_distance = icon, distance
+			end
+		end
+	end
 	local used = 0
 	for i, icon in ipairs(Icons) do
 		local dx, dy = icon.x - map_x, icon.y - map_y
-		if used < ICONS and dx > -reach and dx < reach and dy > -reach and dy < reach and (not icon.bomb or rfg_map_icon_shown(icon.index)) then
+		local metres_squared = (dx * dx + dy * dy) * metres * metres
+		local sticky, show = false, true
+		if icon.rule == "safehouse" then
+			sticky, show = true, icon == nearest and not mission
+		elseif icon.rule == "mission" then
+			sticky, show = true, metres_squared <= MISSION_START_METRES * MISSION_START_METRES and not mission
+		elseif icon.rule ~= "" and (activity or mission) then
+			show = false		-- an activity's start, while an activity or mission runs
+		elseif icon.bomb then
+			sticky, show = true, rfg_map_icon_shown(icon.index) and metres_squared <= STICKY_MOST_METRES * STICKY_MOST_METRES
+		elseif icon.rule == "demo" then
+			show = green
+		elseif icon.rule == "areadefense" or icon.rule == "shotgun" then
+			show = yellow
+		elseif icon.rule == "housearrest" then
+			show = yellow and metres_squared >= HOUSE_ARREST_LEAST_METRES * HOUSE_ARREST_LEAST_METRES
+		end
+		local x, y = dx * world_scale, dy * world_scale	-- frame units from the middle
+		if show then
+			local squared = x * x + y * y
+			if sticky then
+				if squared > rim * rim then
+					local distance = square_root(squared)
+					x, y = x * rim / distance, y * rim / distance
+				end
+			elseif squared > edge * edge then
+				show = false
+			end
+		end
+		if show and used < ICONS then
 			used = used + 1
 			local handle = Icon_handles[used]
 			if Icon_shown[used] ~= icon.picture then
@@ -446,8 +616,20 @@ local function place_icons(map_x, map_y, heading, radius, world_scale)
 				end
 				Icon_shown[used] = icon.picture
 			end
-			vint_set_property(handle, "anchor", dx * world_scale, dy * world_scale)
+			vint_set_property(handle, "anchor", x, y)
 			vint_set_property(handle, "rotation", heading)
+			local tint = "own"
+			if Has_others and icon.rule ~= "" and icon.rule ~= "safehouse" and icon.rule ~= "mission" and rfg_map_icon_done(icon.index) then
+				tint = "done"
+			end
+			if Icon_tint[used] ~= tint then
+				if tint == "done" then
+					vint_set_property(handle, "tint", DONE_COLOUR[1], DONE_COLOUR[2], DONE_COLOUR[3])
+				else
+					vint_set_property(handle, "tint", 255, 255, 255)
+				end
+				Icon_tint[used] = tint
+			end
 		end
 	end
 	for i = used + 1, ICONS do
@@ -458,9 +640,216 @@ local function place_icons(map_x, map_y, heading, radius, world_scale)
 	end
 end
 
+-- A point on the minimap (frame units from the middle): kept on the rim if sticky and further than its rim, hidden if
+-- plain and outside the radius. Gives x, y, shown.
+local function on_minimap(x, y, sticky)
+	local edge = FRAME / 2
+	local rim = STICKY_RIM * edge
+	local squared = x * x + y * y
+	if sticky then
+		if squared > rim * rim then
+			local distance = square_root(squared)
+			return x * rim / distance, y * rim / distance, true
+		end
+		return x, y, true
+	end
+	return x, y, squared <= edge * edge
+end
+
+local function show_element(handles, shown, i, picture)
+	local handle = handles[i]
+	if shown[i] ~= picture then
+		vint_set_property(handle, "image", picture)
+		if shown[i] == nil then
+			vint_set_property(handle, "visible", true)
+		end
+		shown[i] = picture
+	end
+	return handle
+end
+
+local function hide_from(handles, shown, first, most)
+	for i = first, most do
+		if shown[i] ~= nil then
+			vint_set_property(handles[i], "visible", false)
+			shown[i] = nil
+		end
+	end
+end
+
+-- The important EDF buildings (the world's), the placed explosives (the gear's) and the people's markers.
+local function place_others(map_x, map_y, heading, radius, world_scale)
+	if not Has_others then
+		return
+	end
+	local activity, mission = rfg_activity_running()
+	-- Buildings: pinned while no activity or mission runs; drawn under the plain icons then, over them otherwise.
+	local pinned = not activity and not mission
+	local used = 0
+	for i = 1, rfg_map_buildings() do
+		local bx, by, importance = rfg_map_building(i)
+		local x, y, shown = on_minimap((bx - map_x) * world_scale, (by - map_y) * world_scale, pinned)
+		if shown and used < BUILDINGS then
+			used = used + 1
+			local picture = "rfg_ui_map_icon_pmedium"
+			if importance >= 3 then
+				picture = "rfg_ui_map_icon_phigh"
+			end
+			local handle = show_element(Building_handles, Building_shown, used, picture)
+			vint_set_property(handle, "anchor", x, y)
+			vint_set_property(handle, "rotation", heading)
+			if pinned then
+				vint_set_property(handle, "depth", -6)
+			else
+				vint_set_property(handle, "depth", -4)
+			end
+		end
+	end
+	hide_from(Building_handles, Building_shown, used + 1, BUILDINGS)
+	-- Explosives inside the radius, and their rings every 0.5 s.
+	local phase = 0
+	if Sweep.clock ~= nil then
+		phase = (Sweep.clock % EXPLOSIVE_RING_SECONDS) / EXPLOSIVE_RING_SECONDS
+	end
+	used = 0
+	for i = 1, rfg_map_explosives(radius) do
+		local ex, ey, kind, stuck = rfg_map_explosive(i)
+		local x, y, shown = on_minimap((ex - map_x) * world_scale, (ey - map_y) * world_scale, false)
+		if shown and used < EXPLOSIVES then
+			used = used + 1
+			local colour = EXPLOSIVE_COLOURS[kind] or EXPLOSIVE_COLOURS[0]
+			local handle = show_element(Explosive_handles, Explosive_shown, used, "rfg_ui_map_icon_blip")
+			vint_set_property(handle, "anchor", x, y)
+			vint_set_property(handle, "scale", EXPLOSIVE_UNITS / BLIP_PIXELS, EXPLOSIVE_UNITS / BLIP_PIXELS)
+			vint_set_property(handle, "tint", colour[1], colour[2], colour[3])
+			local loose = kind == 0 and not stuck
+			if loose then
+				vint_set_property(handle, "alpha", LOOSE_CHARGE_ALPHA)
+			else
+				vint_set_property(handle, "alpha", 1)
+			end
+			local ring = Explosive_rings[used]
+			vint_set_property(ring, "visible", not loose)
+			if not loose then
+				local size = (EXPLOSIVE_UNITS + (EXPLOSIVE_RING_UNITS - EXPLOSIVE_UNITS) * phase) / BLIP_PIXELS
+				vint_set_property(ring, "anchor", x, y)
+				vint_set_property(ring, "scale", size, size)
+				vint_set_property(ring, "tint", colour[1], colour[2], colour[3])
+				vint_set_property(ring, "alpha", 1 - phase)
+			end
+		end
+	end
+	for i = used + 1, EXPLOSIVES do
+		if Explosive_shown[i] ~= nil then
+			vint_set_property(Explosive_rings[i], "visible", false)
+		end
+	end
+	hide_from(Explosive_handles, Explosive_shown, used + 1, EXPLOSIVES)
+	-- The people's markers: the closest-sticky ones only the 3 nearest.
+	local count = rfg_map_markers()
+	local closest = {}
+	for i = 1, count do
+		local mx, my, picture, placement = rfg_map_marker(i)
+		if placement == 2 then
+			local dx, dy = mx - map_x, my - map_y
+			closest[#closest + 1] = { i = i, distance = dx * dx + dy * dy }
+		end
+	end
+	local allowed = {}
+	for n = 1, CLOSEST_STICKY_MOST do
+		local best = nil
+		for j, c in ipairs(closest) do
+			if not allowed[c.i] and (best == nil or c.distance < best.distance) then
+				best = c
+			end
+		end
+		if best ~= nil then
+			allowed[best.i] = true
+		end
+	end
+	used = 0
+	for i = 1, count do
+		local mx, my, picture, placement, r, g, b, age = rfg_map_marker(i)
+		if placement ~= 2 or allowed[i] then
+			local x, y, shown = on_minimap((mx - map_x) * world_scale, (my - map_y) * world_scale, placement == 1 or placement == 2)
+			if shown and used < MARKERS then
+				used = used + 1
+				local handle = show_element(Marker_handles, Marker_shown, used, picture)
+				vint_set_property(handle, "anchor", x, y)
+				vint_set_property(handle, "rotation", heading)
+				if r ~= nil and r >= 0 then
+					vint_set_property(handle, "tint", r, g, b)
+				else
+					vint_set_property(handle, "tint", 255, 255, 255)
+				end
+				if placement == 3 and age ~= nil and age >= 0 then
+					local part = age / CONVERT_POP_MS
+					if part > 1 then
+						part = 1
+					end
+					vint_set_property(handle, "scale", ICON_SCALE * (1 + 0.75 * part), ICON_SCALE * (1 + 0.75 * part))
+					vint_set_property(handle, "alpha", 1 - part)
+				else
+					vint_set_property(handle, "scale", ICON_SCALE, ICON_SCALE)
+					vint_set_property(handle, "alpha", 1)
+				end
+			end
+		end
+	end
+	hide_from(Marker_handles, Marker_shown, used + 1, MARKERS)
+end
+
+-- The radio tags not found yet within the radius: a green ring each, over 750 ms of every 3 s (by the sweep's clock,
+-- which stands still while the game is paused).
+local function place_tags(map_x, map_y, radius, world_scale)
+	local count = 0
+	if Has_tags then
+		count = rfg_map_radio_tags(radius)
+		if count > TAGS then
+			count = TAGS
+		end
+	end
+	local phase = 0
+	if Sweep.clock ~= nil then
+		phase = Sweep.clock % TAG_RING_EVERY
+	end
+	local part = phase / TAG_RING_SECONDS
+	for i = 1, TAGS do
+		local handle = Tag_handles[i]
+		if handle ~= nil and i <= count and part < 1 then
+			local x, y = rfg_map_radio_tag(i)
+			if Tag_shown[i] == nil then
+				vint_set_property(handle, "visible", true)
+				Tag_shown[i] = true
+			end
+			local size = TAG_RING_UNITS * part / BLIP_PIXELS
+			vint_set_property(handle, "anchor", (x - map_x) * world_scale, (y - map_y) * world_scale)
+			vint_set_property(handle, "scale", size, size)
+			vint_set_property(handle, "alpha", 1 - part)
+		elseif handle ~= nil and Tag_shown[i] ~= nil then
+			vint_set_property(handle, "visible", false)
+			Tag_shown[i] = nil
+		end
+	end
+end
+
+-- The north marker on the rim, where north is on the turned map.
+local function place_north(heading)
+	local north = Map_handles.north
+	if north == nil then
+		return
+	end
+	local sine, cosine = rfg_sin_cos(heading)
+	vint_set_property(north, "anchor", Map_handles.centre_x - NORTH_RIM * sine, Map_handles.centre_y - NORTH_RIM * cosine)
+end
+
 -- The map around the player: turned against the camera, scaled to the minimap's reach.
 local function place_map(map_x, map_y, heading, speed, shown)
+	-- Guerrilla's zoom: 40 to 80 metres by its keys (the mod's), then half the vehicle's speed more.
 	local radius = RADIUS
+	if Has_zoom then
+		radius = rfg_minimap_radius()
+	end
 	if In_vehicle then
 		radius = radius + SPEED_RADIUS * speed
 	end
@@ -494,6 +883,16 @@ local function place_map(map_x, map_y, heading, speed, shown)
 	end
 
 	place_icons(map_x, map_y, heading, radius, world_scale)
+	place_tags(map_x, map_y, radius, world_scale)
+	place_north(heading)
+	-- What other mods give, on their own: should it fail, the map goes on without it.
+	if Has_others then
+		local ok, problem = pcall(place_others, map_x, map_y, heading, radius, world_scale)
+		if not ok then
+			Has_others = false
+			log("the minimap's buildings, explosives and markers stopped: " .. tostring(problem), true)
+		end
+	end
 	-- The sweep's line, only while the minimap shows (Guerrilla's moved as it drew the minimap); should it fail,
 	-- the blips go on without it.
 	if Sweep.on and shown then
@@ -648,6 +1047,7 @@ end
 
 function rfg_ui_hud_init()
 	Log_on = rfa_get_setting ~= nil and rfa_get_setting("GuerrillaHud", "Log", 0) ~= 0
+	Has_zoom = _GetAnyGlobalSilent("rfg_minimap_radius") ~= nil
 	-- Guerrilla's Minimap_radar_min_alpha (0 to 255): how faint a blip gets before the sweep comes round again. Guerrilla
 	-- left it 0 (nothing sets it), so a blip fades out entirely; RadarMinAlpha= under [GuerrillaHud] keeps them showing.
 	if rfa_get_setting ~= nil then

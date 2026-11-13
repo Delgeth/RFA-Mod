@@ -34,6 +34,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <unordered_map>
 
 namespace campaign::activities {
 namespace {
@@ -139,7 +140,11 @@ Progress LoadProgress(const world::Object& node) {
     return progress;
 }
 
+// Each node's "done", for the map (NodeDone): read once at start-up, kept up to date on a win.
+std::unordered_map<unsigned, bool> g_done;
+
 void SaveProgress(unsigned node, const Progress& progress) {
+    g_done[node] = progress.completed;
     const std::string section = save::ForObject("demolitions", node);
     save::SetInt(section.c_str(), "complete", progress.completed);
     save::SetInt(section.c_str(), "discovered", progress.discovered);
@@ -472,8 +477,19 @@ Demolitions* g_demolitions;
 Activity* MakeDemolitionsMaster() {
     LoadLevels();
     world::Load();
+    int done = 0;
+    for (const world::Object* node : world::OfClass("object_demolitions_master_node")) {
+        g_done[node->handle] = LoadProgress(*node).completed;
+        done += g_done[node->handle] ? 1 : 0;
+    }
+    if (!g_done.empty()) rfa::Log("Demolitions master: %d of %u challenges done", done, static_cast<unsigned>(g_done.size()));
     g_demolitions = new Demolitions();
     return g_demolitions;
+}
+
+bool NodeDone(unsigned node) {
+    const auto found = g_done.find(node);
+    return found != g_done.end() && found->second;
 }
 
 bool StartDemolitionsMaster(const char* level) {

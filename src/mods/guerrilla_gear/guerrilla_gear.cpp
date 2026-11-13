@@ -2022,6 +2022,59 @@ void LogMeleeHits() {
     else rfa::Log("Melee hits: the player's are logged (\"Melee hit:\" lines)");
 }
 
+// ---- The guns' high-detail copies, logged (2026-11-12: does a gun he swaps to stay on its low copy?)
+//
+// A diagnostic: it changes nothing in the game. Armageddon draws an item's model with the low-detail copies of its
+// textures, and streams in its <item>_high container (the big ones, type 25) only for the player's gun as he draws
+// it (0x737250 → 0x7CFDC0, thiscall: the item; true when it asked for it), as Guerrilla does for the player's
+// equipped gun. But one item at a time: the one whose copy is in is kept at 0x1BB1D48 (its info) until let go
+// (holstering marks it, 0x8BB550 → 0x7D7740; the frame update frees it, 0x7D76C0), and another is refused while it
+// is held. An item's info is at +0x98: its name +0, its _high container +0x1C (0: none).
+constexpr DWORD kStreamHighDetail = 0x7CFDC0;
+constexpr BYTE kStreamHighDetailPrologue[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC};  // push ebp / mov ebp,esp / push ecx / mov [ebp-4],ecx
+using StreamHighDetailFn = bool(__fastcall*)(BYTE* item, void* unused);  // thiscall
+StreamHighDetailFn g_streamHighDetail = nullptr;
+BYTE* const* const kHighDetailHolder = reinterpret_cast<BYTE* const*>(0x1BB1D48);
+constexpr DWORD kItemInfo = 0x98, kItemInfoHighContainer = 0x1C;
+int g_highDetailLogs = 0;
+
+const char* ItemInfoName(const BYTE* info) {
+    const char* name = info ? *reinterpret_cast<const char* const*>(info) : nullptr;
+    return name ? name : "?";
+}
+
+bool __fastcall StreamHighDetail(BYTE* item, void* unused) {
+    const BYTE* holder = *kHighDetailHolder;  // before the call
+    const bool asked = g_streamHighDetail(item, unused);
+    if (g_highDetailLogs < 100 && item) {
+        ++g_highDetailLogs;
+        const BYTE* info = *reinterpret_cast<const BYTE* const*>(item + kItemInfo);
+        const char* name = ItemInfoName(info);
+        if (!info || !*reinterpret_cast<const DWORD*>(info + kItemInfoHighContainer))
+            rfa::Log("Guns: %s has no high-detail copy (no _high container); its low copy is drawn", name);
+        else if (asked)
+            rfa::Log("Guns: %s's high-detail copy streamed in", name);
+        else if (holder && holder != info)
+            rfa::Log("Guns: %s's high-detail copy refused, held by %s; it stays on its low copy", name, ItemInfoName(holder));
+        else if (holder == info)
+            rfa::Log("Guns: %s's high-detail copy already in (kept)", name);
+        else
+            rfa::Log("Guns: %s's high-detail copy not asked for (the item isn't ready); it stays on its low copy", name);
+    }
+    return asked;
+}
+
+void LogHighDetailGuns() {
+    if (memcmp(reinterpret_cast<const void*>(kStreamHighDetail), kStreamHighDetailPrologue, sizeof kStreamHighDetailPrologue) != 0) {
+        rfa::Log("Guns: the high-detail stream-in (0x%08lX) isn't the publicbeta's; not logged", kStreamHighDetail);
+        return;
+    }
+    g_streamHighDetail = reinterpret_cast<StreamHighDetailFn>(
+        rfa::HookFunction(kStreamHighDetail, sizeof kStreamHighDetailPrologue, reinterpret_cast<void*>(&StreamHighDetail)));
+    if (!g_streamHighDetail) rfa::Log("Guns: could not wrap the high-detail stream-in; not logged");
+    else rfa::Log("Guns: each gun he draws says whether its high-detail copy streamed in (\"Guns:\" lines)");
+}
+
 // ---- The held weapon sounds' starts and stops, logged (the user, 2026-11-10: a turret gun held sounds once, then is silent)
 //
 // A diagnostic for that report, to keep or take out once its cause is known: it changes nothing in the game. A
@@ -2150,6 +2203,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     HeldInPlace();
     MasonsHammer();
     LogMeleeHits();
+    LogHighDetailGuns();
     LogHeldSounds();
     // The upgrades' purchases happen in the heading step: without it the window stays shut.
     if (g_headingStep) {
@@ -2163,4 +2217,62 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Menu(const RFAMenu* menu) {
     if (g_upgradesRunning) upgrades::Menu(menu);
+}
+
+// ---- The placed explosives, for other mods (guerrilla_hud's minimap)
+//
+// Guerrilla's minimap (cartographer::collect_projectiles RM 0x86D000, render_projectiles 0x85FCC0) shows every
+// projectile whose weapon's class is THROWN_CHARGE, THROWN_MINE or SINGULARITY_BOMB inside its zoom radius,
+// whoever threw it: remote charges white and pulsing when stuck to something (its parent or a constraint, 0x85FF83),
+// else faint grey; mines orange; singularity bombs teal. Ours are Guerrilla's own weapons thrown the same way
+// (rfg_charge_placer, mine_placer, singularity_bomb: Shot_Type Thrown, their projectiles made by 0x723300).
+// Armageddon's projectiles are the world's list of subtype 10 (0x43ABC0 how many, 0x43AC10 each; thiscall: the
+// world); a projectile's weapons.xtbl entry is at +0x188 (null for none), its class at the entry's +0x10
+// (Armageddon's numbers: thrown_charge 3, thrown_mine 4, singularity_bomb 12); an object's place +4, its parent's
+// handle +0x6C (-1 none, Guerrilla's +0x70), its child constraint +0x40 (as Guerrilla's); an item's owner's
+// handle +0x164 (its set_owner, virtual +0xA0, writes it).
+struct GuerrillaGearExplosive {
+    float x, y, z;  // where it is
+    int kind;       // 0 a remote charge, 1 a mine, 2 a singularity bomb
+    int stuck;      // 1 when stuck to something (its parent or a constraint)
+    int players;    // 1 when the player threw it (its owner is the player)
+};
+
+namespace {
+auto const ProjectileCount = reinterpret_cast<int(__thiscall*)(void* world)>(0x43ABC0);
+auto const ProjectileAt = reinterpret_cast<BYTE*(__thiscall*)(void* world, int index)>(0x43AC10);
+auto const ObjectHandle = reinterpret_cast<DWORD(__thiscall*)(const BYTE* object)>(0x424850);
+constexpr DWORD kProjectileWeapon = 0x188, kWeaponClass = 0x10, kObjectParent = 0x6C, kObjectChildConstraint = 0x40, kItemOwner = 0x164;
+constexpr int kThrownChargeClass = 3, kThrownMineClass = 4, kSingularityBombClass = 12;
+}  // namespace
+
+// Fills up to `most` records (none when `out` is null) and returns how many there are, which may be more. Call it on
+// the game's thread (as guerrilla_hud's Lua functions run): it reads the world's list as it is.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_PlacedExplosives(GuerrillaGearExplosive* out, int most) {
+    const BYTE* player = LocalPlayer();
+    const DWORD playerHandle = player ? ObjectHandle(player) : 0xFFFFFFFF;
+    const int count = ProjectileCount(kWorld);
+    int found = 0;
+    for (int i = 0; i < count; ++i) {
+        const BYTE* projectile = ProjectileAt(kWorld, i);
+        if (!projectile) continue;
+        const BYTE* weapon = *reinterpret_cast<const BYTE* const*>(projectile + kProjectileWeapon);
+        if (!weapon) continue;
+        const int weaponClass = *reinterpret_cast<const int*>(weapon + kWeaponClass);
+        const int kind = weaponClass == kThrownChargeClass ? 0 : weaponClass == kThrownMineClass ? 1 : weaponClass == kSingularityBombClass ? 2 : -1;
+        if (kind < 0) continue;
+        if (out && found < most) {
+            GuerrillaGearExplosive& e = out[found];
+            const float* at = reinterpret_cast<const float*>(projectile + 0x4);
+            e.x = at[0];
+            e.y = at[1];
+            e.z = at[2];
+            e.kind = kind;
+            e.stuck = *reinterpret_cast<const DWORD*>(projectile + kObjectParent) != 0xFFFFFFFF ||
+                      *reinterpret_cast<void* const*>(projectile + kObjectChildConstraint) != nullptr ? 1 : 0;
+            e.players = playerHandle != 0xFFFFFFFF && *reinterpret_cast<const DWORD*>(projectile + kItemOwner) == playerHandle ? 1 : 0;
+        }
+        ++found;
+    }
+    return found;
 }

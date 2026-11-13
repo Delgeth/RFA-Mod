@@ -42,13 +42,14 @@ public static partial class GuerrillaHud
     public static readonly IReadOnlyList<HudDocument> Documents =
     [
         new("rfg_ui_hud_health", ["ui_hud_blood_gradient", "ui_hud_radiation"]),
-        new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Reticles),
-        new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Icons),
+        new("rfg_ui_hud_reticles", ["ui_hud_reti_assault"], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Reticles,
+            GuerrillaTextSizes: true),
+        new("rfg_ui_hud_weapon_sel", [], GuerrillaScript: true, WeaponPictures: HudWeaponPictures.Icons, GuerrillaTextSizes: true),
         // The minimap; its radar sweep's line (ui_minimap_scan_line, a whole texture in the document's own interface-maps,
         // which Guerrilla's cartographer drew itself: render_scan_line RM 0x863A60).
         new("rfg_ui_hud", ["ui_hud_base_square", "ui_map_icon_player", "ui_minimap_scan_line"]),
         new("rfg_ui_fullscreen", ["ui_hud_base_square", "ui_map_icon_player", WorldMap, .. HintKeys], GuerrillaScript: true, BridgedItems: true,
-            ExtraTextures: ["interface-pc"]),
+            ExtraTextures: ["interface-pc"], GuerrillaTextSizes: true),
         // Guerrilla's messages: its message lines, its use prompt (a hand, a ladder, a vehicle, a mission's start, the
         // upgrades), the weapon swap, the pickups beside the reticle (weapons, rounds, salvage) and the saving icon (its
         // picture is Guerrilla's utility document's, which isn't brought over); and its upgrade screen (the safehouses'
@@ -57,7 +58,7 @@ public static partial class GuerrillaHud
         // from whichever document has it first, so they're renamed rfg_ui_upgrades_....
         new("rfg_ui_messages", ["ui_hud_icon_salvage", "ui_hud_save_icon", "ui_hud_hand_icon", "ui_hud_convoy_car_icon",
                                 "ui_map_icon_mission_start", "ui_hud_icon_upgrade"],
-            GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons),
+            GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons, GuerrillaTextSizes: true),
         new("rfg_ui_upgrades", ["ui_hud_icon_salvage"], GuerrillaScript: true, BridgedItems: true, UpgradePictures: true,
             RenamedGlobals: ["set_header", "set_button", "set_hints", "set_highlight"], GuerrillaTextSizes: true),
         // Guerrilla's weapon cabinet (a safehouse's locker, every ammo crate): the weapons found or bought, to put into
@@ -141,13 +142,21 @@ public static partial class GuerrillaHud
     /// game measures text with), or null if either game lacks it or they're the same. Measured 2026-11-12: font_body
     /// 33 / 50 (its letters' widths 0.66 of Armageddon's too: Armageddon's is half as big again); font_header 43 / 49
     /// (but Guerrilla's letters half as wide again as Armageddon's narrow ones: the height is what's matched);
-    /// font_numbers the same in both.
+    /// font_numbers the same in both. font_latin_numbers and font_header_latin_numbers are names, not files: Guerrilla
+    /// gives them its font_body and font_header (its ui_initialize_fonts), and guerrilla_hud gives them Armageddon's,
+    /// so they're measured as those.
     /// </summary>
     static float? FontScale(Packfile guerrillaInterface, Packfile gameInterface, string font)
     {
         static int? Height(Packfile archive, string font) =>
             archive.Find(font + ".vf3_pc") is { } entry && archive.Read(entry) is { Length: >= 0x18 } data &&
             BitConverter.ToUInt32(data, 0) == 0x544E4656 /* VFNT */ ? BitConverter.ToUInt16(data, 0x16) : null;
+        font = font.ToLowerInvariant() switch
+        {
+            "font_latin_numbers" => "font_body",
+            "font_header_latin_numbers" => "font_header",
+            _ => font,
+        };
         int? guerrilla = Height(guerrillaInterface, font), armageddon = Height(gameInterface, font);
         if (guerrilla is not > 0 || armageddon is not > 0 || guerrilla == armageddon) return null;
         return (float)guerrilla.Value / armageddon.Value;

@@ -18,7 +18,8 @@
 // So for a vehicle that isn't one of Armageddon's own, the gun's aiming (0x830C70) is Guerrilla's again:
 // the walker's rule, else the search below, which is the game's own (it still runs it for a gun nobody
 // drives) with the same settings (Turret_autoaim_*, alike in both games' tweak tables). Armageddon's own
-// vehicles keep Armageddon's rule. In the gunner's seat nothing changes: the gun follows the camera.
+// vehicles keep Armageddon's rule. In the gunner's seat the gun follows the mouse, and the view stays on the gun,
+// as Guerrilla's (see "The gunner's camera" below).
 //
 // RFA-Mod's own addition, not Guerrilla's: the upgrade TURRET LINK (bought with salvage like Guerrilla's
 // own; guerrilla_gear sells it) hands the driver the aim: once bought, the gun follows the player's aim point
@@ -431,10 +432,106 @@ void StartHinges() {
                         : "Turrets: the game's turret part bodies aren't as expected; the parts weigh what their items do, as Armageddon's");
 }
 
+// ---- The gunner's camera: Guerrilla's follows the gun
+//
+// Guerrilla (camera_turret_process RM 0x6DEA50): the mouse turns the gun itself (camera_turret_set_rotation →
+// turret::set_turret_velocity, at the turret's own speeds and within its limits), camera_aim_turret puts the aim
+// point along the muzzle, and turret_update_camera_post (RM 0x6DE030) places the camera from the gun's muzzle
+// with the turret entry's offset (Default_Offset, Fine_Aim_Offset), looking where the gun points: the view never
+// leaves the gun. Armageddon (its turret camera mode's frame 0x4BD350: camera_aim_turret 0x4BE320, the player's
+// camera controls 0x8C1D70, then 0x4BD510) keeps the offsets but turns it round: the mouse turns the camera's
+// look direction (0x11B9CA8), and while the gun runs on velocity motors (0x8C6A10) 0x4BD510 sets their speeds
+// to close the gap between that look and the gun (0x83F6E0) in one frame. The camera can then look where the
+// gun can't go (below its lower limit, or while it lags behind the mouse), and the view comes loose from the
+// gun (the user's screenshot: the camera at Mason's head looking down at the ground, the gun pointing up).
+//
+// So on Guerrilla's vehicles, after 0x4BD510 has set this frame's speeds, the look direction is kept within
+// kGunLead of where the gun points (as 0x4BE120 measures it: from the camera to the gun's aim point, asked
+// without its smoothing, which it only moves when told). The gap still drives the gun, so the mouse aims as
+// before, but the view stays on the gun, at its limits too, as Guerrilla's.
+constexpr DWORD kTurretCameraPost = 0x4BD510;   // the turret camera's placing (Guerrilla's turret_update_camera_post)
+constexpr size_t kTurretCameraPostPrologue = 9; // push ebp / mov ebp,esp / sub esp,1ACh
+constexpr DWORD kCameraLook = 0x11B9CA8;        // the camera's look direction, which the mouse turns
+constexpr DWORD kCameraMatrix = 0x11B9CB4;      // the camera's orientation (right, up, forward)
+constexpr float kGunLead = 2.0f * 3.14159265f / 180.0f;  // how far the view may lead the gun (radians)
+auto const MannedTurret = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human)>(0x881ED0);           // human_combat_get_manned_turret
+auto const GunSeenFromCamera = reinterpret_cast<bool(__cdecl*)(V3* out, BYTE* turret, bool smooth)>(0x4BE120);
+auto const GunOnVelocityMotors = reinterpret_cast<bool(__cdecl*)()>(0x8C6A10);
+auto const MatrixFromForward = reinterpret_cast<void(__fastcall*)(void* matrix, void* unused, const V3* forward)>(0xC9DA10);
+using CameraPostFn = void(__cdecl*)();
+CameraPostFn g_turretCameraPost;
+
+float Length(const V3& v) { return std::sqrt(Dot(v, v)); }
+
+struct CameraWatch {
+    int next = 0;    // when to log next (the game's clock)
+    int lines = 0;
+    float most = 0;  // the widest gap since the last line (degrees)
+    int held = 0;    // frames held to the gun since the last line
+    int frames = 0;
+} g_cameraWatch;
+
+void __cdecl TurretCameraPost() {
+    g_turretCameraPost();
+    BYTE* player = Player();
+    BYTE* turret = player ? MannedTurret(player) : nullptr;
+    BYTE* vehicle = turret ? TurretVehicle(turret, nullptr) : nullptr;
+    if (!vehicle || IsArmageddons(vehicle) || !GunOnVelocityMotors()) return;
+    V3 gun{};
+    if (!GunSeenFromCamera(&gun, turret, false)) return;
+    V3& look = *reinterpret_cast<V3*>(kCameraLook);
+    const float lookLength = Length(look), gunLength = Length(gun);
+    if (lookLength < 1e-4f || gunLength < 1e-4f) return;
+    const V3 l{look.x / lookLength, look.y / lookLength, look.z / lookLength}, g{gun.x / gunLength, gun.y / gunLength, gun.z / gunLength};
+    float cosine = Dot(l, g);
+    cosine = cosine > 1 ? 1 : (cosine < -1 ? -1 : cosine);
+    const float gap = std::acos(cosine);
+    CameraWatch& w = g_cameraWatch;
+    ++w.frames;
+    if (gap * 57.29578f > w.most) w.most = gap * 57.29578f;
+    if (gap > kGunLead) {
+        // The look turned from the gun's way towards its own by kGunLead (on the great circle between them).
+        const V3 across{l.x - g.x * cosine, l.y - g.y * cosine, l.z - g.z * cosine};
+        const float acrossLength = Length(across);
+        V3 held = g;
+        if (acrossLength > 1e-5f) {
+            const float c = std::cos(kGunLead), s = std::sin(kGunLead);
+            held = {g.x * c + across.x / acrossLength * s, g.y * c + across.y / acrossLength * s, g.z * c + across.z / acrossLength * s};
+        }
+        look = {held.x * lookLength, held.y * lookLength, held.z * lookLength};
+        MatrixFromForward(reinterpret_cast<void*>(kCameraMatrix), nullptr, &held);
+        ++w.held;
+    }
+    const int now = GameTime();
+    if (now >= w.next && w.lines < 120) {
+        if (w.next) {
+            rfa::Log("Turrets: the gunner's camera on %s: the view led the gun by up to %.1f degrees in the last second; held to the gun in %d of %d frames",
+                     VehicleName(vehicle), w.most, w.held, w.frames);
+            ++w.lines;
+        }
+        w.next = now + 1000;
+        w.most = 0;
+        w.held = w.frames = 0;
+    }
+}
+
+void StartGunnerCamera() {
+    if (!rfa::IniInt(L"GuerrillaVehicles", L"GunnerCameraAsGuerrilla", 1)) {
+        rfa::Log("Turrets: the gunner's camera looks where the mouse turns it, as Armageddon's ([GuerrillaVehicles] GunnerCameraAsGuerrilla=0)");
+        return;
+    }
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xAC, 0x01, 0x00, 0x00};
+    if (Opens(kTurretCameraPost, opening, sizeof(opening)))
+        g_turretCameraPost = reinterpret_cast<CameraPostFn>(rfa::HookFunction(kTurretCameraPost, kTurretCameraPostPrologue, reinterpret_cast<void*>(&TurretCameraPost)));
+    rfa::Log(g_turretCameraPost ? "Turrets: on Guerrilla's vehicles the gunner's camera stays on the gun, as Guerrilla's (it leads it by at most 2 degrees)"
+                                : "Turrets: the game's turret camera isn't as expected; the gunner's camera stays Armageddon's");
+}
+
 }  // namespace
 
 void StartTurrets() {
     StartHinges();
+    StartGunnerCamera();
     if (!rfa::IniInt(L"GuerrillaVehicles", L"DriverGunAsGuerrilla", 1)) {
         rfa::Log("Turrets: a driver's gun follows the player's aim point on every vehicle, as Armageddon's ([GuerrillaVehicles] DriverGunAsGuerrilla=0)");
         return;

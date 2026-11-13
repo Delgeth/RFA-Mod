@@ -817,6 +817,11 @@ documents (elements driven by a Lua script).
   `vint_doc_load` does (a document in no draw list is loaded but never drawn), and keeps it there
   only while the HUD itself runs (the interface's draw pass, `0x564FF0`, is wrapped too), so
   nothing of it stays on loading screens or in the menus.
+- A text finds its font by name, and a name the game hasn't given out gets the console's font.
+  Armageddon names only `font_body` and `font_header` (`0x5621B0`), so the mod wraps that start-up
+  and adds Guerrilla's others as Guerrilla did: `font_numbers` (its numbers: the ammo, prices,
+  the maps'), which Armageddon ships but never loads, loaded and named, and `font_latin_numbers` /
+  `font_header_latin_numbers` given the body and header fonts.
 
 `editor\GuerrillaBuilder.exe` (its HUD; code in
 `src\editor\RfaFormats\Interface\`) makes the documents from the player's own copy of Guerrilla:

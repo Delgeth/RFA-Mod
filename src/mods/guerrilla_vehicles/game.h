@@ -142,6 +142,8 @@ void StartChases();   // crews.cpp
 void ChasesFrame();
 void StartSafehouses();  // safehouses.cpp
 void SafehousesFrame();
+void StartRiders();      // riders.cpp (a log: shooting riders, getting into occupied vehicles)
+void RidersFrame();
 void StartFlyers();   // flyers.cpp (its own hook, on the vehicles' presim)
 bool FlyersFly();     // Guerrilla's flight model is on: NPCs can fly Guerrilla's flyers
 

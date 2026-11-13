@@ -86,5 +86,9 @@ void StartCooldown();
 // Demolitions master (demolitions_master.cpp).
 Activity* MakeDemolitionsMaster();
 bool StartDemolitionsMaster(const char* level);  // by the table row's name, for trying it out
+// Whether the activity at a node (Guerrilla's handle) is completed: a demolitions master node's own
+// progress (the campaign's save over the zone's demolitions_master_complete); false for other nodes
+// until their kinds are ported. Kept in memory, so it is cheap to ask every frame.
+bool NodeDone(unsigned node);
 
 }  // namespace campaign::activities

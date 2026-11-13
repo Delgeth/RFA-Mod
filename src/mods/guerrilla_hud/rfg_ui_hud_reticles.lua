@@ -69,6 +69,36 @@ local Weapon = {}		-- primary_weapon_hud: weapon_name, icon, target_name, bar_vi
 local Hud_hidden = false
 local Fade_thread = -1
 
+-- Guerrilla's reload animation, its own (its script, on WeaponFire's is_reloading): as a reload starts the box slides
+-- left over the magazine's count (update_ammo_tween1, 36 units) and the count fades out (hide_cliptext_tween1), the
+-- reticle pulses (reload_pulse_tween); when the reload ends they come back (update_ammo_tween2, hide_cliptext_tween2):
+-- the number on the left collapses for the reload and shows again once the gun has refilled. Armageddon's HUD data has
+-- no "reloading now", so here a reload runs from its start until the magazine fills up again (Armageddon moves the rounds
+-- in at the reload's end): it starts on Armageddon's flash_type 1 (FLASH_TYPE_WEAPON_RELOAD, its own script never reads
+-- it), on its reload key (R) with room in the magazine and rounds to fill it, or on an empty magazine with rounds left;
+-- it ends on the refill, a change of weapon, or after RELOAD_MOST_SECONDS (a reload cut short). Each start and end is
+-- logged (the first RELOAD_LOG_LINES), to learn what the game gives.
+local FLASH_TYPE_WEAPON_RELOAD = 1
+local RELOAD_KEY = 0x52					-- R, Armageddon's reload key
+local RELOAD_MOST_SECONDS = 5
+local RELOAD_LOG_LINES = 30
+local Reload = { weapon = nil, rounds = nil, reserve = nil, magazine = 0, flash = nil, active = false, started = 0,
+	key_down = false, logged = 0 }
+
+local function clock()
+	if _GetAnyGlobalSilent("rfg_handbook_clock") ~= nil then
+		return rfg_handbook_clock()
+	end
+	return 0
+end
+
+local function log_reload(text)
+	if rfa_log ~= nil and Reload.logged < RELOAD_LOG_LINES then
+		Reload.logged = Reload.logged + 1
+		rfa_log("[rfg_ui_hud_reticles] reload: " .. text)
+	end
+end
+
 local function armageddon_part(name)
 	return vint_object_find(name, 0, vint_document_find("ui_hud"))
 end
@@ -141,6 +171,33 @@ local function send()
 		rounds, reserve, magazine = total, 0, 0
 	end
 	local can_fire = rounds ~= 0
+	-- Reloading now (see Reload above).
+	local flash = Weapon[12] or 0
+	if flash ~= Reload.flash then
+		log_reload("flash_type " .. tostring(flash) .. " (" .. tostring(weapon_name) .. ", " .. tostring(rounds) .. " in the magazine)")
+		Reload.flash = flash
+	end
+	if Reload.active and weapon_name ~= Reload.weapon then
+		Reload.active = false
+		log_reload("ended: another weapon")
+	end
+	if weapon_name == Reload.weapon and Reload.rounds ~= nil and magazine > 0 and rounds > Reload.rounds and
+		(reserve == -1 or (Reload.reserve ~= nil and reserve < Reload.reserve)) then
+		log_reload("ended: the magazine filled up (" .. tostring(Reload.rounds) .. " to " .. tostring(rounds) .. ", " .. tostring(weapon_name) .. ")")
+		Reload.active = false
+	elseif not Reload.active and magazine > 0 and rounds == 0 and reserve ~= 0 and Reload.rounds ~= nil and Reload.rounds > 0 and
+		weapon_name == Reload.weapon then
+		Reload.active = true
+		Reload.started = clock()
+		log_reload("started: the magazine ran empty (" .. tostring(weapon_name) .. ")")
+	end
+	if flash == FLASH_TYPE_WEAPON_RELOAD and not Reload.active then
+		Reload.active = true
+		Reload.started = clock()
+		log_reload("started: flash_type 1")
+	end
+	Reload.weapon, Reload.rounds, Reload.reserve, Reload.magazine = weapon_name, rounds, reserve, magazine
+	local is_reloading = Reload.active
 	local targeting = state
 	if targeting < 0 then
 		targeting = 0
@@ -162,7 +219,7 @@ local function send()
 		overheated = bar_is_red
 	end
 
-	rfg_dataitem_set(WEAPON_FIRE, true, reload_message == RELOAD_MESSAGE_RELOAD, can_fire, false, weapon_name,
+	rfg_dataitem_set(WEAPON_FIRE, true, reload_message == RELOAD_MESSAGE_RELOAD, can_fire, is_reloading, weapon_name,
 		Weapon[2] or "", reticle_for(Weapon[2], fine_aimed), accuracy, rounds, reserve, magazine, targeting, hit,
 		overheated, overheat, target_name ~= "player", true, 0,
 		ammo_status == AMMO_AREA_STATUS_AMMO_COUNT, -1, 0, 0)
@@ -198,6 +255,25 @@ function rfg_ui_hud_reticles_keep_faded()
 			local part = armageddon_part(name)
 			if part ~= 0 then
 				vint_set_property(part, "visible", false)
+			end
+		end
+		-- A reload's start by its key (with room in the magazine and rounds to fill it), and one cut short.
+		if Weapon[1] ~= nil and _GetAnyGlobalSilent("rfg_key_down") ~= nil then
+			local down = rfg_key_down(RELOAD_KEY)
+			if down and not Reload.key_down and not Reload.active and Reload.magazine > 0 and Reload.rounds ~= nil and
+				Reload.rounds < Reload.magazine and Reload.reserve ~= 0 then
+				Reload.active = true
+				Reload.started = clock()
+				log_reload("started: the reload key (" .. tostring(Reload.weapon) .. ", " .. tostring(Reload.rounds) .. " of " .. tostring(Reload.magazine) .. ")")
+				send()
+			end
+			Reload.key_down = down
+		end
+		if Reload.active and clock() - Reload.started > RELOAD_MOST_SECONDS then
+			Reload.active = false
+			log_reload("ended: no refill after " .. tostring(RELOAD_MOST_SECONDS) .. " s (cut short)")
+			if Weapon[1] ~= nil then
+				send()
 			end
 		end
 		thread_yield()

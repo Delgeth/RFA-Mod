@@ -26,6 +26,7 @@
 #include "liberation.h"
 #include "script_words.h"
 #include "tables.h"
+#include "world_objects.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -372,3 +373,31 @@ HudInfo Hud() {
 }
 
 }  // namespace campaign::activities
+
+// ---- For the other mods (guerrilla_hud's minimap and world map).
+
+// 1 while an activity or a mission runs (Guerrilla's !activity_none() || mission_is_active(): its
+// minimap then hides the activities' starts, the safehouse and the missions' starts, and pins the
+// important EDF buildings to the rim only when nothing runs). *activityMode: the current modal kind
+// (Guerrilla's activity_modes: 11 demolitions master, 4 Guerrilla Express, ...; 0 none); *mission: 1
+// while a mission runs (none is ported yet: 0). All 0 while the campaign's systems rest.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_Running(int* activityMode, int* mission) {
+    using namespace campaign;
+    const bool playing = Playing();
+    if (activityMode) *activityMode = playing ? static_cast<int>(activities::CurrentMode()) : 0;
+    if (mission) *mission = 0;
+    return playing && activities::AnyRunning() ? 1 : 0;
+}
+
+// 1 when the activity at a node is completed (its start icon turns grey): the node by Guerrilla's
+// handle, as campaign_objects.xml has it. Only demolitions master keeps progress yet.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_ActivityDone(unsigned node) {
+    return campaign::activities::NodeDone(node) ? 1 : 0;
+}
+
+// The same by place, for a map icon that knows only where it is (map_icons.txt): the node within 2 m of
+// (x, z) on the ground, or 0.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_ActivityDoneAt(float x, float z) {
+    const campaign::world::Object* node = campaign::world::Near(x, z, 2.0f);
+    return node && campaign::activities::NodeDone(node->handle) ? 1 : 0;
+}
