@@ -75,7 +75,7 @@ sealed class PlaceholderNode : TreeNode
     public PlaceholderNode() => Label = "Loading...";
 }
 
-/// <summary>A folder in the game that holds archives, e.g. build\pc\cache.</summary>
+/// <summary>A folder in the game that holds archives, e.g. build\pc\cache (or a mod's folder, holding its data).</summary>
 sealed class FolderNode : TreeNode
 {
     public FolderNode(string folder, IEnumerable<ArchiveNode> archives)
@@ -83,24 +83,41 @@ sealed class FolderNode : TreeNode
         Label = folder;
         Kind = FileKind.Folder;
         foreach (ArchiveNode archive in archives) Children.Add(archive);
-        Note = Children.Count == 1 ? "1 archive" : $"{Children.Count} archives";
+        var nodes = Children.OfType<ArchiveNode>().ToList();
+        int packs = nodes.Count(n => !n.IsLoose), modFolders = nodes.Count(n => n.IsLoose && !n.IsNewFiles);
+        var said = new List<string>();
+        if (packs > 0) said.Add(packs == 1 ? "1 archive" : $"{packs} archives");
+        if (nodes.Any(n => n.IsNewFiles)) said.Add("new files");
+        if (modFolders > 0) said.Add(modFolders == 1 ? "1 folder" : $"{modFolders} folders");
+        Note = string.Join(", ", said);
     }
 }
 
-/// <summary>A .vpp_pc archive in the game folder, or a new one in overrides\ (noted "new").</summary>
+/// <summary>
+/// A .vpp_pc archive in the game folder, or a new one in overrides\ (noted "new"); or a folder of
+/// loose files the game gets all the same, listed like an archive (see <see cref="Workspace.IsLooseFolder"/>):
+/// the new files in overrides\ (the Guerrilla port's characters, vehicles, weapons, sounds, scripts),
+/// or a mod's data.
+/// </summary>
 sealed class ArchiveNode : TreeNode
 {
     readonly Workspace workspace;
 
-    public string Archive { get; }  // relative to the game folder
+    public string Archive { get; }  // relative to the game folder (a folder of loose files: see Workspace)
+    public bool IsLoose { get; }
+    public bool IsNewFiles { get; }
 
     public ArchiveNode(Workspace workspace, string archive)
     {
         this.workspace = workspace;
         Archive = archive;
-        Label = Path.GetFileName(archive);
-        Kind = FileKind.Archive;
-        if (workspace.IsNewArchive(archive)) Note = "new, in overrides";
+        IsLoose = workspace.IsLooseFolder(archive);
+        IsNewFiles = workspace.IsNewFiles(archive);
+        Label = IsNewFiles ? "New files" : Path.GetFileName(archive);
+        Kind = IsLoose ? FileKind.Folder : FileKind.Archive;
+        Note = IsNewFiles ? "in overrides, given to the game by name"
+             : IsLoose ? "the mod's data"
+             : workspace.IsNewArchive(archive) ? "new, in overrides" : "";
         AddPlaceholder();
     }
 
@@ -128,13 +145,17 @@ sealed class FileNode : TreeNode
         File = file;
         Label = file.Name;
         Kind = FileKind.Of(file.Name);
+        // A new file the game gets only if none of its archives has that name (see Workspace).
+        if (file.Container == null && workspace.IsNewFiles(file.Archive))
+            Note = workspace.GameArchiveWith(file.Name) is string game ? $"unused: the game has its own, in {Path.GetFileName(game)}" : "new";
         UpdateChangedMark();
         if (file.Entry.IsContainer && file.Container == null) AddPlaceholder();
     }
 
     public bool IsOverridden => File.CanOverride && workspace.OverrideFor(File.Archive, File.Name) != null;
 
-    public void UpdateChangedMark() => Changed = IsOverridden;
+    /// <summary>Marked changed: an override of the game's copy, or a loose file the editor changed.</summary>
+    public void UpdateChangedMark() => Changed = IsOverridden || (File.Container == null && workspace.IsLooseFolder(File.Archive) && workspace.IsChanged(File.Archive, File.Name));
 
     public Packfile OpenContainer() => workspace.Container(File.Archive, File.Name);
 

@@ -103,8 +103,15 @@ static class ChunkCatalog
     static string? First(IEnumerable<string> words, Dictionary<string, string> names) =>
         words.Select(w => names.TryGetValue(w, out string? n) ? n : null).FirstOrDefault(n => n != null);
 
-    /// <summary>A pack's name as the browser shows it: its archive's name (rfg_l0 for the Guerrilla world's).</summary>
-    public static string PackName(string archive) => Path.GetFileNameWithoutExtension(archive);
+    /// <summary>
+    /// A pack's name as the browser shows it: its archive's name (rfg_l0 for the Guerrilla world's);
+    /// "new files" for the new files in overrides\ (see <see cref="Workspace.NewFilesName"/>), a mod's
+    /// folder by its path.
+    /// </summary>
+    public static string PackName(string archive) =>
+        Path.GetFileName(archive) == Workspace.NewFilesName ? "new files"
+        : archive.StartsWith(@"mods\", StringComparison.OrdinalIgnoreCase) ? archive
+        : Path.GetFileNameWithoutExtension(archive);
 
     public static string ContainerName(string? container) => container == null ? "(loose in the pack)" : Path.GetFileNameWithoutExtension(container);
 

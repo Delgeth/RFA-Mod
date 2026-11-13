@@ -84,7 +84,49 @@ public partial class MainWindow
 
         UseFluentTitleBar();
         UseStatusLine();
+        RelistWhenFilesChange();
         OnTabChosen(previewDocument, "The file picked in the explorer");
+    }
+
+    string? listedSignature;  // what the explorer and the search list, in short (see Workspace.ListedSignatureReader)
+
+    /// <summary>
+    /// When the window comes back to the front and the files the editor lists have changed (the
+    /// Guerrilla builder wrote new files, or took them away, while the editor was open), the explorer
+    /// and the search are made again, so they list what the game will see. The disk is looked at on
+    /// another thread, so coming back to the window isn't held up.
+    /// </summary>
+    void RelistWhenFilesChange()
+    {
+        Func<string> read = workspace.ListedSignatureReader();
+        bool looking = false;
+        try
+        {
+            listedSignature = read();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        Activated += async (_, _) =>
+        {
+            if (looking) return;
+            looking = true;
+            try
+            {
+                string now = await Task.Run(read);
+                if (now == listedSignature) return;
+                listedSignature = now;
+                Log("The files the editor lists have changed (new files in overrides\\ or the mods' data): the explorer and the search are made again.");
+                BuildTree();
+                _ = BuildSearchIndexAsync();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // (files being written just now: looked at again the next time)
+            }
+            finally
+            {
+                looking = false;
+            }
+        };
     }
 
     /// <summary>

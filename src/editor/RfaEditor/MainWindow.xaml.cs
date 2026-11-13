@@ -194,7 +194,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     async Task BuildSearchIndexAsync()
     {
-        List<(string, string)> archives = workspace.Archives().Select(archive => (archive, workspace.ArchivePath(archive))).ToList();
+        List<(string, Func<Packfile>)> archives = workspace.Archives().Select(archive => (archive, workspace.Open(archive))).ToList();
         var progress = new Progress<string>(text => StatusText.Text = text);
         try
         {

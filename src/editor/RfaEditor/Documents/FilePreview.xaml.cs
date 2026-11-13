@@ -114,6 +114,11 @@ public partial class FilePreview : UserControl, IEditorDocument
         Try(() =>
         {
             Packfile pack = node.Open();
+            if (node.IsLoose)
+            {
+                ShowLooseFolder(node, pack);
+                return;
+            }
             long size = new FileInfo(Workspace.ArchivePath(node.Archive)).Length;
             string where = Workspace.IsNewArchive(node.Archive) ? $" (new: {Workspace.RelativeToMod(Workspace.ArchivePath(node.Archive))})" : "";
             selectedNode = node;
@@ -124,6 +129,24 @@ public partial class FilePreview : UserControl, IEditorDocument
             DetailsText.Text = $"Archive {node.Archive}{where}\n{pack.Entries.Count:N0} files, {size:N0} bytes on disk, {Storage(pack)}.";
             SetButtons(extract: false, extractAll: true, copy: false, showOverride: false);
         });
+    }
+
+    /// <summary>A folder of loose files (see <see cref="Workspace.IsLooseFolder"/>): what it is, how many files and how big.</summary>
+    void ShowLooseFolder(ArchiveNode node, Packfile pack)
+    {
+        selectedNode = node;
+        SetTitle("Preview: " + node.Label);
+        ShowKind(FileKind.Folder);
+        TitleText.Text = node.Label;
+        EmptyHintText.Text = "Expand it in the explorer to see its files.";
+        string folder = Workspace.RelativeToMod(Workspace.ArchivePath(node.Archive));
+        long size = pack.Entries.Sum(e => (long)e.Size);
+        DetailsText.Text = (node.IsNewFiles
+            ? $"New files in {folder}: files no archive of the game has (the Guerrilla port's characters, vehicles, weapons, sounds and " +
+              "scripts, and any you add). The loader gives one to the game when the game looks for its name and finds it in none of its archives."
+            : $"The data of a mod, in {folder}: the mod reads it there and gives it to the game.") +
+            $"\n{pack.Entries.Count:N0} files, {size:N0} bytes on disk.";
+        SetButtons(extract: false, extractAll: true, copy: false, showOverride: false);
     }
 
     internal void ShowFile(GameFile file, FileNode? node)
@@ -197,9 +220,16 @@ public partial class FilePreview : UserControl, IEditorDocument
             ? $" ({file.Entry.CompressedSize:N0} compressed)"
             : "";
         string details = $"In {file.Where}\n{file.Entry.Size:N0} bytes{stored}.\n";
+        if (file.Container == null && Workspace.IsLooseFolder(file.Archive))
+        {
+            ShowLooseFileDetails(file);
+            return;
+        }
 
         string? overridePath = file.CanOverride ? Workspace.OverrideFor(file.Archive, file.Name) : null;
-        string? containerOverride = file.Container != null ? Workspace.OverrideFor(file.Archive, file.Container) : null;
+        string? containerOverride = file.Container == null ? null
+            : Workspace.IsLooseFolder(file.Archive) ? (Workspace.IsChanged(file.Archive, file.Container) ? Workspace.LooseFilePath(file.Archive, file.Container) : null)
+            : Workspace.OverrideFor(file.Archive, file.Container);
         if (overridePath != null)
             details += $"Overridden: the game uses {Workspace.RelativeToMod(overridePath)} instead.";
         else if (file.CanOverride)
@@ -216,6 +246,27 @@ public partial class FilePreview : UserControl, IEditorDocument
         bool isContainer = file.Entry.IsContainer && file.Container == null;
         SetButtons(extract: true, extractAll: isContainer, copy: file.CanOverride,
                    showOverride: overridePath != null || containerOverride != null, table: IsTable(file), level: IsZone(file));
+    }
+
+    /// <summary>A loose file (a new file in overrides\, or a mod's data): where it is, whether the game uses it, and whether you changed it.</summary>
+    void ShowLooseFileDetails(GameFile file)
+    {
+        string path = Workspace.RelativeToMod(Path.Combine(Workspace.ArchivePath(file.Archive), file.Name));
+        string details = $"{path}\n{file.Entry.Size:N0} bytes.\n";
+        if (!Workspace.IsNewFiles(file.Archive))
+            details += "The data of a mod: the mod reads it from its folder and gives it to the game.";
+        else if (Workspace.GameArchiveWith(file.Name) is string game)
+            details += $"A new file, but unused: the game looks for {file.Name} in its archives first, and {game} has it.";
+        else
+            details += $"A new file (the Guerrilla port's, or one you added): no archive of the game has it, so the loader gives it to the game " +
+                       $"when the game looks for {file.Name}.";
+        if (Workspace.IsChanged(file.Archive, file.Name))
+            details += "\n\nYou changed it in the editor (it is changed in place); its copy from before is kept, so it can be restored.";
+        if (IsTable(file)) details += "\n\nThis is a table: open it in the table editor to change its entries field by field.";
+        if (IsZone(file)) details += "\n\nThis is a zone (objects placed in a level): open it in the level editor to see and change them.";
+        DetailsText.Text = details;
+        bool isContainer = file.Entry.IsContainer;
+        SetButtons(extract: true, extractAll: isContainer, copy: false, showOverride: false, table: IsTable(file), level: IsZone(file));
     }
 
     static bool IsZone(GameFile file) => file.Entry.Extension is "rfgzone_pc" or "layer_pc";
@@ -332,7 +383,10 @@ public partial class FilePreview : UserControl, IEditorDocument
     void OnShowOverride(object sender, RoutedEventArgs e)
     {
         if (selectedFile == null) return;
-        string? path = Workspace.OverrideFor(selectedFile.Archive, selectedFile.Container ?? selectedFile.Name);
+        string name = selectedFile.Container ?? selectedFile.Name;
+        string? path = Workspace.IsLooseFolder(selectedFile.Archive)
+            ? (Workspace.IsChanged(selectedFile.Archive, name) ? Workspace.LooseFilePath(selectedFile.Archive, name) : null)
+            : Workspace.OverrideFor(selectedFile.Archive, name);
         if (path != null) Process.Start("explorer.exe", $"/select,\"{path}\"");
     }
 

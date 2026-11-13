@@ -1896,7 +1896,14 @@ the folders and runs them in order:
 
 The code is in `src\editor\`: `RfaFormats` reads and writes the formats (no UI, reusable by other
 tools) and `RfaEditor` is the editor:
-- `MainWindow`: the layout and explorer.
+- `MainWindow`: the layout and explorer. `Workspace` is what the explorer lists and where files are
+  read and saved: the game's archives, the new archives in `overrides\`, and folders of loose files
+  listed as archives (`RfaFormats.Packfile.FromLooseFiles`): the new files in each folder of
+  `overrides\` (as `build\pc\cache\(new files)`; the loader gives one to the game only when no
+  archive has its name, so the editor finds names archives first too) and each folder of `mods\`.
+  A change to a loose file is written in place, its copy from before kept in `editor_originals\`
+  (forgotten when the file is written anew). The window makes the explorer and the search again
+  when those folders change while it is open (`MainWindow.Shell.cs`, `Workspace.ListedSignatureReader`).
 - `MainWindow.Shell.cs` and `Shell\`: the window's frame and layout. The window is a WPF UI
   `FluentWindow`: a Fluent title bar (the tab's menus, where its file is, the top bar's buttons),
   Mica behind it on Windows 11, and a status line. `MainPage` is the layout: dockable panels drawn

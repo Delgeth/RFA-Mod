@@ -63,10 +63,24 @@ You can put the panels where you like:
   colour for its kind (tables, textures, models, zones, scripts, sounds, ...).
 - New archives your mods add in `overrides\` are listed too, marked "new, in overrides", such as
   the Guerrilla world's `rfg_l0.vpp_pc`, `rfg_l1.vpp_pc` and `zonescript_rfg.vpp_pc` once
-  `GuerrillaBuilder.exe` has built them. You can open their zones in the level editor, but you can't
-  save changes into them: build them again instead.
-- Search by file name across all of them. The files inside containers become searchable a few
-  seconds after the editor starts.
+  `GuerrillaBuilder.exe` has built them. You can open their zones in the level editor; what you save
+  to them goes to `edits\`, so the archives stay as they were built.
+- **New files** (in each folder that has some, such as `build\pc\cache`): the files in `overrides\`
+  that aren't in any archive. The Guerrilla builder puts most of the port there: the characters
+  (`mason.rig_pc`, `EDF_Elite.str2_pc`, ...), vehicles (`*.ccar_pc.str2_pc`), weapons
+  (`rfg_enforcer.str2_pc`), sounds, interface scripts and tables. The game gets one when it looks
+  for that name and none of its archives has it; a new file whose name an archive has is marked
+  "unused", as the game always takes the archive's.
+- **mods**: each mod's data folder (`mods\guerrilla_world`, `mods\guerrilla_gear\animations`,
+  ...): the tables, animations, pictures and scripts the Guerrilla mods read and hand to the game.
+- Containers, models, rigs and animations among them open and preview like the game's own. If
+  you save a change to one of these files (a table, a texture in a container), it is changed in
+  place, as the game reads it there, and gets the `changed` tag; its copy from before is kept, so
+  you can restore it. Building the Guerrilla world again writes the file anew, without your change.
+- Search by file name across all of them; the search says where each is ("new file", "the mod's
+  data"). The files inside containers become searchable a few seconds after the editor starts. If
+  the Guerrilla builder adds or removes files while the editor is open, the explorer and the search
+  are made again when you come back to the editor's window.
 - Pick a file to preview it: text files (`.xtbl`, `.lua`, ...) as text, everything else as a hex
   dump.
 - **Extract** saves a file, and **Extract all** every file of an archive or container, into a

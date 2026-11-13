@@ -19,7 +19,7 @@ sealed class GameFile
     }
 
     public string Name => Entry.Name;
-    public string Where => Container == null ? Archive : $"{Archive} > {Container}";
+    public string Where => Container == null ? IndexedFile.Shown(Archive) : $"{IndexedFile.Shown(Archive)} > {Container}";
 
     /// <summary>
     /// The loader replaces files the game looks up by name, which are the files directly inside
@@ -34,21 +34,32 @@ sealed class GameFile
 /// <summary>A file name in the search index: where it is, without keeping anything open.</summary>
 sealed record IndexedFile(string Name, string Archive, string? Container)
 {
-    public string Where => Container == null ? Archive : $"{Archive} > {Container}";
+    public string Where => Container == null ? Shown(Archive) : $"{Shown(Archive)} > {Container}";
+
+    /// <summary>
+    /// Where a file is, as the search lists it: an archive by its path; the new files in overrides\
+    /// (see <see cref="Workspace.NewFilesName"/>) and a mod's data said as such.
+    /// </summary>
+    public static string Shown(string archive) =>
+        System.IO.Path.GetFileName(archive) == Workspace.NewFilesName ? $@"new file, overrides\{System.IO.Path.GetDirectoryName(archive)}"
+        : archive.StartsWith(@"mods\", StringComparison.OrdinalIgnoreCase) ? $"{archive} (the mod's data)"
+        : archive;
+
     public FileKind Kind => FileKind.Of(Name);
 }
 
 static class FileIndex
 {
     /// <summary>
-    /// Every file directly inside the archives (each as its path relative to the game folder, and
-    /// where it is: see <see cref="Workspace.ArchivePath"/>). Quick: only the archives' name lists are read.
+    /// Every file directly inside the archives (each as its path relative to the game folder, and a
+    /// way to open it: see <see cref="Workspace.Open"/>; folders of loose files too). Quick: only the
+    /// archives' name lists are read.
     /// </summary>
-    public static List<IndexedFile> ArchiveFiles(IReadOnlyList<(string Archive, string Path)> archives)
+    public static List<IndexedFile> ArchiveFiles(IReadOnlyList<(string Archive, Func<Packfile> Open)> archives)
     {
         var files = new List<IndexedFile>();
-        foreach ((string archive, string path) in archives)
-            foreach (PackfileEntry entry in Packfile.Open(path).Entries)
+        foreach ((string archive, Func<Packfile> open) in archives)
+            foreach (PackfileEntry entry in open().Entries)
                 files.Add(new IndexedFile(entry.Name, archive, null));
         return files;
     }
@@ -59,13 +70,13 @@ static class FileIndex
     /// container or directly in an archive. Slower: each container is read out of its archive (and
     /// decompressed) to get its name list and the headers of its texture files.
     /// </summary>
-    public static List<IndexedFile> ContainerFiles(IReadOnlyList<(string Archive, string Path)> archives, IProgress<string> progress, Dictionary<string, TextureRef> textures)
+    public static List<IndexedFile> ContainerFiles(IReadOnlyList<(string Archive, Func<Packfile> Open)> archives, IProgress<string> progress, Dictionary<string, TextureRef> textures)
     {
         var files = new List<IndexedFile>();
         int done = 0;
-        foreach ((string archive, string path) in archives)
+        foreach ((string archive, Func<Packfile> open) in archives)
         {
-            Packfile pack = Packfile.Open(path);
+            Packfile pack = open();
             NoteTextures(pack, archive, null, textures);
             foreach (PackfileEntry entry in pack.Entries.Where(e => e.IsContainer))
             {

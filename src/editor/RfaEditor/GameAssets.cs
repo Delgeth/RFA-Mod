@@ -39,12 +39,26 @@ sealed class GameAssets
 
     public void SetIndex(IEnumerable<IndexedFile> allFiles, Dictionary<string, TextureRef> allTextures)
     {
+        bool again = files != null;
         var byName = new Dictionary<string, IndexedFile>(StringComparer.OrdinalIgnoreCase);
         foreach (IndexedFile file in allFiles) byName.TryAdd(file.Name, file);
         files = byName;
         places = allFiles.ToLookup(f => f.Name, StringComparer.OrdinalIgnoreCase);
         textures = allTextures;
-        // Misses noted before the index was ready aren't kept (see Model and Texture), so nothing to forget.
+        // Misses noted before the index was ready aren't kept (see Model and Texture), so nothing to
+        // forget the first time. Made again (the files changed while the editor was open: new files
+        // written), what was found from the old index goes: the lists of chunks, and the misses.
+        if (again)
+        {
+            chunkNames = null;
+            chunkCatalog = null;
+            chunkGroups = null;
+            primitiveKinds = null;
+            placements = null;
+            foreach (string missed in models.Where(m => m.Value == null).Select(m => m.Key).ToList()) models.Remove(missed);
+            foreach (string missed in bitmaps.Where(b => b.Value == null).Select(b => b.Key).ToList()) bitmaps.Remove(missed);
+            foreach (string missed in tables.Where(t => t.Value == null).Select(t => t.Key).ToList()) tables.Remove(missed);
+        }
         IndexBecameReady?.Invoke();
     }
 

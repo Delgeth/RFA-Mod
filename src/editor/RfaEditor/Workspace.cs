@@ -26,6 +26,10 @@ namespace RfaEditor;
 /// add) is still added that way. Building the Guerrilla world again writes the archives anew: then
 /// the kept copies are stale, and are forgotten (each archive's size and time are noted when the
 /// editor writes it).
+///
+/// Loose files are listed as archives too (see "Loose files" below): the new files in overrides\
+/// outside any archive's folder (the Guerrilla port's characters, vehicles, weapons, sounds and
+/// scripts), which the loader gives the game by name, and the mods' own data in mods\.
 /// </summary>
 sealed class Workspace
 {
@@ -89,18 +93,22 @@ sealed class Workspace
     /// <summary>
     /// Every archive, as a path relative to the game folder: the game's own, then the new ones in
     /// overrides\ (an archive file there that the game folder hasn't, such as the Guerrilla world's
-    /// build\pc\cache\rfg_l0.vpp_pc; the loader gives it to the game as if it were in the game folder).
+    /// build\pc\cache\rfg_l0.vpp_pc; the loader gives it to the game as if it were in the game folder),
+    /// then the folders of loose files (see <see cref="IsLooseFolder"/>). In this order the game's
+    /// own come first, as the game finds a name in its archives before the loader's new files.
     /// </summary>
-    public IReadOnlyList<string> Archives() => allArchives ??= [.. RfaFormats.GameFolder.Archives(GameFolder), .. NewArchives()];
+    public IReadOnlyList<string> Archives() => allArchives ??= [.. RfaFormats.GameFolder.Archives(GameFolder), .. NewArchives(), .. LooseFolders().Keys];
 
-    /// <summary>Where an archive is: in the game folder, or in overrides\ if it is a new one.</summary>
-    public string ArchivePath(string archive) => IsNewArchive(archive) ? Path.Combine(OverridesFolder, archive) : Path.Combine(GameFolder, archive);
+    /// <summary>Where an archive is: in the game folder, or in overrides\ if it is a new one; for loose files, their folder.</summary>
+    public string ArchivePath(string archive) =>
+        LooseFolders().TryGetValue(archive, out LooseFolder? loose) ? loose.Folder
+        : IsNewArchive(archive) ? Path.Combine(OverridesFolder, archive) : Path.Combine(GameFolder, archive);
 
     /// <summary>True for an archive in overrides\ that the game hasn't.</summary>
     public bool IsNewArchive(string archive)
     {
         if (isNew.TryGetValue(archive, out bool known)) return known;
-        return isNew[archive] = !File.Exists(Path.Combine(GameFolder, archive)) && File.Exists(Path.Combine(OverridesFolder, archive));
+        return isNew[archive] = !IsLooseFolder(archive) && !File.Exists(Path.Combine(GameFolder, archive)) && File.Exists(Path.Combine(OverridesFolder, archive));
     }
     readonly Dictionary<string, bool> isNew = new(StringComparer.OrdinalIgnoreCase);
 
@@ -115,20 +123,37 @@ sealed class Workspace
             .OrderBy(archive => archive, StringComparer.OrdinalIgnoreCase);
     }
 
-    /// <summary>An archive, by its path relative to the game folder. Opened once, then kept.</summary>
+    /// <summary>An archive, by its path relative to the game folder (or a folder of loose files). Opened once, then kept.</summary>
     public Packfile Archive(string archive)
     {
         if (!archives.TryGetValue(archive, out Packfile? pack))
         {
-            pack = Packfile.Open(ArchivePath(archive));
+            pack = Open(archive)();
             archives[archive] = pack;
         }
         return pack;
     }
 
+    /// <summary>A way to open an archive afresh, apart from this workspace's own (for reading it on another thread).</summary>
+    public Func<Packfile> Open(string archive)
+    {
+        if (LooseFolders().TryGetValue(archive, out LooseFolder? loose))
+        {
+            string name = archive, folder = loose.Folder;
+            return () => Packfile.FromLooseFiles(name, LooseFilesIn(folder, loose.NewFiles ? Path.GetDirectoryName(archive) : null));
+        }
+        string path = ArchivePath(archive);
+        return () => Packfile.Open(path);
+    }
+
     /// <summary>The game's own copy of a file in an archive (never the override). For one of our archives, its copy from before the editor changed it.</summary>
     public byte[] ReadOriginal(string archive, string fileName)
     {
+        if (IsLooseFolder(archive))
+        {
+            if (KeptLoose(archive, fileName) is not string keptLoose) return File.ReadAllBytes(LoosePath(archive, fileName));
+            return keptLoose.EndsWith(AbsentSuffix) ? throw new FileNotFoundException($"{archive} had no {fileName} before the editor added it") : File.ReadAllBytes(keptLoose);
+        }
         if (IsNewArchive(archive) && KeptOriginal(archive, fileName) is string kept)
             return File.Exists(kept) ? File.ReadAllBytes(kept) : throw new FileNotFoundException($"{archive} had no {fileName} before the editor added it");
         Packfile pack = Archive(archive);
@@ -138,6 +163,7 @@ sealed class Workspace
     /// <summary>A file in an archive as the game will see it: the override if one applies, else the game's copy.</summary>
     public byte[] Read(string archive, string fileName)
     {
+        if (IsLooseFolder(archive)) return File.ReadAllBytes(LoosePath(archive, fileName));
         if (IsNewArchive(archive))
         {
             if (pending.TryGetValue(archive, out var waiting) && waiting.TryGetValue(fileName, out byte[]? soon))
@@ -193,7 +219,7 @@ sealed class Workspace
     /// </summary>
     public string? OverrideFor(string archive, string fileName)
     {
-        if (IsNewArchive(archive)) return null;  // ours: changed in place (see IsChanged)
+        if (IsNewArchive(archive) || IsLooseFolder(archive)) return null;  // ours: changed in place (see IsChanged)
         overrides ??= ScanOverrides();
         if (!overrides.TryGetValue(fileName, out List<string>? paths)) return null;
         string? own = paths.FirstOrDefault(p => ArchiveOf(p).Equals(archive, StringComparison.OrdinalIgnoreCase));
@@ -207,7 +233,8 @@ sealed class Workspace
     /// editor changed in one of our archives.
     /// </summary>
     public bool IsChanged(string archive, string fileName) =>
-        IsNewArchive(archive) ? EditFor(archive, fileName) != null || KeptOriginal(archive, fileName) != null : OverrideFor(archive, fileName) != null;
+        IsLooseFolder(archive) ? KeptLoose(archive, fileName) != null
+        : IsNewArchive(archive) ? EditFor(archive, fileName) != null || KeptOriginal(archive, fileName) != null : OverrideFor(archive, fileName) != null;
 
     /// <summary>
     /// Writes an override for this archive's copy of a file. In one of our archives it goes to
@@ -217,6 +244,7 @@ sealed class Workspace
     /// </summary>
     public string WriteOverride(string archive, string fileName, byte[] data)
     {
+        if (IsLooseFolder(archive)) return WriteLoose(archive, fileName, data);
         if (IsNewArchive(archive))
         {
             if (Archive(archive).Find(fileName) is not { } own)
@@ -241,6 +269,11 @@ sealed class Workspace
     /// <summary>Deletes the override the game would use for this archive's copy of a file, if any.</summary>
     public void DeleteOverride(string archive, string fileName)
     {
+        if (IsLooseFolder(archive))
+        {
+            PutBackLoose(archive, fileName);
+            return;
+        }
         if (IsNewArchive(archive))
         {
             string edit = EditPath(archive, fileName);
@@ -356,6 +389,168 @@ sealed class Workspace
         Changed();
     }
 
+    // ---- Loose files ---------------------------------------------------------------------------
+    // Files that aren't in any archive but that the game gets all the same, each folder of them
+    // listed as one "archive" of loose files (Packfile.FromLooseFiles), by a name of its own:
+    //   build\pc\cache\(new files)       the new files in overrides\build\pc\cache\: the loader hands
+    //                                    one to the game when the game looks for that name and finds
+    //                                    it in none of its archives (so a name an archive has is the
+    //                                    archive's; the editor finds names the same way, archives first)
+    //   mods\guerrilla_gear\animations   the data a mod reads from its folder (the Guerrilla port's
+    //                                    tables, animations, pictures and scripts, which it gives the game)
+    // Changing one (saving a table or a zone in it, a texture in a container) writes the file in
+    // place, as the game reads it there; the copy from before is kept in editor_originals\ (as for our
+    // archives), so restoring puts it back. If the file is written anew since (the Guerrilla builder
+    // ran again), the kept copy is forgotten with the change.
+
+    /// <summary>A folder of loose files: where it is, and whether it holds new files (else a mod's data).</summary>
+    sealed record LooseFolder(string Folder, bool NewFiles);
+
+    /// <summary>The name a folder's new files are listed under, beside the folder's archives.</summary>
+    public const string NewFilesName = "(new files)";
+
+    Dictionary<string, LooseFolder>? looseFolders;
+
+    /// <summary>True for a folder of loose files listed as an archive (see above).</summary>
+    public bool IsLooseFolder(string archive) => LooseFolders().ContainsKey(archive);
+
+    /// <summary>True for a folder of new files in overrides\ (see above); false for a mod's data, or an archive.</summary>
+    public bool IsNewFiles(string archive) => LooseFolders().TryGetValue(archive, out LooseFolder? loose) && loose.NewFiles;
+
+    /// <summary>The folders of loose files, in order: the new files in overrides\ (by folder), then each mod's folders.</summary>
+    Dictionary<string, LooseFolder> LooseFolders()
+    {
+        if (looseFolders != null) return looseFolders;
+        var found = new Dictionary<string, LooseFolder>(StringComparer.OrdinalIgnoreCase);
+        // New files: in every folder of overrides\ but its top (its read-me) and the archives' own.
+        if (Directory.Exists(OverridesFolder))
+            foreach (string folder in Directory.EnumerateDirectories(OverridesFolder, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                string relative = Path.GetRelativePath(OverridesFolder, folder);
+                if (relative.Split(Path.DirectorySeparatorChar).Any(part => part.EndsWith(".vpp_pc", StringComparison.OrdinalIgnoreCase))) continue;
+                if (LooseFilesIn(folder, relative).Count > 0) found[Path.Combine(relative, NewFilesName)] = new LooseFolder(folder, NewFiles: true);
+            }
+        // The mods' data: every folder in mods\ (the mods themselves are in mods\ itself).
+        string mods = Path.Combine(ModFolder, "mods");
+        if (Directory.Exists(mods))
+            foreach (string folder in Directory.EnumerateDirectories(mods, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+                if (LooseFilesIn(folder, null).Count > 0) found[Path.GetRelativePath(ModFolder, folder)] = new LooseFolder(folder, NewFiles: false);
+        return looseFolders = found;
+    }
+
+    /// <summary>
+    /// The loose files of a folder, by name. For new files (<paramref name="gameRelative"/>: the
+    /// folder's place in the game folder) not the new archives, which are listed as archives, nor
+    /// a file the game folder has at that place, which the loader leaves out.
+    /// </summary>
+    List<string> LooseFilesIn(string folder, string? gameRelative) =>
+        Directory.EnumerateFiles(folder)
+            .Where(path => gameRelative == null || (!path.EndsWith(".vpp_pc", StringComparison.OrdinalIgnoreCase) &&
+                                                    !File.Exists(Path.Combine(GameFolder, gameRelative, Path.GetFileName(path)))))
+            .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    string LoosePath(string archive, string fileName) => Path.Combine(LooseFolders()[archive].Folder, fileName);
+
+    /// <summary>Where a loose file is on disk (for a folder of loose files: see <see cref="IsLooseFolder"/>).</summary>
+    public string LooseFilePath(string archive, string fileName) => LoosePath(archive, fileName);
+
+    Dictionary<string, string>? archiveNames;  // file name -> the first archive (the game's, or a new one) with it directly inside
+
+    /// <summary>
+    /// The first archive (the game's own, or a new one in overrides\) with a file of this name
+    /// directly inside, or null. A new file of a name an archive has is never the game's: the
+    /// game finds the archive's first.
+    /// </summary>
+    public string? GameArchiveWith(string fileName)
+    {
+        if (archiveNames == null)
+        {
+            archiveNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string archive in Archives().Where(a => !IsLooseFolder(a)))
+            {
+                try
+                {
+                    foreach (PackfileEntry entry in Archive(archive).Entries) archiveNames.TryAdd(entry.Name, archive);
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException) { }  // (one that can't be read has none)
+            }
+        }
+        return archiveNames.TryGetValue(fileName, out string? found) ? found : null;
+    }
+
+    string KeptLoosePath(string archive, string fileName) => Path.Combine(OriginalsFolder, archive, fileName);
+    const string WrittenSuffix = ".written";  // beside a kept copy: the size and time of the file as the editor wrote it
+
+    /// <summary>
+    /// The copy from before the editor changed a loose file (a path ending .absent: there was none),
+    /// or null if it hasn't, or if the file was written anew since (then the kept copy is forgotten).
+    /// </summary>
+    string? KeptLoose(string archive, string fileName)
+    {
+        string kept = KeptLoosePath(archive, fileName), written = kept + WrittenSuffix;
+        string? found = File.Exists(kept) ? kept : File.Exists(kept + AbsentSuffix) ? kept + AbsentSuffix : null;
+        if (found == null) return null;
+        string now = LoosePath(archive, fileName);
+        if (File.Exists(written) && File.Exists(now) && File.ReadAllText(written).Trim() == Stamp(now)) return found;
+        File.Delete(found);
+        File.Delete(written);
+        return null;
+    }
+
+    /// <summary>Writes a loose file in place, keeping its copy from before the first change.</summary>
+    string WriteLoose(string archive, string fileName, byte[] data)
+    {
+        string path = LoosePath(archive, fileName), kept = KeptLoosePath(archive, fileName);
+        if (KeptLoose(archive, fileName) == null)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(kept)!);
+            if (File.Exists(path)) File.Copy(path, kept, overwrite: true);
+            else File.WriteAllBytes(kept + AbsentSuffix, []);
+        }
+        File.WriteAllBytes(path, data);
+        File.WriteAllText(kept + WrittenSuffix, Stamp(path));
+        Changed();
+        return path;
+    }
+
+    /// <summary>Puts a changed loose file's copy from before back (or takes away one the editor added).</summary>
+    void PutBackLoose(string archive, string fileName)
+    {
+        if (KeptLoose(archive, fileName) is not string kept) return;
+        string path = LoosePath(archive, fileName);
+        if (kept.EndsWith(AbsentSuffix)) File.Delete(path);
+        else File.Copy(kept, path, overwrite: true);
+        File.Delete(kept);
+        File.Delete(KeptLoosePath(archive, fileName) + WrittenSuffix);
+        Changed();
+    }
+
+    /// <summary>
+    /// A way to sum up what the editor lists besides the game's own archives: each folder of
+    /// overrides\ and mods\ (but the archives' override folders) with how many files it has and their
+    /// total size, so new archives, new files and the mods' data. It reads only the disk, so it can
+    /// be run on another thread. When the sum changes (the Guerrilla builder wrote new files while the
+    /// editor was open), the explorer and the search are made again.
+    /// </summary>
+    public Func<string> ListedSignatureReader()
+    {
+        string[] roots = [OverridesFolder, Path.Combine(ModFolder, "mods")];
+        return () =>
+        {
+            var parts = new List<string>();
+            foreach (string root in roots.Where(Directory.Exists))
+                foreach (DirectoryInfo folder in new DirectoryInfo(root).EnumerateDirectories("*", SearchOption.AllDirectories))
+                {
+                    if (Path.GetRelativePath(root, folder.FullName).Split(Path.DirectorySeparatorChar)
+                            .Any(part => part.EndsWith(".vpp_pc", StringComparison.OrdinalIgnoreCase))) continue;  // overrides of an archive's files
+                    var files = folder.EnumerateFiles().ToList();
+                    if (files.Count > 0) parts.Add($"{folder.FullName}:{files.Count}:{files.Sum(f => f.Length)}");
+                }
+            return string.Join("|", parts);
+        };
+    }
+
     /// <summary>Forget what is in overrides\, so it is looked at again (after files there changed).</summary>
     public void RefreshOverrides() => Changed();
 
@@ -365,6 +560,11 @@ sealed class Workspace
         overrides = null;
         allArchives = null;
         lastContainer = null;
+        if (looseFolders != null)
+        {
+            foreach (string loose in looseFolders.Keys) archives.Remove(loose);  // their file lists are read again
+            looseFolders = null;
+        }
     }
 
     string ArchiveOf(string overridePath) => Path.GetRelativePath(OverridesFolder, Path.GetDirectoryName(overridePath)!);

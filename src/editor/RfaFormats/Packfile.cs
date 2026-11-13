@@ -119,6 +119,57 @@ public sealed class Packfile
     }
 
     /// <summary>
+    /// Loose files on disk, listed and read as if they were one packfile's (stored plain): each is an
+    /// entry by its file name, read from its own file when asked for. For files a mod puts beside the
+    /// archives, which the game gets by name (the new files in overrides\, such as the Guerrilla
+    /// port's characters and vehicles, and the mods' own data), so they can be browsed and read like
+    /// an archive's. Only each file's size is read now. Such a packfile can't be rebuilt.
+    /// </summary>
+    public static Packfile FromLooseFiles(string name, IReadOnlyList<string> paths)
+    {
+        // Each file gets a place in one long run of bytes, as an archive's data block would: reading
+        // at a place reads that file, from its own start.
+        var entries = new List<PackfileEntry>(paths.Count);
+        var starts = new long[paths.Count];
+        long at = 0;
+        for (int i = 0; i < paths.Count; i++)
+        {
+            uint size = (uint)new FileInfo(paths[i]).Length;
+            starts[i] = at;
+            entries.Add(new PackfileEntry(Path.GetFileName(paths[i]), 0, size, size, at));
+            at += size;
+        }
+        byte[] ReadLoose(long offset, int length)
+        {
+            int index = Array.BinarySearch(starts, offset);
+            if (index < 0) index = ~index - 1;  // the file whose run holds this place
+            if (index < 0 || index >= paths.Count) throw new InvalidDataException($"{name} has nothing at {offset}");
+            using var file = new FileStream(paths[index], FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            file.Position = offset - starts[index];
+            var bytes = new byte[length];
+            file.ReadExactly(bytes);
+            return bytes;
+        }
+        return new Packfile(name, entries, at, ReadLoose);
+    }
+
+    /// <summary>Loose files as a packfile (see <see cref="FromLooseFiles"/>): no header, directory or names of its own.</summary>
+    Packfile(string name, IReadOnlyList<PackfileEntry> entries, long dataSize, Func<long, int, byte[]> readBytes)
+    {
+        Name = name;
+        this.readBytes = readBytes;
+        header = directory = names = [];
+        FormatVersion = Version;
+        Flags = PackfileFlags.None;
+        DataSize = (uint)Math.Min(dataSize, uint.MaxValue);
+        CompressedDataSize = 0xFFFFFFFF;
+        Entries = entries;
+    }
+
+    /// <summary>True for loose files read as a packfile (see <see cref="FromLooseFiles"/>).</summary>
+    public bool IsLooseFiles => header.Length == 0;
+
+    /// <summary>
     /// Opens a container (.str2_pc) inside this archive, as <see cref="FromBytes"/> does with its bytes
     /// read out, but where it lies if the archive isn't compressed (as the levels' aren't): only its
     /// header, directory and names are read now, its data when a file is read, so the container's
@@ -186,6 +237,8 @@ public sealed class Packfile
     /// </summary>
     public byte[] Rebuild(IReadOnlyDictionary<string, byte[]> replacements)
     {
+        if (IsLooseFiles)
+            throw new NotSupportedException($"{Name} is loose files, not a packfile");
         if (FormatVersion != Version)
             throw new NotSupportedException($"{Name} is a Red Faction: Guerrilla packfile, which is only read");
         if (IsCompressed && !IsCondensed)
