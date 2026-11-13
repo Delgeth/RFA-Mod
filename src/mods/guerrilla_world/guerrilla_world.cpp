@@ -386,6 +386,9 @@ BuiltTable g_builtTables[] = {
     // Guerrilla's people (GuerrillaBuilder.exe's people; Armageddon's characters with Guerrilla's added). Their
     // animation sets go into the four animation lists above, which it shares with the vehicles.
     {"character.xtbl", "Characters", {}},
+    // Armageddon's AI properties with rfg_unarmed (its Default less Auto Equip), which Guerrilla's characters with no
+    // equip item name: Guerrilla never puts a gun in a new NPC's hands (GuerrillaBuilder.exe's people).
+    {"ai_properties.xtbl", "AI properties", {}},
     // Guerrilla's squads (their members as Armageddon names them) and their weapons (loadouts), the
     // squads its zones' patrols and spawn nodes put down (GuerrillaBuilder.exe).
     {"squads.xtbl", "Squads", {}},
@@ -1222,6 +1225,104 @@ void __fastcall StreamUpdateSteady(void* manager, void* unused, const float* pos
     }
     g_streamHeld[1] = position[1];
     g_streamUpdate(manager, unused, g_streamHeld, flag);
+}
+
+// ---- Children of destroyed parents, when a zone is made again ----------------------------------
+// A zone made again from a save, or after it streamed out, keeps a list of the objects that went
+// out untouched. The world's serialize_zone (0x6D5F90) makes those objects again from their zone
+// file stubs, and makes the others from their saved state. Its sibling 0x6CFDA0 makes the listed
+// ones only. 0x6CFBD0 fills a set with the listed handles, and 0x6DA720 asks whether a handle is
+// in it. A stub carries the object's original parent (stub +0x24, object +0x6C), and the add
+// (0x6D4880) clears a parent it can't find with "Invalidating parent handle ... because the parent
+// does not exist". A parent destroyed before the save is in neither the list nor the saved state.
+// Its untouched child is made from its stub with that parent: a crate by the Dust safehouse after
+// its neighbour was blown up. Guerrilla's create_object_from_stub (RM 0x93E410) clears the link the
+// same way, so the child stands alone. Here such a child is made unattached and logged, when its
+// parent is in its own zone (the handles' top byte) and in neither the list nor the world. Any
+// other missing parent still reaches the game's check and its warning.
+constexpr DWORD kSerializeZone = 0x6D5F90;     // thiscall: the zone's record, its file, a flag; ret 0Ch
+constexpr DWORD kRemakeListed = 0x6CFDA0;      // thiscall: the zone's record, its file; ret 8
+constexpr DWORD kFillListedSet = 0x6CFBD0;     // thiscall: the set, handles out, the zone, a flag; ret 10h
+constexpr DWORD kAddZoneObject = 0x6D4880;     // thiscall: the object, a flag; ret 8
+constexpr DWORD kZoneRecordListed = 0x68;      // the zone record's count of listed objects
+constexpr DWORD kObjectHandle = 0x68;
+constexpr DWORD kObjectParent = 0x6C;
+using SerializeZoneFn = DWORD(__fastcall*)(void* world, void* unused, BYTE* record, void* file, int flag);
+using RemakeListedFn = DWORD(__fastcall*)(void* world, void* unused, BYTE* record, void* file);
+using FillListedSetFn = DWORD(__fastcall*)(void* world, void* unused, void* set, void* handles, int zone, int flag);
+using AddZoneObjectFn = DWORD(__fastcall*)(void* world, void* unused, BYTE* object, int flag);
+using InListedSetFn = bool(__fastcall*)(void* set, void* unused, DWORD handle);
+auto const InListedSet = reinterpret_cast<InListedSetFn>(0x6DA720);
+using ObjectInWorldFn = BYTE*(__fastcall*)(void* world, void* unused, DWORD handle);
+auto const ObjectInWorld = reinterpret_cast<ObjectInWorldFn>(0x6CB9E0);  // the add's own lookup
+SerializeZoneFn g_serializeZone;
+RemakeListedFn g_remakeListed;
+FillListedSetFn g_fillListedSet;
+AddZoneObjectFn g_addZoneObject;
+thread_local bool t_remaking = false;      // in a zone being made again with a list
+thread_local void* t_listedSet = nullptr;  // that list's set, once filled
+
+DWORD __fastcall SerializeZoneRemaking(void* world, void* unused, BYTE* record, void* file, int flag) {
+    const bool wasRemaking = t_remaking;
+    void* const wasSet = t_listedSet;
+    t_remaking = record && *reinterpret_cast<int*>(record + kZoneRecordListed) > 0;
+    t_listedSet = nullptr;
+    const DWORD made = g_serializeZone(world, unused, record, file, flag);
+    t_remaking = wasRemaking;
+    t_listedSet = wasSet;
+    return made;
+}
+
+DWORD __fastcall RemakeListedRemaking(void* world, void* unused, BYTE* record, void* file) {
+    const bool wasRemaking = t_remaking;
+    void* const wasSet = t_listedSet;
+    t_remaking = true;
+    t_listedSet = nullptr;
+    const DWORD made = g_remakeListed(world, unused, record, file);
+    t_remaking = wasRemaking;
+    t_listedSet = wasSet;
+    return made;
+}
+
+DWORD __fastcall FillListedSetNoted(void* world, void* unused, void* set, void* handles, int zone, int flag) {
+    const DWORD count = g_fillListedSet(world, unused, set, handles, zone, flag);
+    if (t_remaking) t_listedSet = set;
+    return count;
+}
+
+DWORD __fastcall AddZoneObjectChecked(void* world, void* unused, BYTE* object, int flag) {
+    if (t_remaking && t_listedSet && object) {
+        const DWORD handle = *reinterpret_cast<DWORD*>(object + kObjectHandle);
+        const DWORD parent = *reinterpret_cast<DWORD*>(object + kObjectParent);
+        if (parent != 0xFFFFFFFF && parent >> 24 == handle >> 24 && InOurWorld() &&
+            !ObjectInWorld(world, nullptr, parent) && !InListedSet(t_listedSet, nullptr, parent)) {
+            RFA_LOG_FIRST(200, "Zones made again: object %08X is made unattached; its parent %08X, in its zone, was in neither the zone's "
+                               "list nor its saved state (destroyed before the save)", handle, parent);
+            *reinterpret_cast<DWORD*>(object + kObjectParent) = 0xFFFFFFFF;
+        }
+    }
+    return g_addZoneObject(world, unused, object, flag);
+}
+
+// Hooks the four, each only if its first bytes are the ones read here.
+void InstallRemadeChildren() {
+    const BYTE serializeOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xB8, 0x01, 0x00, 0x00};
+    const BYTE remakeOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x38};
+    const BYTE fillOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24};
+    const BYTE addOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14};
+    if (memcmp(reinterpret_cast<const void*>(kSerializeZone), serializeOpening, sizeof(serializeOpening)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kRemakeListed), remakeOpening, sizeof(remakeOpening)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kFillListedSet), fillOpening, sizeof(fillOpening)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kAddZoneObject), addOpening, sizeof(addOpening)) != 0) {
+        rfa::Log("Zones made again: the game's zone loading isn't the code expected; children of destroyed parents keep the game's warning");
+        return;
+    }
+    g_addZoneObject = reinterpret_cast<AddZoneObjectFn>(rfa::HookFunction(kAddZoneObject, sizeof(addOpening), reinterpret_cast<void*>(&AddZoneObjectChecked)));
+    g_fillListedSet = reinterpret_cast<FillListedSetFn>(rfa::HookFunction(kFillListedSet, sizeof(fillOpening), reinterpret_cast<void*>(&FillListedSetNoted)));
+    g_remakeListed = reinterpret_cast<RemakeListedFn>(rfa::HookFunction(kRemakeListed, sizeof(remakeOpening), reinterpret_cast<void*>(&RemakeListedRemaking)));
+    g_serializeZone = reinterpret_cast<SerializeZoneFn>(rfa::HookFunction(kSerializeZone, sizeof(serializeOpening), reinterpret_cast<void*>(&SerializeZoneRemaking)));
+    if (!g_addZoneObject || !g_fillListedSet || !g_remakeListed || !g_serializeZone)
+        rfa::Log("Zones made again: could not hook all of the game's zone loading; children of destroyed parents may keep the game's warning");
 }
 
 // Each frame: in our worlds the sub-zones' layer keeps the game's radius but no more than it can
@@ -8850,8 +8951,14 @@ volatile DWORD g_loopThread;            // the thread that runs the frames (the 
 int g_backgroundFrames;                 // frames left out of the frame times since the last line
 HANDLE g_watchdog;
 
+// A frame still running at the last look (5 s) is stuck: its line is written then, without waiting for the frame to
+// end, so a freeze the game never comes back from still names where the main thread hangs. Windows stops treating a
+// window that hasn't answered for 5 s as the one in front (it puts up its "not responding" copy), so after 3 s into a
+// frame the window being behind no longer stops the looks.
 constexpr size_t kStackCopy = 64 * 1024;  // at most this much of the main thread's stack copied at each look
-constexpr DWORD kLookAtMs[] = {250, 500, 1000, 2000};
+constexpr DWORD kLookAtMs[] = {250, 500, 1000, 2000, 5000};
+constexpr DWORD kStuckMs = 5000;
+constexpr DWORD kFrontCheckedForMs = 3000;
 constexpr DWORD kPlayBeforeLooking = 15000;
 constexpr int kChainLength = 20;
 
@@ -8901,6 +9008,20 @@ int FollowFrames(const DWORD* stack, DWORD esp, size_t copied, DWORD ebp, DWORD*
     return length;
 }
 
+// A look as the log shows it: where the main thread was, and its call chain.
+std::string DescribeLook(const ThreadLook& look) {
+    char part[160];
+    DescribeCodeAddress(look.eip, part, sizeof(part));
+    std::string text = std::string(part) + ", called from ";
+    for (int i = 0; i < look.chainLength; ++i) {
+        DescribeCodeAddress(look.chain[i], part, sizeof(part));
+        text += i ? ", " : "";
+        text += part;
+    }
+    if (!look.chainLength) text += "(no frames read)";
+    return text;
+}
+
 DWORD WINAPI Watchdog(void*) {
     HANDLE thread = nullptr;
     DWORD threadId = 0;
@@ -8914,18 +9035,9 @@ DWORD WINAPI Watchdog(void*) {
         const LONG frame = g_frameNumber;
         if (frame != watchedFrame) {
             // The frame watched has ended: one line for it, if it was looked at.
-            if (haveLook && !behind && g_lastFrameEnded == watchedFrame) {
-                char where[160], part[160];
-                DescribeCodeAddress(last.eip, where, sizeof(where));
-                std::string chain;
-                for (int i = 0; i < last.chainLength; ++i) {
-                    DescribeCodeAddress(last.chain[i], part, sizeof(part));
-                    chain += i ? ", " : "";
-                    chain += part;
-                }
-                RFA_LOG_FIRST(50, "Long frame: %ld ms; at the last look (%lu ms in) the main thread was at %s, called from %s", g_lastFrameMs,
-                              kLookAtMs[looks - 1], where, chain.empty() ? "(no frames read)" : chain.c_str());
-            }
+            if (haveLook && !behind && g_lastFrameEnded == watchedFrame)
+                RFA_LOG_FIRST(50, "Long frame: %ld ms; at the last look (%lu ms in) the main thread was at %s", g_lastFrameMs,
+                              kLookAtMs[looks - 1], DescribeLook(last).c_str());
             watchedFrame = frame;
             looks = 0;
             behind = haveLook = false;
@@ -8933,13 +9045,14 @@ DWORD WINAPI Watchdog(void*) {
         if (!g_destructionLog || !g_buildingsWorld || !g_loopThread || !g_playSinceTick) continue;
         const DWORD now = GetTickCount();
         if (now - static_cast<DWORD>(g_playSinceTick) < kPlayBeforeLooking) continue;
-        if (!GameInFront()) {
+        const LONG elapsed = static_cast<LONG>(now - static_cast<DWORD>(g_frameStartTick));
+        if (behind) continue;
+        if (elapsed < static_cast<LONG>(kFrontCheckedForMs) && !GameInFront()) {
             behind = true;
             InterlockedExchange(&g_frameInBackground, 1);
             InterlockedExchange(&g_simFrameInBackground, 1);
             continue;
         }
-        const LONG elapsed = static_cast<LONG>(now - static_cast<DWORD>(g_frameStartTick));
         if (looks >= static_cast<int>(sizeof(kLookAtMs) / sizeof(kLookAtMs[0])) || elapsed < static_cast<LONG>(kLookAtMs[looks])) continue;
         if (threadId != g_loopThread) {
             if (thread) CloseHandle(thread);
@@ -8962,6 +9075,9 @@ DWORD WINAPI Watchdog(void*) {
         last.eip = context.Eip;
         last.chainLength = copied >= 256 ? FollowFrames(stack, context.Esp, copied, context.Ebp, last.chain) : 0;
         haveLook = true;
+        if (kLookAtMs[looks - 1] == kStuckMs)
+            RFA_LOG_FIRST(10, "Stuck frame: still running after %ld ms (not ended yet); the main thread is at %s", elapsed,
+                          DescribeLook(last).c_str());
     }
 }
 
@@ -9281,6 +9397,46 @@ void __fastcall ResetLinkStrengths(void* shape, void* unused) {
     g_resetLinkStrengths(shape, unused);
 }
 
+// A hit on an anchored piece, logged (a diagnosis, for road signs that stop a car the first time): the game's damage
+// to one piece, 0x6797B0 (cdecl: the mover, the piece's state, the damage, the hit's position, its kind, two flags (the
+// second: break it outright), two more; Guerrilla's rfg_dyn_apply_damage_to_subpiece, RM 0x732A30). Like Guerrilla's,
+// it takes the damage off the piece's anchor strength (state +0, while state +0x18 bit 0 says it's anchored; 0x679E60)
+// and frees the piece once that reaches 0. One line per hit on a piece still anchored, within 12 m of the player, not
+// one that breaks it outright: the mover, the damage against the strength, the strength left, and the hit's kind as
+// passed (if it is Guerrilla's order, 3 and 4 are something touching it, DET_OBJECT_SIMPLE and _COMPLEX; not checked).
+// At most 40 a run (DestructionLog=1).
+constexpr DWORD kPieceDamage = 0x6797B0;
+constexpr size_t kPieceDamagePrologue = 9;  // push ebp / mov ebp,esp / sub esp,0B4h
+constexpr int kPieceHitLines = 40;
+constexpr float kPieceHitNearPlayer = 12.0f;
+using PieceDamageFn = DWORD(__cdecl*)(BYTE* mover, BYTE* state, DWORD damage, const float* position, int kind, int flag, int outright,
+                                      void* other, void* more);
+PieceDamageFn g_pieceDamage;
+volatile LONG g_pieceHitLines;
+
+DWORD __cdecl PieceDamaged(BYTE* mover, BYTE* state, DWORD damage, const float* position, int kind, int flag, int outright, void* other,
+                           void* more) {
+    if (!g_destructionLog || g_pieceHitLines >= kPieceHitLines || (outright & 0xFF) || !state || !mover || !position ||
+        !(*reinterpret_cast<const DWORD*>(state + 0x18) & 1) || *reinterpret_cast<const int*>(state) <= 0)
+        return g_pieceDamage(mover, state, damage, position, kind, flag, outright, other, more);
+    const int before = *reinterpret_cast<const int*>(state);
+    const DWORD result = g_pieceDamage(mover, state, damage, position, kind, flag, outright, other, more);
+    const BYTE* player = LocalPlayer();
+    if (!player || !InOurWorld()) return result;
+    const float* at = reinterpret_cast<const float*>(player + 4);
+    const float dx = position[0] - at[0], dy = position[1] - at[1], dz = position[2] - at[2];
+    const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (distance > kPieceHitNearPlayer || InterlockedIncrement(&g_pieceHitLines) > kPieceHitLines) return result;
+    const bool anchored = (*reinterpret_cast<const DWORD*>(state + 0x18) & 1) != 0;
+    const int after = anchored ? *reinterpret_cast<const int*>(state) : 0;
+    rfa::Log("Piece hit: mover %08lX, kind %d, damage %lu against an anchor strength of %d: %s (%d left); at (%.1f, %.1f, %.1f), %.1f m from "
+             "the player (seat %d)",
+             *reinterpret_cast<const DWORD*>(mover + kObjectHandle), kind, damage, before,
+             !anchored || after <= 0 ? "it gives way" : "it holds", after, position[0], position[1], position[2], distance,
+             *reinterpret_cast<const int*>(player + 0x1168));
+    return result;
+}
+
 void __fastcall CreateWorldAnchor(void* shape, void* unused, void* mover, BYTE* state) {
     BuildingsSync("before a piece was anchored");
     g_createWorldAnchor(shape, unused, mover, state);
@@ -9470,6 +9626,13 @@ void InstallBuildings() {
         g_createWorldAnchor = reinterpret_cast<CreateWorldAnchorFn>(
             rfa::HookFunction(kCreateWorldAnchor, kCreateWorldAnchorPrologue, reinterpret_cast<void*>(&CreateWorldAnchor)));
     if (!g_createWorldAnchor) rfa::Log("Buildings: could not wrap the game's anchoring (its code isn't as expected); pieces hold to the ground as the game's own");
+    {
+        const BYTE damageOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xB4, 0x00, 0x00, 0x00};
+        if (memcmp(reinterpret_cast<const void*>(kPieceDamage), damageOpening, sizeof(damageOpening)) == 0)
+            g_pieceDamage = reinterpret_cast<PieceDamageFn>(
+                rfa::HookFunction(kPieceDamage, kPieceDamagePrologue, reinterpret_cast<void*>(&PieceDamaged)));
+        if (!g_pieceDamage) rfa::Log("Buildings: could not wrap the game's damage to a piece (its code isn't as expected); hits on anchored pieces aren't logged");
+    }
     if (memcmp(reinterpret_cast<const void*>(kResetLinkStrengths), resetOpening, sizeof(resetOpening)) == 0)
         g_resetLinkStrengths = reinterpret_cast<ResetLinkStrengthsFn>(
             rfa::HookFunction(kResetLinkStrengths, kResetLinkStrengthsPrologue, reinterpret_cast<void*>(&ResetLinkStrengths)));
@@ -10122,6 +10285,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_streamUpdate = reinterpret_cast<StreamUpdateFn>(
         rfa::HookFunction(kStreamUpdate, kStreamUpdatePrologue, reinterpret_cast<void*>(&StreamUpdateSteady)));
     if (!g_streamUpdate) rfa::Log("Could not hook the game's stream update; StreamSteady= does nothing");
+    InstallRemadeChildren();
     {
         const BYTE ioOpening[] = {0x55, 0x8B, 0xEC, 0x6A, 0x00};
         const BYTE binkOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};

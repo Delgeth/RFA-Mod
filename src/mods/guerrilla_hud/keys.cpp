@@ -1,8 +1,9 @@
 // Guerrilla's keys (see keys.h): their settings in rfa_mods.ini [GuerrillaKeys], and their F7 window, Guerrilla > Keys.
 //
 // Guerrilla's PC version let its own actions be bound in its controls menu; Armageddon's controls menu knows only
-// Armageddon's. Until Guerrilla's are added there, this window lists them: click a key, then press the new one (a
-// letter, a digit, Tab, Enter, Space, Page Up, Page Down or F1-F12; Esc keeps the old one, Delete leaves the action without a key). Each change is
+// Armageddon's. Until Guerrilla's are added there, this window lists them: click a key, then press the new one (any
+// key of kNamedKeys, a letter, a digit or F1-F12; Esc keeps the old one, Delete leaves the action without a key; a key
+// it can't take is said in the window, 2026-11-13: only letters, digits and a few were taken, others went unseen). Each change is
 // written to rfa_mods.ini at once and used at once. Before [GuerrillaKeys] the map's key was [GuerrillaHud] MapKey and
 // the backpack's [GuerrillaGear] BackpackKey: those are still read where [GuerrillaKeys] has no setting.
 #include "rfa_mod.h"
@@ -65,15 +66,33 @@ int g_capturing = -1;        // the action waiting for its new key, -1 for none
 bool g_heldAtCapture[256];   // the keys already down as it started waiting (not taken as the new key)
 std::string g_status;
 
-// A key's virtual-key code from its name: a letter or digit, Tab, Enter, Space, PageUp, PageDown, or F1-F12; 0 for
-// anything else (or none).
+// The keys these can be, besides the letters, digits and F1-F12, by their names in rfa_mods.ini. Not Esc and Delete
+// (the window's keep-it and no-key), the left and right mouse buttons (the window's clicks) or ` (the console's).
+struct NamedKey {
+    int code;
+    const wchar_t* name;
+};
+const NamedKey kNamedKeys[] = {
+    {VK_TAB, L"Tab"}, {VK_RETURN, L"Enter"}, {VK_SPACE, L"Space"}, {VK_BACK, L"Backspace"},
+    {VK_PRIOR, L"PageUp"}, {VK_NEXT, L"PageDown"}, {VK_INSERT, L"Insert"}, {VK_HOME, L"Home"}, {VK_END, L"End"},
+    {VK_UP, L"Up"}, {VK_DOWN, L"Down"}, {VK_LEFT, L"Left"}, {VK_RIGHT, L"Right"},
+    {VK_SHIFT, L"Shift"}, {VK_CONTROL, L"Ctrl"}, {VK_MENU, L"Alt"}, {VK_CAPITAL, L"CapsLock"},
+    {VK_NUMPAD0, L"Num0"}, {VK_NUMPAD1, L"Num1"}, {VK_NUMPAD2, L"Num2"}, {VK_NUMPAD3, L"Num3"}, {VK_NUMPAD4, L"Num4"},
+    {VK_NUMPAD5, L"Num5"}, {VK_NUMPAD6, L"Num6"}, {VK_NUMPAD7, L"Num7"}, {VK_NUMPAD8, L"Num8"}, {VK_NUMPAD9, L"Num9"},
+    {VK_ADD, L"NumPlus"}, {VK_SUBTRACT, L"NumMinus"}, {VK_MULTIPLY, L"NumStar"}, {VK_DIVIDE, L"NumSlash"},
+    {VK_DECIMAL, L"NumDot"},
+    {VK_OEM_MINUS, L"Minus"}, {VK_OEM_PLUS, L"Equals"}, {VK_OEM_4, L"LeftBracket"}, {VK_OEM_6, L"RightBracket"},
+    {VK_OEM_1, L"Semicolon"}, {VK_OEM_7, L"Quote"}, {VK_OEM_COMMA, L"Comma"}, {VK_OEM_PERIOD, L"Period"},
+    {VK_OEM_2, L"Slash"}, {VK_OEM_5, L"Backslash"},
+    {VK_MBUTTON, L"Mouse3"}, {VK_XBUTTON1, L"Mouse4"}, {VK_XBUTTON2, L"Mouse5"},
+};
+
+// A key's virtual-key code from its name: a letter or digit, F1-F12, or one of kNamedKeys; 0 for anything else (or
+// none).
 int CodeOf(const std::wstring& name) {
     if (name.size() == 1 && iswalnum(name[0])) return towupper(name[0]);
-    if (_wcsicmp(name.c_str(), L"Tab") == 0) return VK_TAB;
-    if (_wcsicmp(name.c_str(), L"Enter") == 0) return VK_RETURN;
-    if (_wcsicmp(name.c_str(), L"Space") == 0) return VK_SPACE;
-    if (_wcsicmp(name.c_str(), L"PageUp") == 0) return VK_PRIOR;
-    if (_wcsicmp(name.c_str(), L"PageDown") == 0) return VK_NEXT;
+    for (const NamedKey& key : kNamedKeys)
+        if (_wcsicmp(name.c_str(), key.name) == 0) return key.code;
     if (name.size() >= 2 && name.size() <= 3 && (name[0] == L'F' || name[0] == L'f')) {
         const int number = _wtoi(name.c_str() + 1);
         if (number >= 1 && number <= 12) return VK_F1 + number - 1;
@@ -83,12 +102,9 @@ int CodeOf(const std::wstring& name) {
 
 std::wstring NameOf(int code) {
     if ((code >= 'A' && code <= 'Z') || (code >= '0' && code <= '9')) return std::wstring(1, static_cast<wchar_t>(code));
-    if (code == VK_TAB) return L"Tab";
-    if (code == VK_RETURN) return L"Enter";
-    if (code == VK_SPACE) return L"Space";
-    if (code == VK_PRIOR) return L"PageUp";
-    if (code == VK_NEXT) return L"PageDown";
     if (code >= VK_F1 && code <= VK_F12) return L"F" + std::to_wstring(code - VK_F1 + 1);
+    for (const NamedKey& key : kNamedKeys)
+        if (key.code == code) return key.name;
     return L"";
 }
 
@@ -166,6 +182,13 @@ int KeyGoneDown(const char*& how) {
             g_heldAtCapture[code] = true;
             return code;
         }
+        // A key these can't be (the left and right buttons and the side keys Shift, Ctrl and Alt also come as their
+        // left / right codes after the plain ones, so those are passed over quietly): said in the window, once a press.
+        g_heldAtCapture[code] = true;
+        if (code != VK_LBUTTON && code != VK_RBUTTON && (code < VK_LSHIFT || code > VK_RMENU)) {
+            g_status = "That key can't be used here; pick another (Esc keeps the old one).";
+            rfa::Log("Guerrilla's keys: key code %d pressed, which can't be one of these", code);
+        }
     }
     return 0;
 }
@@ -209,8 +232,8 @@ void Window() {
     }
     if (!g_windowOpen) g_capturing = -1;
     Capture();
-    ImGui::TextWrapped("The keys of Guerrilla's own actions in the Guerrilla world. Click a key, then press the new one: "
-                       "a letter, a digit, Tab, Enter, Space, Page Up, Page Down or F1-F12 (Esc keeps the old one, Delete leaves it without a key). "
+    ImGui::TextWrapped("The keys of Guerrilla's own actions in the Guerrilla world. Click a key, then press the new one: any key "
+                       "but Esc, Delete and `, or the middle or side mouse buttons (Esc keeps the old one, Delete leaves it without a key). "
                        "They're saved in rfa_mods.ini under [GuerrillaKeys] and work at once.");
     ImGui::Spacing();
     if (ImGui::BeginTable("keys", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {

@@ -1318,11 +1318,19 @@ auto const DropRecord = reinterpret_cast<void(__cdecl*)(BYTE* human, BYTE* recor
 // slot 3): every two seconds on foot, the player playing Mason's set who has none of the three is given
 // the best he has bought (Guerrilla's upgrades: Stonebreaker, Shattermaster; else the plain one), into
 // slot 3 if it's free, else the first free one. One he carries that is lesser than that is dropped first.
+// Not while an activity has put its own weapons in (guerrilla_campaign's GuerrillaCampaign_KitLocked):
+// a demolitions master challenge gives the hammer only if its table does, and its plain one stays.
 void KeepHammer(BYTE* player) {
     const ULONGLONG now = GetTickCount64();
     if (now < g_nextHammerCheck) return;
     g_nextHammerCheck = now + kHammerCheckMs;
     if (!PlaysSet(player, kMasonSet)) return;
+    using KitLockedFn = int(__cdecl*)();
+    static const KitLockedFn kitLocked = [] {
+        HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll");
+        return campaign ? reinterpret_cast<KitLockedFn>(GetProcAddress(campaign, "GuerrillaCampaign_KitLocked")) : nullptr;
+    }();
+    if (kitLocked && kitLocked()) return;
     // The hammers in order (plain, Stonebreaker, Shattermaster), and the one he should have: the best bought.
     const std::string bought = upgrades::BestHammer();
     constexpr int kCount = static_cast<int>(sizeof(kHammers) / sizeof(kHammers[0]));

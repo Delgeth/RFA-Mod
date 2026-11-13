@@ -156,6 +156,14 @@ public sealed class GuerrillaKiosks
     public const uint DialogueBus = 0x36306EDD;
 
     /// <summary>
+    /// A test (2026-11-13): in game every 3D sound of ours plays at full volume and centred, while the game places them
+    /// right. So the newsreader's lines take Armageddon's own attenuation, that of its large fire (efx.bnk_pc, loaded at
+    /// boot: 0 dB at 0 m to -96.3 dB at 25 m), and the music keeps ours (5-70 m). If the newsreader is gone by 25 m and
+    /// the music isn't, our attenuations are what Wwise ignores; if neither fades, it isn't the attenuation.
+    /// </summary>
+    public const uint TestArmageddonAttenuation = 0x2CBFCEE4;
+
+    /// <summary>
     /// Builds the broadcast's sounds (Guerrilla's pa_defaults.xtbl names them) into banks of Armageddon's kind:
     /// - its music (Kiosk_Music_Stinger, _Loop, _Out: foley.aud_pc's AMB_EDF_KIOSK_INTRO, _LOOP, _OUTRO), 3D at the
     ///   kiosk with Guerrilla's distances: the intro and outro once on Armageddon's effects' bus, the loop on its
@@ -232,7 +240,7 @@ public sealed class GuerrillaKiosks
                     Volume = GuerrillaSoundBanks.Db(line.Volume) + line.SoundDb, Priority = GuerrillaSoundBanks.Priority(line.Rank, false),
                 };
                 uint sound = voiceBank.Sound(key, voiceBank.Medium(wave), false, settings, 0,
-                                             new WwiseBankWriter.Output(DialogueBus, voiceBanks.Attenuation(voiceBank, line.DistanceIndex), true));
+                                             new WwiseBankWriter.Output(DialogueBus, TestArmageddonAttenuation, true));
                 voiceBank.Event(eventName, voiceBank.Play(key, sound));
                 voiceBank.Event(eventName + "_STOP", voiceBank.Stop(key, sound, 200));
                 double length = (double)wave.Samples.Length / wave.Channels / wave.Rate;

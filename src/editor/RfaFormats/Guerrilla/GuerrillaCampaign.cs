@@ -156,7 +156,8 @@ public static class GuerrillaCampaign
     /// all child elements (the mod's reader keeps no attributes). The handle and parent are Guerrilla's (hex);
     /// buildings keep Guerrilla's handles in our world (but where the world converter had to give one another),
     /// so a demolitions master node's parent names its target, and parent_pos says where that is, to find it by its
-    /// place otherwise. The zone is ours (rfg_CC_RR); the place is the object's op position. Each property is named and written by
+    /// place otherwise; parent_center is the parent's bounding-box centre, and a demolitions master node's area_center is its
+    /// layer's "Demo Master" dummy (the play area's middle, where there is one). The zone is ours (rfg_CC_RR); the place is the object's op position. Each property is named and written by
     /// Guerrilla's own zone schema (rfg_zonex_format.txt): text, enums and flags as text, a bool as true or false,
     /// whole and fractional numbers, handles in hex, vectors, matrices, boxes and lists as numbers split by spaces.
     /// A marker that is in a zone and again in that zone's p_ file (the same handle) is written once.
@@ -193,12 +194,36 @@ public static class GuerrillaCampaign
         // Where each object is, for the markers' parents: the world converter gives a building another handle when
         // ours already has Guerrilla's (je_dm_05's smokestack, 96030008), so the mod also finds a parent by its place.
         var placeOf = new Dictionary<uint, System.Numerics.Vector3>();
+        // Each object's bounding-box centre: the middle of a demolitions master's play area, unless its layer moves it.
+        var centreOf = new Dictionary<uint, System.Numerics.Vector3>();
+        var sizeOf = new Dictionary<uint, System.Numerics.Vector3>();  // and its size: the target's mark on the minimap
         var objectsOf = new Dictionary<string, List<GuerrillaZoneObject>>();
         foreach (var entry in zoneEntries)
         {
             var objects = GuerrillaZones.Objects(zones.Read(entry));
             objectsOf[entry.Name] = objects;
-            foreach (var o in objects) placeOf.TryAdd(o.Handle, PlaceOf(o));
+            foreach (var o in objects)
+            {
+                placeOf.TryAdd(o.Handle, PlaceOf(o));
+                centreOf.TryAdd(o.Handle, (o.BoundsMin + o.BoundsMax) / 2);
+                sizeOf.TryAdd(o.Handle, o.BoundsMax - o.BoundsMin);
+            }
+        }
+        // A demolitions master layer's "Demo Master" dummy (activities.vpp_pc, je_dm_XX.str2_pc): the play area's
+        // middle instead of the building's (activity_demolitions_master::activity_do_frame_active, LOADING_LAYERS).
+        var demoMasterCentre = new Dictionary<string, System.Numerics.Vector3>(StringComparer.OrdinalIgnoreCase);
+        uint dummyClass = NameHashes.ClassHash("object_dummy");
+        if (File.Exists(Path.Combine(guerrillaCache, "activities.vpp_pc")))
+        {
+            var activities = Packfile.Open(Path.Combine(guerrillaCache, "activities.vpp_pc"));
+            foreach (var entry in activities.Entries.Where(e => e.Name.StartsWith("je_dm_", StringComparison.OrdinalIgnoreCase)))
+            {
+                var inner = activities.OpenContainer(entry);
+                foreach (var layer in inner.Entries.Where(e => e.Name.EndsWith(".layer_pc", StringComparison.OrdinalIgnoreCase)))
+                    foreach (var o in GuerrillaZones.LayerObjects(inner.Read(layer)))
+                        if (o.ClassHash == dummyClass && string.Equals(o.Text("dummy_type")?.Trim(), "Demo Master", StringComparison.OrdinalIgnoreCase))
+                            demoMasterCentre.TryAdd(Path.GetFileNameWithoutExtension(entry.Name), PlaceOf(o));
+            }
         }
         foreach (var entry in zoneEntries)
         {
@@ -212,6 +237,11 @@ public static class GuerrillaCampaign
                 xml.Append($"<object><class>{className}</class><handle>{o.Handle:X8}</handle><parent>{o.Parent:X8}</parent><zone>{zone}</zone>")
                    .Append($"<pos>{F(at.X)} {F(at.Y)} {F(at.Z)}</pos>");
                 if (o.Parent != 0xFFFFFFFF && placeOf.TryGetValue(o.Parent, out var parentAt)) xml.Append($"<parent_pos>{F(parentAt.X)} {F(parentAt.Y)} {F(parentAt.Z)}</parent_pos>");
+                if (o.Parent != 0xFFFFFFFF && centreOf.TryGetValue(o.Parent, out var parentCentre)) xml.Append($"<parent_center>{F(parentCentre.X)} {F(parentCentre.Y)} {F(parentCentre.Z)}</parent_center>");
+                if (o.Parent != 0xFFFFFFFF && sizeOf.TryGetValue(o.Parent, out var parentSize)) xml.Append($"<parent_size>{F(parentSize.X)} {F(parentSize.Y)} {F(parentSize.Z)}</parent_size>");
+                if (className == "object_demolitions_master_node" && o.Text("demolitions_master_type")?.Trim() is { Length: > 0 } level &&
+                    demoMasterCentre.TryGetValue(level, out var areaCentre))
+                    xml.Append($"<area_center>{F(areaCentre.X)} {F(areaCentre.Y)} {F(areaCentre.Z)}</area_center>");
                 xml.Append('\n');
                 foreach (var (hash, (_, value)) in o.Properties)
                 {
@@ -230,7 +260,8 @@ public static class GuerrillaCampaign
         string file = Path.Combine(campaignFolder, CampaignObjectsFile);
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         File.WriteAllText(file, xml.ToString(), new System.Text.UTF8Encoding(false));
-        return $"Campaign markers: {written.Count} in {CampaignObjectsFile} ({string.Join(", ", counts.Select(c => $"{c.Value} {c.Key}"))})" +
+        return $"Campaign markers: {written.Count} in {CampaignObjectsFile} ({string.Join(", ", counts.Select(c => $"{c.Value} {c.Key}"))}; " +
+               $"{demoMasterCentre.Count} demolitions master areas centred by their layer)" +
                (unnamed > 0 ? $"; {unnamed} properties the schema doesn't name left out" : "");
     }
 

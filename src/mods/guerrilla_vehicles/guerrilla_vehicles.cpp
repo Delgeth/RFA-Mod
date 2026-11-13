@@ -176,6 +176,7 @@
 #include "rfa_game.h"
 #include "cars.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -412,14 +413,47 @@ int MouseByName(const std::wstring& name) {
 }
 int MouseNumber(int button) { return button == 1 ? 3 : (button == 2 ? 2 : button + 1); }  // the setting's MouseN for a binding's button
 
+// The bindings the player's saved controls hold come back on top of these: applying the saved options (0x56B370)
+// loads every binding of a set (0x4E8BF0 → 0x4E8830) and then builds its key map again (here). Earlier RFA-Mod
+// builds numbered the mouse buttons in Windows' order (MouseN as the game's N - 1), so Mouse3 went on the game's
+// button 2, the right one (veh_zoom's), and the game saved that with the player's controls: the right button kept
+// changing seats however the setting read. A binding that is exactly what such a build wrote (no key, that button)
+// is moved to the setting's button; any other binding the player has is left alone, and the log names it once.
+int OldMouseOf(const VehicleKey& given) { return given.mouse >= 0 ? MouseNumber(given.mouse) - 1 : -1; }
+int g_loggedMouse[kControlSets][std::size(g_vehicleKeys)];
+bool g_loggedMouseReady = false;
+
 void __cdecl BuildKeyMap(int controlSet) {
+    if (!g_loggedMouseReady) {
+        for (auto& set : g_loggedMouse)
+            for (int& logged : set) logged = -2;
+        g_loggedMouseReady = true;
+    }
     if (controlSet >= 0 && controlSet < kControlSets) {
-        for (const VehicleKey& given : g_vehicleKeys) {
+        for (size_t i = 0; i < std::size(g_vehicleKeys); ++i) {
+            const VehicleKey& given = g_vehicleKeys[i];
             if (!given.key && given.mouse < 0) continue;
             const DWORD binding = kBindings + controlSet * kControlSetSize + given.action * kButtonBindingSize;
             auto* key = reinterpret_cast<DWORD*>(binding + kKeyField);
             auto* mouse = reinterpret_cast<int*>(binding + kMouseField);
-            if (*key || (*mouse >= 0 && *mouse < kMouseButtons)) continue;
+            if (!*key && given.mouse >= 0 && *mouse != given.mouse && *mouse == OldMouseOf(given)) {
+                rfa::Log("Vehicles: %ls moved from the game's button %d (an earlier RFA-Mod build's, kept in the saved controls) to Mouse%d "
+                         "(the game's button %d; control set %d)", given.setting, *mouse, MouseNumber(given.mouse), given.mouse, controlSet);
+                *mouse = given.mouse;
+                g_loggedMouse[controlSet][i] = *mouse;
+                continue;
+            }
+            if (*key || (*mouse >= 0 && *mouse < kMouseButtons)) {
+                const int now = *key ? 1000 + static_cast<int>(*key) : *mouse;
+                if (g_loggedMouse[controlSet][i] != now && !(given.mouse >= 0 && *mouse == given.mouse && !*key)) {
+                    const char* name = *key ? reinterpret_cast<const char* const*>(kKeyNames)[*key] : nullptr;
+                    if (*key) rfa::Log("Vehicles: %ls stays on %s, as the saved controls have it (control set %d)", given.setting, name ? name : "?", controlSet);
+                    else rfa::Log("Vehicles: %ls stays on Mouse%d (the game's button %d), as the saved controls have it (control set %d)", given.setting,
+                                  MouseNumber(*mouse), *mouse, controlSet);
+                }
+                g_loggedMouse[controlSet][i] = now;
+                continue;
+            }
             if (given.key) {
                 *key = given.key;
                 const char* name = reinterpret_cast<const char* const*>(kKeyNames)[given.key];
@@ -875,6 +909,119 @@ ModelWait* WaitFor(void* entry) {
     return nullptr;
 }
 
+// ---- Room in the mission memory for a model the mod reserves
+// A model reserved streams its container (<mesh>.ccar_pc.str2_pc, every primitive's header and data) into the
+// resource's "dynamic mission mempool" (0x26B05F4, made at 0xA47791 with 71 MB; its cpu pool is the object itself,
+// what's left its vtable's +0x1C, which its allocation 0xC990E0 checks). The game reserves models by count alone,
+// 16 at once (0x764CD0: 0x7612F0 the free places, 0x760610 lets go of one nothing uses), and what it streams for its
+// people shares the pool: on 2026-11-13 at 15:46 the 16 models (44 MB) and the rest left 2.1 MB, and
+// Civ_ResRunner-C_1's 2.8 MB stopped the game ("Failed aligned alloc of 2846264 bytes in dynamic mission mempool cpu
+// pool"). Guerrilla never meets this: its vehicles stream into fixed slots by type, freeing low-priority ones first
+// (srm_get_availible_slots RM 0xB52BF0, srm_free_low_priority_slots_vehicle). So a model is reserved only while its
+// container fits in what's left; when it doesn't, the game lets go of one model nothing uses (as when its 16 places
+// are full) and the spawn waits. A model's size: its vehicles.xtbl Mesh_Name with .ccar_pc, in the vehicles' asset
+// list (overrides\build\pc\cache\vehicles.vpp_pc\vehicle_containers.asm_pc, which GuerrillaBuilder.exe writes);
+// one not found counts as the largest.
+constexpr DWORD kMissionMempool = 0x26B05F4, kSpaceLeftSlot = 0x1C;
+constexpr DWORD kAllocationSlack = 256 * 1024;  // the container's own records and alignment
+auto const FreeUnusedModels = reinterpret_cast<int(__fastcall*)(void* pool, void* unused, int count)>(0x760610);
+void* const kVehicleModelPool = reinterpret_cast<void*>(0x1972900);
+struct ModelSize {
+    std::string name;  // the vehicle's, lower case
+    DWORD bytes;
+};
+std::vector<ModelSize> g_modelSizes;
+DWORD g_largestModel = 0;
+bool g_modelSizesRead = false;
+
+std::string Lower(std::string text) {
+    for (char& c : text) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+std::string FileText(const std::wstring& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Each container's bytes in the asset list (version 5: per container its name, type, flags, primitive count, offset,
+// a count of sizes, its compressed size, the sizes; per primitive its name, four bytes, its header's and data's sizes).
+std::vector<ModelSize> ContainerBytes(const std::string& asm_) {
+    std::vector<ModelSize> sizes;
+    size_t at = 0;
+    auto take = [&](size_t n) -> const BYTE* {
+        if (at + n > asm_.size()) return nullptr;
+        const BYTE* p = reinterpret_cast<const BYTE*>(asm_.data()) + at;
+        at += n;
+        return p;
+    };
+    auto word = [&]() { const BYTE* p = take(2); return p ? *reinterpret_cast<const WORD*>(p) : WORD(0); };
+    auto dword = [&]() { const BYTE* p = take(4); return p ? *reinterpret_cast<const DWORD*>(p) : DWORD(0); };
+    auto name = [&]() { const WORD n = word(); const BYTE* p = take(n); return p ? std::string(reinterpret_cast<const char*>(p), n) : std::string(); };
+    dword();  // signature
+    if (word() != 5) return sizes;
+    for (int count = word(), i = 0; i < count && at < asm_.size(); ++i) {
+        ModelSize container{Lower(name()), 0};
+        take(1);
+        word();
+        const int primitives = word();
+        dword();
+        const DWORD sizeCount = dword();
+        dword();
+        take(static_cast<size_t>(sizeCount) * 4);
+        for (int p = 0; p < primitives; ++p) {
+            name();
+            take(4);
+            container.bytes += dword();
+            container.bytes += dword();
+        }
+        sizes.push_back(container);
+    }
+    return sizes;
+}
+
+void ReadModelSizes() {
+    g_modelSizesRead = true;
+    const auto containers = ContainerBytes(FileText(rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\vehicles.vpp_pc\\vehicle_containers.asm_pc"));
+    for (const ModelSize& container : containers) g_largestModel = (std::max)(g_largestModel, container.bytes);
+    const std::string table = FileText(rfa::RootDir() + L"\\mods\\guerrilla_world\\vehicles.xtbl");
+    for (size_t at = table.find("<Vehicle>"); at != std::string::npos; at = table.find("<Vehicle>", at + 1)) {
+        const size_t end = table.find("</Vehicle>", at), nameAt = table.find("<Name>", at), meshAt = table.find("<Mesh_Name>", at);
+        if (end == std::string::npos || nameAt > end || meshAt > end) continue;
+        const size_t fileAt = table.find("<Filename>", meshAt);
+        if (fileAt > end) continue;
+        const std::string vehicle = table.substr(nameAt + 6, table.find('<', nameAt + 6) - nameAt - 6);
+        std::string mesh = table.substr(fileAt + 10, table.find('<', fileAt + 10) - fileAt - 10);
+        mesh = Lower(mesh.substr(0, mesh.rfind('.'))) + ".ccar_pc";
+        for (const ModelSize& container : containers)
+            if (container.name == mesh) g_modelSizes.push_back({Lower(vehicle), container.bytes});
+    }
+    rfa::Log("Spawning: %zu vehicles' model sizes read (the largest %lu KB); a model is reserved only while it fits in the mission memory",
+             g_modelSizes.size(), static_cast<unsigned long>(g_largestModel / 1024));
+}
+
+bool FitsInMissionMemory(const char* vehicle) {
+    if (!g_modelSizesRead) ReadModelSizes();
+    void* pool = reinterpret_cast<void*>(kMissionMempool);
+    const DWORD* vtable = *reinterpret_cast<const DWORD* const*>(pool);
+    if (!vtable) return true;
+    const auto spaceLeft = reinterpret_cast<DWORD(__fastcall*)(void* pool, void* unused)>(vtable[kSpaceLeftSlot / 4]);
+    DWORD need = g_largestModel;
+    const std::string name = Lower(vehicle ? vehicle : "");
+    for (const ModelSize& model : g_modelSizes)
+        if (model.name == name) need = model.bytes;
+    const DWORD left = spaceLeft(pool, nullptr);
+    if (left >= need + kAllocationSlack) return true;
+    static int lastFreed = -100000;  // one model let go every 2 s at most, however many spots wait
+    const int now = Clock();
+    const int freed = now - lastFreed >= 2000 || now < lastFreed ? FreeUnusedModels(kVehicleModelPool, nullptr, 1) : 0;
+    if (freed > 0) lastFreed = now;
+    RFA_LOG_FIRST(40, "Spawning: %s waits: its model needs %lu KB and the mission memory has %lu KB left of 71 MB; %s",
+                  vehicle ? vehicle : "?", static_cast<unsigned long>(need / 1024), static_cast<unsigned long>(left / 1024),
+                  freed > 0 ? "the game lets go of a model nothing uses" : "every model streamed in is in use");
+    return false;
+}
+
 int __cdecl SpawnVehicle(void** parameters) {
     void* wanted = parameters ? parameters[0] : nullptr;
     const int now = Clock();
@@ -908,6 +1055,7 @@ int __cdecl SpawnVehicle(void** parameters) {
     void* record = VehicleRecord(entry);
     if (!record || RecordReserved(record, nullptr) || RecordInUse(record, nullptr)) return result;  // refused for another reason
     const char* name = *reinterpret_cast<const char* const*>(entry);
+    if (!FitsInMissionMemory(name)) return 1;  // not yet: room may come once an unused model has gone
     if (!ReserveInResource(kMissionCategory, kReservationOwner, entry)) {
         RFA_LOG_FIRST(40, "Spawning: no room to stream %s in (16 models at once); it isn't made", name ? name : "?");
         return result;
@@ -1076,6 +1224,68 @@ void ReportSpawnPools() {
 }
 
 namespace {
+
+// ---- A road route that never ends
+// A vehicle that drives along roads (ai_vehicle_travel_to_a_point_do_frame 0x4B18E0 → pathfind_to 0x4B20E0 → 0x706690
+// → 0x707F60) gets its route from the road stage (0x5C87B0). Its search fills a map of road points (0x13CB39C; a
+// point's slot through its road's +0xA8 table, nodes of 0x14 bytes: +8 the next road's handle, +0xC its point), and a
+// walk (0x5C9D81-0x5CA926) follows the map from the start until it meets the destination (the walk's [ebp-0x54] road
+// object and [ebp-8] point), with no other way out. On 2026-11-13 (16:39 and 17:29, Parker at night, traffic) the
+// walk went round a loop in the map and the game stopped there for good, its main thread busy (the user's stack: the
+// map's look-up 0x47BAB0 called from the walk, our traffic's travel_to below). Which road points made the loop isn't
+// known yet; the log says. A walk past 200,000 steps (more than all the points loaded) is going round: its next step
+// is pointed at its destination (a copy of the node, the destination's handle and point in it), so the game's own
+// test ends the walk. [GuerrillaVehicles] RouteLoopGuard=0 turns it off.
+constexpr DWORD kRouteMapFind = 0x47BAB0;      // thiscall (map, key*): a road point's node; key: the road object, its point (word +4)
+constexpr DWORD kRouteWalkReturn = 0x5C9DD6;   // where the walk calls it
+constexpr DWORD kWalkKey = 0x2E0;              // the key is the walk's [ebp-0x2E0]
+constexpr DWORD kDestinationRoad = 0x54, kDestinationPoint = 0x8;
+constexpr DWORD kNodeRoadHandle = 8, kNodePoint = 0xC, kNodeSize = 0x14;
+constexpr int kMostRouteSteps = 200000;
+using RouteMapFindFn = BYTE*(__fastcall*)(void* map, void* unused, BYTE* key);
+RouteMapFindFn g_routeMapFind;
+auto const HandleOf = reinterpret_cast<DWORD(__fastcall*)(BYTE* object, void* unused)>(0x424850);
+BYTE g_routeEnd[kNodeSize];
+DWORD g_walkFrame, g_lastRouteStep;
+int g_routeSteps;
+
+BYTE* __fastcall RouteMapFind(void* map, void* unused, BYTE* key) {
+    BYTE* node = g_routeMapFind(map, unused, key);
+    if (reinterpret_cast<DWORD>(_ReturnAddress()) != kRouteWalkReturn || !node || !key) return node;
+    const DWORD frame = reinterpret_cast<DWORD>(key) + kWalkKey;  // the walk's ebp
+    const DWORD tick = GetTickCount();
+    if (frame != g_walkFrame || tick - g_lastRouteStep > 50) {
+        g_walkFrame = frame;
+        g_routeSteps = 0;
+    }
+    g_lastRouteStep = tick;
+    if (++g_routeSteps < kMostRouteSteps) return node;
+    BYTE* destination = *reinterpret_cast<BYTE**>(frame - kDestinationRoad);
+    if (!destination) return node;
+    const WORD point = *reinterpret_cast<const WORD*>(frame - kDestinationPoint);
+    BYTE* at = *reinterpret_cast<BYTE**>(key);
+    memcpy(g_routeEnd, node, kNodeSize);
+    *reinterpret_cast<DWORD*>(g_routeEnd + kNodeRoadHandle) = HandleOf(destination, nullptr);
+    *reinterpret_cast<WORD*>(g_routeEnd + kNodePoint) = point;
+    RFA_LOG_FIRST(20, "Roads: a route went round a loop (%d steps; at road 0x%08lX point %u, its next road 0x%08lX point %u; bound for road 0x%08lX "
+                      "point %u): ended at its destination",
+                  g_routeSteps, at ? HandleOf(at, nullptr) : 0UL, static_cast<unsigned>(*reinterpret_cast<const WORD*>(key + 4)),
+                  *reinterpret_cast<const DWORD*>(node + kNodeRoadHandle), static_cast<unsigned>(*reinterpret_cast<const WORD*>(node + kNodePoint)),
+                  HandleOf(destination, nullptr), static_cast<unsigned>(point));
+    g_routeSteps = 0;
+    return g_routeEnd;
+}
+
+void StartRouteLoopGuard() {
+    if (!rfa::IniInt(L"GuerrillaVehicles", L"RouteLoopGuard", 1)) return;
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08};  // push ebp / mov ebp,esp / sub esp,8
+    if (memcmp(reinterpret_cast<const void*>(kRouteMapFind), opening, sizeof(opening)) != 0) {
+        rfa::Log("Roads: the route map's look-up (0x%08lX) isn't as expected; a route that goes round a loop isn't ended", kRouteMapFind);
+        return;
+    }
+    g_routeMapFind = reinterpret_cast<RouteMapFindFn>(rfa::HookFunction(kRouteMapFind, sizeof(opening), reinterpret_cast<void*>(&RouteMapFind)));
+    if (g_routeMapFind) rfa::Log("Roads: a road route that goes round a loop (past %d steps) is ended at its destination", kMostRouteSteps);
+}
 
 // ---- Room for Guerrilla's walkers' blend trees (see the top)
 
@@ -1721,6 +1931,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_buildVehicleList = reinterpret_cast<BuildVehicleListFn>(rfa::HookFunction(kBuildVehicleList, kBuildVehicleListPrologue, reinterpret_cast<void*>(&BuildVehicleList)));
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
     MakeRoomForVehiclesInTheWorld();
+    StartRouteLoopGuard();
     RegisterBiggerTypes();
     MoreInteractionRoom();
     MoreSpawnGroups();

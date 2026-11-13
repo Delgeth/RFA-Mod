@@ -119,6 +119,16 @@ public static class GuerrillaPeople
 
     /// <summary>The files this writes: relative to the overrides folder, then to the mods' folders.</summary>
     public const string AssetList = @"build\pc\cache\humans.vpp_pc\character_containers.asm_pc", CharacterTable = "character.xtbl";
+
+    /// <summary>
+    /// Armageddon's AI properties (ai_properties.xtbl; a character's ai_prop names one, the default when none) and
+    /// ours, <see cref="UnarmedAiProp"/>: its Default less "Auto Equip". Armageddon's NPC set-up (0x8A9260) puts
+    /// the best weapon in an NPC's hands when its AI properties have Auto Equip (bit 19 of their flags, +0x58);
+    /// Guerrilla never equips a new NPC (only drawing does), so a character of Guerrilla's with no Equip_Item (its
+    /// civilians, who carry a gun in their inventory) names ours and is empty-handed until it draws.
+    /// </summary>
+    public const string AiPropertiesTable = "ai_properties.xtbl", UnarmedAiProp = "rfg_unarmed";
+    const string DefaultAiProp = "Default", AutoEquipFlag = "Auto Equip";
     public const string PeopleList = "people.txt", RigList = "rigs.txt", OwnEntries = "anim_entries.txt";
     const string SetList = "anim_set_filenames.xtbl", FileList = "anim_files.xtbl", StateList = "anim_states.xtbl", ActionList = "anim_actions.xtbl";
 
@@ -405,6 +415,7 @@ public static class GuerrillaPeople
             yield return $"Crews: {crewLines.Count - 1} lines in {GuerrillaDistricts.CrewList} (each resource's people by team, for the vehicles' crews)";
             // Where Guerrilla's people walk (GuerrillaAmbient): each zone's walkers by day and night and their resource.
             yield return GuerrillaAmbient.Write(guerrillaCache, guerrillaTables, peopleFolder);
+            yield return GuerrillaActions.Write(guerrillaCache, guerrillaTables, peopleFolder);
         }
         // The player's spine bend and arms (Armageddon's tables name Darius's bones), added to what is written there
         // already (the vehicles build adds its walkers' legs to the limb table), ours from an earlier run replaced.
@@ -450,6 +461,18 @@ public static class GuerrillaPeople
         File.WriteAllBytes(listFile, assetList.ToBytes());
         Directory.CreateDirectory(worldFolder);
         File.WriteAllBytes(Path.Combine(worldFolder, CharacterTable), ourCharacters.ToBytes());
+        // Our AI properties with Armageddon's (guerrilla_world hands the table over).
+        {
+            var aiProps = ReadTable(gameTables, AiPropertiesTable);
+            var defaultProps = aiProps.Entries.FirstOrDefault(e => XtblFile.EntryName(e).Equals(DefaultAiProp, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidDataException($"Armageddon's {AiPropertiesTable} has no {DefaultAiProp} entry");
+            var unarmed = aiProps.CopyEntry(defaultProps, UnarmedAiProp);
+            foreach (var flag in (unarmed.Element("ai_flags")?.Elements ?? []).Where(f => f.Value.Trim().Equals(AutoEquipFlag, StringComparison.OrdinalIgnoreCase)).ToList())
+                flag.Remove();
+            File.WriteAllBytes(Path.Combine(worldFolder, AiPropertiesTable), aiProps.ToBytes());
+            yield return $"AI properties: {UnarmedAiProp} added to {AiPropertiesTable} (Armageddon's {DefaultAiProp} less {AutoEquipFlag}), named by " +
+                         $"{ourCharacters.Entries.Count(e => e.ValueOf("ai_prop")?.Trim() == UnarmedAiProp)} of our characters (those Guerrilla gives no Equip_Item)";
+        }
         // Guerrilla's human ragdoll, which the people's entries name (guerrilla_world hands it over).
         File.WriteAllBytes(Path.Combine(worldFolder, GuerrillaRagdoll.FileName), GuerrillaRagdoll.Table());
         foreach (string line in sets.Write(cache, worldFolder, peopleFolder)) yield return line;
@@ -514,8 +537,9 @@ public static class GuerrillaPeople
             yield return $"{ItemTable}: {removed} of our props' items taken out";
         }
         foreach (string path in new[] { Path.Combine(overrides, AssetList), Path.Combine(worldFolder, CharacterTable), Path.Combine(worldFolder, GuerrillaRagdoll.FileName),
+                                        Path.Combine(worldFolder, AiPropertiesTable),
                                         Path.Combine(peopleFolder, OwnEntries), Path.Combine(peopleFolder, GuerrillaDistricts.CrewList),
-                                        Path.Combine(peopleFolder, GuerrillaAmbient.File) })
+                                        Path.Combine(peopleFolder, GuerrillaAmbient.File), Path.Combine(peopleFolder, GuerrillaActions.File) })
             if (File.Exists(path)) { File.Delete(path); yield return $"Deleted {path}"; }
         // The spine bend and limb tables: our rows out; the file goes only if no other build's rows are left in it.
         foreach (string table in new[] { SpinebendTable, LimbTable })
@@ -631,6 +655,8 @@ public static class GuerrillaPeople
         copy.AddElement("Personas");
         copy.AddElement(inventory);
         if (equip != null) copy.AddElement("Equip_Item_Name", equip);
+        // No equip item in Guerrilla's entry: empty-handed until it draws (see UnarmedAiProp).
+        if (rfg.ValueOf("Equip_Item_Name")?.Trim() is not { Length: > 0 }) Set(copy, "ai_prop", UnarmedAiProp);
         // Unarmed while none of its weapons is ported (never one of Armageddon's); no spine bend of
         // Armageddon's (its table names Darius's bones) until Guerrilla's is. Its ragdoll Guerrilla's
         // (GuerrillaRagdoll): without one, Armageddon hides a dead body at once.

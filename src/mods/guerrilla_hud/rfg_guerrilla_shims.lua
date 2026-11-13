@@ -121,7 +121,10 @@ end
 function rfg_play_audio(name)		-- Guerrilla's interface sounds aren't brought over yet
 end
 
-function rfg_get_max_charges()		-- nor its remote charges
+function rfg_get_max_charges()		-- how many remote charges the player can have out, from the mod (0 without it)
+	if _GetAnyGlobalSilent("rfg_charges_most") ~= nil then
+		return rfg_charges_most()
+	end
 	return 0
 end
 

@@ -59,6 +59,13 @@ using StopSoundFn = int(__cdecl*)(DWORD* handle);
 auto const StopSound = reinterpret_cast<StopSoundFn>(0xB85110);
 using SoundGameObjectFn = DWORD(__cdecl*)(DWORD handle);
 auto const SoundGameObject = reinterpret_cast<SoundGameObjectFn>(0xB84D20);  // 0 once the sound has ended
+// For the check of the broadcast's 3D sound (see CheckSound).
+using SoundObjectFromHandleFn = const BYTE*(__cdecl*)(DWORD soundObject);
+auto const SoundObjectFromHandle = reinterpret_cast<SoundObjectFromHandleFn>(0xB812A0);  // takes audiolib's own lock
+const float* const g_cameraPosition = reinterpret_cast<const float*>(0x11B9C6C);
+const float* const g_listenerPosition = reinterpret_cast<const float*>(0x2745548);  // audiolib's, from the camera, given to Wwise
+const float* const g_listenerFront = reinterpret_cast<const float*>(0x2745554);     // its front and top, given with it
+const float* const g_listenerTop = reinterpret_cast<const float*>(0x2745560);
 
 // Wwise's id of a name: FNV-1 (32 bits) of its lower-case letters.
 DWORD WwiseNameId(const std::string& name) {
@@ -260,6 +267,58 @@ void Stop(DWORD& handle) {
     handle = 0;
 }
 
+float Distance(const float* a, const float* b) {
+    const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// What Guerrilla's logarithmic rolloff (audiolib_3d_system_init, RM 0x485A10) gives the newsreader at a distance, in
+// dB: full volume to 5 m, silent at 70 m (DIST_VOC_KIOSK, the distances the builder gives the kiosk's sounds).
+float GuerrillaKioskDb(float distance) {
+    static const float gains[] = {1.0f, 0.699f, 0.523f, 0.398f, 0.301f, 0.222f, 0.155f, 0.097f, 0.046f, 0.02f, 0.0f};
+    const float t = (distance - 5.0f) / 65.0f;
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return -96.3f;
+    const int i = static_cast<int>(t * 10.0f);
+    const float gain = gains[i] + (gains[i + 1] - gains[i]) * (t * 10.0f - i);
+    return gain > 0.0f ? (std::max)(-96.3f, 20.0f * std::log10(gain)) : -96.3f;
+}
+
+// The check of the broadcast's 3D sound in game. The user heard it "as if right next to it", while offline every link
+// looked right (docs: "In game: no fade, and the kiosk heard ..."). Every 2 s of a broadcast it logs the camera's
+// distance to the kiosk; where the game has the broadcast's sound object (its first place +0x24; +0x8B how many places,
+// 1 or more for a 3D one); how far the game measured its listener, the camera, at its last update (+0x0C); and what
+// Guerrilla's curve gives there.
+double g_nextSoundCheckMs = 0.0;
+int g_soundChecks = 0;
+
+void CheckSound(const BYTE* kiosk) {
+    if (g_clockMs < g_nextSoundCheckMs || g_soundChecks >= 90) return;  // 3 minutes of broadcasts a run
+    g_nextSoundCheckMs = g_clockMs + 2000.0;
+    ++g_soundChecks;
+    const float camera = Distance(g_cameraPosition, PlaceOf(kiosk));
+    const BYTE* object = SoundObjectFromHandle(g_soundObject);
+    if (!object) {
+        rfa::Log("Broadcast sound: camera %.1f m from the kiosk; the game has no sound object for the broadcast's handle %lu", camera, g_soundObject);
+        return;
+    }
+    rfa::Log("Broadcast sound: camera %.1f m from the kiosk; the sound object %.1f m from the kiosk, %u place(s), its listener %.1f m away as the "
+             "game measured it (audiolib's listener %.1f m from the camera); Guerrilla's curve gives the music %.1f dB here (the newsreader is "
+             "on Armageddon's fire curve for the test: silent past 25 m)",
+             camera, Distance(reinterpret_cast<const float*>(object + 0x24), PlaceOf(kiosk)), static_cast<unsigned>(object[0x8B]),
+             *reinterpret_cast<const float*>(object + 0x0C), Distance(g_listenerPosition, g_cameraPosition), GuerrillaKioskDb(camera));
+    // The listener's front and top as audiolib gives them to Wwise: Wwise needs them of length 1 and at right angles.
+    static const float zero[3] = {0.0f, 0.0f, 0.0f};
+    if (g_soundChecks <= 5)
+        rfa::Log("Broadcast sound: the listener's front %.2f %.2f %.2f (length %.2f), top %.2f %.2f %.2f (length %.2f), their dot product %.2f; "
+                 "the sound object's orientation %.2f %.2f %.2f",
+                 g_listenerFront[0], g_listenerFront[1], g_listenerFront[2], Distance(g_listenerFront, zero), g_listenerTop[0], g_listenerTop[1],
+                 g_listenerTop[2], Distance(g_listenerTop, zero),
+                 g_listenerFront[0] * g_listenerTop[0] + g_listenerFront[1] * g_listenerTop[1] + g_listenerFront[2] * g_listenerTop[2],
+                 reinterpret_cast<const float*>(object + 0x30)[0], reinterpret_cast<const float*>(object + 0x30)[1],
+                 reinterpret_cast<const float*>(object + 0x30)[2]);
+}
+
 const char* ScreenName(int screen) {
     const auto& all = tables::Screens();
     return screen >= 0 && screen < static_cast<int>(all.size()) ? all[screen].name.c_str() : "none";
@@ -275,6 +334,7 @@ void SetActive(bool active, const char* why) {
         g_screenTimer.Invalidate();
         g_sessionLines = 0;
         g_shouldDeactivate = false;
+        g_nextSoundCheckMs = 0.0;  // the sound's first check at once
         for (int i : g_available) g_lineStates[i].playedThisSession = false;
         g_sessionCutoff = d.sessionMinLines + (d.sessionMaxLines > d.sessionMinLines ? rand() % (d.sessionMaxLines - d.sessionMinLines + 1) : 0);
         screens::SetBroadcastScreen(d.activeScreen);
@@ -397,7 +457,13 @@ void Update(float seconds) {
         SetActive(false, kiosk ? "the kiosk was destroyed" : "the kiosk is gone");
         return;
     }
-    MoveSoundObject(g_soundObject, PlaceOf(kiosk), nullptr);
+    // A test (2026-11-13): the sound object's orientation (+0x30) is (0, 0, 0) unless a move gives one, and Wwise gets
+    // it with the position every frame. In game the sound pans but never fades, even on Armageddon's own curve; a
+    // zero orientation is the one input of ours Wwise has never had valid. A sound without a cone sounds the same
+    // whichever way it faces, so any unit vector does.
+    static const float kFacing[3] = {0.0f, 0.0f, 1.0f};
+    MoveSoundObject(g_soundObject, PlaceOf(kiosk), kFacing);
+    CheckSound(kiosk);
     // Two seconds into each line: whether Wwise is still playing it. The newsreader's lines are the first of
     // Guerrilla's voices in Wwise's ADPCM (each 5 s or longer), so "still playing" means the game decodes that codec.
     if (!g_voiceChecked && g_voice && g_clockMs - g_voiceStartedMs >= 2000.0) {

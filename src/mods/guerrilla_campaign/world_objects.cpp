@@ -26,6 +26,9 @@ Object FromElement(const tables::Element& element) {
     object.zone = element.Text("zone");
     sscanf_s(element.Text("pos").c_str(), "%f %f %f", &object.pos.x, &object.pos.y, &object.pos.z);
     object.hasParentPos = sscanf_s(element.Text("parent_pos").c_str(), "%f %f %f", &object.parentPos.x, &object.parentPos.y, &object.parentPos.z) == 3;
+    object.hasParentCenter = sscanf_s(element.Text("parent_center").c_str(), "%f %f %f", &object.parentCenter.x, &object.parentCenter.y, &object.parentCenter.z) == 3;
+    object.hasParentSize = sscanf_s(element.Text("parent_size").c_str(), "%f %f %f", &object.parentSize.x, &object.parentSize.y, &object.parentSize.z) == 3;
+    object.hasAreaCenter =sscanf_s(element.Text("area_center").c_str(), "%f %f %f", &object.areaCenter.x, &object.areaCenter.y, &object.areaCenter.z) == 3;
     for (const tables::Element* property : element.Children("property"))
         object.properties.emplace_back(property->Text("name"), property->Text("value"));
     return object;

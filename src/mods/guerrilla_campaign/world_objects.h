@@ -21,6 +21,12 @@ struct Object {
     Vector pos{};
     bool hasParentPos = false;     // where the parent is in Guerrilla's world (parent_pos): to find it by its place
     Vector parentPos{};            // when ours gave it another handle
+    bool hasParentCenter = false;  // the parent's bounding-box centre (parent_center)
+    Vector parentCenter{};
+    bool hasParentSize = false;    // and its size (parent_size: the box's x, y, z)
+    Vector parentSize{};
+    bool hasAreaCenter = false;    // a demolitions master node's play-area middle, its layer's "Demo Master" dummy (area_center)
+    Vector areaCenter{};
     std::vector<std::pair<std::string, std::string>> properties;
 
     std::string Property(const char* name, const char* fallback = "") const;

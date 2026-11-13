@@ -171,22 +171,38 @@ public sealed class GuerrillaWalkerTrees
         if (lateral > 0) { Put("Movement_Acceleration_Lateral", F(lateral)); Put("Movement_Deceleration_Lateral", F(lateral)); }
     }
 
-    /// <summary>Writes the tree file and Armageddon's file list with it (for guerrilla_world to hand over); a line for the log.</summary>
-    public string Write(Packfile gameTables, string modFolder)
+    /// <summary>Where the loader serves the list and the tree file each time the game reads them after start-up (relative to
+    /// the overrides folder): the list in place of table.vpp_pc's copy (shared with misc.vpp_pc's, the same file), the tree
+    /// file as a new file found by its name.</summary>
+    public static readonly string ListOverride = Path.Combine("build", "pc", "cache", "table.vpp_pc", FileList),
+                                  TreeOverride = Path.Combine("build", "pc", "cache", TreeFile);
+
+    /// <summary>Writes the tree file and Armageddon's file list with it; a line for the log. Into the mod's folder, which
+    /// guerrilla_world hands the game while it starts, and into the overrides, which the loader serves later: every
+    /// level load the game empties its blend trees and reads the list again by name (0x961730: the count 0x25CD820 set
+    /// to 0), and with only Armageddon's list then, Guerrilla's walkers kept trees that were gone (they didn't show, and
+    /// their legs threw whatever touched them).</summary>
+    public string Write(Packfile gameTables, string modFolder, string overrides)
     {
         string listPath = Path.Combine(modFolder, FileList), treePath = Path.Combine(modFolder, TreeFile);
+        string listOverride = Path.Combine(overrides, ListOverride), treeOverride = Path.Combine(overrides, TreeOverride);
         if (made.Count == 0)
         {
-            foreach (string path in new[] { listPath, treePath }) if (File.Exists(path)) File.Delete(path);
+            foreach (string path in new[] { listPath, treePath, listOverride, treeOverride }) if (File.Exists(path)) File.Delete(path);
             return "Walkers: no blend trees made";
         }
         var file = new XDocument(new XElement("root", new XElement("Version", "1"), new XElement("Blend_Trees", made.Values.Select(m => m.Tree))));
-        Directory.CreateDirectory(modFolder);
-        File.WriteAllText(treePath, file.ToString());
         var list = XDocument.Parse(System.Text.Encoding.UTF8.GetString(gameTables.Read(gameTables.Find(FileList) ?? throw new InvalidDataException($"no {FileList} in Armageddon's misc.vpp_pc"))).TrimStart('﻿'));
         var files = list.Descendants().FirstOrDefault(e => e.Name.LocalName.Equals("files", StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidDataException($"{FileList} has no <files>");
         if (!files.Elements().Any(f => f.Value.Trim().Equals(TreeFile, StringComparison.OrdinalIgnoreCase))) files.Add(new XElement("file", TreeFile));
-        File.WriteAllText(listPath, list.ToString());
-        return $"Walkers: {made.Count} blend trees ({string.Join(", ", made.Keys.Select(TreeName))}) in mods\\guerrilla_world\\{TreeFile}, listed in {FileList}";
+        foreach (var (tree, fileList) in new[] { (treePath, listPath), (treeOverride, listOverride) })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(tree)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(fileList)!);
+            File.WriteAllText(tree, file.ToString());
+            File.WriteAllText(fileList, list.ToString());
+        }
+        return $"Walkers: {made.Count} blend trees ({string.Join(", ", made.Keys.Select(TreeName))}) in mods\\guerrilla_world\\{TreeFile}, listed in {FileList}; "
+               + $"the same in overrides\\{TreeOverride} and overrides\\{ListOverride}, for the game's reading of them at each level load";
     }
 }

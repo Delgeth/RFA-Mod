@@ -76,6 +76,7 @@
 #include "ambient.h"
 #include "ambush.h"
 #include "story.h"
+#include "actions.h"
 #include <intrin.h>
 #include <malloc.h>
 #include <algorithm>
@@ -702,12 +703,17 @@ void LogFailedPath(BYTE* human, const float* goal) {
 }
 
 bool GoalOutOfReach(BYTE* human, const float* start, const float* goal);  // below, with the people's nav cells
+thread_local BYTE* g_searchingFor = nullptr;  // the NPC in our worlds whose way the game's query is finding (CellSearch)
 
 // The game's search, and the log line when it finds nothing for an NPC in our worlds.
 void* AskTheGame(BYTE* human, const float* start, const float* goal, DWORD pathA, DWORD pathB, DWORD flagsLow, DWORD flagsHigh, bool flag) {
-    if (human && goal && InOurWorld() && AsNpc(reinterpret_cast<void*>(kWorld), nullptr, human) && GoalOutOfReach(human, start, goal)) return nullptr;
+    const bool npc = human && goal && InOurWorld() && AsNpc(reinterpret_cast<void*>(kWorld), nullptr, human);
+    if (npc && GoalOutOfReach(human, start, goal)) return nullptr;
+    BYTE* const outer = g_searchingFor;
+    g_searchingFor = npc ? human : nullptr;
     void* path = g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
-    if (!path && human && goal && InOurWorld() && AsNpc(reinterpret_cast<void*>(kWorld), nullptr, human)) LogFailedPath(human, goal);
+    g_searchingFor = outer;
+    if (!path && npc) LogFailedPath(human, goal);
     return path;
 }
 
@@ -1017,83 +1023,133 @@ struct WalkResult {
     float length = 0;         // the walk's length (edge midpoint to edge midpoint) when reached
 };
 
-// The shortest walk over a layer's switched-on cells from a place in one cell to a place in another, by edge midpoints.
-// With a budget, a step whose way so far plus 0.75 x its straight distance to the goal passes it is dropped (the game's
-// search's rule); without one (budget 0), the walk is measured up to kLongestWalkLogged.
-WalkResult Walk(const BYTE* layer, int from, const float* start, int to, const float* goal, float budget) {
+// The shortest walk from a place in one cell to a place in another over the loaded zones' switched-on people's cells,
+// by edge midpoints. With a budget, a step whose way so far plus 0.75 x its straight distance to the goal passes it is
+// dropped (the game's search's rule); without one (budget 0), the walk is measured up to kLongestWalkLogged.
+// The same walk over every loaded zone's people's layer (2026-11-13, the user's Oasis run: "Failed pathfind ... from
+// (1246.0, 34.0, 768.9) to (1321.3, 1.9, 788.4)" and "Pathfinding ran out of nav heap objects": a squad's chase of
+// 77 m straight whose walk is 395 m, past the game's budget of 266 m; the walk above stopped at the zone's edge,
+// "undecided", so the game was asked and searched until its nav heap (at most 4,096 nodes, 0x5ECA20) ran out). A cell's
+// neighbour may be in another zone's layer: the walk follows it there. It still stops, undecided, at an open edge of a
+// border cell (no neighbour across) or a neighbour in no loaded layer, where the game's own search could go on.
+struct LoadedLayer { const BYTE* cells; int count; const float* vertices; std::vector<char> border; };
+
+WalkResult WalkAcross(const BYTE* startCell, const float* start, const BYTE* goalCell, const float* goal, float budget) {
     WalkResult result;
-    const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
-    const int count = *reinterpret_cast<const WORD*>(layer + kLayerCellCount);
-    const float* vertices = *reinterpret_cast<const float* const*>(layer + kLayerVertices);
-    const BYTE* outer = *reinterpret_cast<BYTE* const*>(layer + kLayerOuterEdges);
-    const int outerCount = *reinterpret_cast<const WORD*>(layer + kLayerOuterEdgeCount);
-    if (!cells || !vertices || count <= 0) { result.undecided = true; return result; }
-    std::vector<char> border(count, 0);
-    for (int e = 0; outer && e < outerCount; ++e) {
-        const int cell = *reinterpret_cast<const WORD*>(outer + e * kOuterEdgeSize);
-        if (cell < count) border[cell] = 1;
+    std::vector<LoadedLayer> layers;
+    void* world = reinterpret_cast<void*>(kWorld);
+    const int zones = NavZoneCount(world, nullptr);
+    for (int z = 0; z < zones; ++z) {
+        const BYTE* zone = NavZoneAt(world, nullptr, z);
+        const BYTE* layer = zone ? *reinterpret_cast<BYTE* const*>(zone + kZonePeopleLayer) : nullptr;
+        if (!layer) continue;
+        LoadedLayer l{*reinterpret_cast<BYTE* const*>(layer + kLayerCells), *reinterpret_cast<const WORD*>(layer + kLayerCellCount),
+                      *reinterpret_cast<const float* const*>(layer + kLayerVertices), {}};
+        if (!l.cells || !l.vertices || l.count <= 0) continue;
+        l.border.assign(l.count, 0);
+        const BYTE* outer = *reinterpret_cast<BYTE* const*>(layer + kLayerOuterEdges);
+        const int outerCount = *reinterpret_cast<const WORD*>(layer + kLayerOuterEdgeCount);
+        for (int e = 0; outer && e < outerCount; ++e) {
+            const int cell = *reinterpret_cast<const WORD*>(outer + e * kOuterEdgeSize);
+            if (cell < l.count) l.border[cell] = 1;
+        }
+        layers.push_back(std::move(l));
     }
-    auto Cell = [&](int i) { return cells + i * kNavCellSize; };
-    auto Vertex = [&](const BYTE* cell, int k) { return vertices + 3 * *reinterpret_cast<const WORD*>(cell + kCellVertices + 2 * k); };
+    auto LayerOf = [&](const BYTE* cell) -> const LoadedLayer* {
+        for (const LoadedLayer& l : layers)
+            if (cell >= l.cells && cell < l.cells + l.count * kNavCellSize && (cell - l.cells) % kNavCellSize == 0) return &l;
+        return nullptr;
+    };
+    auto Vertex = [](const LoadedLayer& l, const BYTE* cell, int k) { return l.vertices + 3 * *reinterpret_cast<const WORD*>(cell + kCellVertices + 2 * k); };
     auto Distance = [](const float* a, const float* b) {
         return sqrtf((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
     };
-    std::vector<float> best(count, -1);
-    std::vector<std::array<float, 3>> at(count);
-    using Entry = std::pair<float, int>;  // the step's estimate (way so far + straight to the goal), its cell
+    if (!LayerOf(startCell) || !LayerOf(goalCell)) { result.undecided = true; return result; }
+    std::unordered_map<const BYTE*, float> best;
+    std::unordered_map<const BYTE*, std::array<float, 3>> at;
+    using Entry = std::pair<float, const BYTE*>;  // the step's estimate (way so far + straight to the goal), its cell
     std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-    best[from] = 0;
-    at[from] = {start[0], start[1], start[2]};
-    open.push({Distance(start, goal), from});
+    best[startCell] = 0;
+    at[startCell] = {start[0], start[1], start[2]};
+    open.push({Distance(start, goal), startCell});
     const float limit = budget > 0 ? budget : kLongestWalkLogged;
     while (!open.empty()) {
-        const auto [estimate, i] = open.top();
+        const auto [estimate, cell] = open.top();
         open.pop();
-        const float way = best[i];
-        if (estimate > way + Distance(at[i].data(), goal) + 0.01f) continue;  // an older, longer step to this cell
-        if (i == to) {
+        const float way = best[cell];
+        if (estimate > way + Distance(at[cell].data(), goal) + 0.01f) continue;  // an older, longer step to this cell
+        if (cell == goalCell) {
             result.reached = true;
-            result.length = way + Distance(at[i].data(), goal);
+            result.length = way + Distance(at[cell].data(), goal);
             return result;
         }
-        if (budget > 0 && border[i]) { result.undecided = true; return result; }
-        const BYTE* cell = Cell(i);
+        const LoadedLayer& l = *LayerOf(cell);
+        const bool onBorder = l.border[(cell - l.cells) / kNavCellSize] != 0;
         for (int k = 0; k < 3; ++k) {
             const BYTE* next = *reinterpret_cast<BYTE* const*>(cell + 4 * k);
-            if (next == reinterpret_cast<const BYTE*>(-1) || !next) continue;
-            if (next < cells || next >= cells + count * kNavCellSize || (next - cells) % kNavCellSize != 0) {
-                if (budget > 0) { result.undecided = true; return result; }  // into another layer: the game's search may go on there
+            if (next == reinterpret_cast<const BYTE*>(-1) || !next) {
+                if (onBorder && budget > 0) { result.undecided = true; return result; }  // the zone's edge, joined to nothing here
                 continue;
             }
-            const int j = static_cast<int>((next - cells) / kNavCellSize);
+            const LoadedLayer* nextLayer = LayerOf(next);
+            if (!nextLayer) {
+                if (budget > 0) { result.undecided = true; return result; }  // into a zone not loaded: the game's search may go on there
+                continue;
+            }
             if (next[kCellFlags] & kCellSwitchedOff) continue;
             // The edge they share: the midpoint of the two vertices both have (else the next cell's middle).
             float through[3] = {0, 0, 0};
             int shared = 0;
             for (int a = 0; a < 3; ++a)
-                for (int b = 0; b < 3; ++b)
-                    if (*reinterpret_cast<const WORD*>(cell + kCellVertices + 2 * a) == *reinterpret_cast<const WORD*>(next + kCellVertices + 2 * b)) {
-                        const float* v = Vertex(cell, a);
-                        for (int c = 0; c < 3; ++c) through[c] += v[c];
+                for (int b = 0; b < 3; ++b) {
+                    const float* va = Vertex(l, cell, a);
+                    const float* vb = Vertex(*nextLayer, next, b);
+                    if (fabsf(va[0] - vb[0]) < 0.01f && fabsf(va[1] - vb[1]) < 0.01f && fabsf(va[2] - vb[2]) < 0.01f) {
+                        for (int c = 0; c < 3; ++c) through[c] += va[c];
                         ++shared;
                     }
+                }
             if (shared != 2) {
                 shared = 0;
                 for (int c = 0; c < 3; ++c) through[c] = 0;
                 for (int b = 0; b < 3; ++b, ++shared)
-                    for (int c = 0; c < 3; ++c) through[c] += Vertex(next, b)[c];
+                    for (int c = 0; c < 3; ++c) through[c] += Vertex(*nextLayer, next, b)[c];
             }
             for (int c = 0; c < 3; ++c) through[c] /= static_cast<float>(shared);
-            const float wayThere = way + Distance(at[i].data(), through);
-            if (best[j] >= 0 && best[j] <= wayThere) continue;
+            const float wayThere = way + Distance(at[cell].data(), through);
+            if (auto known = best.find(next); known != best.end() && known->second <= wayThere) continue;
             const float straight = Distance(through, goal);
             if (wayThere + (budget > 0 ? 0.75f * straight : 0) > limit) continue;  // past the budget (the game's rule)
-            best[j] = wayThere;
-            at[j] = {through[0], through[1], through[2]};
-            open.push({wayThere + straight, j});
+            best[next] = wayThere;
+            at[next] = {through[0], through[1], through[2]};
+            open.push({wayThere + straight, next});
         }
     }
     return result;
+}
+
+// Whether the walk from a place in one cell to a place in another can't be found within the game's search budget (and
+// the log line when it can't); `moved` when the places are the ones the game's query moved onto the mesh.
+bool OutOfReach(BYTE* human, BYTE* startCell, const float* from, BYTE* goalCell, const float* goal, bool moved) {
+    // The game's budget, as its search asks it for a person (the larger of its two caps, so the check never asks less).
+    const float budget = std::max(SearchBudget(startCell, from, goalCell, goal, false, false), SearchBudget(startCell, from, goalCell, goal, true, false));
+    if (!(budget > 0)) return false;
+    const WalkResult withinBudget = WalkAcross(startCell, from, goalCell, goal, budget);
+    if (withinBudget.reached || withinBudget.undecided) return false;
+    ++g_goalsTurnedDown;
+    if (g_goalsTurnedDown <= 64 || g_goalsTurnedDown % 100 == 0) {
+        const WalkResult walk = WalkAcross(startCell, from, goalCell, goal, 0);
+        const float dx = goal[0] - from[0], dz = goal[2] - from[2];
+        BYTE* squad = SquadOfNpc(human);
+        char walked[64];
+        if (walk.reached) sprintf_s(walked, "the walk %.0f m", walk.length);
+        else sprintf_s(walked, "no walk within %.0f m in this zone", kLongestWalkLogged);
+        rfa::Log("Goals: NPC 0x%08X (squad 0x%08X) asked for a way from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)%s: %.0f m straight, %s, past the search's "
+                 "budget of %.0f m; not searched for (its action goes on as when no way is found, as Guerrilla's) (%d so far)",
+                 ObjectHandle(human, nullptr), squad ? ObjectHandle(squad, nullptr) : kNoHandle, from[0], from[1], from[2], goal[0], goal[1], goal[2],
+                 moved ? " (the places the game's query moved onto its cells)" : "", sqrtf(dx * dx + dz * dz), walked, budget, g_goalsTurnedDown);
+    }
+    return true;
 }
 
 bool GoalOutOfReach(BYTE* human, const float* start, const float* goal) {
@@ -1101,29 +1157,35 @@ bool GoalOutOfReach(BYTE* human, const float* start, const float* goal) {
     BYTE* startCell = PeopleCellAt(from);
     BYTE* goalCell = PeopleCellAt(goal);
     if (!startCell || !goalCell || startCell == goalCell) return false;
-    BYTE* layer = LayerOfCell(startCell);
-    if (!layer || LayerOfCell(goalCell) != layer || startCell[kCellIsland] != goalCell[kCellIsland]) return false;
-    // The game's budget, as its search asks it for a person (the larger of its two caps, so the check never asks less).
-    const float budget = std::max(SearchBudget(startCell, from, goalCell, goal, false, false), SearchBudget(startCell, from, goalCell, goal, true, false));
-    if (!(budget > 0)) return false;
-    const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
-    const int fromIndex = static_cast<int>((startCell - cells) / kNavCellSize), toIndex = static_cast<int>((goalCell - cells) / kNavCellSize);
-    const WalkResult withinBudget = Walk(layer, fromIndex, from, toIndex, goal, budget);
-    if (withinBudget.reached || withinBudget.undecided) return false;
-    ++g_goalsTurnedDown;
-    if (g_goalsTurnedDown <= 64 || g_goalsTurnedDown % 100 == 0) {
-        const WalkResult walk = Walk(layer, fromIndex, from, toIndex, goal, 0);
-        const float dx = goal[0] - from[0], dz = goal[2] - from[2];
-        BYTE* squad = SquadOfNpc(human);
-        char walked[64];
-        if (walk.reached) sprintf_s(walked, "the walk %.0f m", walk.length);
-        else sprintf_s(walked, "no walk within %.0f m in this zone", kLongestWalkLogged);
-        rfa::Log("Goals: NPC 0x%08X (squad 0x%08X) asked for a way from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f): %.0f m straight, %s, past the search's "
-                 "budget of %.0f m; not asked for (its action goes on as when no way is found, as Guerrilla's) (%d so far)",
-                 ObjectHandle(human, nullptr), squad ? ObjectHandle(squad, nullptr) : kNoHandle, from[0], from[1], from[2], goal[0], goal[1], goal[2],
-                 sqrtf(dx * dx + dz * dz), walked, budget, g_goalsTurnedDown);
-    }
-    return true;
+    // Another zone's cell, or another island, no longer goes to the game unasked: the walk follows the zones' cells.
+    if (!LayerOfCell(startCell) || !LayerOfCell(goalCell)) return false;
+    return OutOfReach(human, startCell, from, goalCell, goal, false);
+}
+
+// The same check on the cells the game's search really uses (2026-11-13, the user's Parker run, 17:05: 14 "Failed
+// pathfind, probably bad navmesh in the area" that got past the check above, e.g. "from: nch: 0x00004a0000201aeb, pos
+// (-1804.6, 17.1, -1252.3) to: nch: 0x00004a0000202e36, pos (-1814.7, 18.9, -1271.9)", a walker fleeing to (-1814.5,
+// 17.1, -1275.0)). A goal with no cell under it (a flee's place inside a building, or over a drop) has none by the
+// lookup above, so it went to the game, and the query (0x5C0B90) moves it to a cell near it itself (0x5BA130, else
+// 0x5C1500): there one 1.8 m up and 3.6 m across, at the EDF base one 4.7 m down, both on the start's island, whose
+// walk is past the budget. The query then calls the search between the two cells (0x5C1960: cdecl; the start's cell and
+// navpoint, the goal's, the two places, whether for a vehicle; the path or null), which, with both cells on one island
+// (0x5BCBB0 on the cells' +0x20), runs the cells' A* (0x5BDC00) that reports the failure. So for an NPC in our worlds
+// that search is checked too, with the query's own cells and places, and answers null without searching when the walk
+// can't be within the budget; the query answers "no way", as for any failed search (a flee tries its next way).
+constexpr DWORD kCellSearch = 0x5C1960;
+constexpr size_t kCellSearchPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0C0h
+using CellSearchFn = void*(__cdecl*)(BYTE* startCell, void* startNavpoint, BYTE* goalCell, void* goalNavpoint, const float* start, const float* goal, bool vehicle);
+using SameIslandFn = bool(__fastcall*)(const BYTE* startIsland, void*, const BYTE* goalIsland);
+auto const SameIsland = reinterpret_cast<SameIslandFn>(0x5BCBB0);
+CellSearchFn g_cellSearch = nullptr;
+
+void* __cdecl CellSearch(BYTE* startCell, void* startNavpoint, BYTE* goalCell, void* goalNavpoint, const float* start, const float* goal, bool vehicle) {
+    BYTE* const human = g_searchingFor;
+    if (human && !vehicle && startCell && goalCell && startCell != goalCell && start && goal && SameIsland(startCell + kCellIsland, nullptr, goalCell + kCellIsland)
+        && OutOfReach(human, startCell, start, goalCell, goal, true))
+        return nullptr;
+    return g_cellSearch(startCell, startNavpoint, goalCell, goalNavpoint, start, goal, vehicle);
 }
 
 // Guerrilla's go_to_believed_location avoids itself for 7 s after a failed way (RM 0x6B607B, push 1B58h); Armageddon's
@@ -1714,6 +1776,37 @@ void MaybeGuerrillaMan(BYTE* npc, const char* why) {
                  g_guerrillaMen);
 }
 
+// Guerrilla's grenade rule (2026-11-13; the user: "got rag dolled by their nades and could not get back up as they
+// where throwing them non stop"). Guerrilla throws only when the thrower's own timer (human_combat's
+// throw_grenade_timestamp) and the one all its AI share (Global_ai_grenade_cooldown_timer) are both over
+// (get_weapon_for_offhand_attack RM 0x626BA0, attack_grenade_enter_common RM 0x69A4B0); a throw on foot sets them to
+// 15-30 s and 10-20 s, so one grenade every 10-20 s among all of them. Armageddon kept the timers (0x49D220: the
+// shared 0x11B5774, the thrower's own npc +0x1034) but its check (0x49D170, cdecl: the NPC → may it throw) lets the
+// last thrower (0x11B56BC) through whatever the shared timer says, and three of its four callers don't start the
+// thrower's own: one Marauder could throw again and again. In our worlds the check is Guerrilla's (both timers over,
+// no last-thrower exemption); elsewhere Armageddon's.
+constexpr DWORD kMayThrow = 0x49D170;
+constexpr size_t kMayThrowPrologue = 6;  // push ebp / mov ebp,esp / mov ecx,[ebp+8]
+constexpr DWORD kOwnThrowTimer = 0x1034;
+int* const kSharedThrowTimer = reinterpret_cast<int*>(0x11B5774);
+using TimerFn = bool(__fastcall*)(int* timer, void*);
+auto const TimerSet = reinterpret_cast<TimerFn>(0xC8B240);      // timestamp::valid
+auto const TimerElapsed = reinterpret_cast<TimerFn>(0xC8B120);  // timestamp::elapsed
+using MayThrowFn = bool(__cdecl*)(BYTE* npc);
+MayThrowFn g_mayThrow = nullptr;
+int g_throwsHeld = 0;
+
+bool TimerOver(int* timer) { return !TimerSet(timer, nullptr) || TimerElapsed(timer, nullptr); }
+
+bool __cdecl MayThrow(BYTE* npc) {
+    if (!npc || !InOurWorld()) return g_mayThrow(npc);
+    const bool may = TimerOver(reinterpret_cast<int*>(npc + kOwnThrowTimer)) && TimerOver(kSharedThrowTimer);
+    if (!may && g_mayThrow(npc) && ++g_throwsHeld <= 8)
+        rfa::Log("Grenades: NPC 0x%08X may not throw yet (Guerrilla's rule: its own and the shared wait both over; Armageddon's check would let it)",
+                 ObjectHandle(npc, nullptr));
+    return may;
+}
+
 int __fastcall DrawFirearmEnter(void* action, void* edx, BYTE* npc, void* aiAction) {
     MaybeGuerrillaMan(npc, "draws a gun");
     return g_drawFirearmEnter(action, edx, npc, aiAction);
@@ -2019,6 +2112,7 @@ void __cdecl GameplayFrame() {
     AmbientFrame(InOurWorld());  // Guerrilla's walkers (ambient.cpp)
     AmbushFrame(InOurWorld());   // Guerrilla's Marauder ambushes (ambush.cpp)
     StoryFrame(InOurWorld());    // Guerrilla's story people at the safehouses (story.cpp)
+    ActionsFrame(InOurWorld());  // Guerrilla's action nodes for the people under them (actions.cpp)
     const DWORD now = GetTickCount();
     if (now - g_lastCheck < 1000) return;
     g_lastCheck = now;
@@ -2074,6 +2168,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     StartAmbient();
     StartAmbushes();
     StartStory();
+    StartActions();
     if (!g_skeletons.empty()) {
         g_readCharacters = reinterpret_cast<ReadCharactersFn>(rfa::HookFunction(kReadCharacters, kReadCharactersPrologue, reinterpret_cast<void*>(&ReadCharacters)));
         if (g_readCharacters) rfa::Log("Skeletons: %u of Guerrilla's people's own to load before the character table", static_cast<unsigned>(g_skeletons.size()));
@@ -2089,6 +2184,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_pickPlayer) rfa::Log("Player: could not hook the player's choice; a DLC uniform chosen in Armageddon's menu still wins in our worlds");
     g_givePlayerSet = reinterpret_cast<GivePlayerSetFn>(rfa::HookFunction(kGivePlayerSet, kGivePlayerSetPrologue, reinterpret_cast<void*>(&GivePlayerSet)));
     if (!g_givePlayerSet) rfa::Log("Player: could not hook the player's animation set; Guerrilla's player gets Armageddon's (and stands still)");
+    g_mayThrow = reinterpret_cast<MayThrowFn>(rfa::HookFunction(kMayThrow, kMayThrowPrologue, reinterpret_cast<void*>(&MayThrow)));
+    if (g_mayThrow) rfa::Log("Grenades: in our worlds an NPC throws only when its own wait and the shared one are both over, as Guerrilla");
+    else rfa::Log("Grenades: could not hook the throw check; Armageddon's lets the last thrower throw again at once");
     g_drawFirearmEnter = reinterpret_cast<DrawEnterFn>(rfa::HookFunction(kDrawFirearmEnter, kDrawEnterPrologue, reinterpret_cast<void*>(&DrawFirearmEnter)));
     g_drawMeleeEnter = reinterpret_cast<DrawEnterFn>(rfa::HookFunction(kDrawMeleeEnter, kDrawEnterPrologue, reinterpret_cast<void*>(&DrawMeleeEnter)));
     if (!g_drawFirearmEnter || !g_drawMeleeEnter)
@@ -2104,6 +2202,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_nodeSpawn = reinterpret_cast<NodeSpawnFn>(rfa::HookFunction(kNodeSpawn, kNodeSpawnPrologue, reinterpret_cast<void*>(&NodeSpawn)));
     if (!g_nodeSpawn) rfa::Log("Squads: could not hook the squad nodes' spawn; Guerrilla's guard posts' squads aren't leashed to their boxes (they chase the player)");
     g_humanPath = reinterpret_cast<HumanPathFn>(rfa::HookFunction(kHumanPath, kHumanPathPrologue, reinterpret_cast<void*>(&HumanPath)));
+    g_cellSearch = reinterpret_cast<CellSearchFn>(rfa::HookFunction(kCellSearch, kCellSearchPrologue, reinterpret_cast<void*>(&CellSearch)));
+    if (!g_cellSearch) rfa::Log("Goals: could not hook the search between two cells; a goal the game moves onto the mesh is still searched for past its budget (\"Failed pathfind\")");
     if (!g_humanPath) rfa::Log("Guard posts: could not hook the people's path query; a guard post's squad still asks for ways out of its post (\"Failed pathfind\" where the way is too long)");
     g_navCheck = reinterpret_cast<NavCheckFn>(rfa::HookFunction(kNavCheck, kNavCheckPrologue, reinterpret_cast<void*>(&NavCheck)));
     if (!g_navCheck) rfa::Log("Transitions: could not hook the load's navigation check; transitions of the zones round the start may stay without their cell");

@@ -64,6 +64,11 @@ local ARMAGEDDON_FADED_EACH_FRAME = { "ammo_area_on_foot" }
 local ARMAGEDDON_HIDDEN_EACH_FRAME = { "reticule_hit", "reticule_hit_2" }
 
 local Reticle = {}		-- reticule_hud: weapon_name, state, scale, hit, magnet_target, fine_aimed
+-- Guerrilla's names for the weapons its script asks about by name for its remote charge squares (handle_charge_ammo:
+-- Max_charges taken, and the squares shown with none out, while the charge placer or mine placer is held); ours are
+-- named rfg_<its name>.
+local GUERRILLA_NAMES = { rfg_charge_placer = "charge_placer", rfg_mine_placer = "mine_placer" }
+local Charges_sent = { -1, -1 }		-- the charges out and blinking last sent
 local Weapon = {}		-- primary_weapon_hud: weapon_name, icon, target_name, bar_visible, bar_pct,
 					-- bar_is_red, ammo_status, total_ammo, clip_size, clip_ammo, reload_message, flash_type
 local Hud_hidden = false
@@ -232,10 +237,17 @@ local function send()
 		overheated = bar_is_red
 	end
 
-	rfg_dataitem_set(WEAPON_FIRE, true, reload_message == RELOAD_MESSAGE_RELOAD, can_fire, is_reloading, weapon_name,
-		Weapon[2] or "", reticle_for(Weapon[2], fine_aimed), accuracy, rounds, reserve, magazine, targeting, hit,
-		overheated, overheat, target_name ~= "player", true, 0,
-		ammo_status == AMMO_AREA_STATUS_AMMO_COUNT, -1, 0, 0)
+	-- Guerrilla's remote charge squares beside the reticle (its WeaponFire's charges and status): the player's charges
+	-- out, and how many of them blink (those not stuck to anything), from the mod (guerrilla_gear's placed explosives).
+	local charges, loose = 0, 0
+	if _GetAnyGlobalSilent("rfg_charges") ~= nil then
+		charges, loose = rfg_charges()
+	end
+	Charges_sent[1], Charges_sent[2] = charges, loose
+	rfg_dataitem_set(WEAPON_FIRE, true, reload_message == RELOAD_MESSAGE_RELOAD, can_fire, is_reloading,
+		GUERRILLA_NAMES[weapon_name] or weapon_name, Weapon[2] or "", reticle_for(Weapon[2], fine_aimed), accuracy, rounds,
+		reserve, magazine, targeting, hit, overheated, overheat, target_name ~= "player", true, 0,
+		ammo_status == AMMO_AREA_STATUS_AMMO_COUNT, -1, charges, loose)
 	show_parts()
 end
 
@@ -268,6 +280,13 @@ function rfg_ui_hud_reticles_keep_faded()
 			local part = armageddon_part(name)
 			if part ~= 0 then
 				vint_set_property(part, "visible", false)
+			end
+		end
+		-- The charges out change without Armageddon's weapon data changing (one detonated, one stuck): sent again.
+		if Weapon[1] ~= nil and _GetAnyGlobalSilent("rfg_charges") ~= nil then
+			local placed, loose = rfg_charges()
+			if placed ~= Charges_sent[1] or loose ~= Charges_sent[2] then
+				send()
 			end
 		end
 		-- A reload's start by its key (with rounds in the magazine but room for more, and rounds to fill it: an empty

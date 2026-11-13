@@ -49,6 +49,7 @@
 #define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "ambient.h"
+#include "actions.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -275,6 +276,7 @@ struct Walker {
     // Guerrilla's cower_goal (a vehicle about to run it over) and gawk_goal (a heavy vehicle near): cowering from what
     // comes at it (looked at again every 200-300 ms), and the gawk timer pair (ai_system::gawk_timer).
     bool incoming = false, gawking = false, fetal = false;
+    int nextNodeLook = 0;  // when it next looks for an action node to use (3b)
     int nextHazardLook = 0, gawkWindow = -1, gawkLength = -1;
 };
 std::vector<Walker> g_walkers;
@@ -389,6 +391,7 @@ void Head(Walker& w, BYTE* navpoint) {
 void EndCower(Walker& w, BYTE* human);
 
 void GiveBack(Walker& w, BYTE* human) {
+    ActionsWalkerStop(w.human);
     EndCower(w, human);
     w.incoming = w.gawking = false;
     w.walked = false;
@@ -557,6 +560,7 @@ constexpr float kHumanCentre = 1.0f;  // human::get_center_pos, about its middle
 constexpr int kHazardLookLeast = 200, kHazardLookMost = 300;
 constexpr int kGawkWindowLeast = 30000, kGawkWindowMost = 45000, kGawkLengthLeast = 5000, kGawkLengthMost = 15000;
 constexpr float kGawkDistance = 20.0f, kGawkingDistance = 25.0f;
+constexpr int kNodeFirstLook = 5000, kNodeLookEvery = 2000, kNodeAgainLeast = 30000, kNodeAgainMost = 60000;
 auto const VehicleSubtype = reinterpret_cast<int(__fastcall*)(BYTE* vehicle, void*)>(0x423530);
 auto const HavokBody = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);
 auto const BodyVelocity = reinterpret_cast<void(__cdecl*)(BYTE* body, V3* out)>(0x776770);
@@ -762,6 +766,20 @@ void Walk(Walker& w, BYTE* human, int now) {
         w.leaving = true;  // Guerrilla's ambient people who fled leave once out of view
     }
     if (VehicleReaction(w, human, ai, now)) return;
+    // Guerrilla's use_action_node_goal for an ambient person (3b): at alert green or yellow it takes a free node within
+    // 30 m whose type allows ambient people (actions.cpp walks it there and plays it), then walks on. Its fitness
+    // (100) is above wandering's (80); how soon a person may use one again isn't read yet: here a first look 5-15 s
+    // after it's made, then 30-60 s after each use, every 2 s between.
+    if (ActionsWalkerBusy(w.human)) return;
+    if (w.nextNodeLook == 0) w.nextNodeLook = now + kNodeFirstLook + std::rand() % kNodeFirstLook * 2;
+    if (!w.leaving && g_alertNow <= 1 && now >= w.nextNodeLook) {
+        w.nextNodeLook = now + kNodeLookEvery;
+        const V3 here = Pos(human);
+        if (ActionsWalkerStart(w.human, &here.x)) {
+            w.nextNodeLook = now + kNodeAgainLeast + std::rand() % (kNodeAgainMost - kNodeAgainLeast + 1);
+            return;
+        }
+    }
     SitOut(human);
     if (w.target == kNone && w.leaving) return;  // nowhere to walk: it stands until it's out of view
     const V3 at = Pos(human);
@@ -1010,6 +1028,7 @@ void AmbientFrame(bool ours) {
         if (InView(&head.x, 1.0f)) w->outOfViewSince = -1;
         else if (w->outOfViewSince < 0) w->outOfViewSince = now;
         if (ShouldGo(*w, Distance(place, at), now)) {
+            ActionsWalkerStop(w->human);
             RemoveObject(kWorld, nullptr, w->human, 0);
             ++g_despawned;
             w = g_walkers.erase(w);

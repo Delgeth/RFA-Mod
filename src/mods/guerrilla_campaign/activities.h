@@ -98,6 +98,11 @@ struct Screen {
     int salvage = 0;
     Vector center{};                   // the play area, for the minimap's ring
     float range = 0.0f;
+    // The target, as Guerrilla's minimap colours it (cartographer::get_structure_color: the mover flag 0x20000000 set
+    // by flag_demo_master_buildings_for_minimap_coloration): its box's middle and half its width.
+    bool hasTarget = false, targetDown = false;
+    Vector target{};
+    float targetRadius = 0.0f;
 };
 
 }  // namespace campaign::activities

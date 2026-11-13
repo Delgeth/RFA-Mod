@@ -489,5 +489,11 @@ extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_MapRings(MapRing*
     MapRing& ring = rings[0];
     ring = {screen.center.x, screen.center.z, screen.range, 50, 200, 50, 80, 0};
     if (screen.outOfRange) ring = {screen.center.x, screen.center.z, screen.range, 200, 50, 50, 255, 0};
-    return 1;
+    if (!screen.hasTarget || most < 2) return 1;
+    // The target over it, in Guerrilla's colours for a demolitions master building (cartographer's 0x2BE5124 standing,
+    // 0x2BE5130 down; set in 0x8801C0): Guerrilla tints the building's own shape, which our minimap doesn't draw, so
+    // here a disc of its size.
+    rings[1] = {screen.target.x, screen.target.z, screen.targetRadius, 148, 13, 0, 255, 0};
+    if (screen.targetDown) rings[1] = {screen.target.x, screen.target.z, screen.targetRadius, 55, 55, 55, 255, 0};
+    return 2;
 }

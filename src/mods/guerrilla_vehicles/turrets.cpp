@@ -246,6 +246,7 @@ auto const TurretPhysics = reinterpret_cast<BYTE*(__fastcall*)(BYTE* turret, voi
 auto const Muzzle = reinterpret_cast<void(__fastcall*)(BYTE* weapon, void* unused, V3* where, float* orientation, int barrel)>(0x733BD0);  // weapon::get_muzzle_transform
 DWORD g_watched = kNone;  // the gun's handle
 int g_watchLines, g_nextWatch, g_lastWatch;
+bool g_watchLog = false;  // [GuerrillaVehicles] TurretWatchLog=1 (off unless set: four lines a second while driving)
 V3 g_lastPlace;
 float g_lastHeading;
 
@@ -311,7 +312,7 @@ void __fastcall AttachGunner(BYTE* turret, void* unused, BYTE* human) {
     if (!vehicle || !human) return;
     const bool player = IsPlayer(human);
     const int seat = SeatOf(vehicle, human);
-    if (player && AimsByItself(turret, nullptr)) {  // the player drives with it: watch it for a minute
+    if (g_watchLog && player && AimsByItself(turret, nullptr)) {  // the player drives with it: watch it for a minute
         g_watched = Handle(turret);
         g_watchLines = g_nextWatch = g_lastWatch = 0;
     }
@@ -532,6 +533,7 @@ void StartGunnerCamera() {
 void StartTurrets() {
     StartHinges();
     StartGunnerCamera();
+    g_watchLog = rfa::IniInt(L"GuerrillaVehicles", L"TurretWatchLog", 0) != 0;
     if (!rfa::IniInt(L"GuerrillaVehicles", L"DriverGunAsGuerrilla", 1)) {
         rfa::Log("Turrets: a driver's gun follows the player's aim point on every vehicle, as Armageddon's ([GuerrillaVehicles] DriverGunAsGuerrilla=0)");
         return;

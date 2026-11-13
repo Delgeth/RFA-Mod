@@ -330,9 +330,13 @@ local function follow_prompts(at)
 	if rfg_use_prompt ~= nil then
 		use_type, swap, current_icon, next_icon, current_ammo, next_ammo, armageddon_own = rfg_use_prompt()
 	end
-	-- Guerrilla hid its use prompt while a pickup row showed (hud_ui_process_use_action_info).
+	-- Guerrilla hid its use prompt while a pickup row showed (hud_ui_process_use_action_info). Its weapon swap stands in
+	-- the same place as the first row (message_swap_main and message_ammo), and Guerrilla never gave both at once (a
+	-- weapon it couldn't take gave no rounds); Armageddon takes the ground weapon's rounds while it offers the swap, so
+	-- the swap waits for the rows too.
 	if Rows > 0 then
 		use_type = 0
+		swap = false
 	end
 	if use_type ~= Use_shown then
 		-- Hiding keeps the picture it had, as it fades out.

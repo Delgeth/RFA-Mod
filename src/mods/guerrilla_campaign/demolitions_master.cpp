@@ -22,8 +22,10 @@
 // GuerrillaCampaign_Activity and answers through GuerrillaCampaign_ActivityChoose; with no HUD asking, the
 // briefing is accepted and the results closed by themselves), the fade to black and back, the building
 // rebuilt (world::restore_object), the area cleared and the AI ignoring the player, the death check, the
-// warp back to where the player started. Not ported yet (piece 3b): the inventory swap with unlimited ammo
-// and the out-of-ammo check, the layer's supplies.
+// warp back to where the player started, the play area centred as Guerrilla's (the building's box, or its layer's
+// "Demo Master" marker), the player's weapons swapped for the challenge's and given back, the out-of-ammo loss. Not
+// ported yet: the layer's supplies (barrels, propane tanks, ammo boxes, walkers, the turret); Unlimited_Ammo (no
+// row sets it).
 #define RFA_MOD_NAME "guerrilla_campaign"
 #include "rfa_mod.h"
 #include "activity_base.h"
@@ -36,6 +38,7 @@
 #include "script_engine.h"
 #include "tables.h"
 #include "world_objects.h"
+#include <algorithm>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -86,6 +89,9 @@ constexpr float kSuccessDelay = 7.5f;      // watching the building fall
 constexpr float kFailureDelay = 0.1f;
 constexpr int kParSlackMs = 999;
 constexpr float kUseDistance = 1.0f;       // the "use" prompt at a node (Guerrilla compares squared distance with 1)
+constexpr float kOutOfAmmoGrace = 2.5f;    // out of ammo this long (the building not coming down) loses
+constexpr float kCollapseQuiet = 1.0f;     // the building counts as coming down while its damage rose this recently
+constexpr float kTargetMarkMin = 4.0f;     // the smallest target mark on the minimap (m)
 
 std::vector<Level> g_levels;
 
@@ -167,6 +173,7 @@ using AtFn = BYTE*(__fastcall*)(void* world, void* unused, int index);
 auto const BuildingCount = reinterpret_cast<CountFn>(0x4776E0);
 auto const BuildingAt = reinterpret_cast<AtFn>(0x477730);
 constexpr DWORD kBuildingFlags = 0x150, kGameDestroyed = 1u << 4;
+constexpr DWORD kBuildingDamage = 0x13C;  // its damage_pct (rfg_mover::serialize 0x6857D0), a float
 
 constexpr DWORD kHandle = 0x68;  // an object's handle
 
@@ -301,6 +308,234 @@ const char* FailureTag(EndReason reason) {
     }
 }
 
+// A Weapon_List entry without a weapon: something the challenge's layer places (its icon, and how many as its Ammo).
+bool IsProp(const Weapon& weapon) { return weapon.weapon.empty() || _stricmp(weapon.weapon.c_str(), "none") == 0; }
+
+// ---- The challenge's kit: finalize_activity_initialization (the player's inventory kept, all of it taken, the
+// table's weapons given, the first one in hand) and reload_inventory (his own given back). Armageddon's inventory:
+// the record in a slot (0x7A8290), the game's delete of a record (0x85C6A0, as its swap 0x8BEB00 calls it), the add
+// into a slot (0x85B260), the record in a hand (0x84E840), the player's equip (0x8BB420); a gun's rounds are its
+// magazine while in his hands and his ammo store's reserve of its type (as guerrilla_hud's weapon cabinet keeps them).
+namespace kit {
+constexpr DWORD kWeaponTable = 0x18F8048, kWeaponTableCount = 0x18F804C, kWeaponEntrySize = 0xE0;
+constexpr DWORD kEntryInventoryItem = 0x18;  // a weapon entry -> its inventory item
+constexpr DWORD kRecordWeapon = 0x18;        // an inventory record -> its weapon's handle
+constexpr DWORD kWeaponEntry = 0x188;        // a weapon -> its weapon entry
+constexpr DWORD kWeaponFiringMode = 0x1C8, kWeaponMagazine = 0x2E0, kModeMagazineSize = 0x13E;
+constexpr DWORD kWeaponCarried = 0x2FC;      // the first firing mode's rounds carried besides the magazine
+constexpr int kSlots = 4;
+auto const RecordInSlot = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human, int slot)>(0x7A8290);
+auto const DeleteRecord = reinterpret_cast<void(__cdecl*)(BYTE* human, BYTE* record, bool, bool, bool)>(0x85C6A0);
+auto const GiveIntoSlot = reinterpret_cast<BYTE*(__cdecl*)(BYTE* human, const void* inventoryItem, int rounds, int slot, bool, bool, bool)>(0x85B260);
+auto const RecordInHand = reinterpret_cast<BYTE*(__fastcall*)(BYTE* human, void* unused, int hand)>(0x84E840);
+auto const PlayerEquip = reinterpret_cast<bool(__cdecl*)(BYTE* player, BYTE* record, int hand, bool, bool)>(0x8BB420);
+auto const FiringModeInfo = reinterpret_cast<BYTE*(__fastcall*)(BYTE* mode, void* unused)>(0x42A1C0);
+auto const HumansAmmo = reinterpret_cast<void*(__fastcall*)(BYTE* human, void* unused)>(0x84E8F0);
+auto const ReserveRounds = reinterpret_cast<int(__fastcall*)(void* ammo, void* unused, BYTE* weapon, int slot)>(0x70EF40);
+auto const AddRounds = reinterpret_cast<int(__fastcall*)(void* ammo, void* unused, BYTE* weapon, int slot, int rounds)>(0x70F4F0);
+auto const TakeRounds = reinterpret_cast<int(__fastcall*)(void* ammo, void* unused, BYTE* weapon, int slot, int rounds)>(0x70F650);
+auto const SetMagazine = reinterpret_cast<void(__fastcall*)(BYTE* weapon, void* unused, int rounds, int mode)>(0x7310F0);
+
+// Guerrilla's hammers (ammo type MELEE: always "ammo" to human_has_ammo), as guerrilla_gear builds them.
+const char* const kHammers[] = {"rfg_sledgehammer", "sledge_upgrade_1", "sledge_upgrade_2"};
+
+struct Kept {
+    const void* item = nullptr;  // its inventory item
+    std::string name;
+    int rounds = 0;
+};
+Kept g_kept[kSlots];
+bool g_haveKept[kSlots];
+int g_heldSlot = -1;
+bool g_swapped = false;
+
+const BYTE* EntryNamed(const char* name) {
+    BYTE* entries = *reinterpret_cast<BYTE* const*>(kWeaponTable);
+    const int count = *reinterpret_cast<const int*>(kWeaponTableCount);
+    for (int i = 0; entries && i < count; ++i) {
+        const char* own = *reinterpret_cast<const char* const*>(entries + i * kWeaponEntrySize);
+        if (own && _stricmp(own, name) == 0) return entries + i * kWeaponEntrySize;
+    }
+    return nullptr;
+}
+
+// Our weapon for one of Guerrilla's weapons.xtbl names: "rfg_" + it where Armageddon has the name, else the name.
+const BYTE* EntryFor(const std::string& guerrilla) {
+    if (const BYTE* ours = EntryNamed(("rfg_" + guerrilla).c_str())) return ours;
+    return EntryNamed(guerrilla.c_str());
+}
+
+const char* NameOf(const BYTE* entry) { return entry ? *reinterpret_cast<const char* const*>(entry) : ""; }
+
+bool IsHammer(const BYTE* entry) {
+    for (const char* hammer : kHammers)
+        if (_stricmp(NameOf(entry), hammer) == 0) return true;
+    return false;
+}
+
+// A record's weapon entry (and its weapon), or null.
+const BYTE* RecordEntry(BYTE* record, BYTE** weapon = nullptr) {
+    BYTE* object = record ? static_cast<BYTE*>(ObjectFromHandle(*reinterpret_cast<const DWORD*>(record + kRecordWeapon))) : nullptr;
+    if (weapon) *weapon = object;
+    return object ? *reinterpret_cast<const BYTE* const*>(object + kWeaponEntry) : nullptr;
+}
+
+bool InHands(BYTE* player, const BYTE* weapon) {
+    BYTE* held = nullptr;
+    RecordEntry(RecordInHand(player, nullptr, 0), &held);
+    return held && held == weapon;
+}
+
+// The rounds a weapon carries itself besides its magazine (its first firing mode's +0x134, what 0x731B00 reads): where a
+// thrown weapon's stock is (the remote charges'), as the ammo store keeps none of it (2026-11-13: the store read 0 for
+// the charge placer while its reloads went on, and the challenge's "1 charge" refilled from the given one's own stock).
+int& CarriedOf(BYTE* weapon) { return *reinterpret_cast<int*>(weapon + kWeaponCarried); }
+
+int RoundsOf(BYTE* player, BYTE* weapon) {
+    void* ammo = HumansAmmo(player, nullptr);
+    const int reserve = (ammo ? ReserveRounds(ammo, nullptr, weapon, 0) : 0) + (std::max)(0, CarriedOf(weapon));
+    // A magazine reads -1 while it reloads (the HUD's "ran empty, -1 left"): none in it, not one fewer.
+    return reserve + (InHands(player, weapon) ? (std::max)(0, *reinterpret_cast<const int*>(weapon + kWeaponMagazine)) : 0);
+}
+
+// A weapon given that many rounds in all: its magazine as full as they fill it, the rest in the reserve (all of them in
+// the reserve for one put away, which takes its magazine's out as it's drawn).
+void SetRounds(BYTE* player, BYTE* weapon, int total) {
+    BYTE* mode = FiringModeInfo(weapon + kWeaponFiringMode, nullptr);
+    const int size = mode ? *reinterpret_cast<const WORD*>(mode + kModeMagazineSize) : 0;
+    const int magazine = (std::max)(0, (std::min)(total, size));
+    const bool inHands = InHands(player, weapon);
+    SetMagazine(weapon, nullptr, magazine, 0);  // as guerrilla_hud's SetRounds (tested in game); the reserve is read after it
+    void* ammo = HumansAmmo(player, nullptr);
+    if (!ammo) return;
+    const int now = ReserveRounds(ammo, nullptr, weapon, 0), wanted = (std::max)(0, inHands ? total - magazine : total);
+    if (now > wanted) TakeRounds(ammo, nullptr, weapon, 0, now - wanted);
+    else if (now < wanted) AddRounds(ammo, nullptr, weapon, 0, wanted - now);
+    // What the store didn't take (a thrown weapon's: none) the weapon carries itself; nothing more of its own.
+    CarriedOf(weapon) = (std::max)(0, wanted - ReserveRounds(ammo, nullptr, weapon, 0));
+}
+
+void TakeAll(BYTE* player) {
+    for (int s = 0; s < kSlots; ++s)
+        if (BYTE* record = RecordInSlot(player, s)) DeleteRecord(player, record, false, false, false);
+}
+
+// One weapon into a slot with that many rounds (a hammer keeps its own: none); its record, or null.
+BYTE* Give(BYTE* player, const BYTE* entry, int slot, int rounds) {
+    const void* item = entry ? *reinterpret_cast<const void* const*>(entry + kEntryInventoryItem) : nullptr;
+    BYTE* record = item ? GiveIntoSlot(player, item, 0, slot, false, false, false) : nullptr;
+    BYTE* weapon = nullptr;
+    if (record && RecordEntry(record, &weapon) && weapon && !IsHammer(entry)) SetRounds(player, weapon, rounds);
+    return record;
+}
+
+bool Swapped() { return g_swapped; }
+
+void Swap(BYTE* player, const Level& level) {
+    if (g_swapped) return;
+    BYTE* held = RecordInHand(player, nullptr, 0);
+    g_heldSlot = -1;
+    for (int s = 0; s < kSlots; ++s) {
+        g_haveKept[s] = false;
+        BYTE* record = RecordInSlot(player, s);
+        BYTE* weapon = nullptr;
+        const BYTE* entry = RecordEntry(record, &weapon);
+        if (!entry || !weapon) continue;
+        g_kept[s] = {*reinterpret_cast<const void* const*>(entry + kEntryInventoryItem), NameOf(entry), RoundsOf(player, weapon)};
+        g_haveKept[s] = true;
+        if (record == held) g_heldSlot = s;
+    }
+    TakeAll(player);
+    // The table's weapons, Guerrilla's slots ((i + 3) % 4: the first in the hammer's); none at all, the sledgehammer.
+    int given = 0;
+    BYTE* first = nullptr;
+    std::string list;
+    for (const Weapon& w : level.weapons) {
+        if (IsProp(w)) continue;
+        const int slot = (given + 3) % kSlots;
+        ++given;
+        const BYTE* entry = EntryFor(w.weapon);
+        BYTE* record = entry ? Give(player, entry, slot, (std::max)(0, w.ammo)) : nullptr;
+        if (!record) {
+            rfa::Log("Demolitions master %s: couldn't give %s (%s)", level.name.c_str(), w.weapon.c_str(), entry ? "the game refused" : "not built");
+            continue;
+        }
+        if (!first) first = record;
+        list += (list.empty() ? "" : ", ") + std::string(NameOf(entry)) + (IsHammer(entry) ? "" : " " + std::to_string((std::max)(0, w.ammo)));
+    }
+    if (given == 0) {
+        first = Give(player, EntryNamed(kHammers[0]), 3, 0);
+        list = first ? "rfg_sledgehammer (the list has none)" : "nothing (rfg_sledgehammer isn't built)";
+    }
+    if (first) PlayerEquip(player, first, 0, false, false);
+    g_swapped = true;
+    std::string kept;
+    for (int s = 0; s < kSlots; ++s)
+        if (g_haveKept[s]) kept += (kept.empty() ? "" : ", ") + g_kept[s].name + " " + std::to_string(g_kept[s].rounds);
+    rfa::Log("Demolitions master %s: the player's own kept (%s), given %s", level.name.c_str(), kept.empty() ? "none" : kept.c_str(), list.c_str());
+}
+
+// The player's own back, as they were (reload_inventory).
+void Restore(BYTE* player, const char* why) {
+    if (!g_swapped || !player) return;
+    g_swapped = false;
+    TakeAll(player);
+    BYTE* held = nullptr;
+    int back = 0;
+    for (int s = 0; s < kSlots; ++s) {
+        if (!g_haveKept[s]) continue;
+        const void* item = g_kept[s].item;
+        BYTE* record = GiveIntoSlot(player, item, 0, s, false, false, false);
+        BYTE* weapon = nullptr;
+        const BYTE* entry = RecordEntry(record, &weapon);
+        if (!record) {
+            rfa::Log("Demolitions master: couldn't give back %s (slot %d)", g_kept[s].name.c_str(), s);
+            continue;
+        }
+        if (weapon && !IsHammer(entry)) SetRounds(player, weapon, g_kept[s].rounds);
+        if (s == g_heldSlot) held = record;
+        ++back;
+    }
+    if (held) PlayerEquip(player, held, 0, false, false);
+    rfa::Log("Demolitions master: the player's own %d weapons given back (%s)", back, why);
+}
+
+// The level went (a reload brings the save's inventory): nothing to give back.
+void Forget() { g_swapped = false; }
+
+// human_has_ammo(player, true, false): a remote charge of his still out (guerrilla_gear's GuerrillaGear_PlacedExplosives),
+// or a weapon in his slots with rounds, or a melee one (the hammers).
+struct PlacedExplosive {
+    float x, y, z;
+    int kind, stuck, players;  // kind 0 a remote charge
+};
+using PlacedFn = int(__cdecl*)(PlacedExplosive* out, int most);
+
+bool HasAmmo(BYTE* player) {
+    if (!player) return true;
+    static PlacedFn placed = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        if (HMODULE gear = GetModuleHandleW(L"guerrilla_gear.dll")) placed = reinterpret_cast<PlacedFn>(GetProcAddress(gear, "GuerrillaGear_PlacedExplosives"));
+        if (!placed) rfa::Log("Demolitions master: guerrilla_gear.dll gives no GuerrillaGear_PlacedExplosives; charges still out don't count as ammo");
+    }
+    if (placed) {
+        PlacedExplosive out[64];
+        const int count = (std::min)(placed(out, 64), 64);
+        for (int i = 0; i < count; ++i)
+            if (out[i].kind == 0 && out[i].players) return true;
+    }
+    for (int s = 0; s < kSlots; ++s) {
+        BYTE* weapon = nullptr;
+        const BYTE* entry = RecordEntry(RecordInSlot(player, s), &weapon);
+        if (!entry || !weapon) continue;
+        if (IsHammer(entry) || RoundsOf(player, weapon) > 0) return true;
+    }
+    return false;
+}
+}  // namespace kit
+
 class Demolitions : public Activity {
 public:
     Demolitions() : Activity(DemolitionsMaster, true, false) {}
@@ -337,6 +572,16 @@ public:
         const Vector at = PositionOf(building);
         rfa::Log("Demolitions master %s: target %08X at (%.0f, %.0f, %.0f), %s, %.0f m from the node", level_->name.c_str(), target_, at.x, at.y, at.z,
                  targetIsBuilding_ ? "a building" : "NOT one of the world's buildings (won when it is gone)", FlatDistance(at, node.pos));
+        // The play area's middle (do_startup_initialization, then activity_do_frame_active's LOADING_LAYERS): the
+        // building's bounding-box centre, or the layer's "Demo Master" dummy where it has one.
+        center_ = node.hasAreaCenter ? node.areaCenter : node.hasParentCenter ? node.parentCenter : at;
+        // The target's mark on the minimap: its box's middle, half its width (at least kTargetMarkMin, to be seen).
+        targetCenter_ = node.hasParentCenter ? node.parentCenter : at;
+        targetRadius_ = node.hasParentSize ? 0.5f * (std::max)(node.parentSize.x, node.parentSize.z) : kTargetMarkMin;
+        if (targetRadius_ < kTargetMarkMin) targetRadius_ = kTargetMarkMin;
+        rfa::Log("Demolitions master %s: the area (%.0f m) is centred on %s at (%.0f, %.0f, %.0f), %.0f m from the node", level_->name.c_str(),
+                 level_->activeRange, node.hasAreaCenter ? "the layer's Demo Master marker" : node.hasParentCenter ? "the building's box" : "the building's place",
+                 center_.x, center_.y, center_.z, FlatDistance(center_, node.pos));
         progress_ = LoadProgress(node);
         step_ = Step::LoadingLayers;
         // activity_demolitions_master_start: where the player stands, to warp him back at the end.
@@ -368,6 +613,7 @@ public:
     // gem_level_shutdown), so ours is forgotten, not taken away.
     void LevelInit() override {
         listener_ = nullptr;
+        kit::Forget();
         Activity::LevelInit();
     }
 
@@ -415,13 +661,20 @@ public:
         screen.outOfRange = rangeTimer_ > 0.0f;
         screen.center = center_;
         screen.range = level_->activeRange;
+        screen.hasTarget = true;
+        screen.target = targetCenter_;
+        screen.targetRadius = targetRadius_;
+        screen.targetDown = targetDown_;
     }
 
     // The HUD's answer: at the briefing, accept (1) or cancel (0); at the results, close (any).
     void Choose(int accept) { choice_ = accept ? 1 : 0; }
 
     // The player's death (demolitions_master_process_player_death).
+    // His own weapons go back at once: the respawn's save (guerrilla_save's, made after the death) must hold his, not
+    // the challenge's.
     void OnPlayerDeath() {
+        kit::Restore(static_cast<BYTE*>(Player()), "the player died");
         if (step_ == Step::Active) Ending(false, PlayerDied);
     }
 
@@ -476,8 +729,7 @@ protected:
             // clean_area: the AI ignores the player, the area's people leave.
             aiIgnoredBefore_ = g_aiIgnoresPlayer != 0;
             SetAiIgnoresPlayer(true);
-            const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
-            SweepNpcs(building ? PositionOf(building) : startPosition_, level_->activeRange + 10.0f);
+            SweepNpcs(center_, level_->activeRange + 10.0f);
             if (!BeginStartUp()) {
                 step_ = Step::PregameReject;
                 Unwind();
@@ -498,17 +750,22 @@ protected:
     bool Start() override {
         if (!Activity::Start()) return false;
         // finalize_activity_initialization: the inventory swapped for the challenge's weapons.
-        for (const Weapon& weapon : level_->weapons)
-            rfa::Log("Demolitions master %s: weapon %s (%s), ammo %d", level_->name.c_str(), weapon.weapon.c_str(), weapon.icon.c_str(), weapon.ammo);
-        NotPorted("swapping the player's inventory for the challenge's weapons (piece 3b)");
+        for (const Weapon& weapon : level_->weapons) {
+            if (IsProp(weapon))
+                rfa::Log("Demolitions master %s: prop %s x%d (placed by the challenge's layer)", level_->name.c_str(), weapon.icon.c_str(), weapon.ammo);
+            else
+                rfa::Log("Demolitions master %s: weapon %s, ammo %d", level_->name.c_str(), weapon.weapon.c_str(), weapon.ammo);
+        }
+        if (BYTE* player = static_cast<BYTE*>(Player())) kit::Swap(player, *level_);
+        if (level_->unlimitedAmmo) NotPorted("Unlimited_Ammo (no challenge of Guerrilla's sets it)");
         timeRemaining_ = static_cast<float>(level_->timeLimit);
         elapsed_ = 0.0f;
         rangeTimer_ = 0.0f;
         pollTimer_ = 0.0f;
         sweepTimer_ = kNpcSweepPeriod;
-        // The play area's middle: the building's (Guerrilla: its bounding box's centre, or the
-        // layer's DEMO_MASTER dummy).
-        center_ = PositionOf(ObjectFromHandle(target_));
+        outOfAmmoTime_ = 0.0f;
+        lastDamage_ = -1.0f;
+        damageChangedAt_ = 0.0f;
         // The building must be standing now; one still down counts as won at once (it wasn't rebuilt).
         const BYTE* building = static_cast<const BYTE*>(ObjectFromHandle(target_));
         if (building && targetIsBuilding_ && (*reinterpret_cast<const DWORD*>(building + kBuildingFlags) & kGameDestroyed))
@@ -575,6 +832,25 @@ protected:
         if (targetDown_ || !building) return Ending(true, Success);
         void* player = Player();
         if (!player) return;
+        // Out of ammo (activity_should_end with Check_demo_master_ammo: human_has_ammo(player, true, false)): while the
+        // building is still coming down wait, else after 2.5 s the loss. Guerrilla asks its stress evaluation whether the
+        // building is collapsing (stress_evaluation_is_active); here, whether its damage (+0x13C) still rose in the last second.
+        const float damage = targetIsBuilding_ ? *reinterpret_cast<const float*>(building + kBuildingDamage) : 0.0f;
+        if (damage != lastDamage_) {
+            lastDamage_ = damage;
+            damageChangedAt_ = elapsed_;
+        }
+        if (kit::Swapped() && !kit::HasAmmo(static_cast<BYTE*>(player))) {
+            if (elapsed_ - damageChangedAt_ < kCollapseQuiet) {
+                outOfAmmoTime_ = 0.0f;
+            } else {
+                if (outOfAmmoTime_ == 0.0f) rfa::Log("Demolitions master %s: out of ammo, the building isn't coming down", level_->name.c_str());
+                outOfAmmoTime_ += kPollPeriod;
+                if (outOfAmmoTime_ >= kOutOfAmmoGrace) return Ending(false, OutOfAmmo);
+            }
+        } else {
+            outOfAmmoTime_ = 0.0f;
+        }
         const float distance = FlatDistance(PositionOf(player), center_);
         if (distance > kHardRange) return Ending(false, OutOfRange);
         if (distance > level_->activeRange) {
@@ -661,6 +937,7 @@ private:
 
     // What the run changed, undone: the AI's ignoring, the warp back to the start, the fade.
     void Unwind() {
+        kit::Restore(static_cast<BYTE*>(Player()), "the run is over");
         SetAiIgnoresPlayer(aiIgnoredBefore_);
         if (haveStart_) WarpPlayer(startPosition_, startOrientation_);
         if (fadedOut_) {
@@ -718,8 +995,11 @@ private:
     float startOrientation_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     bool haveStart_ = false;
     Vector center_{};
+    Vector targetCenter_{};
+    float targetRadius_ = 0.0f;
     float timeRemaining_ = 0.0f, elapsed_ = 0.0f, rangeTimer_ = 0.0f, postTimer_ = 0.0f, pollTimer_ = 0.0f, sweepTimer_ = 0.0f;
     float briefingTime_ = 0.0f, resultsTime_ = 0.0f, fadeTime_ = 0.0f, restoreTime_ = 0.0f;
+    float outOfAmmoTime_ = 0.0f, lastDamage_ = -1.0f, damageChangedAt_ = 0.0f;
     bool targetDown_ = false, success_ = false, targetIsBuilding_ = false;
     EndReason reason_ = Success;
     int choice_ = -1;          // the HUD's answer (-1: none yet)
@@ -784,3 +1064,7 @@ bool StartDemolitionsMaster(const char* level) {
 }
 
 }  // namespace campaign::activities
+
+// 1 while a demolitions master challenge has swapped the player's weapons for its own: guerrilla_gear's hammer top-up
+// (KeepHammer) should leave his slots alone then, as Guerrilla gives no hammer a challenge's list doesn't.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_KitLocked() { return campaign::activities::kit::Swapped() ? 1 : 0; }

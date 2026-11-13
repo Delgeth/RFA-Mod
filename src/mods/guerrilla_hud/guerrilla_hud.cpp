@@ -3792,6 +3792,43 @@ int __cdecl LuaMapBuilding(lua_State* L) {
     return 5;
 }
 
+// rfg_charges() -> placed, loose: the player's remote charges out, and how many of them aren't stuck to anything
+//   (Guerrilla's projectile_count_charges_proxy_mines RM 0xA719C0, as hud_ui_weapons_process_weapon_fire_info 0x8B31AE
+//   used it: WeaponFire's charges, and its status = the charges - the player's stuck projectiles; those blink).
+int __cdecl LuaCharges(lua_State* L) {
+    using namespace rfa::game;
+    static auto explosives = reinterpret_cast<GearExplosivesFn>(ModExport(L"guerrilla_gear.dll", "GuerrillaGear_PlacedExplosives"));
+    int placed = 0, stuck = 0;
+    if (explosives && InOurWorld()) {
+        static GuerrillaGearExplosive found[64];
+        const int count = (std::min)(explosives(found, 64), 64);
+        for (int i = 0; i < count; ++i) {
+            if (!found[i].players) continue;
+            if (found[i].kind == 0) ++placed;
+            if (found[i].stuck) ++stuck;
+        }
+    }
+    lua_pushnumber(L, placed);
+    lua_pushnumber(L, placed > stuck ? placed - stuck : 0);
+    return 2;
+}
+
+// rfg_charges_most() -> how many remote charges the player can have out: Guerrilla's upgrade_get_max_charges (RM
+//   0x775F70): the remote_charge_count upgrade's value at the level bought (upgrades.txt: 2 to start, up to 11).
+int __cdecl LuaChargesMost(lua_State* L) {
+    using namespace rfa::game;
+    int most = 0;
+    for (const CabinetUpgrade& u : g_cabinetUpgrades)
+        if (u.name == "remote_charge_count" && !u.values.empty()) {
+            int bought = UpgradeBought(u.name);
+            if (bought < 0) bought = 0;
+            if (bought >= static_cast<int>(u.values.size())) bought = static_cast<int>(u.values.size()) - 1;
+            most = u.values[bought];
+        }
+    lua_pushnumber(L, most);
+    return 1;
+}
+
 // rfg_map_explosives(reach) -> count, and rfg_map_explosive(i) -> map_x, map_y, kind (0 charge, 1 mine, 2 singularity
 //   bomb), stuck: the placed explosives within `reach` metres of the player (guerrilla_gear's; everyone's, as Guerrilla).
 struct MinimapExplosive { double mapX, mapY; int kind; bool stuck; };
@@ -5065,6 +5102,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_map_building", LuaMapBuilding);
     rfa::game::lua_register(L, "rfg_map_explosives", LuaMapExplosives);
     rfa::game::lua_register(L, "rfg_map_explosive", LuaMapExplosive);
+    rfa::game::lua_register(L, "rfg_charges", LuaCharges);
+    rfa::game::lua_register(L, "rfg_charges_most", LuaChargesMost);
     rfa::game::lua_register(L, "rfg_map_markers", LuaMapMarkers);
     rfa::game::lua_register(L, "rfg_map_marker", LuaMapMarker);
     rfa::game::lua_register(L, "rfg_district_change", LuaDistrictChange);

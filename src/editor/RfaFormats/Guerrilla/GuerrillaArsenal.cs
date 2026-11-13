@@ -329,6 +329,14 @@ public static class GuerrillaArsenal
             var dropped = new List<string>();
             foreach (string field in NotYet)
                 if (copy.Element(field) is { } part) { part.Remove(); dropped.Add(field); }
+            // Its cameras' turning speed with the mouse: Guerrilla has one (Y_Axis_Rotation, its y_axis_rotation_speed),
+            // Armageddon a second for the mouse (Y_Axis_Rotation_mouse, 1.0 when a camera has none: the reader 0x62E56D),
+            // so with the mouse Guerrilla's vehicles turned five times as fast as Guerrilla's 0.2 (the user: "hard to aim /
+            // looking around while driving"). Guerrilla's own value goes in the mouse's too.
+            if (copy.Element("Cameras") is { } cameras)
+                foreach (var camera in cameras.Elements)
+                    if (camera.ValueOf("Y_Axis_Rotation") is { } speed && camera.Element("Y_Axis_Rotation_mouse") == null)
+                        camera.AddElement("Y_Axis_Rotation_mouse", speed.Trim());
             // Its turrets, Guerrilla's (see GuerrillaTurrets): a mount whose turret can't be had yet is left out.
             if (copy.Element("Turrets") is { } mounts)
             {
@@ -488,7 +496,7 @@ public static class GuerrillaArsenal
         File.WriteAllBytes(Path.Combine(modFolder, SpawnGroupTable), ourGroups.ToBytes());
         turrets.Write(modFolder);
         yield return GuerrillaVehicleLights.Write(guerrillaTables, gameTables, modFolder, worldEffects);
-        yield return walkerTrees.Write(gameTables, modFolder);
+        yield return walkerTrees.Write(gameTables, modFolder, overrides);
         yield return GuerrillaWalkerLimbs.Write(guerrillaTables, gameTables, modFolder, walkerRigs);
         yield return GuerrillaVehicleFootsteps.Write(guerrillaTables, gameTables, modFolder, Path.GetDirectoryName(RigListFile(modFolder))!, footstepNames, worldEffects);
         // Guerrilla's traffic by zone, for the guerrilla_vehicles mod's traffic (see GuerrillaTraffic).
@@ -624,6 +632,11 @@ public static class GuerrillaArsenal
         {
             string table = Path.Combine(modFolder, name);
             if (File.Exists(table)) { File.Delete(table); yield return $"Deleted {table}"; }
+        }
+        foreach (string relative in new[] { GuerrillaWalkerTrees.ListOverride, GuerrillaWalkerTrees.TreeOverride })
+        {
+            string file = Path.Combine(overrides, relative);
+            if (File.Exists(file)) { File.Delete(file); yield return $"Deleted {file}"; }
         }
     }
 
