@@ -904,36 +904,28 @@ public sealed class TerrainSubzone
 
     /// <summary>
     /// A strip along a row of squares (each column's lower and upper corner, in x order), split along
-    /// the chosen diagonal and wound as asked: the order of the corners picked so it comes out so.
+    /// the chosen diagonal and wound as asked. Which corner leads picks the diagonal (lower first:
+    /// each square split from its upper-left to its lower-right corner; upper first: the other), and
+    /// that fixes the winding a plain strip gives; for the other winding the strip starts with its
+    /// first corner twice (a triangle of nothing), so every triangle after is turned over.
     /// </summary>
     static int[] RowStrip(List<(int A, int B)> run, bool main, bool up)
     {
-        // Four ways to walk it: lower or upper corner first, along x or back. Each makes its squares'
-        // diagonal one way and turns its triangles one way; the one that matches is taken.
-        foreach (bool backwards in new[] { false, true })
-            foreach (bool upperFirst in new[] { false, true })
-            {
-                var strip = new List<int>(run.Count * 2);
-                for (int k = 0; k < run.Count; k++)
-                {
-                    var (a, b) = run[backwards ? run.Count - 1 - k : k];
-                    if (upperFirst) { strip.Add(b); strip.Add(a); } else { strip.Add(a); strip.Add(b); }
-                }
-                // The first triangle (corner positions in the run: column, row 0 lower / 1 upper).
-                (int C, int R) At(int position)
-                {
-                    int column = position / 2, row = position % 2 == 0 ? (upperFirst ? 1 : 0) : (upperFirst ? 0 : 1);
-                    return (backwards ? run.Count - 1 - column : column, row);
-                }
-                var (p0, p1, p2) = (At(0), At(1), At(2));
-                // Its diagonal: the edge between corners in different columns and rows.
-                bool diagonalMain = false;
-                foreach (var (p, q) in new[] { (p0, p1), (p1, p2), (p2, p0) })
-                    if (p.C != q.C && p.R != q.R) diagonalMain = (q.C - p.C) * (q.R - p.R) > 0;
-                float area = (p1.C - p0.C) * (p2.R - p0.R) - (p1.R - p0.R) * (p2.C - p0.C);
-                if (diagonalMain == main && area > 0 == up) return [.. strip];
-            }
-        throw new InvalidOperationException("no way along the row gives the diagonal and winding asked");
+        bool upperFirst = main;  // (upper, lower, upper...: the squares' diagonal from lower-left to upper-right)
+        var strip = new List<int>(run.Count * 2 + 1);
+        foreach (var (a, b) in run)
+        {
+            if (upperFirst) { strip.Add(b); strip.Add(a); } else { strip.Add(a); strip.Add(b); }
+        }
+        // The first triangle's corners (column, row: 0 lower, 1 upper), and which way it turns.
+        (int C, int R) p0 = (0, upperFirst ? 1 : 0), p1 = (0, upperFirst ? 0 : 1), p2 = (1, upperFirst ? 1 : 0);
+        bool diagonalMain = false;
+        foreach (var (p, q) in new[] { (p0, p1), (p1, p2), (p2, p0) })
+            if (p.C != q.C && p.R != q.R) diagonalMain = (q.C - p.C) * (q.R - p.R) > 0;
+        if (diagonalMain != main) throw new InvalidOperationException("the strip's diagonal isn't the one asked");
+        float area = (p1.C - p0.C) * (p2.R - p0.R) - (p1.R - p0.R) * (p2.C - p0.C);
+        if (area > 0 != up) strip.Insert(0, strip[0]);
+        return [.. strip];
     }
 
     /// <summary>Strips joined into one by repeated indices, each starting at an even place (so it keeps its winding).</summary>

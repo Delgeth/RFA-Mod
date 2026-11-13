@@ -141,6 +141,9 @@ sealed class TerrainSculpt
     /// <summary>What <see cref="FullDetail"/> did, until the editor takes it (to say so, and draw the sub-zones made over).</summary>
     public string? DetailNote { get; private set; }
 
+    /// <summary>Makes the drawn ground the collision now (see <see cref="FullDetail"/>), as the first stroke would.</summary>
+    public void MakeFullDetail() => DetailNote ??= FullDetail();
+
     /// <summary>Takes <see cref="DetailNote"/> (once).</summary>
     public string? TakeDetailNote()
     {

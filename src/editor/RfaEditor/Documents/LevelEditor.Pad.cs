@@ -90,6 +90,11 @@ public partial class LevelEditor
                     ". Hold the left button to sculpt (Shift: the opposite), [ and ] for the brush's size. Saving writes each zone's terrain file, " +
                     "its far-away ground and the sub-zones changed, as overrides." +
                     (sculpt.FarProblem != null ? $" ({name}'s far-away ground can't follow: {sculpt.FarProblem}.)" : ""));
+        // The drawn ground made the collision now, not at the first stroke: ground sculpted before
+        // (with the game's coarser mesh) then matches too, once saved.
+        sculpt.MakeFullDetail();
+        ShowSculptedGround(sculpt, []);
+        if (sculpt.LayoutPending) MarkUnsaved();
         return true;
     }
 
