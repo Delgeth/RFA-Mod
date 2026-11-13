@@ -65,8 +65,11 @@ public static class GuerrillaWorld
     /// it gives the game Armageddon's Default people, whose effects run its pools out at start.
     /// 3 (v0.5.8-beta): Guerrilla's people, guard boxes, turret parts and looping sounds; the mods
     /// size the game's tables for what the world's zones and tables now name.
+    /// 4 (v0.5.11-beta).
+    /// 5 (v0.6.0-beta): Guerrilla's hinges (turbines, cranes), the turbine list, transition cells,
+    /// ladders, Mason's coat cloth, the kill regions and the campaign's markers, which the mods read.
     /// </summary>
-    public const int Format = 4;
+    public const int Format = 5;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
