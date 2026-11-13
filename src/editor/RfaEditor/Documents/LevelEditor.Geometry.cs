@@ -30,6 +30,8 @@ public partial class LevelEditor
     (string Archive, string? Container) stitchListAt;
     string geometrySignature = "";       // the pieces as read or last saved: whether they changed
     readonly Dictionary<string, ChunkPackage> stitchesToAdd = new(StringComparer.OrdinalIgnoreCase);
+    Dictionary<uint, GamePiece>? geometryInGame;  // the pieces as the game loaded them, by their handle here (Live)
+    bool geometryWritten;                         // the stitch list was written since geometryInGame was noted
 
     /// <summary>The zone's stitch list's pieces as objects in it (once, before the scene is made).</summary>
     void EnsureGeometryObjects()
@@ -46,14 +48,38 @@ public partial class LevelEditor
             stitchListAt = (found.Archive, found.Container);
             uint handle = GeometryHandles;
             var taken = zone.Objects.Select(o => o.Handle).ToHashSet();
+            var perList = new int[StitchList.ListCount];
+            geometryInGame = [];
             foreach (StitchPiece piece in list.Pieces)
             {
                 while (taken.Contains(handle)) handle++;
+                // The game's list holds the pieces list by list, each list's in the order read.
+                int inList = Math.Clamp(piece.List, 0, StitchList.ListCount - 1);
+                geometryInGame[handle] = new GamePiece(inList, perList[inList]++, piece.Name, piece.Flags, piece.Position, piece.Rotation);
                 NewGeometryObject(piece.Name, piece.List, piece.Flags, piece.Position, piece.Rotation, handle++);
             }
             geometryLoaded = true;
             geometrySignature = GeometrySignature();
             return;
+        }
+    }
+
+    /// <summary>
+    /// The game is about to load the level again from the zone as just saved: its level geometry is
+    /// then the pieces as they are here (as SaveGeometry writes them: list by list, in the zone's
+    /// order), or as they were if nothing was saved.
+    /// </summary>
+    void NoteGeometryReloaded()
+    {
+        if (!geometryLoaded || stitchListName == null || !geometryWritten) return;
+        geometryWritten = false;
+        var perList = new int[StitchList.ListCount];
+        geometryInGame = [];
+        foreach (ZoneObject obj in zone.Objects.Where(IsGeometry))
+        {
+            int list = ListOf(obj);
+            (Vector3 p, Matrix4x4 r) = obj.Placement;
+            geometryInGame[obj.Handle] = new GamePiece(list, perList[list]++, PieceOf(obj), IntOf(obj, "stitch_flags", 4), p, r);
         }
     }
 
@@ -155,13 +181,18 @@ public partial class LevelEditor
     }
 
     /// <summary>The containers holding the zone's stitch list (where pieces brought in go).</summary>
-    List<(string Archive, string Container)> StitchContainers() => stitchListName == null ? [] :
-        context.Assets.PlacesOf(stitchListName).Where(p => p.Container != null).Select(p => (p.Archive, p.Container!)).Distinct().ToList();
+    /// <remarks>A stitch list loose in its archive (Ruin maps') has none: then the zone's level containers (see ChunkContainers).</remarks>
+    List<(string Archive, string Container)> StitchContainers()
+    {
+        if (stitchListName == null) return [];
+        var holding = context.Assets.PlacesOf(stitchListName).Where(p => p.Container != null).Select(p => (p.Archive, p.Container!)).Distinct().ToList();
+        return holding.Count > 0 ? holding : ChunkContainers();
+    }
 
     /// <summary>The zone's bytes without the level geometry (which goes in the stitch list).</summary>
     byte[] ZoneBytesWithoutGeometry()
     {
-        var geometry = zone.Objects.Where(IsGeometry).ToList();
+        var geometry = zone.Objects.Where(o => IsGeometry(o) || IsBarrier(o)).ToList();  // (and the invisible walls: SaveBarriers)
         if (geometry.Count == 0) return zone.ToBytes();
         RemovedObjects taken = zone.Remove(geometry);
         try { return zone.ToBytes(); }
@@ -207,6 +238,7 @@ public partial class LevelEditor
             foreach ((string inArchive, string? inContainer) in context.Assets.PlacesOf(stitchListName).Distinct())
                 said.Add(PutZoneFile(stitchListName, inArchive, inContainer, list));
             said.Insert(0, $"{pieces.Count:N0} pieces of level geometry into {stitchListName}");
+            geometryWritten = true;
         }
         geometrySignature = signature;
         stitchesToAdd.Clear();

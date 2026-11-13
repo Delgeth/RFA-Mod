@@ -156,8 +156,11 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
         SceneViewport.Children.Add(brushVisual);
         SceneViewport.Children.Add(magnetVisual);
+        SceneViewport.Children.Add(helpersVisual);  // light and camera cones, invisible walls (LevelEditor.Helpers.cs)
         SetTool(LevelTool.Move);
         CompositionTarget.Rendering += PadFrame;
+        GamePanel.ControllerChanged += ShowControllerOwner;
+        ShowControllerOwner();
         ShowSource();
         BuildObjectTree("");
         BuildGrid();
@@ -167,6 +170,18 @@ public partial class LevelEditor : UserControl, IEditorDocument
         // Opened before the editor finished reading every container: draw again once it has, as
         // models and textures in other containers and archives can be found then.
         if (!context.Assets.IndexReady) context.Assets.IndexBecameReady += OnIndexReady;
+    }
+
+    /// <summary>
+    /// The file index was read again (after a new level's archive was written): what wasn't found
+    /// before (the level's ground, level geometry, sky, its other files) is looked for again and drawn.
+    /// </summary>
+    public void FilesIndexedAgain()
+    {
+        copies = null;  // (the zone's other copies: the index now has the new archive's containers)
+        related = null;
+        relatedOf.Clear();
+        OnIndexReady();
     }
 
     void OnIndexReady()
@@ -257,6 +272,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (control && e.Key == Key.S) Save();
         else if (Keyboard.FocusedElement is TextBoxBase) return;  // typing in a property
         else if (drag == Drag.Look) { }                             // flying: the keys move the camera
+        else if (control && shift && e.Key == Key.C) CopyProperties();
+        else if (control && shift && e.Key == Key.V) PasteProperties();
         else if (control && e.Key == Key.D) DuplicateSelected();
         else if (e.Key == Key.Delete) DeleteSelected();
         else if (e.Key == Key.Q) SetTool(LevelTool.Select);
@@ -336,6 +353,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         TransformHost.Content = null;
         RelatedFile? elsewhere = selected != null ? relatedOf.GetValueOrDefault(selected) : null;
         DuplicateButton.IsEnabled = DeleteButton.IsEnabled = selected != null && elsewhere == null;
+        UpdatePasteButton();
         ShowInGameButton.IsEnabled = selected != null;
         ElsewhereNote.Visibility = elsewhere != null ? Visibility.Visible : Visibility.Collapsed;
         TransformHost.IsEnabled = PropertyPanel.IsEnabled = elsewhere == null;  // another file's objects are changed in its own tab
@@ -492,6 +510,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
     void AfterMoveOrTurn(bool fromInspector)
     {
+        RefreshHelpers();
         scene?.Place(selected!);
         foreach (Carried c in carried) scene?.Place(c.Object);
         ShowSelection();
@@ -723,10 +742,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
         CompositionTarget.Rendering -= FollowFrame;
         CompositionTarget.Rendering -= DrawGpuView;
         CompositionTarget.Rendering -= PadFrame;
+        GamePanel.ControllerChanged -= ShowControllerOwner;
         CompositionTarget.Rendering -= SculptFrame;
         gpuScene?.Dispose();
         gpuView?.Dispose();
         settledTimer.Stop();
+        liveTimer.Stop();
         gameLink.Dispose();
     }
 
@@ -961,6 +982,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// <summary>After objects were added or deleted: the outliner and the chips' counts again.</summary>
     void ObjectsChanged()
     {
+        RefreshHelpers();
         links = null;  // before the chips: they count the links
         BuildObjectTree(FilterBox.Text.Trim());
         BuildKindChips();
@@ -1008,6 +1030,15 @@ public partial class LevelEditor : UserControl, IEditorDocument
             AddList.Items.Add(AddListRow(kind, label.Length > 0 ? label : className, label.Length > 0 ? className : null, count.ToString("N0"),
                                          $"{className}: {count:N0} in this file. A copy of one is added where the middle of the view points.", example));
 
+        // An invisible wall (see LevelEditor.Barriers.cs).
+        if (barrierFile != null && (filter.Length == 0 || "invisible wall barrier collision".Contains(filter, StringComparison.OrdinalIgnoreCase)))
+        {
+            AddList.Items.Add(AddListHeading("INVISIBLE WALL"));
+            AddList.Items.Add(AddListRow(ObjectKind.Regions, "Invisible wall", "invisible_barrier", "",
+                                         "A wall the player can't go through and nobody sees: a box 10 m wide, 10 m high and 1 m thick, standing where the " +
+                                         "middle of the view points (its bb resizes it). It goes into the zone's terrain file on saving.", new BarrierChoice()));
+        }
+
         // Any chunk of the game's (or the Guerrilla world's): buildings and props from every level, to browse (see LevelEditor.ChunkBrowser.cs).
         FillChunkBrowser(filter);
 
@@ -1036,6 +1067,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             ToolTipService.SetShowOnDisabled(note, true);
             AddList.Items.Add(note);
         }
+        AddExampleRows(filter);
     }
 
     static ListBoxItem AddListHeading(string text) => new()
@@ -1097,6 +1129,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (chosen is SchemaClass type) { if (CanPlaceAt(at, $"The new {type.Name}")) AddNew(type, at); }
         else if (chosen is ChunkChoice chunk) { if (CanPlaceAt(at, chunk.Chunk)) AddChunk(chunk.Chunk, at); }
         else if (chosen is GeometryChoice piece) AddGeometry(piece.Piece, at);
+        else if (chosen is BarrierChoice) AddBarrier(at);
+        else if (chosen is ObjectExample gameExample) AddExample(gameExample, at);
         ViewArea.Focus();
     }
 
@@ -1186,6 +1220,88 @@ public partial class LevelEditor : UserControl, IEditorDocument
         context.Assets.WorldHasChunk(chunk, at.Archive) || Workspace.Container(at.Archive, at.Container).Find(chunk + ".cchk_pc") != null;
 
     /// <summary>
+    /// The objects of a chunk added where given (see <see cref="AddChunk"/>): a copy of where the
+    /// game's levels place it, else a new mover; its files noted to bring in on saving (said in
+    /// <paramref name="needs"/>). Not yet in the scene or the undo list. Throws InvalidOperationException
+    /// if it can't be. (The chunk painter adds many with it.)
+    /// </summary>
+    readonly Dictionary<string, ZoneFile> chunkSourceZones = new(StringComparer.OrdinalIgnoreCase);  // zones copied from, read once (the chunk painter adds many)
+
+    IReadOnlyList<ZoneObject> MakeChunkObjects(string chunk, Vector3 at, string targetContainer, List<string> needs, out string how)
+    {
+        IReadOnlyList<ZoneObject> added;
+        // Where the game's levels place it, if they do: copy that object (and its pieces).
+        ZoneFile? from = null;
+        ZoneObject? template = null;
+        ChunkPlacement? place = null;
+        var placements = context.Assets.ChunkPlacements();
+        if (!placements.IsCompleted)
+        {
+            context.Log($"Looking through the game's levels for where they place {chunk} (once)...");
+            placements.Wait(TimeSpan.FromSeconds(60));
+        }
+        if (placements.IsCompletedSuccessfully && placements.Result.TryGetValue(chunk, out ChunkPlacement? found))
+        {
+            place = found;
+            try
+            {
+                Packfile pack = place.Container == null ? Workspace.Archive(place.Archive) : Workspace.Container(place.Archive, place.Container);
+                string sourceKey = $"{place.Archive}|{place.Container}|{place.Zone}";
+                if (chunkSourceZones.TryGetValue(sourceKey, out ZoneFile? known)) from = known;
+                else if (pack.Find(place.Zone) is { } entry) from = chunkSourceZones[sourceKey] = ZoneFile.Read(pack.Read(entry));
+                template = from?.Objects.FirstOrDefault(o => o.Handle == place.Handle);
+            }
+            catch (InvalidDataException) { }
+        }
+
+        if (from != null && template != null)
+        {
+            IReadOnlyList<ZoneObject> group = from.PiecesWith(template);
+            added = zone.AddCopiesFrom(from, group, TakenHandles(), at - group[0].Placement.Position);
+            how = $"a copy of {place!.Zone}'s ({names.Class(template.ClassHash)}, handle {template.Handle:X8}" +
+                  (group.Count > 1 ? $", with the {group.Count - 1} object(s) joined to it" : "") + ")";
+        }
+        else
+        {
+            string modelName = chunk + ".cchk_pc";
+            byte[]? header = context.Assets.ReadAnywhere(modelName), data = context.Assets.ReadAnywhere(ModelFile.DataFileName(modelName));
+            if (header == null || data == null) throw new InvalidOperationException($"{modelName} isn't in the game's files");
+            if (context.Assets.ZoneSchema is not { } schema) throw new InvalidOperationException("the game's zone schema couldn't be read");
+            ModelFile model = ModelFile.Read(modelName, header, data);
+            IReadOnlyList<ChunkObject> parts = model.Objects?.Objects ?? [];
+            bool breaks = parts.Any(o => o.Breakable);
+            uint uid = parts.Count > 0 ? parts[0].Uid : 0;
+            uint checksum = header.Length >= 0x28 ? BitConverter.ToUInt32(header, 0x24) : 0;
+            (Vector3 min, Vector3 max) = ChunkBounds(model, parts.Count > 0 ? parts[0].Uid : null);
+            string className = breaks ? "rfg_mover" : "general_mover";
+            var properties = RfaFormats.Guerrilla.GuerrillaMovers.NewMover(schema, breaks, chunk, checksum, uid, at);
+            added = [zone.AddNew(NameHashes.ClassHash(className), properties, at + min, at + max, TakenHandles())];
+            how = $"a new {className} (no level of the game's places it to copy)";
+        }
+
+        NoteChunksToBring(added, targetContainer, needs);
+        return added;
+    }
+
+    /// <summary>The chunks new objects name that this zone's world doesn't have: brought in on saving (said in <paramref name="needs"/>).</summary>
+    void NoteChunksToBring(IEnumerable<ZoneObject> added, string targetContainer, List<string> needs)
+    {
+        foreach (string named in added.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
+                                      .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (chunksToAdd.ContainsKey(named) || ChunkContainers().All(c => HasChunk(named, c)))
+                continue;
+            if (context.Assets.PackageOf(named, out string? why) is { } package)
+            {
+                chunksToAdd[named] = package;
+                needs.Add($"{named} ({package.Files.Count} files, {package.Files.Sum(f => (long)f.Data.Length) / 1024:N0} KB)");
+            }
+            else
+                context.Log($"Add: {named}'s files can't be brought into {targetContainer}: {why}. The game will show its stand-in for it.");
+        }
+    }
+
+    /// <summary>
     /// Adds any chunk of the game's (a building or prop from another level, or from the Guerrilla
     /// world) where the view points, and picks it. If the game's levels place it somewhere, that
     /// object is copied (with its properties, and the pieces joined to it, with the destruction links
@@ -1216,70 +1332,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         var needs = new List<string>();
         try
         {
-            // Where the game's levels place it, if they do: copy that object (and its pieces).
-            ZoneFile? from = null;
-            ZoneObject? template = null;
-            ChunkPlacement? place = null;
-            var placements = context.Assets.ChunkPlacements();
-            if (!placements.IsCompleted)
-            {
-                context.Log($"Looking through the game's levels for where they place {chunk} (once)...");
-                placements.Wait(TimeSpan.FromSeconds(60));
-            }
-            if (placements.IsCompletedSuccessfully && placements.Result.TryGetValue(chunk, out ChunkPlacement? found))
-            {
-                place = found;
-                try
-                {
-                    Packfile pack = place.Container == null ? Workspace.Archive(place.Archive) : Workspace.Container(place.Archive, place.Container);
-                    if (pack.Find(place.Zone) is { } entry)
-                    {
-                        from = ZoneFile.Read(pack.Read(entry));
-                        template = from.Objects.FirstOrDefault(o => o.Handle == place.Handle);
-                    }
-                }
-                catch (InvalidDataException) { }
-            }
-
-            if (from != null && template != null)
-            {
-                IReadOnlyList<ZoneObject> group = from.PiecesWith(template);
-                added = zone.AddCopiesFrom(from, group, TakenHandles(), at - group[0].Placement.Position);
-                how = $"a copy of {place!.Zone}'s ({names.Class(template.ClassHash)}, handle {template.Handle:X8}" +
-                      (group.Count > 1 ? $", with the {group.Count - 1} object(s) joined to it" : "") + ")";
-            }
-            else
-            {
-                string modelName = chunk + ".cchk_pc";
-                byte[]? header = context.Assets.ReadAnywhere(modelName), data = context.Assets.ReadAnywhere(ModelFile.DataFileName(modelName));
-                if (header == null || data == null) throw new InvalidOperationException($"{modelName} isn't in the game's files");
-                if (context.Assets.ZoneSchema is not { } schema) throw new InvalidOperationException("the game's zone schema couldn't be read");
-                ModelFile model = ModelFile.Read(modelName, header, data);
-                IReadOnlyList<ChunkObject> parts = model.Objects?.Objects ?? [];
-                bool breaks = parts.Any(o => o.Breakable);
-                uint uid = parts.Count > 0 ? parts[0].Uid : 0;
-                uint checksum = header.Length >= 0x28 ? BitConverter.ToUInt32(header, 0x24) : 0;
-                (Vector3 min, Vector3 max) = ChunkBounds(model, parts.Count > 0 ? parts[0].Uid : null);
-                string className = breaks ? "rfg_mover" : "general_mover";
-                var properties = RfaFormats.Guerrilla.GuerrillaMovers.NewMover(schema, breaks, chunk, checksum, uid, at);
-                added = [zone.AddNew(NameHashes.ClassHash(className), properties, at + min, at + max, TakenHandles())];
-                how = $"a new {className} (no level of the game's places it to copy)";
-            }
-
-            // The chunks the new objects name that this zone's world doesn't have: brought in on saving.
-            foreach (string named in added.Select(o => o.Property("chunk_name")?.Text).OfType<string>()
-                                          .Select(n => System.IO.Path.GetFileNameWithoutExtension(n)).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (chunksToAdd.ContainsKey(named) || ChunkContainers().All(c => HasChunk(named, c)))
-                    continue;
-                if (context.Assets.PackageOf(named, out string? why) is { } package)
-                {
-                    chunksToAdd[named] = package;
-                    needs.Add($"{named} ({package.Files.Count} files, {package.Files.Sum(f => (long)f.Data.Length) / 1024:N0} KB)");
-                }
-                else
-                    context.Log($"Add: {named}'s files can't be brought into {targetContainer}: {why}. The game will show its stand-in for it.");
-            }
+            added = MakeChunkObjects(chunk, at, targetContainer, needs, out how);
         }
         catch (InvalidOperationException ex)
         {
@@ -1365,6 +1418,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     /// </summary>
     void CommitEdit(string what = "Edit")
     {
+        RefreshHelpers();  // (a property such as a light's angle may have changed)
         if (selected == null || editStart == null) return;
         byte[] now = selected.Snapshot();
         var others = carried.Select(c => (c.Object, Before: c.Start, Now: c.Object.Snapshot()))
@@ -1412,6 +1466,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
 
     void AfterUndoOrRedo(Change change, string done)
     {
+        RefreshHelpers();
         if (change.AddsOrRemoves)
         {
             if (selected != null && Editable(selected) && !zone.Objects.Contains(selected)) Select(null, focus: false);
@@ -1430,6 +1485,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             foreach (ZoneObject other in change.Others ?? []) scene?.Place(other);
             LinksChanged();
         }
+        if (change.Object == null) LiveNeedsReload();  // a change to no one object (the ground, many objects): the game may need the level again
         StartEdit();  // the picked object, or what is attached to it, may be as it was
         if (selected != null && (change.Object == selected || change.Others?.Contains(selected) == true)) ShowProperties();
         ShowSelection();
@@ -1489,9 +1545,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
             bool showModels = ShowModelsBox.IsChecked == true;
             // The level geometry as objects (see LevelEditor.Geometry.cs), before the scene is made of them.
             bool hadGeometry = geometryLoaded;
+            bool hadBarriers = barriersLoaded;
             EnsureGeometryObjects();
-            if (geometryLoaded && !hadGeometry) BuildObjectTree(FilterBox.Text.Trim());
+            EnsureBarrierObjects();  // (the invisible walls, see LevelEditor.Barriers.cs)
+            if ((geometryLoaded && !hadGeometry) || (barriersLoaded && !hadBarriers)) BuildObjectTree(FilterBox.Text.Trim());
             scene = new LevelScene(zone, names, showModels, objectModels.Of, (file, uid) => ModelParts(file, archive, container, uid: uid));
+            RefreshHelpers();
             sceneContent.Content = scene.Root;
             foreach (RelatedFile file in RelatedFiles())
                 file.Scene = new LevelScene(file.Zone, names, showModels, objectModels.Of, (model, uid) => ModelParts(model, file.Archive, file.Container, uid: uid));
@@ -1749,7 +1808,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
             if (context.Assets.ReadFile(zone + ".cterrain_pc", archive, container) is not { } file) continue;
             try
             {
-                if (ZoneFoliage.Read(file.Data, zone) is not { } zoneFoliage) return;
+                byte[] data = FoliageAsPainted(zone, file.Data);  // (with the foliage painter's strokes, see LevelEditor.Foliage.cs)
+                if (ZoneFoliage.Read(data, zone) is not { } zoneFoliage) return;
                 var pieces = zoneFoliage.Scatter().ToList();
                 if (pieces.Count == 0) return;
                 IEnumerable<Model3D> models = (scene?.Models ?? []).Concat(RelatedFiles().SelectMany(f => f.Scene?.Models ?? []));
@@ -1783,7 +1843,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         try
         {
             if (context.Assets.ReadFile(zone + ".cterrain_pc", archive, container) is { } file &&
-                ZoneTerrain.Read(file.Data) is { } ground && Decode(ground.BlendMap, 4096) is { } blend)
+                ZoneTerrain.Read(TerrainAsSwapped(zone, file.Data)) is { } ground && (PaintedBlend(zone) ?? Decode(ground.BlendMap, 4096)) is { } blend)
             {
                 RgbaImage?[] layers = ground.Layers.Select(layer => Decode(layer.Texture, TerrainPainter.DetailNeeded(layer))).ToArray();
                 if (layers.All(layer => layer != null))
@@ -2454,6 +2514,18 @@ public partial class LevelEditor : UserControl, IEditorDocument
         foreach ((string a, string? c) in context.Assets.PlacesOf(zoneName).Distinct())
             if (!copies.Contains((a, c)) && Original(a, c).AsSpan().SequenceEqual(mine))
                 copies.Add((a, c));
+        // In one of our own archives (a level New level made: its zone loose and in its ns_base container, where
+        // the game reads it), its containers are looked in directly, whether or not the index has them yet.
+        if (Workspace.IsNewArchive(archive))
+            foreach (PackfileEntry entry in Workspace.Archive(archive).Entries.Where(e => e.IsContainer).ToList())
+            {
+                if (copies.Contains((archive, entry.Name))) continue;
+                try
+                {
+                    if (Original(archive, entry.Name).AsSpan().SequenceEqual(mine)) copies.Add((archive, entry.Name));
+                }
+                catch (Exception ex) when (ex is FileNotFoundException or InvalidDataException) { }
+            }
         return copies;
     }
 
@@ -2530,10 +2602,15 @@ public partial class LevelEditor : UserControl, IEditorDocument
                                                    here.SelectMany(p => p.Primitives).ToList(),
                                                    here.Select(p => p.Group).ToList()).TrimEnd('.') + ". ";
             }
+            message += BringEffects();
             byte[] bytes = ZoneBytesWithoutGeometry();  // (the level geometry goes into the stitch list: SaveGeometry)
             message += "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
             message += SaveGeometry();
             if (SculptChanged) message += " " + SaveSculpt() + MoveWhatStandsOnGround();
+            message += SaveFoliage();
+            message += SaveBarriers();
+            message += SaveGroundPaint();
+            message += SaveLayerSwaps();
             batch.Dispose();
             foreach (TerrainSculpt sculpted in sculptZones) sculpted.Saved();
             chunksToAdd.Clear();
@@ -2542,6 +2619,10 @@ public partial class LevelEditor : UserControl, IEditorDocument
             ShowSource();
             context.Log(message + " The game uses it from its next start through RFAModLauncher.");
             context.OverridesChanged();
+            // A running game looks for files saved for the first time now (a loose file new in
+            // overrides\ isn't used until it does: the level then read the game's own, smaller stitch
+            // list into the room its asset list gave the saved one, and never finished loading).
+            if (GameLink.IsRecent(gameLink.Read())) gameLink.TrySend(["editor_rescan"]);
             return true;
         }
         catch (Exception ex)

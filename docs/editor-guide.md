@@ -263,7 +263,9 @@ are working in, in folders on its left:
 - **Level geometry**: every stitch piece (rock walls, cliffs, ledges, roads, ...), by category,
   setting and pack.
 - **New objects**: every class in the game's schema that can be made from it alone (lights,
-  spawns, triggers, effects, items, ...), by kind.
+  spawns, triggers, effects, items, navpoints, ...), by kind. Under **From the game's levels** are
+  the classes only Volition's tools could make (logic handlers, roads, splines, animated rigs):
+  every different one the game's levels have, added as a copy with the rest of its set.
 - **Everything**, at the top, lists all of them at once.
 
 Pick a folder to list what is in it and in the folders under it. The **Find** box narrows the list
@@ -315,6 +317,16 @@ the other. Lines keep the same width on the screen near and far. You can't edit 
 - Alt+drag circles the picked object, and **F** looks at it.
 - **Show the whole zone** frames the zone's objects, leaving out the few far-off ones some zones
   have.
+
+### What the game doesn't draw
+
+The light-bulb button in the toolbar (on to start with) shows, in the editor only, what the game
+keeps invisible: each **spot light's cone** (yellow: as far as it reaches, as wide as its hotspot and
+falloff), each **spectator camera's view** (blue: the MP markers of type *Spectator camera* and
+*Spectator intro camera*), the **invisible walls** (red: from each wall point to the next, 40 m
+high, and 20 m down where the wall extends downward) and the **invisible collision boxes**
+(orange). They follow the objects as you move them, from this zone's files and those shown with it.
+Nothing of them is saved.
 
 ### With an Xbox controller
 
@@ -423,15 +435,22 @@ has the brush's choices while you sculpt.
   - As in Volition's editor, some properties are hidden and some are read-only (with a lock): its
     tools set them, such as a building's model or a light's curve files. Tick **Show hidden and
     read-only properties** to see and change them anyway.
-  - Properties Volition's tools added that the schema doesn't describe (a navpoint's data, links,
-    a building's destruction data) are shown at the end, with their names from the game.
+  - Properties Volition's tools added that the schema doesn't describe are shown at the end, with
+    their names from the game, and every one can be changed: a navpoint's data as its type, outer
+    radius and speed limit; links and a rig's children as handles in hex (add or take out as many
+    as you like); numbers as numbers; any other packed data (a logic handler's script, a road's
+    points) as its bytes in hex, with the text in it on hover.
 - **Add** (+ in the toolbar, or Edit > Add) lists one of each kind of object the file has (a crate, a light, a
   squad spawn, a building piece, ...), with a Find box. Pick one to add a copy where the middle of
   the view points. Below them are **new objects** of every class in the game's schema that can be
   made from it alone (lights, spawns, triggers, effects, items, ...): a new one gets every
   property at the schema's default, as Volition's tools would have written it, where the middle
-  of the view points. Hover over the last line for the classes that can't be made this way and
-  why (navpoints, roads and buildings need data Volition's tools made). A few classes, marked
+  of the view points. A new navpoint gets its packed data from the schema's defaults (a path
+  node); link it by adding handles to its obj_links. Below them, **From the game's levels** lists
+  every different logic handler, road, spline and animated rig in the game's levels: picking one
+  adds a copy of it with the objects it hangs from and those hanging from it (a trigger with its
+  handler, a monolith's rigs), its handles new and the handles they name of each other changed to
+  the copies'. Buildings are added from the chunk browser. A few classes, marked
   *unused*, are in none of the game's levels, so the game may do nothing with them. The
   [Assets panel](#the-assets-panel) offers the same things in folders, with a preview, to drag
   into the view.
@@ -470,8 +489,10 @@ has the brush's choices while you sculpt.
   geometry* in the chunk browser (by category, setting and pack, or by name): pick one to place it
   where the middle of the view points. Saving writes them into the zone's stitch list (every copy),
   with its decals as they were and a collision tree made again to reach every piece; pieces from
-  elsewhere have their model and textures brought into the list's container. They are never saved
-  in the zone file itself. Sculpting moves the pieces standing on the ground with it.
+  elsewhere (another level's, or the Guerrilla world's: their shaders load everywhere) have their
+  model and textures brought into the list's container, or for a level whose list is loose in its
+  archive (the Ruin maps), into the zone's level container. They are never saved in the zone file
+  itself. Sculpting moves the pieces standing on the ground with it.
 - **Duplicate** (Ctrl+D) copies the picked object beside it (to the view's right, clear of it). A
   copy is a whole breakable object, as the game's own are: copying a loose piece (the tank of an
   explosive tanker) copies the part it hangs from too (the tanker's base), with everything
@@ -479,6 +500,15 @@ has the brush's choices while you sculpt.
 - **Delete** (Del) removes the picked object with the objects attached to it (a building's lights).
   It's refused, saying why, while something else names one of them (another object's links, such
   as navpoints linked in a path, or an object in a mission layer).
+- **Effects follow objects into any level.** What an object shows when it breaks, is hit or burns,
+  and the explosion it dies in, come from its level object (its `Props`: `level_objects.xtbl`, its
+  effects in `effects.xtbl`, their visuals in `vfx.xtbl`, its explosion in `explosions.xtbl`, as the
+  game reads them, the `guerrilla_world` mod's with Guerrilla's added). Most visuals load with a
+  level, from files its archives hold, so a prop moved to another level (or a Guerrilla building in
+  one of Armageddon's) broke without them. On saving, the effect files the objects added to the zone
+  need and the level hasn't (each `.cefct_pc` and `.gefct_pc`, and a converted Guerrilla effect's
+  textures) are brought into its containers with their models. Effects loaded at start-up, and
+  Armageddon's effect textures, are everywhere already.
 - **Delete all** (Edit > Delete all, which says how many of each) deletes every chunk (building and prop), every
   piece of level geometry, both, or every object of the picked one's class, with what is attached
   to them, in one step to undo. Those something else names are kept, as Delete keeps them, and the
@@ -527,14 +557,35 @@ These three are in the **Game** menu, and at the right end of the toolbar.
   doesn't, and the picked object's box and the gizmo stay where the zone puts it. This has only
   been tried with a stand-in for the game, not yet with the game itself.
 
+### Panels, and the game docked in the editor
+
+Every panel (Explorer, Outliner, Inspector, Log, Game) can be dragged by its title to dock it
+elsewhere or float it as a window of its own; documents are the tabs in the middle.
+
+The **Game** tab holds the running game's window, docked inside the editor (the **Game** button,
+top right, brings it forward):
+
+- **Start the game** runs `RFAModLauncher.exe` (Steam has to be running). With **Dock
+  automatically** on, the game is docked as soon as its window is up. **Dock** takes a game that
+  is already running.
+- The game has to be in **Windowed** mode (Options > Display; with the borderless mod that is
+  borderless fullscreen). Its exclusive Fullscreen mode can't be docked.
+- **Click the game to play.** The first click only gives it the mouse and keys. **Shift+F1**,
+  **Back to the editor** or Alt+Tab gives them back. The game keeps running while you work in the
+  editor (it doesn't pause), and doesn't see your keys or mouse.
+- Drag the Game tab to a side of the documents to see a level and the game at once.
+- The game fills the panel, whatever its size or shape: it draws at its own resolution and is
+  stretched to the space it has.
+- **Undock** or closing the editor gives the game its own window back, as it was.
+
 ## Not yet
 
 - Civilians' outfits, and characters and walkers in poses other than their rest pose.
 - The ground's normal maps, and effects such as fire and smoke (and the sky's moving clouds).
 - Shadows of the few omni lamps that cast them.
 - Editing the level geometry, terrain or foliage.
-- Making new navpoints, roads, splines, logic handlers and animation rigs from nothing (copy one
-  instead).
+- Making new roads, splines, logic handlers and animation rigs from nothing (add a copy of one of
+  the game's instead).
 - Deleting objects that other objects' links name, and editing links between objects.
 - Changing a zone's layers or the zones around it from the zone's tab.
 - Putting changed models back into the game, and textures of another size.

@@ -18,6 +18,7 @@ namespace RfaEditor;
 sealed class GameAssets
 {
     readonly Workspace workspace;
+    readonly object assetLock = new();   // guards models, bitmaps, tables for parallel reads
     Dictionary<string, IndexedFile>? files;     // every file in an archive or container, by name
     ILookup<string, IndexedFile>? places;       // ...and every place each name is in
     Dictionary<string, TextureRef>? textures;   // every texture, by name
@@ -115,6 +116,24 @@ sealed class GameAssets
     Dictionary<string, AsmContainer>? chunkGroups;       // "<chunk>" -> its group (<chunk>.rfgchunkx) in an asset list
     Dictionary<string, AsmPrimitive>? primitiveKinds;    // a file's primitive as some asset list gives it (its type, allocator, ...)
     Task<Dictionary<string, ChunkPlacement>>? placements;
+    readonly Dictionary<uint, List<ObjectExample>> examples = [];  // filled with the placements (see ObjectExamples)
+
+    /// <summary>
+    /// The classes whose objects only Volition's tools could make (their data isn't described: a logic handler's
+    /// script, a road's or spline's points, a rig's bones), by name: added as copies of the game's own.
+    /// </summary>
+    public static readonly string[] ExampleClasses = ["object_logic_handler", "object_path_road", "object_spline", "object_anim_rig", "constraint"];
+
+    /// <summary>
+    /// Objects of the game's levels of <see cref="ExampleClasses"/>, by class: up to 60 different ones a class (a rig
+    /// by its rig_name, a handler by the text in its script, else one a zone), to add copies of. Found with
+    /// <see cref="ChunkPlacements"/> (each zone read once).
+    /// </summary>
+    public async Task<IReadOnlyDictionary<uint, List<ObjectExample>>> ObjectExamples()
+    {
+        await ChunkPlacements();
+        lock (examples) return examples.ToDictionary(e => e.Key, e => e.Value.ToList());
+    }
 
     /// <summary>Every chunk (model of a building or prop: a .cchk_pc) in the game's files and ours, by name without extension. Empty until the index is ready.</summary>
     public IReadOnlyList<string> ChunkNames()
@@ -151,9 +170,57 @@ sealed class GameAssets
         return chunkCatalog = entries;
     }
 
+    // Files the editor made (terrain pieces, textures given a zone's layer's name length), found by
+    // name before the game's own: until saved into a level's containers they exist only here.
+    readonly Dictionary<string, byte[]> generated = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> generatedLike = new(StringComparer.OrdinalIgnoreCase);     // a made header file → the game's file whose asset-list kind it takes
+    readonly Dictionary<string, string> generatedTextures = new(StringComparer.OrdinalIgnoreCase); // a made texture's name → its header file
+
+    /// <summary>Adds a file the editor made (see above); <paramref name="like"/>: the game's file whose kind (for the asset lists) it has.</summary>
+    public void AddGenerated(string name, byte[] bytes, string? like = null)
+    {
+        lock (assetLock)
+        {
+            generated[name] = bytes;
+            if (like != null) generatedLike[name] = like;
+            models.Remove(name);
+            if (name.EndsWith(".cvbm_pc", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".cpeg_pc", StringComparison.OrdinalIgnoreCase))
+                foreach (string texture in PegFile.TextureNames(bytes)) generatedTextures[texture] = name;
+        }
+    }
+
+    /// <summary>Files (header files, each with its data file) as a package to bring into a level's containers, with their primitives for the asset lists; null, with why, if one can't be read.</summary>
+    public ChunkPackage? FilesPackage(string name, IEnumerable<string> headers, out string? why)
+    {
+        ReadAssetLists();
+        return Package(name, headers.ToList(), null, out why);
+    }
+
+    /// <summary>Every ground texture the game's zones (and the Guerrilla world's) use as a layer, with how many zones use it; read once, in the background.</summary>
+    public Task<List<(string Texture, int Zones)>> GroundTextures() => groundTextures ??= Task.Run(() =>
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (string name in NamesWhere(n => n.EndsWith(".cterrain_pc", StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            try
+            {
+                if (ReadAnywhere(name) is { } bytes && RfaFormats.Meshes.ZoneTerrain.Read(bytes) is { } ground)
+                    foreach (string texture in ground.Layers.Select(l => l.Texture).Distinct(StringComparer.OrdinalIgnoreCase))
+                        counts[texture] = counts.GetValueOrDefault(texture) + 1;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or ArgumentException) { }
+        }
+        return counts.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase).Select(kv => (kv.Key, kv.Value)).ToList();
+    });
+    Task<List<(string Texture, int Zones)>>? groundTextures;
+
+    /// <summary>Whether a file is one the editor made (see <see cref="AddGenerated"/>).</summary>
+    public bool IsGenerated(string name) => generated.ContainsKey(name);
+
     /// <summary>A file by name from wherever the index says it is, as the game sees it; null if none has it.</summary>
     public byte[]? ReadAnywhere(string name)
     {
+        if (generated.TryGetValue(name, out byte[]? made)) return made;
         if (files == null || !files.TryGetValue(name, out IndexedFile? found)) return null;
         Packfile pack = Pack(found.Archive, found.Container);
         return pack.Find(name) is { } entry ? pack.Read(entry) : null;
@@ -281,6 +348,71 @@ sealed class GameAssets
         return Package(piece, headers, null, out why);
     }
 
+    RfaFormats.Guerrilla.GuerrillaEffectTables.EffectLookup? effectLookup;
+
+    /// <summary>
+    /// The effect tables as the game reads them (the guerrilla_world mod's, Armageddon's with
+    /// Guerrilla's added, where the mod has them; else Armageddon's own), for following an object's
+    /// level object to its effects' files. Null if they can't be read.
+    /// </summary>
+    RfaFormats.Guerrilla.GuerrillaEffectTables.EffectLookup? EffectLookup()
+    {
+        if (effectLookup != null) return effectLookup;
+        string? Text(string table)
+        {
+            string mods = Path.Combine(workspace.ModFolder, "mods", "guerrilla_world", table);
+            byte[]? bytes = File.Exists(mods) ? File.ReadAllBytes(mods) : ReadAnywhere(table);
+            return bytes == null ? null : System.Text.Encoding.Latin1.GetString(bytes);
+        }
+        if (Text("level_objects.xtbl") is not string objects || Text("effects.xtbl") is not string effects ||
+            Text("vfx.xtbl") is not string visuals || Text("explosions.xtbl") is not string explosions) return null;
+        try { return effectLookup = new(objects, effects, visuals, explosions); }
+        catch (InvalidDataException) { return null; }
+    }
+
+    /// <summary>
+    /// The files the effects of these level objects (objects' Props) need in a level, those
+    /// <paramref name="present"/> says the level hasn't: each effect's .cefct_pc and .gefct_pc, and
+    /// the textures it names that are files of their own (a converted Guerrilla effect's .cvbm_pc and
+    /// .gvbm_pc; Armageddon's own effects' textures are all in effects.vpp_pc, loaded everywhere). As a
+    /// package to bring into a level's containers; null if there is nothing to bring.
+    /// </summary>
+    public ChunkPackage? EffectPackageFor(IEnumerable<string> levelObjects, Func<string, bool> present, out List<string> effects)
+    {
+        effects = [];
+        ReadAssetLists();
+        if (files == null || EffectLookup() is not { } lookup) return null;
+        var headers = new List<string>();
+        foreach (string file in levelObjects.Distinct(StringComparer.OrdinalIgnoreCase).SelectMany(lookup.FilesOf).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            string header = file + ".cefct_pc";
+            if (present(header) || ReadAnywhere(header) is not byte[] bytes) continue;
+            effects.Add(file);
+            headers.Add(header);
+            foreach (string texture in EffectTextures(bytes))
+            {
+                string textureHeader = Path.GetFileNameWithoutExtension(texture) + ".cvbm_pc";
+                if (files.ContainsKey(textureHeader) && !present(textureHeader) && !headers.Contains(textureHeader, StringComparer.OrdinalIgnoreCase))
+                    headers.Add(textureHeader);
+            }
+        }
+        return headers.Count == 0 ? null : Package("effects", headers, null, out _);
+    }
+
+    /// <summary>The textures a version-36 effect file names (its bitmaps: a count at +0x1C, a list of their names' offsets at +0x20).</summary>
+    static IEnumerable<string> EffectTextures(byte[] effect)
+    {
+        if (effect.Length < 0x24) yield break;
+        int count = BitConverter.ToInt32(effect, 0x1C), list = BitConverter.ToInt32(effect, 0x20);
+        for (int i = 0; i < count && list + i * 4 + 4 <= effect.Length; i++)
+        {
+            int at = BitConverter.ToInt32(effect, list + i * 4);
+            if (at <= 0 || at >= effect.Length) continue;
+            int end = Array.IndexOf(effect, (byte)0, at);
+            if (end > at) yield return System.Text.Encoding.Latin1.GetString(effect, at, end - at);
+        }
+    }
+
     /// <summary>The files, primitives and own group (see <see cref="PackageOf"/>) of a chunk or stitch piece, from its header files.</summary>
     ChunkPackage? Package(string chunk, List<string> headers, AsmContainer? own, out string? why)
     {
@@ -298,11 +430,13 @@ sealed class GameAssets
             string dataName = DataFileOf(header);
             byte[]? data = dataName.Length > 0 ? ReadAnywhere(dataName) : null;
             if (data != null) found.Add((dataName, data));
-            AsmPrimitive? kind = primitiveKinds!.GetValueOrDefault(header);
+            AsmPrimitive? kind = primitiveKinds!.GetValueOrDefault(header) ??
+                                 (generatedLike.TryGetValue(header, out string? like) ? primitiveKinds!.GetValueOrDefault(like) : null);
             (byte type, byte allocator, byte flags, byte split) = kind != null ? (kind.Type, kind.Allocator, kind.Flags, kind.SplitIndex)
                 : Path.GetExtension(header).ToLowerInvariant() switch
                 {
                     ".cchk_pc" or ".cstch_pc" => ((byte)2, (byte)1, (byte)6, (byte)0),
+                    ".cefct_pc" => ((byte)13, (byte)1, (byte)6, (byte)0),
                     ".cpeg_pc" or ".cvbm_pc" => ((byte)1, (byte)1, (byte)6, (byte)1),
                     _ => ((byte)0, (byte)0, (byte)0, (byte)0),
                 };
@@ -349,6 +483,8 @@ sealed class GameAssets
         {
             var found = new Dictionary<string, ChunkPlacement>(StringComparer.OrdinalIgnoreCase);
             uint chunkName = NameHashes.PropertyHash("chunk_name");
+            var exampleClasses = ExampleClasses.ToDictionary(NameHashes.ClassHash, c => c);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (IndexedFile file in zones)
             {
                 try
@@ -356,8 +492,18 @@ sealed class GameAssets
                     Packfile pack = file.Container == null ? own.Archive(file.Archive) : own.Container(file.Archive, file.Container);
                     if (pack.Find(file.Name) is not { } entry) continue;
                     foreach (ZoneObject obj in ZoneFile.Read(pack.Read(entry)).Objects)
+                    {
                         if (obj.Property(chunkName) is { Type: ZoneProperty.TextType } name)
                             found.TryAdd(Path.GetFileNameWithoutExtension(name.Text), new ChunkPlacement(file.Archive, file.Container, file.Name, obj.Handle));
+                        if (!exampleClasses.TryGetValue(obj.ClassHash, out string? className)) continue;
+                        string label = ExampleLabel(obj) is { Length: > 0 } l ? l : Path.GetFileNameWithoutExtension(file.Name);
+                        lock (examples)
+                        {
+                            if (!examples.TryGetValue(obj.ClassHash, out List<ObjectExample>? list)) examples[obj.ClassHash] = list = [];
+                            if (list.Count < 60 && seen.Add(className + "|" + label))
+                                list.Add(new ObjectExample(className, label, new ChunkPlacement(file.Archive, file.Container, file.Name, obj.Handle)));
+                        }
+                    }
                 }
                 catch (Exception) { }  // (a file that can't be read gives no places)
             }
@@ -365,21 +511,37 @@ sealed class GameAssets
         });
     }
 
+    /// <summary>What tells an example object from others of its class: a rig's name, the first words in a handler's script.</summary>
+    static string ExampleLabel(ZoneObject obj)
+    {
+        if (obj.Property("rig_name") is { Type: ZoneProperty.TextType } rig) return rig.Text;
+        if (obj.Property("template") is { Type: ZoneProperty.TextType } template) return template.Text;
+        if (obj.Property("logic_handler_buffer") is { } script)
+            return string.Join(" ", System.Text.RegularExpressions.Regex.Matches(System.Text.Encoding.Latin1.GetString(script.Value), "[A-Za-z_][A-Za-z0-9_ ]{3,}")
+                                        .Select(m => m.Value.Trim()).Take(2));
+        return "";
+    }
+
     /// <summary>A model by its c-file name, or null if it can't be found or read.</summary>
     public ModelFile? Model(string name, string nearArchive, string? nearContainer)
     {
-        if (models.TryGetValue(name, out ModelFile? known) && known != null) return known;
-        ModelFile? model = null;
-        try
+        lock (assetLock)
         {
-            if (Find(name, nearArchive, nearContainer) is (Packfile pack, PackfileEntry header) &&
-                pack.Find(ModelFile.DataFileName(name)) is PackfileEntry data)
-                model = ModelFile.Read(name, pack.Read(header), pack.Read(data));
+            if (models.TryGetValue(name, out ModelFile? known) && known != null) return known;
+            ModelFile? model = null;
+            try
+            {
+                if (generated.TryGetValue(name, out byte[]? madeHeader) && generated.TryGetValue(ModelFile.DataFileName(name), out byte[]? madeData))
+                    model = ModelFile.Read(name, madeHeader, madeData);
+                else if (Find(name, nearArchive, nearContainer) is (Packfile pack, PackfileEntry header) &&
+                    pack.Find(ModelFile.DataFileName(name)) is PackfileEntry data)
+                    model = ModelFile.Read(name, pack.Read(header), pack.Read(data));
+            }
+            catch (InvalidDataException) { }
+            catch (NotSupportedException) { }
+            if (model != null || IndexReady) models[name] = model;  // a miss is only final once the index is ready
+            return model;
         }
-        catch (InvalidDataException) { }
-        catch (NotSupportedException) { }
-        if (model != null || IndexReady) models[name] = model;  // a miss is only final once the index is ready
-        return model;
     }
 
     /// <summary>
@@ -389,13 +551,16 @@ sealed class GameAssets
     /// </summary>
     public BitmapSource? Texture(string name, string nearArchive, string? nearContainer, int maxSize, bool alpha = false)
     {
-        string key = $"{name}@{maxSize}{(alpha ? "+alpha" : "")}";
-        if (bitmaps.TryGetValue(key, out BitmapSource? known) && known != null) return known;
-        BitmapSource? bitmap = FindTexture(name, nearArchive, nearContainer) is var (peg, texture)
-            ? Bitmaps.FromRgba(peg.Decode(texture, maxSize), alpha)
-            : null;
-        if (bitmap != null || IndexReady) bitmaps[key] = bitmap;
-        return bitmap;
+        lock (assetLock)
+        {
+            string key = $"{name}@{maxSize}{(alpha ? "+alpha" : "")}";
+            if (bitmaps.TryGetValue(key, out BitmapSource? known) && known != null) return known;
+            BitmapSource? bitmap = FindTexture(name, nearArchive, nearContainer) is var (peg, texture)
+                ? Bitmaps.FromRgba(peg.Decode(texture, maxSize), alpha)
+                : null;
+            if (bitmap != null || IndexReady) bitmaps[key] = bitmap;
+            return bitmap;
+        }
     }
 
     /// <summary>A game table (.xtbl) by name, read once; null if it can't be found (or the index isn't ready yet).</summary>
@@ -409,9 +574,29 @@ sealed class GameAssets
         return table;
     }
 
+    /// <summary>The name of the texture file (its header, .cpeg_pc or .cvbm_pc) holding a texture, as <see cref="FindTexture"/> finds it; null if none.</summary>
+    public string? TextureFileName(string name, string nearArchive, string? nearContainer)
+    {
+        if (generatedTextures.TryGetValue(name, out string? madeHeader)) return madeHeader;
+        if (nearContainer != null)
+        {
+            Packfile pack = workspace.Container(nearArchive, nearContainer);
+            foreach (PackfileEntry entry in pack.Entries.Where(e => e.Extension is "cpeg_pc" or "cvbm_pc"))
+                if (PegFile.TextureNames(pack.Read(entry)).Contains(name, StringComparer.OrdinalIgnoreCase))
+                    return entry.Name;
+        }
+        return textures != null && textures.TryGetValue(name, out TextureRef? at) ? at.PegHeader : null;
+    }
+
     /// <summary>The texture file holding a texture, and the texture in it.</summary>
     public (PegFile, PegTexture)? FindTexture(string name, string nearArchive, string? nearContainer)
     {
+        if (generatedTextures.TryGetValue(name, out string? madeHeader) && generated.TryGetValue(madeHeader, out byte[]? h) &&
+            PegFile.DataFileName(madeHeader) is { } madeData && generated.TryGetValue(madeData, out byte[]? d))
+        {
+            PegFile made = PegFile.Read(h, d);
+            if (made.Textures.FirstOrDefault(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } texture) return (made, texture);
+        }
         if (nearContainer != null && FindTextureIn(workspace.Container(nearArchive, nearContainer), name) is { } local) return local;
         if (textures != null && textures.TryGetValue(name, out TextureRef? at))
             return ReadTexture(Pack(at.Archive, at.Container), at.PegHeader, name);
@@ -424,6 +609,7 @@ sealed class GameAssets
     /// </summary>
     public (byte[] Data, string Archive, string? Container)? ReadFile(string name, string nearArchive, string? nearContainer)
     {
+        if (generated.TryGetValue(name, out byte[]? made)) return (made, nearArchive, nearContainer);
         if (nearContainer != null && workspace.Container(nearArchive, nearContainer) is var container && container.Find(name) is { } inContainer)
             return (container.Read(inContainer), nearArchive, nearContainer);
         // (A file loose in an archive as the game sees it: its override, or edit, if it has one.)
@@ -494,3 +680,6 @@ sealed record ChunkPackage(string Chunk, List<(string Name, byte[] Data)> Files,
 
 /// <summary>An object placing a chunk: in which zone file (where it is) and its handle.</summary>
 sealed record ChunkPlacement(string Archive, string? Container, string Zone, uint Handle);
+
+/// <summary>An object of one of the game's levels to add a copy of (see <see cref="GameAssets.ObjectExamples"/>).</summary>
+sealed record ObjectExample(string Class, string Label, ChunkPlacement Place);

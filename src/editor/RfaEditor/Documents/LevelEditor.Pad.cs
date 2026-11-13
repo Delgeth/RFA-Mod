@@ -37,7 +37,7 @@ public partial class LevelEditor
     bool strokeFromPad, padInverse;
     float padStrength = 1;
 
-    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, 3);
+    SculptMode ChosenMode => (SculptMode)Math.Clamp(SculptModeBox.SelectedIndex, 0, (int)SculptMode.EraseChunks);
     float BrushRadius => (float)SculptRadiusSlider.Value;
     bool SculptChanged => sculptZones.Any(z => z.Changed);
 
@@ -90,6 +90,11 @@ public partial class LevelEditor
                     ". Hold the left button to sculpt (Shift: the opposite), [ and ] for the brush's size. Saving writes each zone's terrain file, " +
                     "its far-away ground and the sub-zones changed, as overrides." +
                     (sculpt.FarProblem != null ? $" ({name}'s far-away ground can't follow: {sculpt.FarProblem}.)" : ""));
+        // The drawn ground made the collision now, not at the first stroke: ground sculpted before
+        // (with the game's coarser mesh) then matches too, once saved.
+        sculpt.MakeFullDetail();
+        ShowSculptedGround(sculpt, []);
+        if (sculpt.LayoutPending) MarkUnsaved();
         return true;
     }
 
@@ -147,7 +152,18 @@ public partial class LevelEditor
         }
         var mesh = new MeshGeometry3D { Positions = positions, TriangleIndices = triangles };
         mesh.Freeze();
-        Color colour = ChosenMode switch { SculptMode.Lower => Color.FromRgb(90, 170, 255), SculptMode.Smooth => Color.FromRgb(140, 230, 140), SculptMode.Flatten => Color.FromRgb(230, 200, 90), _ => Color.FromRgb(255, 140, 60) };
+        Color colour = ChosenMode switch
+        {
+            SculptMode.Lower or SculptMode.Valley => Color.FromRgb(90, 170, 255), SculptMode.Smooth => Color.FromRgb(140, 230, 140),
+            SculptMode.Flatten => Color.FromRgb(230, 200, 90), SculptMode.Mountain => Color.FromRgb(200, 150, 255), SculptMode.Peak => Color.FromRgb(255, 90, 90),
+            SculptMode.PaintFoliage => Color.FromRgb(120, 220, 90), SculptMode.EraseFoliage => Color.FromRgb(220, 220, 220),
+            SculptMode.PaintGround => Color.FromRgb(255, 220, 120), SculptMode.PaintRoad => Color.FromRgb(170, 170, 190),
+            SculptMode.Mesa or SculptMode.Terrace or SculptMode.Cliff => Color.FromRgb(230, 120, 70),
+            SculptMode.Canyon or SculptMode.Erode or SculptMode.Crater => Color.FromRgb(120, 140, 255), SculptMode.Dunes => Color.FromRgb(240, 210, 140),
+            SculptMode.Roughen => Color.FromRgb(180, 160, 140),
+            SculptMode.PaintChunks => Color.FromRgb(90, 230, 230), SculptMode.EraseChunks => Color.FromRgb(230, 90, 160),
+            _ => Color.FromRgb(255, 140, 60),
+        };
         var material = new MaterialGroup { Children = { new DiffuseMaterial(new SolidColorBrush(Colors.Black)), new EmissiveMaterial(new SolidColorBrush(colour)) } };
         material.Freeze();
         brushVisual.Content = new GeometryModel3D(mesh, material) { BackMaterial = material };
@@ -164,6 +180,13 @@ public partial class LevelEditor
             return false;
         }
         CommitEdit();
+        if ((ChosenMode is SculptMode.PaintFoliage or SculptMode.EraseFoliage && !BeginFoliageStroke()) ||
+            (ChosenMode is SculptMode.PaintGround or SculptMode.PaintRoad && !BeginGroundStroke(ChosenMode == SculptMode.PaintRoad)) ||
+            (ChosenMode is SculptMode.PaintChunks or SculptMode.EraseChunks && !BeginChunkStroke()))
+        {
+            strokeFromPad = false;
+            return false;
+        }
         strokeBefore = sculptZones.ToDictionary(z => z, z => z.Snapshot());
         standing = StandingOnGround(zone, GroundHeight, z => sculptZones.Any(s => s.Covers(z.X, z.Z)))
             .Where(o => Editable(o)).ToDictionary(o => o, o => o.Placement.Position.Y - GroundHeight(o.Placement.Position.X, o.Placement.Position.Z));
@@ -185,10 +208,36 @@ public partial class LevelEditor
         if (BrushPoint() is not Vector3 centre) return;
         SculptMode mode = ChosenMode;
         bool inverse = strokeFromPad ? padInverse : Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        if (mode is SculptMode.PaintFoliage or SculptMode.EraseFoliage)
+        {
+            // The foliage painter (LevelEditor.Foliage.cs): the opposite (Shift) erases while painting, and paints while erasing.
+            PaintFoliage(new Vector2(centre.X, centre.Z), BrushRadius, erase: (mode == SculptMode.EraseFoliage) ^ inverse);
+            ShowBrush();
+            return;
+        }
+        if (mode is SculptMode.PaintChunks or SculptMode.EraseChunks)
+        {
+            // The chunk painter (LevelEditor.ChunkPainter.cs): Shift erases while painting, and paints while erasing.
+            ChunkStrokeStep(new Vector2(centre.X, centre.Z), BrushRadius, (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1) * seconds,
+                            (mode == SculptMode.EraseChunks) ^ inverse);
+            ShowBrush();
+            return;
+        }
+        if (mode is SculptMode.PaintGround or SculptMode.PaintRoad)
+        {
+            // The ground painter (LevelEditor.GroundPaint.cs): Shift paints the base layer back.
+            GroundStrokeStep(new Vector2(centre.X, centre.Z), BrushRadius, (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1) * seconds, inverse);
+            ShowBrush();
+            return;
+        }
         if (inverse) mode = mode switch { SculptMode.Raise => SculptMode.Lower, SculptMode.Lower => SculptMode.Raise, _ => mode };
         float strength = (float)SculptStrengthSlider.Value * (strokeFromPad ? padStrength : 1);
-        float amount = mode is SculptMode.Raise or SculptMode.Lower ? strength * seconds : Math.Min(1, strength * seconds * 0.5f);
-        foreach (var (ground, parts) in TerrainSculpt.ApplyAll(sculptZones, new Vector2(centre.X, centre.Z), BrushRadius, mode, amount, flattenTo))
+        bool landform = mode is SculptMode.Hill or SculptMode.Peak or SculptMode.Mountain or SculptMode.Valley or
+                        SculptMode.Mesa or SculptMode.Canyon or SculptMode.Dunes or SculptMode.Crater or SculptMode.Erode or SculptMode.Roughen or
+                        SculptMode.Terrace or SculptMode.Cliff;
+        float amount = mode is SculptMode.Raise or SculptMode.Lower || landform ? strength * seconds : Math.Min(1, strength * seconds * 0.5f);
+        foreach (var (ground, parts) in TerrainSculpt.ApplyAll(sculptZones, new Vector2(centre.X, centre.Z), BrushRadius, mode, amount, flattenTo,
+                                                               opposite: inverse && landform))
             ShowSculptedGround(ground, parts);
         FollowGround(new Vector2(centre.X, centre.Z), BrushRadius + 2);
         ShowBrush();
@@ -201,6 +250,14 @@ public partial class LevelEditor
         bool wasPad = strokeFromPad;
         strokeFromPad = false;
         if (sculpt == null || strokeBefore is not { } before) return;
+        if (EndFoliageStroke() || EndGroundStroke(before) || EndChunkStroke())
+        {
+            strokeBefore = null;
+            standing = null;
+            if (!wasPad) ShowBrush();
+            return;
+        }
+        SculptedLive();  // the game has the ground as sculpted at once (LevelEditor.LiveTerrain.cs), or once the level is loaded again
         strokeBefore = null;
         standing = null;
         var changed = new List<(TerrainSculpt Zone, float[] Before, float[] After)>();
@@ -232,13 +289,45 @@ public partial class LevelEditor
     /// <summary>Gives a zone's sculpted sub-zones' models new meshes, at their vertices' heights now (with their normals; the rest kept).</summary>
     void ShowSculptedGround(TerrainSculpt zone, IReadOnlyList<TerrainSculpt.Part> parts)
     {
+        if (zone.TakeDetailNote() is string note)
+        {
+            context.Log("Sculpt: " + note + (zone.LayoutPending ? ". The game shows it once the level is saved and loaded again (Auto reload does it); till then the ground isn't changed in it live." : "."));
+            parts = zone.Parts;
+        }
         if (!groundModels.TryGetValue(zone.Zone, out var ground)) return;
         foreach (TerrainSculpt.Part part in parts)
         {
             int index = ground.Numbers.IndexOf(part.Number);
             if (index < 0 || index >= ground.Models.Children.Count || ground.Models.Children[index] is not GeometryModel3D { IsFrozen: false } model ||
-                model.Geometry is not MeshGeometry3D old || old.Positions.Count != part.Heights.Length)
+                model.Geometry is not MeshGeometry3D old)
                 continue;
+            if (old.Positions.Count != part.Heights.Length)
+            {
+                // Made over at every grid step: a new mesh, its picture spread over the box the old one filled.
+                if (!part.Regridded) continue;
+                Vector3 min = part.DrawnMin, size = part.DrawnMax - part.DrawnMin;
+                var grid = new MeshGeometry3D();
+                var gridPositions = new Point3DCollection(part.Heights.Length);
+                var gridNormals = new Vector3DCollection(part.Heights.Length);
+                var uvs = new PointCollection(part.Heights.Length);
+                for (int v = 0; v < part.Heights.Length; v++)
+                {
+                    Vector3 p = part.Subzone.Positions[v], n = part.Normals[v];
+                    gridPositions.Add(new Point3D(p.X, part.Heights[v], -p.Z));
+                    gridNormals.Add(new Vector3D(n.X, n.Y, -n.Z));
+                    uvs.Add(new Point(size.X > 0 ? (p.X - min.X) / size.X : 0, size.Z > 0 ? (p.Z - min.Z) / size.Z : 0));
+                }
+                var triangles = new Int32Collection(part.Subzone.Triangles.Length);
+                int[] t = part.Subzone.Triangles;
+                for (int k = 0; k + 2 < t.Length; k += 3) { triangles.Add(t[k]); triangles.Add(t[k + 2]); triangles.Add(t[k + 1]); }  // (WPF's Z flipped turns them over)
+                grid.Positions = gridPositions;
+                grid.Normals = gridNormals;
+                grid.TextureCoordinates = uvs;
+                grid.TriangleIndices = triangles;
+                grid.Freeze();
+                model.Geometry = grid;
+                continue;
+            }
             var positions = new Point3DCollection(part.Heights.Length);
             var normals = new Vector3DCollection(part.Heights.Length);
             for (int v = 0; v < part.Heights.Length; v++)
@@ -266,7 +355,7 @@ public partial class LevelEditor
     /// building, a crate or a navpoint, not a lamp on a pole or a light in a ceiling.
     /// </summary>
     static IEnumerable<ZoneObject> StandingOnGround(ZoneFile file, Func<float, float, float> ground, Func<Vector3, bool> over) =>
-        file.Objects.Where(o => o.Parent == ZoneObject.None && over(o.Placement.Position) &&
+        file.Objects.Where(o => o.Parent == ZoneObject.None && !IsBarrier(o) && over(o.Placement.Position) &&
                                 o.BoundsMin.Y - ground(o.Placement.Position.X, o.Placement.Position.Z) is >= -3 and <= 2);
 
     /// <summary>During a stroke: this zone's objects on the ground near the brush keep their height over it (with what is attached to them).</summary>
@@ -395,10 +484,19 @@ public partial class LevelEditor
             {
                 if (inContainer == null)
                 {
-                    bool own = TryOriginal(inArchive, null, name) is byte[] original && original.AsSpan().SequenceEqual(bytes);
+                    // Loose in its archive: the asset lists give its size (the game sets memory aside by it,
+                    // and a level whose terrain file is bigger or smaller than its list says never finishes
+                    // loading), so they follow it: from its size now, and from the game's own size (lists an
+                    // earlier save left behind).
+                    byte[]? original = TryOriginal(inArchive, null, name);
+                    int sizeNow = Workspace.Read(inArchive, name).Length;
+                    var lists = ContainerEdits.UpdateLooseSize(Workspace, name, sizeNow, bytes.Length);
+                    if (original != null && original.Length != sizeNow) lists.AddRange(ContainerEdits.UpdateLooseSize(Workspace, name, original.Length, bytes.Length));
+                    bool own = original != null && original.AsSpan().SequenceEqual(bytes);
                     if (own) Workspace.DeleteOverride(inArchive, name);
                     else Workspace.WriteOverride(inArchive, name, bytes);
-                    done.Add(own ? $"{name} is the game's own again" : name);
+                    string sized = lists.Count > 0 ? $" (its size updated in {string.Join(", ", lists.Distinct(StringComparer.OrdinalIgnoreCase))})" : "";
+                    done.Add((own ? $"{name} is the game's own again" : name) + sized);
                     continue;
                 }
                 if (!inContainers.TryGetValue((inArchive, inContainer), out var group)) inContainers[(inArchive, inContainer)] = group = new(StringComparer.OrdinalIgnoreCase);
@@ -438,6 +536,9 @@ public partial class LevelEditor
                 if (!Workspace.IsChanged(inArchive, inContainer ?? name)) continue;
                 if (inContainer == null)
                 {
+                    // (Its size in the asset lists back to the game's own too.)
+                    int sizeNow = Workspace.Read(inArchive, name).Length;
+                    if (TryOriginal(inArchive, null, name) is byte[] own) ContainerEdits.UpdateLooseSize(Workspace, name, sizeNow, own.Length);
                     Workspace.DeleteOverride(inArchive, name);
                     notes.Add($"{name} is the game's own again");
                     continue;
@@ -470,13 +571,26 @@ public partial class LevelEditor
     enum ReticleLook { Off, Free, OnObject, OnLocked, Holding }
     ReticleLook reticleShown = ReticleLook.Off;
 
+    void OnSwapController(object sender, RoutedEventArgs e) => GamePanel.SwapController();
+
+    void ShowControllerOwner() => ControllerButtonText.Text = GamePanel.ControllerLabel;
+
     void PadFrame(object? sender, EventArgs e)
     {
         DateTime now = DateTime.Now;
         float seconds = (float)Math.Min(0.1, (now - lastPadFrame).TotalSeconds);
         lastPadFrame = now;
         if (!IsVisible || Window.GetWindow(this)?.IsActive != true) return;
-        if (!pad.Read(out PadState state, out PadButtons pressed))
+        bool read = pad.Read(out PadState state, out PadButtons pressed);
+        // Both sticks pressed in: the controller changes hands, between this view and the docked game.
+        if (read && state.Holds(PadButtons.LeftStick) && state.Holds(PadButtons.RightStick) &&
+            (pressed & (PadButtons.LeftStick | PadButtons.RightStick)) != 0)
+        {
+            GamePanel.SwapController();
+            return;
+        }
+        if (GamePanel.ControllerToGame) return;  // the controller is the docked game's
+        if (!read)
         {
             if (padWasConnected)
             {

@@ -93,6 +93,9 @@ sealed class GameLink : IDisposable
     /// <summary>Whether the game is running with the console mod: it wrote in the last few seconds.</summary>
     public static bool IsRecent(GameView? view) => view != null && DateTime.UtcNow - view.Written < TimeSpan.FromSeconds(3);
 
+    /// <summary>A file in the link folder (where the game reads what the editor leaves it), by name.</summary>
+    public string FileIn(string name) => Path.Combine(folder, name);
+
     /// <summary>Hands console commands to the game, which runs them within a tenth of a second.</summary>
     public void Send(IEnumerable<string> commands)
     {
@@ -100,6 +103,60 @@ sealed class GameLink : IDisposable
         File.WriteAllLines(temporary, commands);
         File.Move(temporary, path, overwrite: true);
     }
+
+    /// <summary>
+    /// Hands the game lines as <see cref="Send"/> does, unless it hasn't taken the last ones yet
+    /// (then nothing is sent, and false returned: send again later). For Live, which sends often.
+    /// </summary>
+    public bool TrySend(IReadOnlyList<string> lines)
+    {
+        string path = Path.Combine(folder, "to_game.txt"), temporary = path + ".live.tmp";
+        try
+        {
+            if (File.Exists(path)) return false;
+            File.WriteAllLines(temporary, lines);
+            File.Move(temporary, path, overwrite: false);
+            return true;
+        }
+        catch (IOException) { return false; }
+    }
+
+    /// <summary>What the game answered about a chunk container it was asked to load (editor_chunk): "loaded", "failed", or null (not yet).</summary>
+    public string? ChunkAnswer(string container) => Answer($"chunk_{container}");
+
+    /// <summary>The game's answer named so (link\&lt;name&gt;.txt), taken (the file deleted); null if there's none yet.</summary>
+    public string? Answer(string name)
+    {
+        string path = Path.Combine(folder, $"{name}.txt");
+        try
+        {
+            if (!File.Exists(path)) return null;
+            string answer = File.ReadAllText(path).Trim();
+            File.Delete(path);
+            return answer;
+        }
+        catch (IOException) { return null; }
+    }
+
+    /// <summary>Whether lines handed to the game are still waiting for it to take them.</summary>
+    public bool Waiting => File.Exists(Path.Combine(folder, "to_game.txt"));
+
+    /// <summary>The line that moves and turns an object in the game (rotation rows right, up, forward), by its handle.</summary>
+    public static string MoveCommand(uint handle, Vector3 p, Matrix4x4 r) => string.Create(CultureInfo.InvariantCulture,
+        $"editor_move 0x{handle:X8} {p.X:0.####} {p.Y:0.####} {p.Z:0.####} {r.M11:0.######} {r.M12:0.######} {r.M13:0.######} {r.M21:0.######} {r.M22:0.######} {r.M23:0.######} {r.M31:0.######} {r.M32:0.######} {r.M33:0.######}");
+
+    /// <summary>
+    /// Has the game make an object it hasn't: its block (as the zone file holds it) is put in
+    /// bin\link\create_HANDLE.bin, and the line returned tells the game to make it from that.
+    /// </summary>
+    public string CreateCommand(uint handle, byte[] block)
+    {
+        File.WriteAllBytes(Path.Combine(folder, $"create_{handle:X8}.bin"), block);
+        return $"editor_create 0x{handle:X8}";
+    }
+
+    /// <summary>The line that removes an object from the game, by its handle.</summary>
+    public static string RemoveCommand(uint handle) => $"editor_remove 0x{handle:X8}";
 
     /// <summary>
     /// Asks the game where objects are now (it answers within a tenth of a second; see

@@ -20,6 +20,41 @@
                         <TextBlock Text="Overrides folder" />
                     </StackPanel>
                 </Button>
+                <Button DockPanel.Dock="Right" Click="OnOpenGameLevel" Margin="0,0,8,0"
+                        ToolTip="Opens the zone the running game has loaded (the one its camera is in), in the level editor">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Zone}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Game's level" />
+                    </StackPanel>
+                </Button>
+                <Button DockPanel.Dock="Right" Click="OnSpawnResources" Margin="0,0,8,0"
+                        ToolTip="What a level can spawn (its characters, vehicles, exos, the player's look): its spawn_resource.xtbl entry, changed or added to">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Spawn}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Spawn resources" />
+                    </StackPanel>
+                </Button>
+                <Button DockPanel.Dock="Right" Click="OnDeleteLevel" Margin="0,0,8,0"
+                        ToolTip="Deletes a level made with New level, all of it: from its map list, its spawn resources, strings and pictures, and its archive with its edits">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Delete}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Delete level" />
+                    </StackPanel>
+                </Button>
+                <Button DockPanel.Dock="Right" Click="OnNewLevel" Margin="0,0,8,0"
+                        ToolTip="Makes a brand-new level for Ruin or Infestation, listed in that mode's map list, with its own preview picture">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Add}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="New level" />
+                    </StackPanel>
+                </Button>
+                <Button DockPanel.Dock="Right" Click="OnShowGame" Margin="0,0,8,0"
+                        ToolTip="Shows the Game panel: the running game, docked in the editor">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Game}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="Game" />
+                    </StackPanel>
+                </Button>
                 <TextBlock x:Name="GameFolderText" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
             </DockPanel>

@@ -55,7 +55,7 @@ sealed class ObjectKind
         "obj_light" => Lights,
         "navpoint" or "object_leap_node" or "object_path_road" => Paths,
         "player_start" or "object_mission_start_node" => Starts,
-        "trigger_region" or "damage_region" or "object_bounding_box" => Regions,
+        "trigger_region" or "damage_region" or "object_bounding_box" or "invisible_barrier" => Regions,
         "object_effect" or "effect_streaming_node" => Effects,
         _ when className.Contains("spawn", StringComparison.OrdinalIgnoreCase) => Spawns,
         _ => Other,

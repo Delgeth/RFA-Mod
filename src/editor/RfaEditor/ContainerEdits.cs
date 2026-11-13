@@ -190,11 +190,19 @@ static class ContainerEdits
             bool any = false;
             foreach (AsmContainer container in asm.Containers)
                 foreach (AsmPrimitive primitive in container.Primitives)
+                {
                     if (primitive.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase) && primitive.HeaderSize == oldSize)
                     {
                         primitive.HeaderSize = newSize;
                         any = true;
                     }
+                    // A g-file's size is its header file's primitive's data size (a sub-zone made over at every grid step grows both).
+                    else if (primitive.DataSize == oldSize && primitive.DataSize != 0 && DataFileOf(primitive.Name).Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        primitive.DataSize = newSize;
+                        any = true;
+                    }
+                }
             if (!any) continue;
             byte[] updated = asm.ToBytes();
             if (updated.AsSpan().SequenceEqual(workspace.ReadOriginal(archive, list))) workspace.DeleteOverride(archive, list);
@@ -205,7 +213,7 @@ static class ContainerEdits
     }
 
     /// <summary>Whether two archives are one level's: the same, or the same world's (rfg_l0 and rfg_l1, world_l0 and world_l1, x and x_precache) in one folder.</summary>
-    static bool SameLevel(string a, string b)
+    internal static bool SameLevel(string a, string b)
     {
         if (a.Equals(b, StringComparison.OrdinalIgnoreCase)) return true;
         static string World(string archive)

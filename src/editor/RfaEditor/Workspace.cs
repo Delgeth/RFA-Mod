@@ -551,6 +551,24 @@ sealed class Workspace
         };
     }
 
+    /// <summary>
+    /// Takes one of our new archives (see <see cref="IsNewArchive"/>) out: its file in overrides\, the
+    /// copies kept of its files from before the editor changed them, and anything of it held back.
+    /// For making a new level again under the same name. False if it isn't one of ours.
+    /// </summary>
+    public bool RemoveNewArchive(string archive)
+    {
+        if (File.Exists(Path.Combine(GameFolder, archive))) return false;
+        string path = Path.Combine(OverridesFolder, archive);
+        archives.Remove(archive);
+        pending.Remove(archive);
+        if (File.Exists(path)) File.Delete(path);
+        if (Directory.Exists(OriginalsOf(archive))) Directory.Delete(OriginalsOf(archive), true);
+        if (Directory.Exists(Path.Combine(EditsFolder, archive))) Directory.Delete(Path.Combine(EditsFolder, archive), true);
+        Changed();
+        return true;
+    }
+
     /// <summary>Forget what is in overrides\, so it is looked at again (after files there changed).</summary>
     public void RefreshOverrides() => Changed();
 

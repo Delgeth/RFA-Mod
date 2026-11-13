@@ -68,15 +68,14 @@ public sealed class ZoneSchema
     /// </summary>
     static readonly Dictionary<string, string> NeedsToolData = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["navpoint"] = "its settings are packed into navpoint_data, whose layout isn't known yet",
-        ["object_path_road"] = "its road is in path_road_data, made by Volition's tools",
-        ["object_spline"] = "its curve is in object_spline_data, made by Volition's tools",
-        ["object_anim_rig"] = "its bones are in anim_rig_children and bone_strength, made from its rig",
-        ["object_logic_handler"] = "its script is in logic_handler_buffer, made by Volition's tools",
+        ["object_path_road"] = "its road is in path_road_data, made by Volition's tools; add a copy of one of the game's instead (the Add list's From the game's levels)",
+        ["object_spline"] = "its curve is in object_spline_data, made by Volition's tools; add a copy of one of the game's instead (the Add list's From the game's levels)",
+        ["object_anim_rig"] = "its bones are in anim_rig_children and bone_strength, made from its rig; add a copy of one of the game's instead (the Add list's From the game's levels)",
+        ["object_logic_handler"] = "its script is in logic_handler_buffer, made by Volition's tools; add a copy of one of the game's instead (the Add list's From the game's levels)",
         ["obj_chunk_ref"] = "it is written as an rfg_mover or general_mover with its model's destruction data; add a copy of one instead",
-        ["constraint_point"] = "it is written as a constraint with a template made by Volition's tools",
-        ["constraint_hinge"] = "it is written as a constraint with a template made by Volition's tools",
-        ["constraint_prism"] = "it is written as a constraint with a template made by Volition's tools",
+        ["constraint_point"] = "it is written as a constraint with a template made by Volition's tools; add a copy of one of the game's (with the pieces it joins) from the Add list's From the game's levels",
+        ["constraint_hinge"] = "it is written as a constraint with a template made by Volition's tools; add a copy of one of the game's (with the pieces it joins) from the Add list's From the game's levels",
+        ["constraint_prism"] = "it is written as a constraint with a template made by Volition's tools; add a copy of one of the game's (with the pieces it joins) from the Add list's From the game's levels",
     };
 
     /// <summary>
@@ -257,6 +256,19 @@ public sealed class SchemaClass
     public List<NewProperty> NewObject(Vector3 position, Func<SchemaPopulate, IReadOnlyList<string>>? choicesOf = null)
     {
         if (CantMake != null) throw new InvalidOperationException($"a new {Name} can't be made: {CantMake}");
+        if (Name.Equals("navpoint", StringComparison.OrdinalIgnoreCase))
+        {
+            // As the game's: its position alone ("just_pos", no rotation), and its settings packed (see NavpointData).
+            int type = Array.FindIndex(NavpointData.Types, t => t.Equals(Property("navpoint_type")?.Default, StringComparison.OrdinalIgnoreCase));
+            float radius = Property("outer_radius")?.DefaultNumbers() is [var r, ..] ? r : 1.35f;
+            float speed = Property("navpoint_speed_limit")?.DefaultNumbers() is [var v, ..] ? v : 10;
+            byte[] at = [.. BitConverter.GetBytes(position.X), .. BitConverter.GetBytes(position.Y), .. BitConverter.GetBytes(position.Z)];
+            return
+            [
+                new(ZoneProperty.ValueType, NameHashes.PropertyHash("just_pos"), at),
+                new(ZoneProperty.ListType, NameHashes.PropertyHash("navpoint_data"), NavpointData.New(type < 0 ? NavpointData.PathType : type, radius, speed).ToBytes()),
+            ];
+        }
         var placement = new byte[48];
         float[] numbers = [position.X, position.Y, position.Z, 1, 0, 0, 0, 1, 0, 0, 0, 1];
         for (int i = 0; i < numbers.Length; i++) BitConverter.TryWriteBytes(placement.AsSpan(i * 4), numbers[i]);

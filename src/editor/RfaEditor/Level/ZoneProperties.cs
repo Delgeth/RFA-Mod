@@ -67,6 +67,7 @@ sealed class ZonePropertyRows
             bool editable = showAll || !(property.ReadOnly || property.Hidden);
             if (described.TryGetValue(property, out ZoneProperty? value)) yield return row.Described(property, value, editable);
             else if (property.Exported) yield return row.NotSet(property, editable);
+            else if (showAll && property.Type == SchemaType.List && !property.EditorOnly && !property.CombinedExport) yield return row.NotSet(property, editable);
         }
         // Properties of other classes (none in the game's zones), then those the schema doesn't describe.
         foreach (var (property, value) in described.Where(d => !listed.Contains(d.Key)))
@@ -145,8 +146,10 @@ sealed class ZonePropertyRows
                 DockPanel.SetDock(set, Dock.Right);
                 set.Click += (_, _) =>
                 {
-                    byte[] value = property.DefaultValue(rows.choicesOf) ?? [0];
-                    obj.AddProperty(property.ZoneType, NameHashes.PropertyHash(property.ZoneName), value);
+                    if (property.Type == SchemaType.List)  // a list of handles: one, none (FFFFFFFF), to fill in
+                        obj.AddProperty(ZoneProperty.ListType, NameHashes.PropertyHash(property.ZoneName), BitConverter.GetBytes(ZoneObject.None));
+                    else
+                        obj.AddProperty(property.ZoneType, NameHashes.PropertyHash(property.ZoneName), property.DefaultValue(rows.choicesOf) ?? [0]);
                     Finished(laidOut: true);
                 };
                 panel.Children.Add(set);
@@ -336,7 +339,8 @@ sealed class ZonePropertyRows
             {
                 Width = 44, Height = 20, CornerRadius = new CornerRadius(4), BorderBrush = Theme.Brush("StrongBorderBrush"), BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
-                ToolTip = "The colour as the screen can show it: values above 1 are brighter still",
+                ToolTip = "The colour as the screen can show it: values above 1 are brighter still. Click to pick it on a colour wheel",
+                Cursor = System.Windows.Input.Cursors.Hand,
             };
             void ShowSwatch()
             {
@@ -345,6 +349,40 @@ sealed class ZonePropertyRows
                 swatch.Background = new SolidColorBrush(Color.FromRgb(Channel(c[0]), Channel(c[1]), Channel(c[2])));
             }
             ShowSwatch();
+            // A click on the swatch opens a colour wheel: picking changes the colour as you drag (so a
+            // light shows it in the view, and with Live in the game); the numbers show it once it closes.
+            swatch.MouseLeftButtonUp += (_, _) =>
+            {
+                float[] now = property.Floats();
+                var wheel = new ColorWheel(now[0], now[1], now[2]);
+                var popup = new Popup
+                {
+                    PlacementTarget = swatch, Placement = PlacementMode.Bottom, StaysOpen = false, AllowsTransparency = true,
+                    Child = new Border
+                    {
+                        Background = Theme.Brush("PanelBrush"), BorderBrush = Theme.Brush("StrongBorderBrush"), BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(6), Child = wheel,
+                    },
+                };
+                bool picked = false;
+                wheel.Picked += (red, green, blue) =>
+                {
+                    byte[] value = property.Value;
+                    BitConverter.TryWriteBytes(value.AsSpan(0), red);
+                    BitConverter.TryWriteBytes(value.AsSpan(4), green);
+                    BitConverter.TryWriteBytes(value.AsSpan(8), blue);
+                    property.SetValue(value);
+                    ShowSwatch();
+                    picked = true;
+                    changed();
+                };
+                wheel.Done += committed;
+                popup.Closed += (_, _) =>
+                {
+                    if (picked) relaidOut();  // the numbers beside the swatch, shown again
+                };
+                popup.IsOpen = true;
+            };
             return (swatch, NumbersEditor(property, [("R", "AxisXBrush"), ("G", "AxisYBrush"), ("B", "AxisZBrush"), ("A", "DimTextBrush")], 0.01, afterEach: ShowSwatch));
         }
 
@@ -530,16 +568,131 @@ sealed class ZonePropertyRows
                         return null;
                     });
                 default:
-                    // Lists are links (obj_links, dynamic_links) or data Volition's tools packed (navpoint_data, logic_handler_buffer, ...).
-                    string what = property.Type != ZoneProperty.ListType ? ""
-                        : name.Contains("link", StringComparison.OrdinalIgnoreCase) ? " (links to other objects; not editable yet)"
-                        : " (data Volition's tools made; not editable yet)";
-                    return new TextBlock
-                    {
-                        Text = $"{property.Size} bytes" + what,
-                        Foreground = Theme.Brush("DimTextBrush"), VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap,
-                    };
+                    // Lists are links (obj_links, dynamic_links, a rig's children) or data Volition's tools packed (navpoint_data,
+                    // logic_handler_buffer, path_road_data, ...): each has an editor.
+                    if (name.Equals("navpoint_data", StringComparison.OrdinalIgnoreCase) && NavpointData.Read(property.Value) is { } navpoint)
+                        return NavpointEditor(property, navpoint);
+                    if (property.Size % 4 == 0 && (name.Contains("link", StringComparison.OrdinalIgnoreCase) || name.Contains("children", StringComparison.OrdinalIgnoreCase) ||
+                                                   name.Contains("handle", StringComparison.OrdinalIgnoreCase)))
+                        return HandleListEditor(property, name);
+                    if (property.Size % 4 == 0 && property.Size > 0 && (name.Contains("strength", StringComparison.OrdinalIgnoreCase) || AllNumbers(property.Value)))
+                        return NumberListEditor(property);
+                    return BytesEditor(property);
             }
+        }
+
+        /// <summary>
+        /// A navpoint's packed settings (see <see cref="NavpointData"/>): its type, outer radius and speed limit, each as the
+        /// schema names them; the bytes Volition's tools left are kept as they are.
+        /// </summary>
+        FrameworkElement NavpointEditor(ZoneProperty property, NavpointData data)
+        {
+            var panel = new StackPanel();
+            var type = new ComboBox { ItemsSource = NavpointData.Types, SelectedIndex = data.Type, ToolTip = "navpoint_type: what the navpoint is to people and vehicles finding their way" };
+            if (data.Type < 0 || data.Type >= NavpointData.Types.Length) type.Text = data.TypeName;
+            type.SelectionChanged += (_, _) =>
+            {
+                if (type.SelectedIndex < 0) return;
+                data.Type = type.SelectedIndex;
+                property.SetValue(data.ToBytes());
+                Finished();
+            };
+            panel.Children.Add(type);
+            TextBox Number(string tip, float value, Action<float> set) => TextBoxEditor(value.ToString("0.###", CultureInfo.InvariantCulture), tip, text =>
+            {
+                if (!float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float number)) return "must be a number";
+                set(number);
+                property.SetValue(data.ToBytes());
+                return null;
+            });
+            panel.Children.Add(Captioned("Outer radius", Number("outer_radius: how near counts as at it (m)", data.Radius, v => data.Radius = v)));
+            panel.Children.Add(Captioned("Speed limit", Number("navpoint_speed_limit (m/s)", data.SpeedLimit, v => data.SpeedLimit = v)));
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"Version {data.Version}" + (data.Cell is { } cell ? $", on navigation cell {cell:X}" : "") + ". Its links: obj_links.",
+                Foreground = Theme.Brush("DimTextBrush"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
+            });
+            return panel;
+        }
+
+        static FrameworkElement Captioned(string caption, FrameworkElement editor)
+        {
+            var row = new DockPanel { Margin = new Thickness(0, 2, 0, 0) };
+            var label = new TextBlock { Text = caption, Width = 80, VerticalAlignment = VerticalAlignment.Center, Foreground = Theme.Brush("DimTextBrush"), FontSize = 11 };
+            DockPanel.SetDock(label, Dock.Left);
+            row.Children.Add(label);
+            row.Children.Add(editor);
+            return row;
+        }
+
+        /// <summary>Handles of other objects (links, a rig's children): in hex, FFFFFFFF none; as many as you like.</summary>
+        FrameworkElement HandleListEditor(ZoneProperty property, string name)
+        {
+            var handles = Enumerable.Range(0, property.Size / 4).Select(i => BitConverter.ToUInt32(property.Value, i * 4)).ToList();
+            bool endsWithZero = name.Equals("dynamic_links", StringComparison.OrdinalIgnoreCase);
+            return TextBoxEditor(string.Join(" ", handles.Select(h => h.ToString("X8"))),
+                $"{name}: the handles of the objects it links to, in hex (FFFFFFFF for none), separated by spaces. Add or take out as many as you like." +
+                (endsWithZero ? " (dynamic_links: its destruction links' numbers, then a 0.)" : ""), text =>
+                {
+                    var values = new List<byte>();
+                    foreach (string part in text.Split([' ', ',', ';', '\n', '\r', '\t'], StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        string hex = part.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? part[2..] : part;
+                        if (!uint.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint handle)) return $"'{part}' isn't a handle in hex";
+                        values.AddRange(BitConverter.GetBytes(handle));
+                    }
+                    property.SetValue([.. values]);
+                    return null;
+                });
+        }
+
+        static bool AllNumbers(byte[] value)
+        {
+            if (value.Length == 0 || value.Length % 4 != 0) return false;
+            for (int i = 0; i < value.Length; i += 4)
+            {
+                float f = BitConverter.ToSingle(value, i);
+                if (!float.IsFinite(f) || (f != 0 && (Math.Abs(f) < 1e-5f || Math.Abs(f) > 1e7f))) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Numbers (a rig's bones' strengths, ...): as many as you like.</summary>
+        FrameworkElement NumberListEditor(ZoneProperty property) =>
+            TextBoxEditor(string.Join(" ", property.Floats().Select(f => f.ToString("0.####", CultureInfo.InvariantCulture))),
+                "Numbers, separated by spaces (as many as you like)", text =>
+                {
+                    var values = new List<byte>();
+                    foreach (string part in text.Split([' ', ',', ';'], StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        if (!float.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out float number)) return $"'{part}' isn't a number";
+                        values.AddRange(BitConverter.GetBytes(number));
+                    }
+                    property.SetValue([.. values]);
+                    return null;
+                });
+
+        /// <summary>
+        /// Data Volition's tools packed (a logic handler's script, a road's or spline's points, ...), whose layout isn't
+        /// described: its bytes in hex, to change by hand (the text in it is shown on hover).
+        /// </summary>
+        FrameworkElement BytesEditor(ZoneProperty property)
+        {
+            byte[] value = property.Value;
+            var text = System.Text.RegularExpressions.Regex.Matches(System.Text.Encoding.Latin1.GetString(value), "[ -~]{4,}").Select(m => m.Value).ToList();
+            TextBox box = TextBoxEditor(Convert.ToHexString(value), $"{value.Length} bytes in hex (Volition's tools made them; their layout isn't known)." +
+                (text.Count > 0 ? "\nText in it: " + string.Join(", ", text.Take(12)) : ""), entered =>
+                {
+                    string hex = new(entered.Where(Uri.IsHexDigit).ToArray());
+                    if (hex.Length % 2 != 0) return "an odd number of hex digits";
+                    property.SetValue(Convert.FromHexString(hex));
+                    return null;
+                });
+            box.FontFamily = new FontFamily("Consolas");
+            box.TextWrapping = TextWrapping.Wrap;
+            box.MaxHeight = 120;
+            box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            return box;
         }
 
         /// <summary>

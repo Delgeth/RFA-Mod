@@ -170,9 +170,12 @@ export, if it has one, right after adding its own (`rfa::game::lua_register` in 
 **In-game menus** (`menus.cpp`): the loader hosts [Dear ImGui](https://github.com/ocornut/imgui)
 (`src\third_party\imgui`, built with `NDEBUG` so its checks never stop the game) on the game's own
 Direct3D 11 device. The game makes its swap chain with a DXGI factory, so the loader wraps the
-`CreateDXGIFactory` import and, on the factory, `CreateSwapChain` (slot 10 of its methods); on the
-swap chain, `Present` (8), where it draws the menus on the finished picture, and `ResizeBuffers`
-(13). It reads the game window's messages for ImGui by subclassing it. The menus are up while the
+`CreateDXGIFactory` import and, on the factory, `CreateSwapChain` (slot 10 of its methods), and
+hands the game a swap chain of its own (`ChainProxy`) that passes every call on to the real one:
+in `Present` it first draws the menus on the finished picture, and in `ResizeBuffers` it lets go of
+the picture. (The real swap chain's methods are not swapped: the Steam overlay swaps the same two,
+again on every display mode change, and the two hooks then called each other until the stack ran
+out.) It reads the game window's messages for ImGui by subclassing it. The menus are up while the
 console is open (`0x28FF1CA`), when the game has already stopped the player's controls and freed the
 mouse; ImGui draws its own cursor, as the game hides Windows'. The game reads its own input with
 DirectInput, so the window's messages go on to it untouched, and the console asks
@@ -262,6 +265,16 @@ asks the game to open its pause menu, as if you had pressed the pause key (the r
 `0x135B3F1`, whose own setter is `0x582760`; the HUD opens the menu on its next update unless a
 cutscene or another menu is up, `0x57B774`). So switching away always pauses the game, as it does
 when the game sees the switch itself.
+
+The editor's Game tab can dock the game's window in the editor: it gives the window a child's
+style and makes it a child of one of its own (a plain window created with mixed DPI hosting, as the
+mod makes the game per-monitor DPI aware). The mod sees `WS_CHILD` on the game's window and then
+leaves its position, size and style to the editor (the game's own `SetWindowLong`/`SetWindowPos`
+keep it a borderless child), and, as a child gets no activation messages, takes keyboard focus as
+what says you are in the game: on `WM_KILLFOCUS` it frees the cursor and mutes the game's input
+(`WM_INPUT` included) without asking for the pause menu, so the game keeps running; a mouse click
+into the window gives it focus and is not passed on. `GetForegroundWindow` answers with the game's
+window while docked, so the game doesn't suspend.
 
 The game normally blocks the Windows key system-wide while it runs; with `AllowWindowsKey=1` it
 works in the game too. With `Enabled=0` every hook stays installed but only logs.

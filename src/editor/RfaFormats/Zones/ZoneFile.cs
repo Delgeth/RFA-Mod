@@ -159,7 +159,14 @@ public sealed class ZoneFile
     /// and its layer: 0x82 for world_08_02, 0x80 in its mission layer 128), and a number after the
     /// highest one used with them, here or in <paramref name="taken"/> (the zone's other files).
     /// </summary>
-    public uint NewHandle(ZoneObject like, IEnumerable<uint> taken) => NewHandle(like.Handle & 0xFFFF0000, taken);
+    public uint NewHandle(ZoneObject like, IEnumerable<uint> taken) =>
+        NewHandle((like.Handle & 0xFFFF0000) == EditorOnlyHandles ? PrefixFor(like.ClassHash) : like.Handle & 0xFFFF0000, taken);
+
+    /// <summary>
+    /// Handles the editor gives what it shows as objects but the game has none of (the level geometry's
+    /// pieces while a zone is open): never a new object's.
+    /// </summary>
+    public const uint EditorOnlyHandles = 0xFFFE0000;
 
     uint NewHandle(uint prefix, IEnumerable<uint> taken)
     {
@@ -192,7 +199,8 @@ public sealed class ZoneFile
     uint PrefixFor(uint classHash)
     {
         uint? MostCommonPrefix(IEnumerable<ZoneObject> these) =>
-            these.GroupBy(o => o.Handle & 0xFFFF0000).OrderByDescending(g => g.Count()).Select(g => (uint?)g.Key).FirstOrDefault();
+            these.Where(o => (o.Handle & 0xFFFF0000) != EditorOnlyHandles)
+                 .GroupBy(o => o.Handle & 0xFFFF0000).OrderByDescending(g => g.Count()).Select(g => (uint?)g.Key).FirstOrDefault();
         return MostCommonPrefix(objects.Where(o => o.ClassHash == classHash)) ?? MostCommonPrefix(objects)
                ?? throw new InvalidOperationException("the zone has no objects to take a handle's zone and layer from");
     }
@@ -559,7 +567,7 @@ public sealed class ZoneObject
 
     public uint ClassHash => U32(0);
     public uint Handle { get => U32(4); internal set => SetU32(4, value); }
-    public ushort Flags => BitConverter.ToUInt16(bytes, 32);
+    public ushort Flags { get => BitConverter.ToUInt16(bytes, 32); set => BitConverter.TryWriteBytes(bytes.AsSpan(32), value); }
 
     /// <summary>The bounding box, in world coordinates (the game uses it to decide what to draw).</summary>
     public Vector3 BoundsMin => ReadVector(8);
@@ -584,6 +592,9 @@ public sealed class ZoneObject
 
     internal byte[] Bytes => bytes;
     internal int Size => bytes.Length;
+
+    /// <summary>A copy of the object as the zone file holds it (its header, then its properties): what the game makes it from.</summary>
+    public byte[] ToBlock() => (byte[])bytes.Clone();
 
     public ZoneProperty? Property(uint nameHash) => Properties.FirstOrDefault(p => p.NameHash == nameHash);
     public ZoneProperty? Property(string name) => Property(NameHashes.PropertyHash(name));

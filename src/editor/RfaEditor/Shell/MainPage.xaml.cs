@@ -33,7 +33,8 @@ public partial class MainPage : UserControl
     /// <param name="log">The window's log, which the Log panel shows.</param>
     /// <param name="explorer">The window's explorer of the game's files, for the Explorer panel.</param>
     /// <param name="activeChanged">Called with the tab you are working in (and where its file is) when that changes.</param>
-    internal MainPage(EditorContext context, ListBox log, FrameworkElement explorer, Action<IEditorDocument?, string?> activeChanged)
+    /// <param name="game">The Game panel's view (the running game, docked), if the window has one: it starts as a tab in the middle.</param>
+    internal MainPage(EditorContext context, ListBox log, FrameworkElement explorer, Action<IEditorDocument?, string?> activeChanged, FrameworkElement? game = null)
     {
         InitializeComponent();
         this.context = context;
@@ -52,6 +53,7 @@ public partial class MainPage : UserControl
             new ShellPanel("log", "Log", LogView(log)),
             new ShellPanel("assets", "Assets", OnPanel(assetsHost), Beside: "log"),
         ];
+        if (game != null) panels.Add(new ShellPanel("game", "Game", game));
         layout = new DockLayout(DockManager, "main", id => panels.FirstOrDefault(panel => panel.Id == id)?.View);
         layout.Restore();
         PlacePanels();
@@ -80,7 +82,14 @@ public partial class MainPage : UserControl
             place.Content ??= panel.View;
             place.CanClose = false;  // a panel can't be lost: there is no way yet to bring one back
             place.CanHide = false;
+            // The game's own window can't slide in and out with a panel pinned to a side.
+            if (panel.Id == "game") place.CanAutoHide = false;
             if (!isNew) continue;
+            if (panel.Id == "game")
+            {
+                DocumentPane().Children.Add(place);  // a tab with the documents to start with
+                continue;
+            }
             if (placed.FirstOrDefault(a => a.ContentId == panel.Beside)?.Parent is LayoutAnchorablePane beside) beside.Children.Add(place);
             else place.AddToLayout(DockManager, AnchorableShowStrategy.Bottom);
         }
@@ -221,6 +230,72 @@ public partial class MainPage : UserControl
     {
         string? key = documents.FirstOrDefault(d => d.Value.Tab == e.Document).Key;
         if (key != null) documents.Remove(key);
+        ShowParts(documents.Values.FirstOrDefault(d => d.Tab.IsSelected).Document);
+    }
+
+    // ---- The game, docked ----------------------------------------------------------------------
+
+    LayoutAnchorable? GamePlace() => DockManager.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(a => a.ContentId == "game");
+
+    /// <summary>Brings the Game panel forward.</summary>
+    internal void ShowGame()
+    {
+        if (GamePlace() is not { } game) return;
+        if (game.IsHidden) game.Show();
+        game.IsSelected = true;
+        game.IsActive = true;
+    }
+
+    /// <summary>Puts the Game panel where its Place button says (dragging it by its title does the same by hand).</summary>
+    internal void PlaceGame(GamePanel.Place place)
+    {
+        if (GamePlace() is not { } game) return;
+        switch (place)
+        {
+            case GamePanel.Place.Window:
+                game.Float();
+                return;
+            case GamePanel.Place.Tab:
+                game.Parent?.RemoveChild(game);
+                DocumentPane().Children.Add(game);
+                break;
+            default:
+                // A pane of its own, under or beside the documents: in the row or column the
+                // documents are in if it runs that way, else in a new one that takes their place.
+                Orientation way = place == GamePanel.Place.Below ? Orientation.Vertical : Orientation.Horizontal;
+                game.Parent?.RemoveChild(game);
+                var pane = new LayoutAnchorablePane(game);
+                ILayoutElement middle = DocumentPane();
+                while (middle.Parent is LayoutDocumentPaneGroup group) middle = group;
+                if (middle.Parent is LayoutPanel row && row.Orientation == way)
+                {
+                    row.InsertChildAt(row.IndexOfChild(middle) + 1, pane);
+                }
+                else if (middle.Parent is ILayoutContainer container)
+                {
+                    var split = new LayoutPanel { Orientation = way };
+                    container.ReplaceChild(middle, split);
+                    split.Children.Add((ILayoutPanelElement)middle);
+                    split.Children.Add(pane);
+                }
+                break;
+        }
+        game.IsSelected = true;
+        game.IsActive = true;
+    }
+
+    // ---- Open tabs, for the window -------------------------------------------------------------
+
+    /// <summary>The open tabs whose key starts with <paramref name="prefix"/> (e.g. a level archive's zones: "level:build\pc\cache\x.vpp_pc").</summary>
+    internal List<(string Key, IEditorDocument Document)> OpenTabs(string prefix) =>
+        documents.Where(d => d.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Select(d => (d.Key, d.Value.Document)).ToList();
+
+    /// <summary>Closes a tab without asking to save (its file is being made again or deleted).</summary>
+    internal void CloseTab(string key)
+    {
+        if (!documents.TryGetValue(key, out var open)) return;
+        documents.Remove(key);
+        open.Tab.Close();
         ShowParts(documents.Values.FirstOrDefault(d => d.Tab.IsSelected).Document);
     }
 

@@ -10,7 +10,9 @@
 #include <DbgHelp.h>
 #include <algorithm>
 #include <cstdio>
+#include <deque>
 #include <map>
+#include <set>
 #include <vector>
 
 #pragma comment(linker, "/EXPORT:RFALoader_Init=_RFALoader_Init@4")
@@ -171,6 +173,18 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI Hk_SetUnhandledExceptionFilter(LPTOP_LEVEL_E
 LONG CALLBACK NoteAccessViolation(EXCEPTION_POINTERS* exception) {
     static LONG noted = 0, dumped = 0;
     const EXCEPTION_RECORD* rec = exception->ExceptionRecord;
+    // A stack overflow (calls that never stop calling each other) can end the game without the crash
+    // filter ever running: report it here, from a fresh thread, as this one has no stack left.
+    static LONG overflowed = 0;
+    if (rec->ExceptionCode == EXCEPTION_STACK_OVERFLOW && InterlockedExchange(&overflowed, 1) == 0) {
+        static CrashJob job;
+        job = CrashJob{exception, GetCurrentThreadId(), L"-overflow"};
+        if (HANDLE thread = CreateThread(nullptr, 0, WriteCrashReport, &job, 0, nullptr)) {
+            WaitForSingleObject(thread, 30000);
+            CloseHandle(thread);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && InterlockedIncrement(&noted) <= 5) {
         char where[MAX_PATH + 16];
         DescribeAddress(reinterpret_cast<DWORD>(rec->ExceptionAddress), where, sizeof(where));
@@ -374,8 +388,21 @@ struct Override {
     DWORD archiveSize = 0;   // size of the file it replaces, in its archive
     LONG used = 0;           // set the first time the game reads it, so the log says so only once
 };
-std::map<std::string, std::vector<Override>> g_overrides;  // lower-case file name -> replacements
+// (A deque: adding to it leaves the replacements already there where they are, so the file hooks can
+// keep one they found while more are added: see RFALoader_RescanOverrides.)
+std::map<std::string, std::deque<Override>> g_overrides;  // lower-case file name -> replacements
 size_t g_overrideCount = 0;
+
+// The game looks files up on several threads, and the editor can ask for overrides\ and edits\ to be
+// looked through again while the game runs (RFALoader_RescanOverrides): the hooks hold this shared
+// while they search g_overrides and g_newFiles (never while they call the game), a rescan alone
+// while it adds to them. Nothing is ever taken out, so what a hook found stays good.
+SRWLOCK g_filesLock = SRWLOCK_INIT;
+struct SharedFiles {
+    SharedFiles() { AcquireSRWLockShared(&g_filesLock); }
+    ~SharedFiles() { ReleaseSRWLockShared(&g_filesLock); }
+};
+std::set<std::wstring> g_seenFiles;  // every file of overrides\ and edits\ looked at, so a rescan only looks at new ones
 
 struct ArchiveFile {
     std::string name;
@@ -500,7 +527,7 @@ void FindOverrides(const std::wstring& root, const std::wstring& relative) {
         if (name == L"." || name == L"..") continue;
         const std::wstring path = relative.empty() ? name : relative + L"\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) FindOverrides(root, path);
-        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0) AddOverride(root, path);
+        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0 && g_seenFiles.insert(L"overrides\\" + path).second) AddOverride(root, path);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
 }
@@ -585,7 +612,7 @@ void FindEdits(const std::wstring& root, const std::wstring& relative) {
         if (name == L"." || name == L"..") continue;
         const std::wstring path = relative.empty() ? name : relative + L"\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) FindEdits(root, path);
-        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0) AddEdit(root, path);
+        else if (_wcsnicmp(name.c_str(), L"README", 6) != 0 && g_seenFiles.insert(L"edits\\" + path).second) AddEdit(root, path);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
 }
@@ -618,10 +645,15 @@ int __cdecl LoadBufferHook(lua_State* L, const char* buffer, size_t size, const 
     const std::string name = ScriptFileName(chunkName);
     if (!name.empty()) {
         RFA_LOG_FIRST(60, "Lua script loaded: %s", chunkName);
-        auto found = g_overrides.find(Lower(name));
+        const Override* replacement = nullptr;
+        {
+            SharedFiles shared;
+            auto found = g_overrides.find(Lower(name));
+            if (found != g_overrides.end()) replacement = &found->second.front();
+        }
         std::string text;
-        if (found != g_overrides.end() && ReadWholeFile(found->second.front().path, text)) {
-            rfa::Log("Using override %s", found->second.front().relative.c_str());
+        if (replacement && ReadWholeFile(replacement->path, text)) {
+            rfa::Log("Using override %s", replacement->relative.c_str());
             return g_loadBuffer(L, text.data(), text.size(), chunkName);
         }
     }
@@ -632,6 +664,10 @@ using rfa::game::FileFindResult;
 using FindFileFn = bool(__cdecl*)(FileFindResult*, const char*, bool);
 FindFileFn g_findFile;  // the game's FindFile
 
+// Forward declarations for FindNewFile
+extern bool g_logLookups;
+bool IsLevelFile(const char* name);
+
 // A file the game found nowhere: a new file in overrides\ at that path (build\pc\cache\rfg01.vpp_pc,
 // or .\build\pc\cache\..., with / or \), or of that name (also when the game asks with a full
 // path), as a loose file. A request it can't answer whose name holds a new file's own name (rfg01
@@ -640,27 +676,57 @@ bool FindNewFile(FileFindResult* result, const char* name) {
     std::string key = Lower(name);
     std::replace(key.begin(), key.end(), '/', '\\');
     if (key.rfind(".\\", 0) == 0) key.erase(0, 2);
-    auto file = g_newFiles.find(key);
-    if (file == g_newFiles.end()) file = g_newFiles.find(key.substr(key.find_last_of('\\') + 1));
-    if (file == g_newFiles.end()) {
-        for (const auto& [newKey, newFile] : g_newFiles) {
-            const std::string stem = newKey.substr(newKey.find_last_of('\\') + 1, newKey.find_last_of('.') - newKey.find_last_of('\\') - 1);
-            if (stem.size() >= 3 && key.find(stem) != std::string::npos) {
-                RFA_LOG_FIRST(100, "The game looked for %s and found it nowhere (no new file is called that)", name);
-                break;
+    NewFile* file = nullptr;
+    {
+        SharedFiles shared;
+        auto found = g_newFiles.find(key);
+        if (found == g_newFiles.end()) found = g_newFiles.find(key.substr(key.find_last_of('\\') + 1));
+        // The console's "level <zone>" (0x58E9A0) first checks that the level is there, as a world's
+        // first layer: build\pc\cache\<zone>_l0.vpp_pc (0x6CD1A0). A level the editor made (New level)
+        // is one archive, <zone>.vpp_pc, as the game's Ruin and Infestation maps are (which the check
+        // doesn't find either: they are started from their menus, which don't check): it answers for it.
+        // The level is then loaded by its zone's name, as from the menus.
+static const std::string kLayer0 = "_l0.vpp_pc";
+        if (found == g_newFiles.end() && key.size() >= kLayer0.size() &&
+            key.compare(key.size() - kLayer0.size(), kLayer0.size(), kLayer0) == 0) {
+            std::string level = key.substr(0, key.size() - kLayer0.size()) + ".vpp_pc";
+            found = g_newFiles.find(level);
+            if (found == g_newFiles.end()) found = g_newFiles.find(level.substr(level.find_last_of('\\') + 1));
+            // Also try the filename alone in case the request was a bare filename
+            if (found == g_newFiles.end()) {
+                std::string levelName = level.substr(level.find_last_of('\\') + 1);
+                found = g_newFiles.find(levelName);
+            }
+            if (found != g_newFiles.end()) {
+                rfa::Log("Level load: mapped %s -> %s (single-archive level)", name, found->second.relative.c_str());
+            } else {
+                rfa::Log("Level load: asked for %s (_l0.vpp_pc) but no single-archive level found for %s", name, level.c_str());
             }
         }
-        return false;
+        if (found == g_newFiles.end()) {
+            if (g_logLookups && IsLevelFile(name)) {
+                rfa::Log("Level load: file not found in new files: %s", name);
+            }
+            for (const auto& [newKey, newFile] : g_newFiles) {
+                const std::string stem = newKey.substr(newKey.find_last_of('\\') + 1, newKey.find_last_of('.') - newKey.find_last_of('\\') - 1);
+                if (stem.size() >= 3 && key.find(stem) != std::string::npos) {
+                    RFA_LOG_FIRST(100, "The game looked for %s and found it nowhere (no new file is called that)", name);
+                    break;
+                }
+            }
+            return false;
+        }
+        file = &found->second;
     }
     result->source = -1;
     result->pathType = -1;
     result->name[0] = '\0';
     result->size = 0;
     result->archiveEntry = nullptr;
-    const bool ok = rfa::game::FindLooseFile(result, file->second.ansiPath.c_str(), 0);
-    if (InterlockedExchange(&file->second.used, 1) == 0)
+    const bool ok = rfa::game::FindLooseFile(result, file->ansiPath.c_str(), 0);
+    if (InterlockedExchange(&file->used, 1) == 0)
         rfa::Log(ok ? "Using new file %s (the game asked for %s)" : "New file %s could not be opened (the game asked for %s)",
-                 file->second.relative.c_str(), name);
+                 file->relative.c_str(), name);
     return ok;
 }
 
@@ -720,10 +786,44 @@ inline const auto KeepString =
 inline const auto NameChecksum =
     rfa::game::At<DWORD*(__fastcall*)(DWORD* out, void* unused, const char* text, DWORD seed, int maxLength)>(0xC8BEB0);
 
+// More than five maps: the reader's `cmp [12F3A74h],5` (its 5 at 0x50E78F) made 32, the list's own
+// limit (checked just before, at 0x50E77B; the "WC mempool" behind it holds 32), and the shipped values
+// it puts back over each map by its place (0x50EBF6 to 0x50EC54: the name, as above, the round times
+// 60000 and 15000 ms, the scoreboard as its place, the damage-to-score multiplier from five constants,
+// read past the fifth for a sixth map) jumped over (to 0x50EC57): every map is as its table says. The
+// game's table has those very values for its five, so they are as they were. A map the game reads from
+// its base table starts locked (+0x2D) until the map before it unlocks it (its unlocks_map, once that
+// map's par score is beaten); a map past the five has none, so it is opened once the table is read.
+constexpr DWORD kRuinMapLimitAt = 0x50E78F, kRuinShippedValuesAt = 0x50EBF6;
+constexpr int kRuinShippedMaps = 5, kRuinMostMaps = 32;
+bool g_moreRuinMaps = false;
+
+void AllowMoreRuinMaps() {
+    static const BYTE limit[] = {0x83, 0x3D, 0x74, 0x3A, 0x2F, 0x01, 0x05, 0x7C};  // cmp dword ptr [12F3A74h],5 / jl
+    static const BYTE shipped[] = {0x8B, 0x4D, 0xC4, 0x8B, 0x15, 0x74};          // mov ecx,[ebp-3Ch] / mov edx,[12F3A74h]
+    if (memcmp(reinterpret_cast<const void*>(kRuinMapLimitAt - 6), limit, sizeof(limit)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kRuinShippedValuesAt), shipped, sizeof(shipped)) != 0) {
+        rfa::Log("The Ruin map reader isn't as expected; Ruin keeps its five maps");
+        return;
+    }
+    const BYTE most = kRuinMostMaps;
+    const BYTE jump[] = {0xEB, static_cast<BYTE>(0x50EC57 - (kRuinShippedValuesAt + 2))};  // jmp short 0x50EC57
+    g_moreRuinMaps = rfa::PatchCode(reinterpret_cast<void*>(kRuinMapLimitAt), &most, 1) &&
+                     rfa::PatchCode(reinterpret_cast<void*>(kRuinShippedValuesAt), jump, sizeof(jump));
+    rfa::Log(g_moreRuinMaps ? "Ruin takes up to %d maps from wrecking_crew_maps.xtbl, each as the table gives it"
+                            : "Could not change the Ruin map reader; Ruin keeps its five maps", kRuinMostMaps);
+}
+
 void __cdecl ReadRuinMapsHook(void* table, int dlc) {
     const int first = g_ruinMapCount;
     g_readRuinMaps(table, dlc);
     if (!table) return;
+    if (g_moreRuinMaps)
+        for (int i = (first > kRuinShippedMaps ? first : kRuinShippedMaps); i < g_ruinMapCount && i < kRuinMostMaps; ++i)
+            if (BYTE* map = reinterpret_cast<BYTE*>(g_ruinMaps[i])) {
+                map[0x2D] = 0;
+                rfa::Log("Ruin map %d: %s, unlocked", i, g_ruinMaps[i]->fileName ? g_ruinMaps[i]->fileName : "(no name)");
+            }
     int index = first;
     std::string leftOut;
     for (void* entry = FirstEntry(table, "wc_map_list"); entry; entry = NextEntry(table, entry, "wc_map_list"), ++index) {
@@ -740,7 +840,7 @@ void __cdecl ReadRuinMapsHook(void* table, int dlc) {
         NameChecksum(&map->fileNameChecksum, nullptr, fileName, 0, -1);
     }
     if (!leftOut.empty())
-        rfa::Log("The game reads at most 5 Ruin maps; left out of its list: %s", leftOut.c_str());
+        rfa::Log("The game reads at most %d Ruin maps; left out of its list: %s", g_moreRuinMaps ? kRuinMostMaps : kRuinShippedMaps, leftOut.c_str());
 }
 
 // With LogLookups=1, the Ruin map list is logged too when a Ruin match begins
@@ -762,25 +862,30 @@ void __cdecl BeginRuinMatchHook() {
 
 bool __cdecl FindFileHook(FileFindResult* result, const char* name, bool flag) {
     const bool found = g_findFile(result, name, flag);
-    if (g_logLookups && name && IsLevelFile(name))
-        RFA_LOG_FIRST(4000, "Lookup %s: %s, %lu bytes", name,
-                      !found                 ? "not found"
+if (g_logLookups && name && IsLevelFile(name)) {
+        const char* sourceStr = !found                 ? "not found"
                       : result->source == 1 ? "in an archive"
                       : result->source == 2 ? "in a virtual folder"
                       : result->source == 0 ? "loose file"
-                                             : "found",
-                      found ? result->size : 0ul);
-    if (!found && name && !g_newFiles.empty()) return FindNewFile(result, name);
+                                             : "found";
+        rfa::Log("Level lookup: %s -> %s (%lu bytes)", name, sourceStr, found ? result->size : 0ul);
+    }
+    if (!found && name) return FindNewFile(result, name);
     if (!found || result->source != 1 || !name) return found;  // not found, or not inside an archive
 
-    auto overrides = g_overrides.find(Lower(name));
-    if (overrides == g_overrides.end() || IsLuaScript(overrides->first)) return found;
-    auto o = std::find_if(overrides->second.begin(), overrides->second.end(),
-                          [&](const Override& candidate) { return candidate.archiveSize == result->size; });
-    if (o == overrides->second.end()) {
-        RFA_LOG_FIRST(20, "Override %s not used here: the game loaded another archive's %s (%lu bytes)",
-                      overrides->second.front().relative.c_str(), name, result->size);
-        return found;
+    Override* o = nullptr;
+    {
+        SharedFiles shared;
+        auto overrides = g_overrides.find(Lower(name));
+        if (overrides == g_overrides.end() || IsLuaScript(overrides->first)) return found;
+        auto match = std::find_if(overrides->second.begin(), overrides->second.end(),
+                                  [&](const Override& candidate) { return candidate.archiveSize == result->size; });
+        if (match == overrides->second.end()) {
+            RFA_LOG_FIRST(20, "Override %s not used here: the game loaded another archive's %s (%lu bytes)",
+                          overrides->second.front().relative.c_str(), name, result->size);
+            return found;
+        }
+        o = &*match;
     }
 
     // Start the result again the way the game's FindFile does, then let the game's own loose-file
@@ -865,6 +970,23 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
         }
 }
 
+// Looks through overrides\ and edits\ again for files added since the game started (the editor asks
+// for this before it has the game load a level again or reload a table, so a zone or table saved
+// for the first time while the game runs is used at once). How many new files it saw. A file
+// already known is read from the disk each time the game opens it, so a changed one needs no rescan.
+bool g_overridesOn = false;
+extern "C" __declspec(dllexport) int __cdecl RFALoader_RescanOverrides() {
+    if (!g_overridesOn) return 0;
+    AcquireSRWLockExclusive(&g_filesLock);
+    const size_t before = g_seenFiles.size();
+    FindOverrides(rfa::RootDir() + L"\\overrides", L"");
+    FindEdits(rfa::RootDir() + L"\\edits", L"");
+    const int added = static_cast<int>(g_seenFiles.size() - before);
+    ReleaseSRWLockExclusive(&g_filesLock);
+    if (added) rfa::Log("Overrides looked through again: %d new file(s)", added);
+    return added;
+}
+
 void InstallOverrides() {
     using namespace rfa::game;
     // "ScriptOverrides" is the setting's old name, from when only Lua scripts could be overridden.
@@ -872,6 +994,7 @@ void InstallOverrides() {
         rfa::Log("Overrides: off ([Loader] Overrides=0)");
         return;
     }
+    g_overridesOn = true;
     FindOverrides(rfa::RootDir() + L"\\overrides", L"");
     FindEdits(rfa::RootDir() + L"\\edits", L"");  // changes to the archives the mod adds (the Guerrilla world's)
     g_logLookups = rfa::IniInt(L"Loader", L"LogLookups", 0) != 0;
@@ -888,6 +1011,7 @@ void InstallOverrides() {
     g_readRuinMaps = reinterpret_cast<ReadRuinMapsFn>(
         rfa::HookFunction(kReadRuinMaps, kReadRuinMapsPrologue, reinterpret_cast<void*>(&ReadRuinMapsHook)));
     if (!g_readRuinMaps) rfa::Log("Could not hook the Ruin map reader; Ruin starts maps by their place in its table");
+    else AllowMoreRuinMaps();
     const auto newFiles = std::count_if(g_newFiles.begin(), g_newFiles.end(),
                                         [](const auto& file) { return file.first.find('\\') != std::string::npos; });
     rfa::Log("Overrides: %u in overrides\\, and %u new files; Lua scripts %s, other files %s",

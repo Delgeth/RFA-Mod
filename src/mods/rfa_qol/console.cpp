@@ -65,6 +65,7 @@
 #include <ctime>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -1501,6 +1502,7 @@ constexpr wchar_t kSharedName[] = L"Local\\RFAModEditorLink";
 constexpr uint32_t kSharedMagic = 0x4C414652;  // "RFAL"
 
 SharedView* g_shared = nullptr;
+bool g_linkFolderThere = false;  // bin\link is there (the editor's link is set up)
 DWORD g_lastPicked = 0;
 ULONGLONG g_lastCheck = 0;
 
@@ -1538,7 +1540,16 @@ void ShowEditor() {
     }
 }
 
+bool RunEditorEdit(const std::string& line);  // the editor's live edits (below)
+
 // Runs the commands the editor sent, if any, and deletes them.
+// The renderer's lock (rl_is_locked, 0xD2EC00): set while a frame is drawn on the render thread (the
+// main loop's handshake, 0x521D70: unlocked by 0x76AA50 as the game's update starts, locked again by
+// 0x76AA80). Placing or making draw instances (and objects with models) while it is set fails the
+// game's "rl_is_locked() == false" check and leaves the scene half changed, so the editor's commands
+// run only while it isn't: from the frame hook when it isn't, and right after 0x76AA50 unlocks it.
+bool RenderLocked() { return *reinterpret_cast<volatile BYTE*>(0x2E7A6A9) != 0; }
+
 void RunEditorCommands() {
     const std::wstring path = LinkFolder() + L"\\to_game.txt";
     WIN32_FILE_ATTRIBUTE_DATA info;
@@ -1566,6 +1577,7 @@ void RunEditorCommands() {
     }
     for (const std::string& line : lines) {
         if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (RunEditorEdit(line)) continue;
         if (line.size() > kMaxCommandLength) {
             rfa::Log("Editor link: a command longer than %u characters was skipped", static_cast<unsigned>(kMaxCommandLength));
             continue;
@@ -1601,6 +1613,1315 @@ struct GameObject {
     float position[3];
     float rotation[9];
 };
+
+// The editor's live edits (its Live button): lines among its commands that aren't the console's.
+//   editor_move <handle> <x y z> <9 numbers>   moves and turns the object (rotation rows right, up,
+//       forward) with the object's own "set position and rotation" (slot 10 of its functions, at
+//       +0x28: thiscall, the position, the rotation, 1), as the mission scripts' object_set_position
+//       (0x9203B0) does;
+//   editor_chunk <asset list> <container>      loads a chunk the level hasn't (below);
+//   editor_reload                              loads the level again and puts the player back (below);
+//   editor_rescan                              has the loader look for new files in overrides\ and edits\;
+//   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
+//   editor_create <handle>                     makes an object the game hasn't, from its block as a
+//       zone file holds it (header, then properties), which the editor put in
+//       bin\link\create_<HANDLE>.bin: as the game's own layer loader (0x6D5D30) makes a layer's
+//       objects, first a stub for it (0x6D56E0, thiscall on the world: where the block's address
+//       is), then the object from stub and block (0x6D5770, thiscall on the world: how many, the
+//       stubs, the blocks). The block is kept: the game may point into it.
+// An object the game hasn't now (not loaded, broken up, or only in the editor yet) is passed over.
+using SetPlaceFn = void(__fastcall*)(void* object, void* unused, const float* position, const float* rotation, int now);
+auto const RemoveObject = reinterpret_cast<int(__fastcall*)(void* world, void* unused, DWORD handle, int flag)>(0x6D56A0);
+
+auto const MakeStub = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, BYTE** block)>(0x6D56E0);
+auto const MakeFromStubs = reinterpret_cast<void(__fastcall*)(void* world, void* unused, int count, BYTE** stubs, BYTE** blocks)>(0x6D5770);
+constexpr DWORD kStubNumber = 0x74;  // a stub's place in the lists it is made from (a short)
+constexpr size_t kBlockHeader = 0x38, kBlockHandle = 4;
+
+// A spawn node made live puts its squad, vehicle or exo down at once, as the mission scripts'
+// spawn functions do (a node of the level's own does it when its zone streams in, so one made as the
+// game runs would never): sf_spawn_squad (0x94F710) finds the node (0x425AE0, thiscall on the world:
+// the handle) and spawns its squad (0x800040, thiscall on the node: -1, 0; the squad's handle or -1);
+// sf_spawn_exo (0x94F520): 0x92DE90, then 0x8021C0 (-1); sf_of_spawn_vehicle (0x943510): 0x4B32F0,
+// then 0x7FE5A0 (-1). Each then sets the flag 0x7EE790 sets. What a node spawned is kept by the node's
+// handle, so taking the node away (editor_remove: the editor does that to make it again with new
+// settings, too) takes it away as well.
+auto const FindSquadNode = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x425AE0);
+auto const SpawnSquadFromNode = reinterpret_cast<DWORD(__fastcall*)(BYTE* node, void* unused, int a, int b)>(0x800040);
+auto const FindExoNode = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x92DE90);
+auto const SpawnExoFromNode = reinterpret_cast<DWORD(__fastcall*)(BYTE* node, void* unused, int a)>(0x8021C0);
+auto const FindVehicleNode = reinterpret_cast<BYTE*(__fastcall*)(void* world, void* unused, DWORD handle)>(0x4B32F0);
+auto const SpawnVehicleFromNode = reinterpret_cast<DWORD(__fastcall*)(BYTE* node, void* unused, int a)>(0x7FE5A0);
+auto const NoteSpawned = reinterpret_cast<void(__cdecl*)()>(0x7EE790);
+std::map<DWORD, DWORD> g_nodeSpawned;  // a live-made node's handle -> what it spawned
+
+// A zone class name's hash, as zone files keep it (the editor's NameHashes.ClassHash).
+constexpr DWORD ClassHash(const char* name) {
+    DWORD hash = 0;
+    for (; *name; ++name) {
+        const char c = *name >= 'A' && *name <= 'Z' ? static_cast<char>(*name - 'A' + 'a') : *name;
+        hash = ((hash << 6) | (hash >> 26)) ^ static_cast<unsigned char>(c);
+    }
+    return hash;
+}
+
+void SpawnFromNode(DWORD handle, DWORD classHash) {
+    void* world = reinterpret_cast<void*>(kObjectList);
+    const char* what = nullptr;
+    DWORD spawned = 0xFFFFFFFF;
+    if (classHash == ClassHash("object_squad_spawn_node")) {
+        what = "squad";
+        if (BYTE* node = FindSquadNode(world, nullptr, handle)) spawned = SpawnSquadFromNode(node, nullptr, -1, 0);
+    } else if (classHash == ClassHash("object_exo_spawn_node")) {
+        what = "exo";
+        if (BYTE* node = FindExoNode(world, nullptr, handle)) spawned = SpawnExoFromNode(node, nullptr, -1);
+    } else if (classHash == ClassHash("object_vehicle_spawn_node")) {
+        what = "vehicle";
+        if (BYTE* node = FindVehicleNode(world, nullptr, handle)) spawned = SpawnVehicleFromNode(node, nullptr, -1);
+    }
+    if (!what) return;
+    if (spawned == 0xFFFFFFFF) {
+        rfa::Log("Editor link: node 0x%08X couldn't spawn its %s (not in its spawn resources, or the game has no room)", static_cast<unsigned>(handle), what);
+        return;
+    }
+    NoteSpawned();
+    g_nodeSpawned[handle] = spawned;
+    rfa::Log("Editor link: node 0x%08X spawned its %s (0x%08X)", static_cast<unsigned>(handle), what, static_cast<unsigned>(spawned));
+}
+
+void MakeEditorObject(DWORD handle) {
+    void* world = reinterpret_cast<void*>(kObjectList);
+    wchar_t name[40];
+    swprintf_s(name, L"\\create_%08X.bin", static_cast<unsigned>(handle));
+    const std::wstring path = LinkFolder() + name;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file) {
+        rfa::Log("Editor link: no block for object 0x%08X (%ls)", static_cast<unsigned>(handle), path.c_str());
+        return;
+    }
+    fseek(file, 0, SEEK_END);
+    const long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    BYTE* block = size >= static_cast<long>(kBlockHeader) && size <= 0xFFFF ? static_cast<BYTE*>(_aligned_malloc(size + 16, 16)) : nullptr;
+    const bool read = block && fread(block, 1, size, file) == static_cast<size_t>(size);
+    fclose(file);
+    DeleteFileW(path.c_str());
+    if (!read || *reinterpret_cast<DWORD*>(block + kBlockHandle) != handle) {
+        rfa::Log("Editor link: the block for object 0x%08X isn't one (%ld bytes)", static_cast<unsigned>(handle), size);
+        return;
+    }
+    if (FindObject(world, nullptr, handle)) {
+        rfa::Log("Editor link: the game already has an object 0x%08X; not made again", static_cast<unsigned>(handle));
+        return;
+    }
+    BYTE* blocks[1] = {block};
+    BYTE* stubs[1] = {MakeStub(world, nullptr, &blocks[0])};
+    if (!stubs[0]) {
+        rfa::Log("Editor link: the game made no stub for object 0x%08X (a class it doesn't make from zones?)", static_cast<unsigned>(handle));
+        return;
+    }
+    *reinterpret_cast<WORD*>(stubs[0] + kStubNumber) = 0;
+    MakeFromStubs(world, nullptr, 1, stubs, blocks);
+    const bool made = stubs[0] && FindObject(world, nullptr, handle);
+    rfa::Log(made ? "Editor link: made object 0x%08X" : "Editor link: the game couldn't make object 0x%08X from its block", static_cast<unsigned>(handle));
+    if (made) SpawnFromNode(handle, *reinterpret_cast<DWORD*>(block));
+}
+
+// editor_reload: the level is loaded again (the console's reload_level), and the player then put
+// back where they stood (warp x y z), so a change that needs the level loaded again (new models,
+// the ground, level geometry) doesn't also send you back to the level's start. The player (0x8B92D0)
+// is gone or another while the level loads; once there is one again that has stayed put for 0.3
+// seconds, the level is taken to be up.
+auto const ThePlayer = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
+struct ReloadReturn {
+    bool waiting = false;
+    float position[3]{};
+    BYTE* playerThen = nullptr;
+    bool sawLoading = false;
+    int checks = 0, steady = 0;
+    float last[3]{};
+} g_reloadReturn;
+
+void StartEditorReload() {
+    BYTE* player = ThePlayer();
+    g_reloadReturn = ReloadReturn{};
+    if (player) {
+        memcpy(g_reloadReturn.position, player + 4, sizeof(g_reloadReturn.position));
+        g_reloadReturn.playerThen = player;
+        g_reloadReturn.waiting = true;
+    }
+    rfa::Log("Editor link: loading the level again%s", player ? "; the player goes back to where they stand" : "");
+    RunConsoleCommand("reload_level");
+}
+
+// Ten times a second while a reload's return is waiting.
+void ContinueEditorReload() {
+    ReloadReturn& r = g_reloadReturn;
+    if (!r.waiting) return;
+    if (++r.checks > 1200) {  // two minutes: given up
+        r.waiting = false;
+        return;
+    }
+    BYTE* player = ThePlayer();
+    if (!player || player != r.playerThen) r.sawLoading = true;
+    if (!player || (!r.sawLoading && r.checks < 50)) {  // (no sign of loading after 5 seconds: it was quick)
+        r.steady = 0;
+        return;
+    }
+    float now[3];
+    memcpy(now, player + 4, sizeof(now));
+    r.steady = memcmp(now, r.last, sizeof(now)) == 0 || r.steady == 0 ? r.steady + 1 : 1;
+    memcpy(r.last, now, sizeof(now));
+    if (r.steady < 3) return;  // (still for 0.3 seconds)
+    r.waiting = false;
+    rfa::Log("Editor link: the level is up again; the player goes back to %.1f, %.1f, %.1f", r.position[0], r.position[1], r.position[2]);
+    RunConsoleCommand("warp %.3f %.3f %.3f", r.position[0], r.position[1], r.position[2]);
+}
+
+// editor_chunk <asset list> <container>: loads a chunk the level hasn't, so objects of it can be made
+// at once (Live). The editor put a container holding the chunk's model and textures, and an asset
+// list naming just that container, in overrides\live\ (new files, found by the loader once it has
+// looked again: editor_rescan comes first). The asset list is read as the chunk system reads
+// chunk_containers.asm_pc at the game's start (0x90A3A0, with the chunk system's pools, see 0x6AA9F0),
+// which registers the container with the streaming system; then it is found by name (0x90A290) and
+// loaded at once, as the game loads its preload chunks (0x908FC0: true once loaded). Loading the
+// container's model makes the chunk known to the game (the chunk primitive type does that), so
+// objects of it can be made. The result goes to link\chunk_<container>.txt for the editor.
+auto const ReadAssetList = reinterpret_cast<bool(__cdecl*)(const char* name, void* tempPool, void* pool, int, int, int)>(0x90A3A0);
+auto const FindContainer = reinterpret_cast<void*(__cdecl*)(const char* name)>(0x90A290);
+auto const LoadContainerNow = reinterpret_cast<bool(__cdecl*)(void* container)>(0x908FC0);
+constexpr DWORD kChunkTempPool = 0x26AF908, kChunkPool = 0x26AEE78;
+
+// Each step on its own, guarded: a fault in the game's code is logged with the step, not a crash
+// (unless another mod's exception handler gets to it first).
+int GuardedReadAssetList(const char* name) {
+    __try {
+        return ReadAssetList(name, reinterpret_cast<void*>(kChunkTempPool), reinterpret_cast<void*>(kChunkPool), 0, 0, 0) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
+    }
+}
+void* GuardedFindContainer(const char* name, bool* faulted) {
+    __try {
+        return FindContainer(name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *faulted = true;
+        return nullptr;
+    }
+}
+int GuardedLoadContainer(void* container) {
+    __try {
+        return LoadContainerNow(container) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
+    }
+}
+
+void LoadEditorChunk(const std::string& assetList, const std::string& container) {
+    bool faulted = false;
+    rfa::Log("Editor link: chunk container %s: looking it up", container.c_str());
+    void* found = GuardedFindContainer(container.c_str(), &faulted);
+    if (!found && !faulted) {
+        rfa::Log("Editor link: chunk container %s: reading the asset list %s", container.c_str(), assetList.c_str());
+        const int read = GuardedReadAssetList(assetList.c_str());
+        if (read < 0) rfa::Log("Editor link: reading the asset list FAULTED (exception %08X)", static_cast<unsigned>(-read) | 0x80000000u);
+        found = read < 0 ? nullptr : GuardedFindContainer(container.c_str(), &faulted);
+        if (!found) rfa::Log("Editor link: the asset list %s was %s, but has no container %s", assetList.c_str(), read > 0 ? "read" : "not read", container.c_str());
+    }
+    int load = 0;
+    if (found) {
+        rfa::Log("Editor link: chunk container %s: loading it (container record %p)", container.c_str(), found);
+        load = GuardedLoadContainer(found);
+        if (load < 0) rfa::Log("Editor link: loading the container FAULTED (exception %08X)", static_cast<unsigned>(-load) | 0x80000000u);
+    }
+    const bool loaded = load > 0;
+    rfa::Log("Editor link: chunk container %s %s", container.c_str(), loaded ? "loaded" : "NOT loaded");
+    const std::wstring answer = LinkFolder() + L"\\chunk_" + std::wstring(container.begin(), container.end()) + L".txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, answer.c_str(), L"w") == 0 && file) {
+        fputs(loaded ? "loaded" : "failed", file);
+        fclose(file);
+    }
+}
+
+// editor_chunk_files <group> <file>...: loads a chunk the level hasn't (Live), from its files, which the
+// editor put loose in overrides\live\ (found by name once the loader has looked again: editor_rescan
+// comes first). The chunk's group (<chunk>.rfgchunkx, .rfgstitchx for level geometry: the container
+// the game looks for when it makes an object of the chunk) is made as the game makes its preload
+// chunks' at start-up (0x6AAC00): started (0x909670: the name, the chunk pool, type 15, preload),
+// its model added (0x9097A0: the file, the primitive type's name, allocator 2) and its textures
+// ("chunk_texture", allocator 1), finished (0x909E60) and loaded at once (0x908FC0). (Reading an asset
+// list instead, 0x90A3A0, faults: its temporary allocator is only open while the game starts.) A file
+// the game can't find is fatal there, so each is looked for first (0xC92010).
+constexpr bool g_makeChunkGroups = true;  // (see LoadEditorChunkFiles)
+
+// The allocator a group's records (its container, names and primitive records) come from. The game's
+// chunk pool (0x26AEE78) is its start-up pool, full once the game runs: asking it for more stalls the
+// game and fails. The streaming system only asks its allocator (an object whose first word is its
+// function table) "has a mark?" (+0x0C), for a mark (+0x5C, only if so) and for memory (+0x38:
+// size, alignment, 0, 0): this one answers from the C heap. A group is never let go, nor its memory.
+void* __fastcall LiveAllocate(void*, void*, unsigned size, unsigned alignment, int, int) {
+    if (alignment < 4) alignment = 4;
+    void* memory = _aligned_malloc(size ? size : 1, alignment);
+    if (memory) memset(memory, 0, size);
+    return memory;
+}
+bool __fastcall LiveHasMark(void*, void*) { return false; }
+int __fastcall LiveMark(void*, void*) { return 0; }
+void __fastcall LiveRelease(void*, void*, int, int, int) {}  // (+0x60: back to a mark; nothing kept)
+struct LiveAllocator {
+    void** table;
+};
+void* g_liveAllocatorTable[48];
+LiveAllocator g_liveAllocator{g_liveAllocatorTable};
+void* LiveGroupAllocator() {
+    if (!g_liveAllocatorTable[0]) {
+        for (void*& slot : g_liveAllocatorTable) slot = reinterpret_cast<void*>(&LiveMark);
+        g_liveAllocatorTable[0x0C / 4] = reinterpret_cast<void*>(&LiveHasMark);
+        g_liveAllocatorTable[0x18 / 4] = reinterpret_cast<void*>(&LiveHasMark);  // (has a parent allocator? no: +0x80 isn't asked)
+        g_liveAllocatorTable[0x38 / 4] = reinterpret_cast<void*>(&LiveAllocate);
+        g_liveAllocatorTable[0x60 / 4] = reinterpret_cast<void*>(&LiveRelease);
+    }
+    return &g_liveAllocator;
+}
+auto const StreamContainerStart = reinterpret_cast<bool(__cdecl*)(const char* name, void* pool, BYTE type, BYTE notPreload, BYTE)>(0x909670);
+auto const StreamAddPrimitive = reinterpret_cast<void*(__cdecl*)(const char* file, const char* typeName, BYTE allocator, char split, int, BYTE flags, int)>(0x9097A0);
+auto const StreamContainerFinish = reinterpret_cast<void*(__cdecl*)(BYTE, BYTE)>(0x909E60);
+auto const GameFileExists = reinterpret_cast<bool(__cdecl*)(const char* name)>(0xC92010);
+constexpr DWORD kPrimitiveTypeNames = 0x10FE40C;  // const char*[]: 3 stitch, 4 chunk, 5 chunk_texture
+
+int GuardedFileExists(const char* name) {
+    __try {
+        return GameFileExists(name) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// 1 if the group was made, else a negative step: -1 start, -2 a file, -3 finish.
+int GuardedMakeChunkGroup(const char* group, const std::vector<const char*>& files, int* failedFile) {
+    bool started = false;
+    __try {
+        // As a level's chunk is listed when the game loads a level from loose files (0x6AE620): a group of
+        // type 14 (not preloaded), the model in the chunk allocator (2), its textures in the texture one (1).
+        if (!StreamContainerStart(group, LiveGroupAllocator(), 14, 1, 0)) return -1;
+        started = true;
+        const char* const* types = reinterpret_cast<const char* const*>(kPrimitiveTypeNames);
+        for (size_t i = 0; i < files.size(); i++) {
+            *failedFile = static_cast<int>(i);
+            const char* dot = strrchr(files[i], '.');
+            if (!dot) continue;
+            if (_stricmp(dot, ".cchk_pc") == 0) StreamAddPrimitive(files[i], types[4], 2, 1, 0, 0, 0);
+            else if (_stricmp(dot, ".cstch_pc") == 0) StreamAddPrimitive(files[i], types[3], 2, 1, 0, 0, 0);
+            else if (_stricmp(dot, ".cvbm_pc") == 0 || _stricmp(dot, ".cpeg_pc") == 0) StreamAddPrimitive(files[i], types[5], 1, 1, 0, 0, 0);
+        }
+        *failedFile = -1;
+        started = false;
+        return StreamContainerFinish(0, 0) ? 1 : -3;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (started) {
+            __try {
+                StreamContainerFinish(0, 0);  // (the streaming system's group being made is closed)
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        return *failedFile >= 0 ? -2 : -1;
+    }
+}
+
+auto const RequestContainerLoad = reinterpret_cast<bool(__cdecl*)(void* container)>(0x908F10);
+auto const ContainerState = reinterpret_cast<int(__cdecl*)(void* container)>(0x909210);  // 3 loaded, 4 failed
+struct ChunkLoading {
+    std::string group;
+    void* container;
+    ULONGLONG since;
+    bool onDemand = false;  // a group loaded when needed (flag 0x100): put back so once loaded
+};
+auto const SetOnDemand = reinterpret_cast<bool(__cdecl*)(void* container, bool onDemand)>(0x908480);
+int GuardedSetOnDemand(void* container, bool onDemand) {
+    __try {
+        SetOnDemand(container, onDemand);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+std::vector<ChunkLoading> g_chunksLoading;
+
+int GuardedRequestLoad(void* container) {
+    __try {
+        return RequestContainerLoad(container) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+int GuardedContainerState(void* container) {
+    __try {
+        return ContainerState(container);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 4;
+    }
+}
+
+void AnswerChunk(const std::string& group, bool loaded) {
+    rfa::Log("Editor link: chunk %s %s", group.c_str(), loaded ? "loaded" : "NOT loaded");
+    const std::wstring path = LinkFolder() + L"\\chunk_" + std::wstring(group.begin(), group.end()) + L".txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+        fputs(loaded ? "loaded" : "failed", file);
+        fclose(file);
+    }
+}
+
+// Whether the game's files are locked for reading now (cf_open's flag, 0x290A67D: see below).
+bool CfileLocked() { return *reinterpret_cast<volatile BYTE*>(0x290A67D) != 0; }
+auto const SetCfileLocked = reinterpret_cast<void(__cdecl*)(bool locked)>(0xC96450);
+struct WaitingGroup { std::string line; ULONGLONG since; };
+std::vector<WaitingGroup> g_groupsWaiting;
+void LoadEditorChunkGroup(const std::string& line);
+
+// Every frame: chunks asked to load that have (or failed, or are taking more than 30 seconds) are
+// answered.
+void WatchEditorChunks() {
+    // Chunk groups waiting for the game's files to be free (LoadEditorChunkGroup): one at a time.
+    if (!g_groupsWaiting.empty()) {
+        WaitingGroup next = g_groupsWaiting.front();
+        if (!CfileLocked()) {
+            g_groupsWaiting.erase(g_groupsWaiting.begin());
+            LoadEditorChunkGroup(next.line);
+        } else if (GetTickCount64() - next.since > 30000) {
+            g_groupsWaiting.erase(g_groupsWaiting.begin());
+            char group[128] = {};
+            sscanf_s(next.line.c_str() + 19, "%127s", group, static_cast<unsigned>(sizeof(group)));
+            rfa::Log("Editor link: chunk %s: the game's files stayed locked for 30 seconds", group);
+            AnswerChunk(group, false);
+        }
+    }
+    for (auto it = g_chunksLoading.begin(); it != g_chunksLoading.end();) {
+        const int state = GuardedContainerState(it->container);
+        const bool late = GetTickCount64() - it->since > 30000;
+        if (state != 3 && state != 4 && !late) {
+            ++it;
+            continue;
+        }
+        if (late && state != 3) rfa::Log("Editor link: chunk %s: still not loaded after 30 seconds (state %d)", it->group.c_str(), state);
+        if (it->onDemand && state == 3) GuardedSetOnDemand(it->container, true);
+        AnswerChunk(it->group, state == 3);
+        it = g_chunksLoading.erase(it);
+    }
+}
+
+// editor_chunk_group <group> <asset list>: loads a chunk the level hasn't (Live). The editor put in
+// overrides\live\ (found by name once the loader has looked again: editor_rescan comes first) the
+// chunk's files packed in a container of their own and an asset list naming it and the chunk's group
+// (<chunk>.rfgchunkx, or .rfgstitchx), as the Guerrilla world lists its own. If the game hasn't a group
+// of that name, the list is read into its container records (0x90A3A0) with the allocator above for
+// both its temporary memory and its records (the game's own are its start-up ones, closed or full once
+// it runs). The group is then loaded as the game loads one (0x908FC0) but without waiting: a group
+// loaded on demand (flag 0x100) is made loadable (0x908480, 0), asked to load (0x908F10), watched each
+// frame (WatchEditorChunks), and put back once loaded.
+int GuardedReadOwnAssetList(const char* name) {
+    __try {
+        return ReadAssetList(name, LiveGroupAllocator(), LiveGroupAllocator(), 0, 0, 0) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
+    }
+}
+
+void LoadEditorChunkGroup(const std::string& line) {
+    char groupText[128] = {}, listText[128] = {};
+    if (sscanf_s(line.c_str() + 19, "%127s %127s", groupText, static_cast<unsigned>(sizeof(groupText)), listText,
+                 static_cast<unsigned>(sizeof(listText))) != 2) {
+        rfa::Log("Editor link: editor_chunk_group needs a group and an asset list");
+        return;
+    }
+    const std::string group = groupText;
+    bool faulted = false;
+    void* found = GuardedFindContainer(groupText, &faulted);
+    if (!found && !faulted) {
+        const bool lockedForCheck = CfileLocked();
+        if (lockedForCheck) SetCfileLocked(false);
+        const int exists = GuardedFileExists(listText);
+        if (lockedForCheck) SetCfileLocked(true);
+        if (exists <= 0) {
+            rfa::Log("Editor link: chunk %s: the game can't find the asset list %s (is the loader up to date?)", groupText, listText);
+            AnswerChunk(group, false);
+            return;
+        }
+        rfa::Log("Editor link: chunk %s: reading its asset list %s", groupText, listText);
+        // As the game itself reads a file while it runs (0x501C30): its "no reading now" flag (cf_open,
+        // 0xC91470, stops at "Someone is accessing cfile synchronously, but it is locked!" while it is
+        // set, part way, after which the game couldn't find a level's files) cleared for the read and
+        // set back after.
+        const bool locked = CfileLocked();
+        if (locked) SetCfileLocked(false);
+        const int read = GuardedReadOwnAssetList(listText);
+        if (locked) SetCfileLocked(true);
+        if (read <= 0) {
+            rfa::Log(read < 0 ? "Editor link: chunk %s: reading its asset list FAULTED (exception %08X)" : "Editor link: chunk %s: its asset list wasn't read%s",
+                     groupText, read < 0 ? static_cast<unsigned>(-read) | 0x80000000u : 0u);
+            AnswerChunk(group, false);
+            return;
+        }
+        found = GuardedFindContainer(groupText, &faulted);
+        if (!found) {
+            rfa::Log("Editor link: chunk %s: its asset list was read, but has no such group", groupText);
+            AnswerChunk(group, false);
+            return;
+        }
+    }
+    if (!found) {
+        AnswerChunk(group, false);
+        return;
+    }
+    const bool onDemand = (*reinterpret_cast<WORD*>(static_cast<BYTE*>(found) + 0x22) & 0x100) != 0;
+    if (onDemand) GuardedSetOnDemand(found, false);
+    if (GuardedRequestLoad(found) <= 0) {
+        if (onDemand) GuardedSetOnDemand(found, true);
+        AnswerChunk(group, false);
+        return;
+    }
+    rfa::Log("Editor link: chunk %s: loading", groupText);
+    g_chunksLoading.push_back({group, found, GetTickCount64(), onDemand});
+}
+
+void LoadEditorChunkFiles(const std::string& line) {
+    std::vector<std::string> words;
+    for (size_t at = 19; at < line.size();) {
+        const size_t end = line.find(' ', at);
+        const std::string word = line.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (!word.empty()) words.push_back(word);
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    if (words.size() < 2) {
+        rfa::Log("Editor link: editor_chunk_files needs a group name and the chunk's files");
+        return;
+    }
+    const std::string group = words[0];
+    auto reply = [&](bool loaded) { AnswerChunk(group, loaded); };
+    bool faulted = false;
+    void* found = GuardedFindContainer(group.c_str(), &faulted);
+    if (!found && !faulted && !g_makeChunkGroups) {
+        // Making a group the game's asset lists don't name stalls the game for most of a minute and
+        // then fails (its container pool is full once the game has started): not tried.
+        rfa::Log("Editor link: chunk %s: the game's asset lists have no group of that name (a chunk from the Guerrilla world or "
+                 "another archive the game hasn't loaded); it shows after the level is saved and loaded again", group.c_str());
+        reply(false);
+        return;
+    }
+    if (!found && !faulted) {
+        // The names stay with the streaming system: kept for good.
+        std::vector<const char*> files;
+        for (size_t i = 1; i < words.size(); i++) {
+            const char* kept = _strdup(words[i].c_str());
+            if (!kept) return;
+            if (GuardedFileExists(kept) <= 0) {
+                rfa::Log("Editor link: chunk %s: the game can't find its file %s (is the loader up to date?)", group.c_str(), kept);
+                reply(false);
+                return;
+            }
+            files.push_back(kept);
+        }
+        const char* keptGroup = _strdup(group.c_str());
+        int failedFile = -1;
+        rfa::Log("Editor link: chunk %s: making its group of %d files", group.c_str(), static_cast<int>(files.size()));
+        const int made = keptGroup ? GuardedMakeChunkGroup(keptGroup, files, &failedFile) : -1;
+        if (made < 0) {
+            rfa::Log("Editor link: chunk %s: making its group FAILED at %s%s", group.c_str(),
+                     made == -1 ? "the start" : made == -2 ? "the file " : "the finish", made == -2 && failedFile >= 0 ? files[failedFile] : "");
+            reply(false);
+            return;
+        }
+        found = GuardedFindContainer(group.c_str(), &faulted);
+    }
+    // Asked to load (0x908F10), not loaded at once: the game streams it in over the next frames, and
+    // the answer goes to the editor once it has (WatchEditorChunks). (Loading at once, 0x908FC0,
+    // waits in a loop, for good if the streaming system can't load it.)
+    if (!found || GuardedRequestLoad(found) <= 0) {
+        reply(false);
+        return;
+    }
+    rfa::Log("Editor link: chunk %s: loading", group.c_str());
+    g_chunksLoading.push_back({group, found, GetTickCount64()});
+}
+
+// Level geometry (stitch pieces), live. A zone's stitch list stays in memory as it was read (the
+// loader, 0x6B8710, only turns its offsets into addresses); its terrain record (0x6BBA90, by the
+// zone's .cterrain_pc name) has the terrain data at +0 (the zone object it was made for at +0xA8)
+// and the list's header at +4: its first 9 words are each list's pieces, the next 9 their counts,
+// and +0x94 the combined collision's parts (0 when each piece has its own body). A piece is 100 bytes:
+// name +0, position +4, rotation +0x10 (3 rows), flags +0x34, its collision body +0x38 (when it has
+// its own), its draw instances +0x3C (one per sub-chunk, +0x40 of them).
+// When the level is made (0x6BBAC0) each piece gets its draw instances (0x76F280: an
+// rl_stitch_mesh_instance per sub-chunk, placed with the instance's set position 0x602710 and set
+// rotation 0x602740 and put in the scene, 0x768460) and, unless the level has one combined
+// collision for all its pieces, a collision body of its own (0x6BC270, from the piece's chunk
+// 0x6AC740 and the zone; the body told its piece, 0x776240). The same calls move, take away and
+// make pieces now:
+//   moved: its draw instances placed again, and its body (havok set position and rotation, 0x7765C0;
+//     a body handle is the body). With a combined collision the piece has no body: one is made for
+//     it where it now is (the combined one still has it where it was, until the level loads again);
+//   deleted: its draw instances let go (0x76F8B0), its body put far below the world;
+//   put back (undo): made again as the level made it;
+//   new (a piece added in the editor): a piece of our own, outside the level's lists, made the
+//     same way. Its chunk has to be loaded (the editor loads it first if the level hasn't).
+auto const TerrainRecord = reinterpret_cast<BYTE*(__cdecl*)(const char* cterrainName)>(0x6BBA90);
+auto const ChunkByName = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x6AC740);
+auto const MakeStitchDraw = reinterpret_cast<void(__cdecl*)(BYTE* piece)>(0x76F280);
+auto const FreeStitchDraw = reinterpret_cast<void(__cdecl*)(BYTE* piece)>(0x76F8B0);
+auto const MakeStitchBody = reinterpret_cast<DWORD(__cdecl*)(BYTE* chunk, BYTE* zone, BYTE* piece)>(0x6BC270);
+auto const BodyOf = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);
+auto const SetBodyUserData = reinterpret_cast<void(__cdecl*)(BYTE* body, int what, void* data)>(0x776240);
+auto const SetBodyPlace = reinterpret_cast<void(__cdecl*)(BYTE* body, const float* position, const float* rotation)>(0x7765C0);
+auto const SetDrawPosition = reinterpret_cast<void(__thiscall*)(void* instance, const float* position)>(0x602710);
+auto const SetDrawRotation = reinterpret_cast<void(__thiscall*)(void* instance, const float* rotation)>(0x602740);
+auto const UpdateInScene = reinterpret_cast<void(__cdecl*)(void* instance)>(0x768460);
+auto const FreeBody = reinterpret_cast<void(__cdecl*)(DWORD handle, bool, bool, bool)>(0x7755C0);  // as the level frees its pieces' (handle, 0, 1, 1)
+constexpr int kPieceSize = 100, kPiecePlace = 4, kPieceFlags = 0x34, kPieceBody = 0x38, kPieceDraws = 0x3C, kPieceDrawCount = 0x40;
+constexpr int kChunkSubChunks = 0x158;
+constexpr DWORD kNoBody = 0xFFFFFFFF;
+
+// What we did to a piece beyond its own data: a body made for it (the level's collision being
+// combined, or a new piece), and whether it is taken away now.
+struct LivePiece {
+    BYTE* record = nullptr;  // the terrain record it is of
+    DWORD body = kNoBody;
+    bool hidden = false;
+};
+std::vector<std::pair<BYTE*, LivePiece>> g_livePieces;  // by piece
+struct SpawnedPiece {
+    DWORD id = 0;
+    BYTE* piece = nullptr;
+    BYTE* record = nullptr;
+    std::string name;
+    int flags = 4;
+};
+std::vector<SpawnedPiece> g_spawnedPieces;
+
+LivePiece& LivePieceOf(BYTE* piece, BYTE* record = nullptr) {
+    for (auto& [at, live] : g_livePieces)
+        if (at == piece) return live;
+    g_livePieces.push_back({piece, LivePiece{record}});
+    return g_livePieces.back().second;
+}
+
+bool HasDraws(BYTE* piece) {
+    void** draws = *reinterpret_cast<void***>(piece + kPieceDraws);
+    const int count = *reinterpret_cast<int*>(piece + kPieceDrawCount);
+    for (int i = 0; draws && i < count; i++)
+        if (draws[i]) return true;
+    return false;
+}
+
+// The piece's draw instances where its data puts it now.
+void PlaceDraws(BYTE* piece) {
+    void** draws = *reinterpret_cast<void***>(piece + kPieceDraws);
+    const int count = *reinterpret_cast<int*>(piece + kPieceDrawCount);
+    const float* place = reinterpret_cast<float*>(piece + kPiecePlace);
+    for (int i = 0; draws && i < count; i++) {
+        if (!draws[i]) continue;
+        SetDrawPosition(draws[i], place);
+        SetDrawRotation(draws[i], place + 3);
+        UpdateInScene(draws[i]);
+    }
+}
+
+// The body the piece collides with as we can move it: its own, else one we made for it (made now
+// if `make`; the chunk's collision model is needed).
+DWORD BodyFor(BYTE* piece, BYTE* zone, bool ownBody, bool make) {
+    if (ownBody) {
+        const DWORD own = *reinterpret_cast<DWORD*>(piece + kPieceBody);
+        if (own != kNoBody && own != 0) return own;
+    }
+    LivePiece& live = LivePieceOf(piece);
+    if (live.body != kNoBody || !make || !zone) return live.body;
+    BYTE* chunk = ChunkByName(*reinterpret_cast<const char**>(piece));
+    if (!chunk) return kNoBody;
+    live.body = MakeStitchBody(chunk, zone, piece);
+    if (BYTE* body = live.body != kNoBody ? BodyOf(live.body) : nullptr) SetBodyUserData(body, 0xE, piece);
+    return live.body;
+}
+
+void PlaceBody(DWORD handle, const float* place) {
+    if (BYTE* body = handle != kNoBody ? BodyOf(handle) : nullptr) SetBodyPlace(body, place, place + 3);
+}
+
+// Puts a piece where `numbers` (position, 3 rotation rows) say, its drawing and its collision; makes
+// its drawing again if it was taken away. 1 if done, else a reason (see the callers).
+int GuardedPlacePiece(BYTE* piece, BYTE* record, BYTE* zone, bool ownBody, const float* numbers) {
+    __try {
+        memcpy(piece + kPiecePlace, numbers, 12 * sizeof(float));
+        LivePiece& live = LivePieceOf(piece, record);
+        if (!HasDraws(piece)) {
+            if (!ChunkByName(*reinterpret_cast<const char**>(piece))) return -6;
+            MakeStitchDraw(piece);  // made where the piece is
+        } else {
+            PlaceDraws(piece);
+        }
+        live.hidden = false;
+        PlaceBody(BodyFor(piece, zone, ownBody, true), numbers);
+        return HasDraws(piece) ? 1 : -7;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+int GuardedHidePiece(BYTE* piece, bool ownBody) {
+    __try {
+        FreeStitchDraw(piece);
+        LivePiece& live = LivePieceOf(piece);
+        live.hidden = true;
+        // Its collision goes as the level's take-down lets a piece's go (0x7755C0: handle, 0, 1, 1); it
+        // is made again if the piece is put back. (Put far away instead, a body outside the world's
+        // broadphase has the game take the zone down.)
+        if (ownBody) {
+            DWORD& own = *reinterpret_cast<DWORD*>(piece + kPieceBody);
+            if (own != kNoBody && own != 0) FreeBody(own, false, true, true);
+            own = kNoBody;
+        }
+        if (live.body != kNoBody) FreeBody(live.body, false, true, true);
+        live.body = kNoBody;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+// The level's own piece (list, index) of the zone whose .cterrain_pc is named, checked by its name;
+// with its list's header and the zone object. A reason (below 0) if there's none.
+int GuardedFindPiece(const char* cterrain, int list, int index, const char* name, BYTE** piece, BYTE** record, BYTE** header, BYTE** zone) {
+    __try {
+        *record = TerrainRecord(cterrain);
+        if (!*record) return -1;
+        *header = *reinterpret_cast<BYTE**>(*record + 4);
+        BYTE* data = *reinterpret_cast<BYTE**>(*record);
+        *zone = data ? *reinterpret_cast<BYTE**>(data + 0xA8) : nullptr;
+        if (!*header || list < 0 || list >= 9) return -2;
+        BYTE* pieces = *reinterpret_cast<BYTE**>(*header + list * 4);
+        const int count = *reinterpret_cast<int*>(*header + 0x24 + list * 4);
+        if (!pieces || index < 0 || index >= count) return -3;
+        *piece = pieces + index * kPieceSize;
+        const char* pieceName = *reinterpret_cast<const char**>(*piece);
+        if (!pieceName || _stricmp(pieceName, name) != 0) return -4;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+const char* const kPieceWhy[] = {"", "the game has no terrain record of that name", "no such list", "no such piece",
+                                 "the piece there has another name (the stitch list changed since the level loaded)",
+                                 "the game's code faulted", "its chunk isn't loaded in the game", "the game made no drawing for it"};
+
+bool ReadNumbers(const char* rest, float* numbers, int count) {
+    for (int i = 0; i < count; i++) {
+        char* next = nullptr;
+        numbers[i] = strtof(rest, &next);
+        if (next == rest) return false;
+        rest = next;
+    }
+    return true;
+}
+
+bool CombinedCollision(BYTE* header) {
+    __try {
+        return *reinterpret_cast<void**>(header + 0x94) != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
+void GuardedFreePiece(BYTE* piece, DWORD body, bool draws);
+
+// Terrain records whose combined collision was swapped for a body per piece (below).
+std::vector<BYTE*> g_ownBodyRecords;
+
+// A level whose pieces share one combined collision (header +0x90 parts, their bodies +0x98) can't
+// have one piece's collision moved. The first time one of its pieces is moved or taken away live,
+// its collision is made as the game makes it when it has no combined one (0x6BBAC0): the combined
+// bodies let go (their handles -1, so the take-down skips them; their shapes stay for the unloader),
+// and each piece given a body of its own (0x6BC270, told its piece, at +0x38, which the take-down
+// lets go). Pieces taken away live get none. Returns the number of bodies made, or -1 if it faulted.
+int GuardedOwnBodies(BYTE* header, BYTE* zone) {
+    int made = 0;
+    __try {
+        const int parts = *reinterpret_cast<int*>(header + 0x90);
+        DWORD* combined = *reinterpret_cast<DWORD**>(header + 0x98);
+        for (int i = 0; combined && i < parts; i++) {
+            if (combined[i] != kNoBody) FreeBody(combined[i], false, true, true);
+            combined[i] = kNoBody;
+        }
+        for (int list = 0; list < 9; list++) {
+            BYTE* pieces = *reinterpret_cast<BYTE**>(header + list * 4);
+            const int count = *reinterpret_cast<int*>(header + 0x24 + list * 4);
+            for (int i = 0; pieces && i < count; i++) {
+                BYTE* piece = pieces + i * kPieceSize;
+                DWORD& own = *reinterpret_cast<DWORD*>(piece + kPieceBody);
+                own = kNoBody;
+                if (!HasDraws(piece)) continue;  // (taken away)
+                BYTE* chunk = ChunkByName(*reinterpret_cast<const char**>(piece));
+                if (!chunk) continue;
+                own = MakeStitchBody(chunk, zone, piece);
+                if (BYTE* body = own != kNoBody ? BodyOf(own) : nullptr) {
+                    SetBodyUserData(body, 0xE, piece);
+                    made++;
+                }
+            }
+        }
+        return made;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// Whether the record's pieces each have a body of their own now (made so if they shared one).
+bool OwnBodies(BYTE* record, BYTE* header, BYTE* zone) {
+    if (!CombinedCollision(header)) return true;
+    if (std::find(g_ownBodyRecords.begin(), g_ownBodyRecords.end(), record) != g_ownBodyRecords.end()) return true;
+    // Bodies made earlier for its pieces (moved before this): let go, the pieces get their own.
+    for (auto& [piece, live] : g_livePieces) {
+        if (live.record != record || live.body == kNoBody) continue;
+        GuardedFreePiece(piece, live.body, false);
+        live.body = kNoBody;
+    }
+    const int made = GuardedOwnBodies(header, zone);
+    g_ownBodyRecords.push_back(record);
+    rfa::Log(made >= 0 ? "Editor link: the level geometry's combined collision swapped for a body per piece (%d), so pieces' collision moves with them"
+                       : "Editor link: swapping the level geometry's combined collision for a body per piece FAULTED", made);
+    return made >= 0;
+}
+
+// editor_stitch <zone>.cterrain_pc <list> <index> <piece name> x y z <9 rotation numbers>: the level's
+// own piece moved (or put back). editor_stitch_hide <zone>.cterrain_pc <list> <index> <piece name>: taken away.
+void EditorStitchPiece(const std::string& line, bool hide) {
+    const size_t skip = hide ? 19 : 14;
+    char cterrain[96] = {}, name[96] = {};
+    int list = -1, index = -1, used = 0;
+    if (sscanf_s(line.c_str() + skip, "%95s %d %d %95s%n", cterrain, static_cast<unsigned>(sizeof(cterrain)), &list, &index, name,
+                 static_cast<unsigned>(sizeof(name)), &used) != 4) {
+        rfa::Log("Editor link: %s needs a terrain name, list, index and piece name%s", hide ? "editor_stitch_hide" : "editor_stitch",
+                 hide ? "" : ", and 12 numbers");
+        return;
+    }
+    float numbers[12];
+    if (!hide && !ReadNumbers(line.c_str() + skip + used, numbers, 12)) return;
+    BYTE *piece = nullptr, *record = nullptr, *header = nullptr, *zone = nullptr;
+    int result = GuardedFindPiece(cterrain, list, index, name, &piece, &record, &header, &zone);
+    if (result > 0) {
+        const bool ownBody = OwnBodies(record, header, zone);
+        result = hide ? GuardedHidePiece(piece, ownBody) : GuardedPlacePiece(piece, record, zone, ownBody, numbers);
+    }
+    static int done = 0, problems = 0;
+    if (result > 0) {
+        if (++done <= 5) rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) %s", name, cterrain, list, index, hide ? "taken away" : "moved");
+    } else if (++problems <= 10) {
+        rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) not %s: %s", name, cterrain, list, index, hide ? "taken away" : "moved",
+                 kPieceWhy[-result]);
+    }
+}
+
+void AnswerEditor(const std::string& name, const char* answer) {
+    const std::wstring path = LinkFolder() + L"\\" + std::wstring(name.begin(), name.end()) + L".txt";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+        fputs(answer, file);
+        fclose(file);
+    }
+}
+
+// A new piece of our own: its data (as a stitch list's), an array for its draw instances, its name
+// kept. Never freed (its body knows it).
+BYTE* NewPiece(const char* name, int flags) {
+    BYTE* piece = static_cast<BYTE*>(calloc(1, kPieceSize));
+    char* kept = _strdup(name);
+    void** draws = static_cast<void**>(calloc(8, sizeof(void*)));
+    if (!piece || !kept || !draws) return nullptr;
+    *reinterpret_cast<char**>(piece) = kept;
+    piece[kPieceFlags] = static_cast<BYTE>(flags);
+    *reinterpret_cast<DWORD*>(piece + kPieceBody) = kNoBody;
+    *reinterpret_cast<void***>(piece + kPieceDraws) = draws;
+    return piece;
+}
+
+int GuardedSubChunks(const char* name) {
+    __try {
+        BYTE* chunk = ChunkByName(name);
+        return chunk ? *reinterpret_cast<int*>(chunk + kChunkSubChunks) : -1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+int GuardedZoneOf(const char* cterrain, BYTE** record, BYTE** zone) {
+    __try {
+        *record = TerrainRecord(cterrain);
+        if (!*record) return -1;
+        BYTE* data = *reinterpret_cast<BYTE**>(*record);
+        *zone = data ? *reinterpret_cast<BYTE**>(data + 0xA8) : nullptr;
+        return *zone ? 1 : -1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -5;
+    }
+}
+
+// editor_stitch_add <zone>.cterrain_pc <id> <piece name> <flags> x y z <9 rotation numbers>: a piece
+// added in the editor made (or, made already, moved). The answer (link\stitch_<id>.txt: made, moved,
+// nochunk or failed) tells the editor whether to fall back on a reload.
+void EditorAddStitchPiece(const std::string& line) {
+    char cterrain[96] = {}, name[96] = {};
+    unsigned id = 0;
+    int flags = 4, used = 0;
+    if (sscanf_s(line.c_str() + 18, "%95s %x %95s %d%n", cterrain, static_cast<unsigned>(sizeof(cterrain)), &id, name,
+                 static_cast<unsigned>(sizeof(name)), &flags, &used) != 4) {
+        rfa::Log("Editor link: editor_stitch_add needs a terrain name, id, piece name, flags and 12 numbers");
+        return;
+    }
+    float numbers[12];
+    if (!ReadNumbers(line.c_str() + 18 + used, numbers, 12)) return;
+    char answerName[32];
+    sprintf_s(answerName, "stitch_%08X", id);
+    BYTE *record = nullptr, *zone = nullptr;
+    if (GuardedZoneOf(cterrain, &record, &zone) <= 0) {
+        rfa::Log("Editor link: new level geometry piece %s: the game has no zone for %s", name, cterrain);
+        AnswerEditor(answerName, "failed");
+        return;
+    }
+    SpawnedPiece* spawned = nullptr;
+    for (SpawnedPiece& s : g_spawnedPieces)
+        if (s.id == id && s.record == record && _stricmp(s.name.c_str(), name) == 0 && s.flags == flags) spawned = &s;
+    // Another piece made before for the same id (the piece was made another chunk, or its flags
+    // changed, in the editor): taken away.
+    for (SpawnedPiece& s : g_spawnedPieces)
+        if (s.id == id && &s != spawned && !LivePieceOf(s.piece).hidden) GuardedHidePiece(s.piece, false);
+    const bool made = spawned != nullptr;
+    if (!spawned) {
+        const int subChunks = GuardedSubChunks(name);
+        if (subChunks < 0) {
+            rfa::Log("Editor link: new level geometry piece %s: its chunk isn't loaded in the game", name);
+            AnswerEditor(answerName, "nochunk");
+            return;
+        }
+        if (subChunks > 1) {  // (the game doesn't make those as stitch pieces either)
+            rfa::Log("Editor link: new level geometry piece %s: its chunk has %d sub-chunks; stitch pieces have one", name, subChunks);
+            AnswerEditor(answerName, "failed");
+            return;
+        }
+        BYTE* piece = NewPiece(name, flags);
+        if (!piece) {
+            AnswerEditor(answerName, "failed");
+            return;
+        }
+        *reinterpret_cast<int*>(piece + kPieceDrawCount) = subChunks;
+        g_spawnedPieces.push_back({id, piece, record, name, flags});
+        spawned = &g_spawnedPieces.back();
+    }
+    // Pieces of our own always have a body of their own (made for them, as for a combined collision).
+    const int result = GuardedPlacePiece(spawned->piece, record, zone, false, numbers);
+    static int count = 0;
+    if (result > 0 && (!made && ++count <= 10)) rfa::Log("Editor link: made level geometry piece %s (0x%08X)", name, id);
+    if (result <= 0) rfa::Log("Editor link: new level geometry piece %s not %s: %s", name, made ? "moved" : "made", kPieceWhy[-result]);
+    AnswerEditor(answerName, result > 0 ? (made ? "moved" : "made") : result == -6 ? "nochunk" : "failed");
+}
+
+// editor_stitch_drop <id>: a piece added in the editor (made by editor_stitch_add) deleted there.
+void EditorDropStitchPiece(const std::string& line) {
+    const DWORD id = static_cast<DWORD>(strtoul(line.c_str() + 19, nullptr, 16));
+    for (SpawnedPiece& s : g_spawnedPieces) {
+        if (s.id != id || LivePieceOf(s.piece).hidden) continue;
+        if (GuardedHidePiece(s.piece, false) > 0) rfa::Log("Editor link: level geometry piece %s (0x%08X) taken away", s.name.c_str(), static_cast<unsigned>(id));
+    }
+}
+
+// The game takes a zone's terrain and level geometry away (0x6BC900, the terrain record: when the level
+// unloads or loads again): first the pieces we made and the bodies we made for its pieces go, while
+// the chunks they are made of are still there.
+constexpr DWORD kTerrainTakeDown = 0x6BC900;
+constexpr size_t kTerrainTakeDownPrologue = 6;  // push ebp / mov ebp,esp / sub esp,34h
+using TerrainTakeDownFn = void(__cdecl*)(BYTE* record);
+TerrainTakeDownFn g_terrainTakeDown;
+
+void GuardedFreePiece(BYTE* piece, DWORD body, bool draws) {
+    __try {
+        if (draws) FreeStitchDraw(piece);
+        if (body != kNoBody) FreeBody(body, false, true, true);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        rfa::Log("Editor link: letting go of a level geometry piece made live faulted");
+    }
+}
+
+void __cdecl TerrainTakeDown(BYTE* record) {
+    int freed = 0;
+    for (auto it = g_spawnedPieces.begin(); it != g_spawnedPieces.end();) {
+        if (it->record != record) {
+            ++it;
+            continue;
+        }
+        DWORD body = kNoBody;
+        for (auto& [at, live] : g_livePieces)
+            if (at == it->piece) std::swap(body, live.body);  // (not freed again below)
+        GuardedFreePiece(it->piece, body, true);
+        freed++;
+        it = g_spawnedPieces.erase(it);
+    }
+    for (auto it = g_livePieces.begin(); it != g_livePieces.end();) {
+        if (it->second.record != record) {
+            ++it;
+            continue;
+        }
+        if (it->second.body != kNoBody) GuardedFreePiece(it->first, it->second.body, false);
+        it = g_livePieces.erase(it);
+    }
+    g_ownBodyRecords.erase(std::remove(g_ownBodyRecords.begin(), g_ownBodyRecords.end(), record), g_ownBodyRecords.end());
+    if (freed) rfa::Log("Editor link: %d level geometry pieces made live let go with their zone", freed);
+    g_terrainTakeDown(record);
+}
+
+// ---- Terrain edits in the running level (editor_terrain <file> <patch>) -----------------------
+//
+// The game keeps a zone's terrain files in memory as they were read, laid out as in the file
+// (their pointers set in place), and draws and collides with them from there:
+//   <zone>.cterrain_pc (terrain_load_terrain 0x6B9640; its record by name 0x6BBA90): the terrain
+//     data (record +0) inside the file; its ground collision, a Havok compressed height field, is a
+//     Havok packfile loaded in place, so its u16 samples are read from the file's memory as the game
+//     runs. The zone object (data +0xA8) keeps the field's body (zone +0x4C), made at the zone's
+//     corner (zone +0x188) without rotation.
+//   <zone>_N.ctmesh_pc (the sub-zones, 0x6B7A60; record by name: 0x6BCEE0 on 0x1855158): its data
+//     D (record +0) at a known place in the file; D +0x1C its mesh data (rl_mesh_data: +0x0C vertex
+//     count, +0x10 vertex size, +0x2C the vertices, in the g-file's memory), D +0x20 its rl_pc_mesh,
+//     whose vertex buffer (+0x50) the device made at load (immutable: 0x00C2B740).
+// The editor writes the bytes that differ (a patch file in link\): ranges of the c-file (values only:
+// the same layout, so no pointer differs), and for a sub-zone its vertices. They are copied in; a
+// sub-zone gets a new vertex buffer made from them (the old one is kept, not released, in case a
+// frame being drawn still has it). Answers in link\terrain_<file>.txt: done or failed.
+auto const SubzoneRecord = reinterpret_cast<bool(__thiscall*)(void* table, const char* name, BYTE** record)>(0x6BCEE0);
+void* const kSubzones = reinterpret_cast<void*>(0x1855158);
+auto const RenderDevice = reinterpret_cast<void*(__cdecl*)()>(0xC26500);
+int g_terrainBuffersKept = 0;
+
+void AnswerTerrain(const std::string& file, const char* answer) {
+    rfa::Log("Editor link: terrain %s %s", file.c_str(), answer);
+    const std::wstring path = LinkFolder() + L"\\terrain_" + std::wstring(file.begin(), file.end()) + L".txt";
+    FILE* out = nullptr;
+    if (_wfopen_s(&out, path.c_str(), L"w") == 0 && out) {
+        fputs(answer, out);
+        fclose(out);
+    }
+}
+
+// The patch: "RFTP", version 1, kind (0 terrain, 1 sub-zone), where the data is in the c-file (a
+// sub-zone's D), the c-file's size, the range count; each range its offset, length and bytes; then
+// (a sub-zone) the vertex count, size and bytes.
+struct TerrainPatch {
+    unsigned kind = 0, dataAt = 0, size = 0;
+    std::vector<std::pair<unsigned, std::vector<BYTE>>> ranges;
+    unsigned vertexCount = 0, vertexSize = 0;
+    std::vector<BYTE> vertices;
+    struct FarMesh { unsigned index, count, size; std::vector<BYTE> vertices; };
+    std::vector<FarMesh> farMeshes;  // (the terrain file's far-away meshes: their vertices from the .gterrain_pc)
+};
+
+bool ReadTerrainPatch(const std::wstring& path, TerrainPatch& patch) {
+    FILE* in = nullptr;
+    if (_wfopen_s(&in, path.c_str(), L"rb") != 0 || !in) return false;
+    std::vector<BYTE> bytes;
+    BYTE buffer[65536];
+    for (size_t n; (n = fread(buffer, 1, sizeof(buffer), in)) > 0;) bytes.insert(bytes.end(), buffer, buffer + n);
+    fclose(in);
+    size_t at = 0;
+    auto U32 = [&](unsigned& value) {
+        if (at + 4 > bytes.size()) return false;
+        memcpy(&value, bytes.data() + at, 4);
+        at += 4;
+        return true;
+    };
+    unsigned magic = 0, version = 0, count = 0;
+    if (!U32(magic) || magic != 0x50544652 || !U32(version) || version != 1 || !U32(patch.kind) || !U32(patch.dataAt) || !U32(patch.size) || !U32(count)) return false;
+    for (unsigned r = 0; r < count; r++) {
+        unsigned offset = 0, length = 0;
+        if (!U32(offset) || !U32(length) || at + length > bytes.size() || offset + static_cast<unsigned long long>(length) > patch.size) return false;
+        patch.ranges.emplace_back(offset, std::vector<BYTE>(bytes.begin() + at, bytes.begin() + at + length));
+        at += length;
+    }
+    unsigned farCount = 0;
+    if (patch.kind == 0 && U32(farCount))
+        for (unsigned f = 0; f < farCount && f < 9; f++) {
+            TerrainPatch::FarMesh mesh{};
+            if (!U32(mesh.index) || !U32(mesh.count) || !U32(mesh.size)) return false;
+            size_t length = static_cast<size_t>(mesh.count) * mesh.size;
+            if (at + length > bytes.size()) return false;
+            mesh.vertices.assign(bytes.begin() + at, bytes.begin() + at + length);
+            at += length;
+            patch.farMeshes.push_back(std::move(mesh));
+        }
+    if (patch.kind == 1 && U32(patch.vertexCount) && U32(patch.vertexSize)) {
+        size_t length = static_cast<size_t>(patch.vertexCount) * patch.vertexSize;
+        if (at + length > bytes.size()) return false;
+        patch.vertices.assign(bytes.begin() + at, bytes.begin() + at + length);
+    }
+    return true;
+}
+
+// The terrain file's start in memory, from its data (inside it): "TERR", version 42, going back.
+BYTE* GuardedTerrainBase(BYTE* data, unsigned size) {
+    __try {
+        for (BYTE* at = reinterpret_cast<BYTE*>(reinterpret_cast<uintptr_t>(data) & ~uintptr_t(3)); at + size > data && at > data - 0x800000; at -= 4)
+            if (*reinterpret_cast<DWORD*>(at) == 0x52524554 && *reinterpret_cast<DWORD*>(at + 4) == 42) return at;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
+auto const BodySetPosition = reinterpret_cast<void(__thiscall*)(BYTE* body, const float* position)>(0xACAFF0);
+auto const MakeBox = reinterpret_cast<void*(__thiscall*)(void* box, const float* min, const float* max)>(0x4FAA20);
+auto const SetMeshBounds = reinterpret_cast<void(__thiscall*)(BYTE* mesh, void* box)>(0x6BDB90);
+auto const FreeBox = reinterpret_cast<void(__thiscall*)(void* box)>(0x926130);
+
+struct BufferDesc { UINT width, usage, bind, cpu, misc, stride; };
+struct InitialData { const void* bytes; UINT pitch, slicePitch; };
+
+// A mesh's vertices replaced (in its g-file's memory: its mesh data +0x2C, +0x0C count, +0x10 size),
+// a new vertex buffer made from them (the old one kept: a frame being drawn may still have it), and
+// its bounds set from a box (min, max) as the load does. A reason if it couldn't be; null if done.
+const char* NewVertices(BYTE* meshData, BYTE* mesh, unsigned count, unsigned size, const BYTE* bytes, const BYTE* boxMin, const BYTE* boxMax) {
+    if (!meshData || !mesh) return "failed: a mesh is missing";
+    if (*reinterpret_cast<unsigned*>(meshData + 0x0C) != count || meshData[0x10] != size) return "failed: a mesh's vertices differ from the editor's";
+    BYTE* vertices = *reinterpret_cast<BYTE**>(meshData + 0x2C);
+    if (!vertices) return "failed: a mesh has no vertices";
+    memcpy(vertices, bytes, static_cast<size_t>(count) * size);
+    void* device = RenderDevice();
+    if (!device) return "failed: no render device";
+    BufferDesc desc{count * size, 1, 1, 0, 0, 0};
+    InitialData initial{vertices, 0, 0};
+    void* made = nullptr;
+    using CreateBufferFn = long(__stdcall*)(void* self, const BufferDesc*, const InitialData*, void** buffer);
+    auto create = reinterpret_cast<CreateBufferFn>((*reinterpret_cast<void***>(device))[3]);
+    if (create(device, &desc, &initial, &made) < 0 || !made) return "failed: a new vertex buffer couldn't be made";
+    *reinterpret_cast<void**>(mesh + 0x50) = made;
+    g_terrainBuffersKept++;
+    alignas(16) BYTE box[0x40] = {};
+    if (void* built = MakeBox(box, reinterpret_cast<const float*>(boxMin), reinterpret_cast<const float*>(boxMax))) {
+        SetMeshBounds(mesh, built);
+        FreeBox(box);
+    }
+    return nullptr;
+}
+
+bool GuardedCopy(BYTE* to, const BYTE* from, size_t length) {
+    __try {
+        memcpy(to, from, length);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// A terrain file's ranges, and the height field's body placed again. A reason if it couldn't be.
+const char* GuardedPatchTerrain(const char* name, const TerrainPatch& patch) {
+    __try {
+        BYTE* record = TerrainRecord(name);
+        if (!record) return "failed: the level hasn't that terrain";
+        BYTE* data = *reinterpret_cast<BYTE**>(record);
+        if (!data) return "failed: no terrain data";
+        BYTE* base = GuardedTerrainBase(data, patch.size);
+        if (!base) return "failed: the terrain file wasn't found in memory";
+        for (size_t r = 0; r < patch.ranges.size(); r++)
+            if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
+        // The far-away meshes (terrain data +0x40: nine records of 0x30, +4 its mesh data, +8 its
+        // rl_pc_mesh, +0x0C and +0x18 its box: 0x770030), as the sub-zones below: their vertices, a new
+        // vertex buffer, their bounds.
+        if (BYTE* farRecords = *reinterpret_cast<BYTE**>(data + 0x40))
+            for (size_t f = 0; f < patch.farMeshes.size(); f++) {
+                const TerrainPatch::FarMesh& mesh = patch.farMeshes[f];
+                if (mesh.index >= 9) continue;
+                BYTE* record = farRecords + mesh.index * 0x30;
+                if (const char* why = NewVertices(*reinterpret_cast<BYTE**>(record + 4), *reinterpret_cast<BYTE**>(record + 8),
+                                                  mesh.count, mesh.size, mesh.vertices.data(), record + 0x0C, record + 0x18))
+                    return why;
+            }
+        // The height field's body set where it already is (hkpRigidBody::setPosition, 0xACAFF0, with
+        // its own position: its motion at +0xE0, the transform's translation at +0x120), so the world
+        // works its box out again from the new heights: else ground raised above, or lowered below,
+        // what the level loaded with isn't solid. (Placing it at the zone's corner instead put it
+        // outside the world: "Tried to delete a zone ... outside the broadphase".)
+        if (BYTE* zone = *reinterpret_cast<BYTE**>(data + 0xA8)) {
+            DWORD handle = *reinterpret_cast<DWORD*>(zone + 0x4C);
+            if (BYTE* body = handle != kNoBody && handle != 0 ? BodyOf(handle) : nullptr) {
+                alignas(16) float position[4];
+                memcpy(position, body + 0x120, sizeof(position));
+                bool sane = true;
+                for (int i = 0; i < 3; i++) sane = sane && position[i] == position[i] && position[i] > -100000 && position[i] < 100000;
+                if (sane) BodySetPosition(body, position);
+            }
+        }
+        return "done";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "failed: the game's code faulted";
+    }
+}
+
+
+const char* GuardedPatchSubzone(const char* name, const TerrainPatch& patch) {
+    __try {
+        BYTE* record = nullptr;
+        if (!SubzoneRecord(kSubzones, name, &record) || !record) return "failed: the level hasn't that sub-zone";
+        BYTE* d = *reinterpret_cast<BYTE**>(record);
+        if (!d) return "failed: no sub-zone data";
+        BYTE* base = d - patch.dataAt;
+        if (*reinterpret_cast<DWORD*>(base) != 0x5A425553) return "failed: the sub-zone file wasn't where expected in memory";
+        for (size_t r = 0; r < patch.ranges.size(); r++)
+            if (!GuardedCopy(base + patch.ranges[r].first, patch.ranges[r].second.data(), patch.ranges[r].second.size())) return "failed: a range couldn't be written";
+        BYTE* meshData = *reinterpret_cast<BYTE**>(d + 0x1C);
+        BYTE* mesh = *reinterpret_cast<BYTE**>(d + 0x20);
+        if (!meshData || !mesh) return "failed: the sub-zone has no mesh";
+        // Its bounds for drawing (the mesh's, +0x10, from the sub-zone's box, D +0x24 and +0x30, as the
+        // load sets them: 0x6B7E20): else ground raised above, or lowered below, the box the level
+        // loaded with is left out of view now and then (it flickers).
+        alignas(16) BYTE box[0x40] = {};
+        if (void* made = MakeBox(box, reinterpret_cast<float*>(d + 0x24), reinterpret_cast<float*>(d + 0x30))) {
+            SetMeshBounds(mesh, made);
+            FreeBox(box);
+        }
+        if (patch.vertices.empty()) return "done";
+        unsigned count = *reinterpret_cast<unsigned*>(meshData + 0x0C), size = meshData[0x10];
+        BYTE* vertices = *reinterpret_cast<BYTE**>(meshData + 0x2C);
+        if (count != patch.vertexCount || size != patch.vertexSize || !vertices) return "failed: the sub-zone's vertices differ from the editor's";
+        if (!GuardedCopy(vertices, patch.vertices.data(), patch.vertices.size())) return "failed: the vertices couldn't be written";
+        void* device = RenderDevice();
+        if (!device) return "failed: no render device";
+        BufferDesc desc{count * size, 1, 1, 0, 0, 0};
+        InitialData initial{vertices, 0, 0};
+        void* made = nullptr;
+        using CreateBufferFn = long(__stdcall*)(void* self, const BufferDesc*, const InitialData*, void** buffer);
+        auto create = reinterpret_cast<CreateBufferFn>((*reinterpret_cast<void***>(device))[3]);
+        if (create(device, &desc, &initial, &made) < 0 || !made) return "failed: the new vertex buffer couldn't be made";
+        *reinterpret_cast<void**>(mesh + 0x50) = made;  // (the old one is kept: see the top)
+        g_terrainBuffersKept++;
+        return "done";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "failed: the game's code faulted";
+    }
+}
+
+void EditorTerrain(const std::string& line) {
+    char name[128] = {}, patchName[128] = {};
+    if (sscanf_s(line.c_str() + 15, "%127s %127s", name, static_cast<unsigned>(sizeof(name)), patchName, static_cast<unsigned>(sizeof(patchName))) != 2) return;
+    TerrainPatch patch;
+    const std::wstring path = LinkFolder() + L"\\" + std::wstring(patchName, patchName + strlen(patchName));
+    if (!ReadTerrainPatch(path, patch)) {
+        AnswerTerrain(name, "failed: the patch couldn't be read");
+        return;
+    }
+    _wremove(path.c_str());
+    AnswerTerrain(name, patch.kind == 0 ? GuardedPatchTerrain(name, patch) : GuardedPatchSubzone(name, patch));
+}
+
+bool RunEditorEdit(const std::string& line) {
+    if (line.rfind("editor_terrain ", 0) == 0) {
+        EditorTerrain(line);
+        return true;
+    }
+    if (line.rfind("editor_stitch ", 0) == 0 || line.rfind("editor_stitch_hide ", 0) == 0) {
+        EditorStitchPiece(line, line.rfind("editor_stitch_hide ", 0) == 0);
+        return true;
+    }
+    if (line.rfind("editor_stitch_add ", 0) == 0) {
+        EditorAddStitchPiece(line);
+        return true;
+    }
+    if (line.rfind("editor_stitch_drop ", 0) == 0) {
+        EditorDropStitchPiece(line);
+        return true;
+    }
+    if (line.rfind("editor_chunk_group ", 0) == 0) {
+        LoadEditorChunkGroup(line);
+        return true;
+    }
+    if (line.rfind("editor_chunk_files ", 0) == 0) {
+        LoadEditorChunkFiles(line);
+        return true;
+    }
+    if (line.rfind("editor_chunk ", 0) == 0) {
+        char assetList[128] = {}, container[128] = {};
+        if (sscanf_s(line.c_str() + 13, "%127s %127s", assetList, static_cast<unsigned>(sizeof(assetList)), container,
+                     static_cast<unsigned>(sizeof(container))) == 2)
+            LoadEditorChunk(assetList, container);
+        return true;
+    }
+    if (line == "editor_level") {
+        // Which level the game has loaded (the name it loads it by, kept in the world at +0x18, which
+        // reload_level loads again: 0x4D4D40 → 0x6C87B0) and where the camera and the player are, for
+        // the editor's "Game's level" (link\level.txt).
+        const char* level = reinterpret_cast<const char*>(kObjectList + 0x18);
+        char name[128] = {};
+        strncpy_s(name, level, _TRUNCATE);
+        BYTE* player = ThePlayer();
+        float at[3] = {};
+        if (player) memcpy(at, player + 4, sizeof(at));
+        const std::wstring path = LinkFolder() + L"\\level.txt";
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
+            fprintf(file, "%s\n%.3f %.3f %.3f\n%d %.3f %.3f %.3f\n", name, g_cameraPosition[0], g_cameraPosition[1], g_cameraPosition[2],
+                    player ? 1 : 0, at[0], at[1], at[2]);
+            fclose(file);
+        }
+        rfa::Log("Editor link: the editor asked which level is loaded: %s", name[0] ? name : "(none)");
+        return true;
+    }
+    if (line == "editor_reload") {
+        StartEditorReload();
+        return true;
+    }
+    if (line == "editor_rescan") {
+        // The loader looks through overrides\ and edits\ again, for files the editor saved for the
+        // first time since the game started (before it has the game reload a level or a table).
+        using RescanFn = int(__cdecl*)();
+        if (auto rescan = reinterpret_cast<RescanFn>(GetProcAddress(GetModuleHandleW(L"rfa_loader.dll"), "RFALoader_RescanOverrides")))
+            rescan();
+        else rfa::Log("Editor link: this loader can't look through the overrides again (an older rfa_loader.dll)");
+        return true;
+    }
+    if (line.rfind("editor_create ", 0) == 0) {
+        MakeEditorObject(static_cast<DWORD>(strtoul(line.c_str() + 14, nullptr, 0)));
+        return true;
+    }
+    const bool move = line.rfind("editor_move ", 0) == 0, remove = line.rfind("editor_remove ", 0) == 0;
+    if (!move && !remove) return false;
+    static int moved = 0, removed = 0, missing = 0;
+    const char* text = line.c_str() + (move ? 12 : 14);
+    char* rest = nullptr;
+    const DWORD handle = static_cast<DWORD>(strtoul(text, &rest, 0));
+    void* object = FindObject(reinterpret_cast<void*>(kObjectList), nullptr, handle);
+    if (!object) {
+        if (++missing <= 10) rfa::Log("Editor link: the game has no object 0x%08X now (%s skipped)", static_cast<unsigned>(handle), move ? "move" : "removal");
+        return true;
+    }
+    if (remove) {
+        // What a live-made node spawned goes with it.
+        if (auto spawned = g_nodeSpawned.find(handle); spawned != g_nodeSpawned.end()) {
+            if (FindObject(reinterpret_cast<void*>(kObjectList), nullptr, spawned->second))
+                RemoveObject(reinterpret_cast<void*>(kObjectList), nullptr, spawned->second, 0);
+            g_nodeSpawned.erase(spawned);
+        }
+        RemoveObject(reinterpret_cast<void*>(kObjectList), nullptr, handle, 0);
+        if (++removed <= 10) rfa::Log("Editor link: removed object 0x%08X", static_cast<unsigned>(handle));
+        return true;
+    }
+    float numbers[12];
+    for (float& number : numbers) {
+        char* next = nullptr;
+        number = strtof(rest, &next);
+        if (next == rest) {
+            rfa::Log("Editor link: editor_move needs a handle and 12 numbers");
+            return true;
+        }
+        rest = next;
+    }
+    const auto setPlace = reinterpret_cast<SetPlaceFn>((*static_cast<void***>(object))[10]);
+    setPlace(object, nullptr, numbers, numbers + 3, 1);
+    if (++moved <= 5) rfa::Log("Editor link: moved object 0x%08X to %.2f, %.2f, %.2f", static_cast<unsigned>(handle), numbers[0], numbers[1], numbers[2]);
+    return true;
+}
 
 void AnswerWhereWanted() {
     const std::wstring wanted = LinkFolder() + L"\\where_wanted.txt";
@@ -1752,16 +3073,34 @@ void AnswerLightingWanted() {
 using FrameUpdateFn = void(__cdecl*)();
 FrameUpdateFn g_frameUpdate;
 
+// 0x76AA50 (the handshake's "unlock the renderer"), replaced: as the game's, then the editor's commands,
+// in the window where the renderer is unlocked.
+constexpr DWORD kRenderUnlock = 0x76AA50;
+void __cdecl RenderUnlock() {
+    if (RenderLocked()) reinterpret_cast<void(__cdecl*)()>(0xD2EA20)();
+    ++*reinterpret_cast<int*>(0x1973834);
+    if (g_linkFolderThere) RunEditorCommands();
+}
+
 void __cdecl FrameUpdate() {
     g_frameUpdate();
     ShowEditor();
     if (g_drawsConsole && g_settings.gameLog) ReadReports();
+    // The editor's commands are looked for every frame (Live sends them as you drag), the rest ten times a second.
+    static int linkFolderChecks = 0;
+    if (linkFolderChecks-- <= 0) {
+        g_linkFolderThere = GetFileAttributesW(LinkFolder().c_str()) != INVALID_FILE_ATTRIBUTES;
+        linkFolderChecks = 60;
+    }
+    const bool linkFolderThere = g_linkFolderThere;
+    if (linkFolderThere && !RenderLocked()) RunEditorCommands();
+    if (!g_chunksLoading.empty()) WatchEditorChunks();
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastCheck < kCheckEveryMs) return;
     g_lastCheck = now;
     if (g_drawsConsole && g_settings.modLog) ReadModLog();
-    if (GetFileAttributesW(LinkFolder().c_str()) == INVALID_FILE_ATTRIBUTES) return;  // the editor's link isn't set up
-    RunEditorCommands();
+    if (!linkFolderThere) return;  // the editor's link isn't set up
+    ContinueEditorReload();
     AnswerWhereWanted();
     AnswerLightingWanted();
 }
@@ -1821,6 +3160,9 @@ void console::Init() {
 
     g_runScriptFile = reinterpret_cast<RunScriptFileFn>(
         rfa::HookFunction(kRunScriptFile, kRunScriptFilePrologue, reinterpret_cast<void*>(&RunScriptFile)));
+    g_terrainTakeDown = reinterpret_cast<TerrainTakeDownFn>(
+        rfa::HookFunction(kTerrainTakeDown, kTerrainTakeDownPrologue, reinterpret_cast<void*>(&TerrainTakeDown)));
+    if (!g_terrainTakeDown) rfa::Log("Could not hook the game's terrain take-down; level geometry made live may outlive its level");
     g_gameplayStart = reinterpret_cast<GameplayStartFn>(
         rfa::HookFunction(kGameplayStart, kGameplayStartPrologue, reinterpret_cast<void*>(&GameplayStart)));
     rfa::Log(g_runScriptFile && g_gameplayStart
@@ -1828,6 +3170,15 @@ void console::Init() {
                  : "Could not hook the game's startup / gameplay points; console.ini is off");
 
     ShareWithEditor();
+    {
+        // (The game's own 0x76AA50 is checked first: push ebp / mov ebp,esp / call 0xD2EC00.)
+        const BYTE expected[] = {0x55, 0x8B, 0xEC, 0xE8};
+        if (memcmp(reinterpret_cast<void*>(kRenderUnlock), expected, sizeof(expected)) == 0 &&
+            rfa::ReplaceFunction(kRenderUnlock, reinterpret_cast<void*>(&RenderUnlock)))
+            rfa::Log("Editor link: the editor's commands run while the renderer is unlocked");
+        else
+            rfa::Log("Editor link: could not take the renderer's unlock; the editor's commands wait for frames it is unlocked in");
+    }
     g_frameUpdate = reinterpret_cast<FrameUpdateFn>(
         rfa::HookFunction(kFrameUpdate, kFrameUpdatePrologue, reinterpret_cast<void*>(&FrameUpdate)));
     rfa::Log(g_frameUpdate ? "Editor link: the camera is shared every frame, and bin\\link is watched for the editor's commands"

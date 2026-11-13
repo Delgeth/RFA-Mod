@@ -1,0 +1,174 @@
+using System.Numerics;
+
+namespace RfaFormats.Meshes;
+
+/// <summary>
+/// Navigation made from nothing, for a new level's flat ground (see the editor's New level): a square
+/// of ground cut into a grid of triangle cells, for the people's layer and the vehicles' (the same
+/// mesh, the vehicles' cells flagged 0x20), each with its Havok tree. Laid out as the game's own files
+/// are (see <see cref="NavigationFile"/>, <see cref="NavigationLayer"/>): cells wound as the game's
+/// (x/z cross product of the edges negative), each joined to the cells across its edges (edge k runs
+/// from vertex k to vertex k+1), the open edges on the zone's border its outer edges, one heap slot a
+/// cell and no spare ones, one island, and the pools as Volition's tools wrote them for a layer with
+/// nothing computed (<see cref="NavigationLayer.PlainPools"/>).
+///
+/// The tree is a MOPP block ("MOPP", 0x12D, the box's corner less 0.05, the scale, the code's size, 1,
+/// then the code), as the game's: the scale 2^24 / ((the box's longest side + 0.1) × 128/127), a point
+/// at floor((p − corner) × scale) and its top 8 bits compared (the code never shifts). The code is a
+/// k-d tree over the cells: at each node a split on the axis the cells' middles spread most along
+/// (0x23 + axis, the left half's highest and the right half's lowest value, and two 16-bit jumps:
+/// left over the jump that follows, right onto it), the jump (0x07, 24 bits) over the left half, the
+/// left half and the right; at each leaf the cell's box on the three axes, a value of slack each way
+/// (0x26, 0x27, 0x28: lowest, highest), then the cell's number (0x30 + it below 32, else 0x50, 0x51
+/// or 0x52 and 8, 16 or 24 bits). Multi-byte values big-endian. Untested in the game (the same code as
+/// the Guerrilla editor's, which is too).
+/// </summary>
+public static class NavigationBuilder
+{
+    /// <summary>
+    /// A navigation file for a flat square of ground: <paramref name="centre"/> (x, z) and
+    /// <paramref name="half"/> its half width, at <paramref name="height"/>, in the zone whose corner is
+    /// <paramref name="zoneCorner"/> (its lowest x and z) and side <paramref name="zoneWidth"/>, at
+    /// <paramref name="place"/> in the world's grid (column × 16 + row: the single-zone levels' 0x88).
+    /// Cells about <paramref name="step"/> m across.
+    /// </summary>
+    public static NavigationFile FlatSquare(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place = 0x88, float step = 4)
+    {
+        var (people, peopleTree) = Grid(centre, half, height, zoneCorner, zoneWidth, place, step, vehicles: false);
+        var (vehicles, vehiclesTree) = Grid(centre, half, height, zoneCorner, zoneWidth, place, step, vehicles: true);
+        return new NavigationFile(0, people, peopleTree, vehicles, vehiclesTree);
+    }
+
+    static (NavigationLayer Layer, byte[] Tree) Grid(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place, float step, bool vehicles)
+    {
+        int n = Math.Clamp((int)MathF.Ceiling(2 * half / step), 1, 120);
+        float s = 2 * half / n, x0 = centre.X - half, z0 = centre.Y - half;
+        var vertices = new Vector3[(n + 1) * (n + 1)];
+        for (int j = 0; j <= n; j++)
+            for (int i = 0; i <= n; i++) vertices[j * (n + 1) + i] = new Vector3(x0 + i * s, height, z0 + j * s);
+        ushort V(int i, int j) => (ushort)(j * (n + 1) + i);
+
+        // Two cells a square, wound as the game's: (v1 − v0) × (v2 − v0) across x and z negative.
+        var corners = new List<ushort[]>();
+        for (int j = 0; j < n; j++)
+            for (int i = 0; i < n; i++)
+            {
+                ushort a = V(i, j), b = V(i + 1, j), c = V(i + 1, j + 1), d = V(i, j + 1);
+                corners.Add([a, c, b]);
+                corners.Add([a, d, c]);
+            }
+
+        // Each cell joined to the one across each of its edges.
+        var across = new Dictionary<(int, int), (int Cell, int Edge)>();
+        var adjacent = corners.Select(_ => new[] { -1, -1, -1 }).ToArray();
+        for (int cell = 0; cell < corners.Count; cell++)
+            for (int k = 0; k < 3; k++)
+            {
+                int p = corners[cell][k], q = corners[cell][(k + 1) % 3];
+                var key = (Math.Min(p, q), Math.Max(p, q));
+                if (across.Remove(key, out var other))
+                {
+                    adjacent[cell][k] = other.Cell;
+                    adjacent[other.Cell][other.Edge] = cell;
+                }
+                else across[key] = (cell, k);
+            }
+
+        // The open edges on the zone's border are its outer edges (where the next zone's mesh would join).
+        const float Near = 0.01f;
+        bool OnBorder(Vector3 p, Vector3 q) =>
+            (MathF.Abs(p.X - zoneCorner.X) < Near && MathF.Abs(q.X - zoneCorner.X) < Near) ||
+            (MathF.Abs(p.X - zoneCorner.X - zoneWidth) < Near && MathF.Abs(q.X - zoneCorner.X - zoneWidth) < Near) ||
+            (MathF.Abs(p.Z - zoneCorner.Y) < Near && MathF.Abs(q.Z - zoneCorner.Y) < Near) ||
+            (MathF.Abs(p.Z - zoneCorner.Y - zoneWidth) < Near && MathF.Abs(q.Z - zoneCorner.Y - zoneWidth) < Near);
+        var outer = across.Values.Where(e => OnBorder(vertices[corners[e.Cell][e.Edge]], vertices[corners[e.Cell][(e.Edge + 1) % 3]]))
+                          .OrderBy(e => e.Cell).ThenBy(e => e.Edge)
+                          .Select(e => new NavigationEdge((ushort)e.Cell, (byte)e.Edge, 0, uint.MaxValue)).ToArray();
+
+        byte flags = vehicles ? (byte)0x20 : (byte)0;
+        var cells = corners.Select((v, i) => new NavigationCell(adjacent[i], 0, 0, v, 0xFFFF, 0, place, flags, 0, place)).ToArray();
+        byte[] islands = NavigationLayer.Islands(cells);
+        cells = cells.Select((c, i) => c with { Island = islands[i] }).ToArray();
+        var (words, pools) = NavigationLayer.PlainPools(islands.Max() + 1, place, people: !vehicles);
+        var min = new Vector3(x0, height, z0);
+        var max = new Vector3(x0 + 2 * half, height, z0 + 2 * half);
+        var layer = new NavigationLayer(NavigationLayer.ArmageddonVersion, vertices, cells, 0, outer, min, max, words, pools);
+
+        var boxes = corners.Select(v =>
+        {
+            Vector3 a = vertices[v[0]], b = vertices[v[1]], c = vertices[v[2]];
+            return (Min: Vector3.Min(a, Vector3.Min(b, c)), Max: Vector3.Max(a, Vector3.Max(b, c)));
+        }).ToArray();
+        return (layer, Mopp(boxes, min, max));
+    }
+
+    /// <summary>A MOPP block over these boxes (each found by its number): see the class.</summary>
+    public static byte[] Mopp(IReadOnlyList<(Vector3 Min, Vector3 Max)> boxes, Vector3 min, Vector3 max)
+    {
+        Vector3 offset = min - new Vector3(0.05f);
+        Vector3 size = max - min;
+        float longest = MathF.Max(size.X, MathF.Max(size.Y, size.Z));
+        float scale = 16777216f / ((longest + 0.1f) * 128f / 127f);
+        int Q(float value, float from) => Math.Clamp((int)MathF.Floor((value - from) * scale), 0, 0xFFFFFF) >> 16;
+        int[] Lo(Vector3 v) => [Q(v.X, offset.X), Q(v.Y, offset.Y), Q(v.Z, offset.Z)];
+        var lows = boxes.Select(b => Lo(b.Min)).ToArray();
+        var highs = boxes.Select(b => Lo(b.Max)).ToArray();
+
+        var code = new List<byte>();
+        Build(Enumerable.Range(0, boxes.Count).ToList(), code, lows, highs);
+
+        var output = new MemoryStream();
+        var w = new BinaryWriter(output);
+        w.Write(0x50504F4Du);  // "MOPP"
+        w.Write(0x12Du);
+        w.Write(offset.X);
+        w.Write(offset.Y);
+        w.Write(offset.Z);
+        w.Write(scale);
+        w.Write(code.Count);
+        w.Write(1u);
+        w.Write(code.ToArray());
+        return output.ToArray();
+    }
+
+    static void Build(List<int> these, List<byte> code, int[][] lows, int[][] highs)
+    {
+        if (these.Count == 1)
+        {
+            int cell = these[0];
+            for (int axis = 0; axis < 3; axis++)
+            {
+                code.Add((byte)(0x26 + axis));
+                code.Add((byte)Math.Max(0, lows[cell][axis] - 1));
+                code.Add((byte)Math.Min(255, highs[cell][axis] + 1));
+            }
+            if (cell < 32) code.Add((byte)(0x30 + cell));
+            else if (cell < 0x100) { code.Add(0x50); code.Add((byte)cell); }
+            else if (cell < 0x10000) { code.Add(0x51); code.Add((byte)(cell >> 8)); code.Add((byte)cell); }
+            else { code.Add(0x52); code.Add((byte)(cell >> 16)); code.Add((byte)(cell >> 8)); code.Add((byte)cell); }
+            return;
+        }
+        // Split along the axis the middles spread most along, half each side.
+        int best = 0;
+        float spread = -1;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            int lo = these.Min(c => lows[c][axis] + highs[c][axis]), hi = these.Max(c => lows[c][axis] + highs[c][axis]);
+            if (hi - lo > spread) { spread = hi - lo; best = axis; }
+        }
+        int ax = best;
+        var sorted = these.OrderBy(c => lows[c][ax] + highs[c][ax]).ThenBy(c => c).ToList();
+        var left = sorted.Take(sorted.Count / 2).ToList();
+        var right = sorted.Skip(sorted.Count / 2).ToList();
+        int leftHighest = Math.Min(255, left.Max(c => highs[c][ax]) + 1), rightLowest = Math.Max(0, right.Min(c => lows[c][ax]) - 1);
+
+        var leftCode = new List<byte>();
+        Build(left, leftCode, lows, highs);
+        if (leftCode.Count > 0xFFFFFF) throw new InvalidOperationException("a navigation tree's half is too big to jump over");
+        // left if the box's lowest ≤ leftHighest (on to pc + 7 + 4: past the jump); right if its highest ≥ rightLowest (pc + 7 + 0: the jump).
+        code.AddRange([(byte)(0x23 + ax), (byte)leftHighest, (byte)rightLowest, 0x00, 0x04, 0x00, 0x00]);
+        code.AddRange([0x07, (byte)(leftCode.Count >> 16), (byte)(leftCode.Count >> 8), (byte)leftCode.Count]);
+        code.AddRange(leftCode);
+        Build(right, code, lows, highs);
+    }
+}

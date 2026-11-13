@@ -2,11 +2,14 @@
 //
 // Where it draws: the game makes its swap chain with a DXGI factory (it imports CreateDXGIFactory),
 // so the loader wraps that import and, on the factory it returns, its CreateSwapChain (slot 10 of
-// the factory's methods). On the swap chain the game gets, it wraps Present (slot 8), to draw the
-// menus on the game's finished picture just before it is shown, and ResizeBuffers (slot 13), to let
-// go of the picture before the game resizes it. A COM object's methods are a table of pointers
-// shared by every object of its kind, so each is swapped once (as an import is), keeping the old
-// pointer to call on.
+// the factory's methods; a COM object's methods are a table of pointers shared by every object of
+// its kind, so it is swapped once, as an import is, keeping the old pointer to call on). The game
+// is then given a swap chain of the loader's own (ChainProxy) that passes every call on to the real
+// one, drawing the menus on the game's finished picture just before Present shows it and letting go
+// of the picture before ResizeBuffers resizes it. The real swap chain's own methods are NOT
+// swapped: the Steam overlay swaps Present and ResizeBuffers there too, and swaps them again when
+// the game changes its display mode, after which its hook and ours called each other until the
+// stack ran out (the game ended, without a word, on every video settings change).
 //
 // When: while the developer console is open (0x28FF1CA), when the game has already stopped the
 // player's controls and stopped holding the mouse in the middle of the screen. Their own key
@@ -41,19 +44,13 @@ auto& g_consoleOpen = *reinterpret_cast<const volatile BYTE*>(0x28FF1CA);
 
 // The methods wrapped, by their place in the object's table of methods.
 constexpr int kCreateSwapChainSlot = 10;  // IDXGIFactory::CreateSwapChain
-constexpr int kPresentSlot = 8;           // IDXGISwapChain::Present
-constexpr int kResizeBuffersSlot = 13;    // IDXGISwapChain::ResizeBuffers
 
 using CreateFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
 using CreateSwapChainFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
-using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
-using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 using MenuFn = void(__cdecl*)(const RFAMenu*);
 
 CreateFactoryFn g_createFactory;
 CreateSwapChainFn g_createSwapChain;
-PresentFn g_present;
-ResizeBuffersFn g_resizeBuffers;
 
 const std::vector<HMODULE>* g_mods;
 std::vector<MenuFn> g_menus;  // each mod's RFAMod_Menu, found on the first frame drawn
@@ -364,36 +361,82 @@ void DrawMenus() {
     g_shown = true;
 }
 
-HRESULT STDMETHODCALLTYPE Present(IDXGISwapChain* chain, UINT sync, UINT flags) {
-    if (chain == g_chain && !(flags & DXGI_PRESENT_TEST)) DrawMenus();
-    return g_present(chain, sync, flags);
-}
+// The swap chain the game is given: the real one behind it does the work (see the top).
+class ChainProxy final : public IDXGISwapChain {
+public:
+    explicit ChainProxy(IDXGISwapChain* real) : real_(real) {}
 
-HRESULT STDMETHODCALLTYPE ResizeBuffers(IDXGISwapChain* chain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
-    if (chain == g_chain) LetGoOfTarget();
-    return g_resizeBuffers(chain, count, width, height, format, flags);
-}
+    // IUnknown. The game's references are the real swap chain's: when its last one goes, so does this.
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
+        if (!out) return E_POINTER;
+        if (id == __uuidof(IUnknown) || id == __uuidof(IDXGIObject) || id == __uuidof(IDXGIDeviceSubObject) ||
+            id == __uuidof(IDXGISwapChain)) {
+            *out = static_cast<IDXGISwapChain*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return real_->QueryInterface(id, out);  // a newer kind of swap chain: the real one, unwrapped
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return real_->AddRef(); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        IDXGISwapChain* real = real_;
+        real->AddRef();
+        const bool last = real->Release() == 1;  // this Release is its last
+        if (last && g_chain == real) {
+            LetGoOfTarget();  // our view of its picture goes before it does
+            g_chain = nullptr;
+        }
+        const ULONG left = real->Release();
+        if (last) delete this;
+        return left;
+    }
+
+    // IDXGIObject, IDXGIDeviceSubObject
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID name, UINT size, const void* data) override { return real_->SetPrivateData(name, size, data); }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID name, const IUnknown* unknown) override { return real_->SetPrivateDataInterface(name, unknown); }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID name, UINT* size, void* data) override { return real_->GetPrivateData(name, size, data); }
+    HRESULT STDMETHODCALLTYPE GetParent(REFIID id, void** parent) override { return real_->GetParent(id, parent); }
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID id, void** device) override { return real_->GetDevice(id, device); }
+
+    // IDXGISwapChain
+    HRESULT STDMETHODCALLTYPE Present(UINT sync, UINT flags) override {
+        if (real_ == g_chain && !(flags & DXGI_PRESENT_TEST)) DrawMenus();
+        return real_->Present(sync, flags);
+    }
+    HRESULT STDMETHODCALLTYPE GetBuffer(UINT buffer, REFIID id, void** surface) override { return real_->GetBuffer(buffer, id, surface); }
+    HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL fullscreen, IDXGIOutput* target) override { return real_->SetFullscreenState(fullscreen, target); }
+    HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL* fullscreen, IDXGIOutput** target) override { return real_->GetFullscreenState(fullscreen, target); }
+    HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC* desc) override { return real_->GetDesc(desc); }
+    HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) override {
+        if (real_ == g_chain) LetGoOfTarget();
+        return real_->ResizeBuffers(count, width, height, format, flags);
+    }
+    HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC* mode) override { return real_->ResizeTarget(mode); }
+    HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput** output) override { return real_->GetContainingOutput(output); }
+    HRESULT STDMETHODCALLTYPE GetFrameStatistics(DXGI_FRAME_STATISTICS* stats) override { return real_->GetFrameStatistics(stats); }
+    HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT* count) override { return real_->GetLastPresentCount(count); }
+
+private:
+    IDXGISwapChain* real_;
+};
 
 HRESULT STDMETHODCALLTYPE CreateSwapChain(IDXGIFactory* factory, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** chain) {
     const HRESULT made = g_createSwapChain(factory, device, desc, chain);
     if (FAILED(made) || !chain || !*chain || !desc || !device) return made;
-    if (g_chain) {  // the game made a new one (a display change): draw on that from now on
+    if (g_window) {  // the game made a new one (a display change): draw on that from now on
         if (desc->OutputWindow != g_window) return made;
         LetGoOfTarget();
         g_chain = *chain;
+        *chain = new ChainProxy(g_chain);
+        rfa::Log("The game made a new swap chain: %ux%u", desc->BufferDesc.Width, desc->BufferDesc.Height);
         return made;
     }
     ID3D11Device* d3d = nullptr;
     if (FAILED(device->QueryInterface(__uuidof(ID3D11Device), reinterpret_cast<void**>(&d3d))) || !d3d) return made;
-    if (!WrapMethod(*chain, kPresentSlot, &Present, &g_present) ||
-        !WrapMethod(*chain, kResizeBuffersSlot, &ResizeBuffers, &g_resizeBuffers)) {
-        rfa::Log("Could not wrap the swap chain's Present; no menus");
-        d3d->Release();
-        return made;
-    }
     g_device = d3d;
     g_device->GetImmediateContext(&g_context);
     g_chain = *chain;
+    *chain = new ChainProxy(g_chain);
     g_window = desc->OutputWindow;
     g_windowProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WindowProc)));
     rfa::Log("The game's swap chain: %ux%u; menus will show while the console is open", desc->BufferDesc.Width, desc->BufferDesc.Height);

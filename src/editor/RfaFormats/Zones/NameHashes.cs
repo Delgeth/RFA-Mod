@@ -46,7 +46,9 @@ public sealed class ZoneNames
     /// </summary>
     static readonly string[] KnownNames = ["object_squad_spawn_node",
         // The level editor's own: level geometry (stitch pieces) shown as objects while a zone is open, never saved in one.
-        "level_geometry", "stitch_list", "stitch_flags"];
+        "level_geometry", "stitch_list", "stitch_flags",
+        // ...and the zone's invisible walls (from its terrain file), the same way.
+        "invisible_barrier"];
 
     public static ZoneNames Empty { get; } = new([]);
 
