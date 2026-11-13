@@ -1,7 +1,4 @@
-<<<<<<< HEAD
 using System.Numerics;
-=======
->>>>>>> 8014847de61d55f58c38fe57eef35863f9c993d6
 using System.Text;
 
 namespace RfaFormats.Meshes;

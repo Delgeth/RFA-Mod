@@ -862,8 +862,7 @@ void __cdecl BeginRuinMatchHook() {
 
 bool __cdecl FindFileHook(FileFindResult* result, const char* name, bool flag) {
     const bool found = g_findFile(result, name, flag);
-<<<<<<< HEAD
-    if (g_logLookups && name && IsLevelFile(name)) {
+if (g_logLookups && name && IsLevelFile(name)) {
         const char* sourceStr = !found                 ? "not found"
                       : result->source == 1 ? "in an archive"
                       : result->source == 2 ? "in a virtual folder"
@@ -871,16 +870,6 @@ bool __cdecl FindFileHook(FileFindResult* result, const char* name, bool flag) {
                                              : "found";
         rfa::Log("Level lookup: %s -> %s (%lu bytes)", name, sourceStr, found ? result->size : 0ul);
     }
-=======
-    if (g_logLookups && name && IsLevelFile(name))
-        RFA_LOG_FIRST(4000, "Lookup %s: %s, %lu bytes", name,
-                      !found                 ? "not found"
-                      : result->source == 1 ? "in an archive"
-                      : result->source == 2 ? "in a virtual folder"
-                      : result->source == 0 ? "loose file"
-                                             : "found",
-                      found ? result->size : 0ul);
->>>>>>> 8014847de61d55f58c38fe57eef35863f9c993d6
     if (!found && name) return FindNewFile(result, name);
     if (!found || result->source != 1 || !name) return found;  // not found, or not inside an archive
 
