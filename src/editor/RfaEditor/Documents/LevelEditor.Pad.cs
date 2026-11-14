@@ -130,7 +130,7 @@ public partial class LevelEditor
             context.Log("NavMesh: the editor is still reading the game's files. Try again in a few seconds.");
             return false;
         }
-        navMeshName = zoneName + ".navdata_pc";
+        navMeshName = TerrainZone + ".navdata_pc";  // (the zone's own name: its terrain files', without .rfgzone_pc or p_)
         if (context.Assets.ReadFile(navMeshName, archive, container) is not { } file)
         {
             context.Log($"NavMesh: {navMeshName} not found in the game's files.");
@@ -139,6 +139,11 @@ public partial class LevelEditor
         navMeshBytes = file.Data;
         navMeshOriginal = file.Data;
         navMesh = NavigationFile.Read(navMeshBytes);
+        if (navMesh.People == null && navMesh.Vehicles == null)
+        {
+            // None yet (a new level's, or one Volition left without): one made over the ground.
+            if (!BuildNavMeshFromGround()) return false;
+        }
         navLayer = ChosenNavMeshLayer == 0 ? navMesh.People : navMesh.Vehicles;
         otherLayer = ChosenNavMeshLayer == 0 ? navMesh.Vehicles : navMesh.People;
         if (navLayer == null)
@@ -310,11 +315,45 @@ public partial class LevelEditor
         navMeshChanged = false;
     }
 
-    /// <summary>Regenerates the MOPP trees and island numbering for the current navigation file.</summary>
+    /// <summary>
+    /// A navigation mesh made over the zone's ground as it is now (sculpted too): see NavigationBuilder.FromGround.
+    /// Both layers, cells about 4 m across; false if the ground can't be read or has nowhere flat enough.
+    /// </summary>
+    bool BuildNavMeshFromGround()
+    {
+        if (!EnsureSculpt() || sculpt == null) return false;
+        try
+        {
+            TerrainSculpt ground = sculpt;
+            var centre = ground.Corner + new Vector2(ground.Width / 2);
+            byte place = navMesh?.People?.Cells.FirstOrDefault()?.Place ?? (byte)0x88;
+            NavigationFile made = NavigationBuilder.FromGround((x, z) => ground.HeightAt(x, z), centre, ground.Width / 2 - 0.5f, ground.Corner, ground.Width, place);
+            navMesh = made with { Stamp = navMesh?.Stamp ?? 0 };
+            navMeshBytes = navMesh.ToBytes();
+            navLayer = ChosenNavMeshLayer == 0 ? navMesh.People : navMesh.Vehicles;
+            otherLayer = ChosenNavMeshLayer == 0 ? navMesh.Vehicles : navMesh.People;
+            MarkUnsaved();
+            context.Log($"NavMesh: made over the ground: {navMesh.People?.Cells.Length ?? 0} cells for people, {navMesh.Vehicles?.Cells.Length ?? 0} for vehicles " +
+                        "(too steep left out). Saving writes it.");
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            context.Log($"NavMesh: couldn't be made over the ground: {ex.Message}.");
+            return false;
+        }
+    }
+
+    /// <summary>Regenerates the MOPP trees and island numbering for the current navigation file (with Shift: the whole mesh made again over the ground).</summary>
     void OnRegenerateNavMesh(object sender, RoutedEventArgs e)
     {
         if (navMesh == null || navLayer == null) return;
         CommitEdit();
+        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) || navLayer.Cells.Length == 0)
+        {
+            if (BuildNavMeshFromGround()) ShowNavMesh();
+            return;
+        }
         navMeshBefore = navLayer.ToBytes();
 
         // Rebuild MOPP tree

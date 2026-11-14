@@ -314,7 +314,7 @@
                         <TextBlock Grid.Row="4" Text="Strength" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
                         <Slider x:Name="NavMeshStrengthSlider" Grid.Row="4" Grid.Column="1" Minimum="0.1" Maximum="10" Value="1" VerticalAlignment="Center" Margin="0,0,0,6"
                                 ToolTip="How fast a stroke works" />
-                        <Button x:Name="RegenerateNavMeshButton" Grid.Row="5" Grid.ColumnSpan="2" Content="Regenerate MOPP &amp; Islands" Padding="6,3" Click="OnRegenerateNavMesh" ToolTip="Rebuild the MOPP trees and island numbering for the current navigation file" />
+                        <Button x:Name="RegenerateNavMeshButton" Grid.Row="5" Grid.ColumnSpan="2" Content="Regenerate MOPP &amp; Islands" Padding="6,3" Click="OnRegenerateNavMesh" ToolTip="Rebuild the MOPP trees and island numbering for the current navigation file. Shift-click: make the whole mesh again over the ground as it is now" />
                     </Grid>
                 </Border>
             </Grid>

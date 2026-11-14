@@ -186,15 +186,15 @@ sealed class NewLevel
 
         // An empty stitch list; navigation.
         files[name + ".stchlst_pc"] = StitchList.Write([], new Vector3(centre.X, height, centre.Y), []);
-        if (mode == Mode.Infestation && !noGround)
+        if (!noGround)
         {
             files[name + ".navdata_pc"] = NavigationBuilder.FlatSquare(centre, half - 1, height, ZoneCorner, ZoneWidth, ZonePlace).ToBytes();
-            report.Add("navigation: a new flat mesh over the ground, for the enemies (untested in the game)");
+            report.Add("navigation: a new mesh over the ground, for people and vehicles (squads you add find their way; edit it with the NavMesh tool, N)");
         }
         else
         {
             files[name + ".navdata_pc"] = NavigationFile.None.ToBytes();
-            report.Add(mode == Mode.Infestation ? "navigation: none (no ground to make it over: the enemies won't find their way)" : "navigation: none (nothing walks in Ruin by itself)");
+            report.Add("navigation: none (no ground to make it over; once you've built a floor, the NavMesh tool, N, can make one)");
         }
 
         // Its row, strings, spawn resources and picture (before its zone, which names its spawn resources).
