@@ -25,6 +25,7 @@ public partial class LevelEditor : IDocumentParts
         MenuPanel = DocumentParts.Detach(MenuPart);
         NameScope.SetNameScope(MenuPart, NameScope.GetNameScope(this));
         UseAssetDrops();
+        UseGameplayMarkers();
         Loaded += (_, _) => StartFrameStats();
         Unloaded += (_, _) => StopFrameStats();
     }

@@ -73,6 +73,9 @@ public partial class LevelEditor
             ObjectTree.Items.Add(fileItem);
         }
 
+        // The Guerrilla port's gameplay markers, from the mods' files (see LevelEditor.Gameplay.cs).
+        if (GameplayGroup(filter, finding) is { } gameplay) ObjectTree.Items.Add(gameplay);
+
         // The level's parts: what is drawn besides the objects.
         if (!finding)
             foreach (ShowRow row in showRows.Where(r => r.Kind == null && r.File == null))

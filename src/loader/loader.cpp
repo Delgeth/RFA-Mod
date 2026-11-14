@@ -9,6 +9,7 @@
 #include "menus.h"
 #include <DbgHelp.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <deque>
 #include <map>
@@ -750,98 +751,193 @@ bool IsLevelFile(const char* name) {
     return false;
 }
 
-// Ruin (the game calls it Wrecking Crew) keeps its maps in a list: a pointer per map, each map
-// starting with its file name and that name's checksum. The menu shows the list, and a match
+// Ruin (the game calls it Wrecking Crew) keeps its maps in a list: a pointer per map, read from
+// wrecking_crew_maps.xtbl, one wc_map_list entry per map. The menu shows the list, and a match
 // starts the map at the chosen place in it.
-struct RuinMap {
-    const char* fileName;   // +0: ruin01: the level's archive is build\pc\cache\ruin01.vpp_pc
-    DWORD fileNameChecksum;  // +4: of the name, ignoring case
+struct RuinWeaponList {  // the game's growable array: the weapons a map's par score unlocks, as checksums
+    DWORD* items;
+    int capacity;
+    int count;
 };
+
+struct RuinMap {
+    const char* fileName;           // +0x00 ruin01: the level's archive is build\pc\cache\ruin01.vpp_pc
+    DWORD fileNameChecksum;         // +0x04 of the name, ignoring case
+    const char* displayName;        // +0x08 a string id, RUIN_MAP_01
+    const char* displayNameUpper;   // +0x0C
+    const char* imageName;          // +0x10
+    int timeOfDayHour;              // +0x14
+    int timeOfDayMinute;            // +0x18
+    void* resourceReservation;      // +0x1C
+    int roundTimeMs;                // +0x20 total_chaos_round_time_ms
+    float timeBonusTarget;          // +0x24 total_chaos_time_bonus_target
+    int timeBonusTimeMs;            // +0x28 total_chaos_time_bonus_time_ms
+    bool locked;                    // +0x2C is_locked
+    bool lockedUntilEarned;         // +0x2D a base-game map, until the map before it unlocks it
+    int dlc;                        // +0x30 the DLC the table came from, or -1
+    int scoreboardIndex;            // +0x34
+    int parScore;                   // +0x38 par_unlocks: the score to beat,
+    int maxScoreStat;               // +0x3C
+    bool unlocksExo;                // +0x40
+    const char* unlocksMap;         // +0x44 the map that opens when it is beaten,
+    RuinWeaponList unlocksWeapons;  // +0x48 and the weapons
+    BYTE notRead54[0x14];           // +0x54 (the reader leaves these alone)
+    int ambientBank;                // +0x68 Audio
+    DWORD musicTrigger;             // +0x6C
+    float damageToScore;            // +0x70 Damage_To_Score_Multiplier
+    int nanoforgeAbility;           // +0x74
+};
+static_assert(offsetof(RuinMap, lockedUntilEarned) == 0x2D && offsetof(RuinMap, unlocksWeapons) == 0x48 &&
+                  offsetof(RuinMap, nanoforgeAbility) == 0x74, "RuinMap must match the game's map record");
+
 inline RuinMap** const g_ruinMaps = rfa::game::At<RuinMap**>(0x12F39E8);  // room for 35
 inline int& g_ruinMapCount = *rfa::game::At<int*>(0x12F3A74);
 inline const int& g_chosenRuinMap = *rfa::game::At<const int*>(0x10F857C);
+inline void* const kRuinMapPool = rfa::game::At<void*>(0x12F3DA8);     // the "WC mempool": room for 32 maps
+inline void* const kRuinStringPool = rfa::game::At<void*>(0x12F3C78);  // keeps the maps' names for good
+inline const DWORD& kNoChecksum = *rfa::game::At<const DWORD*>(0x290A190);
+inline const DWORD& kNoMusicTrigger = *rfa::game::At<const DWORD*>(0x10724B8);
 
-// The game reads the list from wrecking_crew_maps.xtbl, one wc_map_list entry per map, with
-// 0x50E690 (cdecl: the table, and the DLC it came from or -1). After reading an entry it throws its
-// file_name away and names the map after its place in the list instead, from five names built into
-// that function (ruin01, ruin08, ruin06, ruin07, ruin03), which is also why it stops at five maps.
-// The game's own table lists them in that order, so for it nothing changes; a table with a new map
-// would start the wrong level. Run after the game's reader, this puts each map's own file_name back.
-// The rest the game sets by place stays: the scoreboard, the round times and the score multiplier.
-constexpr DWORD kReadRuinMaps = 0x50E690;
-constexpr size_t kReadRuinMapsPrologue = 6;  // push ebp / mov ebp,esp / sub esp,78h
-using ReadRuinMapsFn = void(__cdecl*)(void* table, int dlc);
-ReadRuinMapsFn g_readRuinMaps;
-
-// The game's table helpers, as its reader uses them. An entry is an XML element.
+// The game's table helpers, as its reader uses them. An entry is an XML element (its name at +0, its
+// text at +0xC). The "required" ones log an error when the field is missing; the others don't.
+struct XmlElement {
+    const char* name;
+    void* notUsed[2];
+    const char* text;
+};
 inline const auto FirstEntry = rfa::game::At<void*(__cdecl*)(void* table, const char* name)>(0xC8F730);
 inline const auto NextEntry = rfa::game::At<void*(__cdecl*)(void* table, void* after, const char* name)>(0xC8F780);
 inline const auto EntryText = rfa::game::At<const char*(__cdecl*)(void* entry, const char* field)>(0xC8C800);
+inline const auto OptionalText = rfa::game::At<const char*(__cdecl*)(void* entry, const char* field)>(0xC8C8E0);
+inline const auto RequiredChild = rfa::game::At<void*(__cdecl*)(void* entry, const char* name)>(0xC8C710);
+inline const auto FirstChild = rfa::game::At<void*(__cdecl*)(void* entry, const char* name)>(0xC8C7A0);
+inline const auto NextChild = rfa::game::At<void*(__cdecl*)(void* entry, void* after, const char* name)>(0xC8C7C0);
+inline const auto ReadInt = rfa::game::At<void(__cdecl*)(int& out, void* entry, const char* field)>(0xC8CAC0);
+inline const auto ReadFloat = rfa::game::At<void(__cdecl*)(float& out, void* entry, const char* field)>(0xC8CD30);
+inline const auto ReadBool = rfa::game::At<void(__cdecl*)(bool& out, void* entry, const char* field)>(0xC8CE00);
+inline const auto ReadOptionalBool = rfa::game::At<bool(__cdecl*)(bool& out, void* entry, const char* field)>(0xC8CE60);
+// What the reader looks names up with: "hh:mm", a spawn resource reservation, a stat, a sound
+// bank (from a field), a Nano Forge ability.
+inline const auto ReadTimeOfDay = rfa::game::At<void(__cdecl*)(int* hour, int* minute, const char* text)>(0x9F6970);
+inline const auto FindResourceReservation = rfa::game::At<void*(__cdecl*)(const char* name)>(0x75F2F0);
+inline const auto FindStat = rfa::game::At<int(__cdecl*)(const char* name)>(0x554860);
+inline const auto ReadSoundBank = rfa::game::At<int(__cdecl*)(void* entry, const char* field)>(0x537A90);
+inline const auto FindNanoforgeAbility = rfa::game::At<int(__cdecl*)(const char* name)>(0x71A210);
 // Methods (the object in ECX), called as __fastcall with EDX unused. KeepString copies a name into
-// the string pool the reader keeps its names in, which lasts as long as the game; NameChecksum
-// works out a name's checksum into `out` the way the reader does.
-inline void* const kRuinStringPool = rfa::game::At<void*>(0x12F3C78);
+// the string pool (or finds it there, ignoring case); NameChecksum works out a name's checksum into
+// `out` and returns `out`; NewRuinMap takes a record from the pool (nullptr when it is full); AddWeapon
+// adds to a weapon list, growing it.
 inline const auto KeepString =
     rfa::game::At<const char*(__fastcall*)(void* pool, void* unused, const char* text, int, int)>(0xC97DB0);
 inline const auto NameChecksum =
     rfa::game::At<DWORD*(__fastcall*)(DWORD* out, void* unused, const char* text, DWORD seed, int maxLength)>(0xC8BEB0);
+inline const auto NewRuinMap = rfa::game::At<RuinMap*(__fastcall*)(void* pool, void* unused, int)>(0x512CE0);
+inline const auto AddWeapon = rfa::game::At<int(__fastcall*)(RuinWeaponList* list, void* unused, const DWORD& weapon)>(0x49C480);
 
-// More than five maps: the reader's `cmp [12F3A74h],5` (its 5 at 0x50E78F) made 32, the list's own
-// limit (checked just before, at 0x50E77B; the "WC mempool" behind it holds 32), and the shipped values
-// it puts back over each map by its place (0x50EBF6 to 0x50EC54: the name, as above, the round times
-// 60000 and 15000 ms, the scoreboard as its place, the damage-to-score multiplier from five constants,
-// read past the fifth for a sixth map) jumped over (to 0x50EC57): every map is as its table says. The
-// game's table has those very values for its five, so they are as they were. A map the game reads from
-// its base table starts locked (+0x2D) until the map before it unlocks it (its unlocks_map, once that
-// map's par score is beaten); a map past the five has none, so it is opened once the table is read.
-constexpr DWORD kRuinMapLimitAt = 0x50E78F, kRuinShippedValuesAt = 0x50EBF6;
-constexpr int kRuinShippedMaps = 5, kRuinMostMaps = 32;
-bool g_moreRuinMaps = false;
-
-void AllowMoreRuinMaps() {
-    static const BYTE limit[] = {0x83, 0x3D, 0x74, 0x3A, 0x2F, 0x01, 0x05, 0x7C};  // cmp dword ptr [12F3A74h],5 / jl
-    static const BYTE shipped[] = {0x8B, 0x4D, 0xC4, 0x8B, 0x15, 0x74};          // mov ecx,[ebp-3Ch] / mov edx,[12F3A74h]
-    if (memcmp(reinterpret_cast<const void*>(kRuinMapLimitAt - 6), limit, sizeof(limit)) != 0 ||
-        memcmp(reinterpret_cast<const void*>(kRuinShippedValuesAt), shipped, sizeof(shipped)) != 0) {
-        rfa::Log("The Ruin map reader isn't as expected; Ruin keeps its five maps");
-        return;
-    }
-    const BYTE most = kRuinMostMaps;
-    const BYTE jump[] = {0xEB, static_cast<BYTE>(0x50EC57 - (kRuinShippedValuesAt + 2))};  // jmp short 0x50EC57
-    g_moreRuinMaps = rfa::PatchCode(reinterpret_cast<void*>(kRuinMapLimitAt), &most, 1) &&
-                     rfa::PatchCode(reinterpret_cast<void*>(kRuinShippedValuesAt), jump, sizeof(jump));
-    rfa::Log(g_moreRuinMaps ? "Ruin takes up to %d maps from wrecking_crew_maps.xtbl, each as the table gives it"
-                            : "Could not change the Ruin map reader; Ruin keeps its five maps", kRuinMostMaps);
+const char* KeepRuinString(const char* text) { return KeepString(kRuinStringPool, nullptr, text, 0, 0); }
+DWORD RuinNameChecksum(const char* text) {
+    DWORD checksum;
+    return *NameChecksum(&checksum, nullptr, text, 0, -1);
 }
 
-void __cdecl ReadRuinMapsHook(void* table, int dlc) {
-    const int first = g_ruinMapCount;
-    g_readRuinMaps(table, dlc);
+// The game's own reader (0x50E690, cdecl: the table, and the DLC it came from or -1) stops at five
+// maps, and after reading each it sets these by the map's place in the list, whatever the table
+// says: the five maps the game was made for, in their table's order, with that same table's values.
+// So a table with a new map would start the wrong level, and no more than five could be listed.
+constexpr int kRuinShippedMaps = 5, kRuinMostMaps = 32;  // 32: what the map pool holds
+const char* const kShippedRuinMaps[kRuinShippedMaps] = {"ruin01", "ruin08", "ruin06", "ruin07", "ruin03"};
+constexpr float kShippedDamageToScore[kRuinShippedMaps] = {0.6f, 0.85f, 3.75f, 0.56f, 0.85f};
+constexpr int kShippedRoundTimeMs = 60000, kShippedTimeBonusMs = 15000;
+
+// One wc_map_list entry, read as the game reads it.
+void ReadRuinMap(RuinMap* map, void* entry, int dlc) {
+    map->dlc = dlc;
+    map->lockedUntilEarned = dlc == -1;
+    map->fileName = nullptr;
+    map->fileNameChecksum = kNoChecksum;
+    if (const char* text = EntryText(entry, "file_name")) {
+        map->fileName = KeepRuinString(text);
+        map->fileNameChecksum = RuinNameChecksum(map->fileName);
+    }
+    const char* text = EntryText(entry, "display_name");
+    map->displayName = text ? KeepRuinString(text) : nullptr;
+    text = EntryText(entry, "display_name_uppercase");
+    map->displayNameUpper = text ? KeepRuinString(text) : nullptr;
+    text = EntryText(entry, "image_name");
+    map->imageName = text ? KeepRuinString(text) : nullptr;
+    if (const char* time = EntryText(entry, "time_of_day")) ReadTimeOfDay(&map->timeOfDayHour, &map->timeOfDayMinute, time);
+    const char* reservation = OptionalText(entry, "resource_reservation");
+    map->resourceReservation = reservation ? FindResourceReservation(reservation) : nullptr;
+    map->locked = true;
+    ReadOptionalBool(map->locked, entry, "is_locked");
+    ReadInt(map->roundTimeMs, entry, "total_chaos_round_time_ms");
+    ReadFloat(map->timeBonusTarget, entry, "total_chaos_time_bonus_target");
+    ReadInt(map->timeBonusTimeMs, entry, "total_chaos_time_bonus_time_ms");
+    ReadInt(map->scoreboardIndex, entry, "scoreboard_index");
+
+    void* par = RequiredChild(entry, "par_unlocks");
+    ReadInt(map->parScore, par, "par_score");
+    map->maxScoreStat = FindStat(EntryText(par, "max_score_stat"));
+    ReadBool(map->unlocksExo, par, "unlocks_exo");
+    const char* unlocks = OptionalText(par, "unlocks_map");
+    map->unlocksMap = unlocks ? KeepRuinString(unlocks) : nullptr;
+    map->unlocksWeapons.count = 0;
+    void* weapons = RequiredChild(par, "unlocks_weapons");
+    for (void* weapon = FirstChild(weapons, "weapon_info"); weapon; weapon = NextChild(weapons, weapon, "weapon_info"))
+        AddWeapon(&map->unlocksWeapons, nullptr, RuinNameChecksum(static_cast<XmlElement*>(weapon)->text));
+
+    map->ambientBank = 0;
+    map->musicTrigger = kNoMusicTrigger;
+    if (void* audio = RequiredChild(entry, "Audio")) {
+        map->ambientBank = ReadSoundBank(audio, "Ambient_Bank_Name");
+        if (const char* music = OptionalText(audio, "Music_Trigger_Name")) map->musicTrigger = RuinNameChecksum(music);
+    }
+    ReadFloat(map->damageToScore, entry, "Damage_To_Score_Multiplier");
+    const char* ability = OptionalText(entry, "Nanoforge_Ability");
+    map->nanoforgeAbility = ability ? FindNanoforgeAbility(ability) : 0;
+}
+
+// The loader's reader, in the game's reader's place: up to 32 maps, each started by its own
+// file_name. For the first five places it keeps what the game sets by place (the round times, the
+// scoreboard and the damage-to-score multiplier), so the game's five maps are as they always were.
+// A map past the five is as its table gives it, and one from the base table is open from the start:
+// the game opens each base-game map from the one before it (its unlocks_map, once that map's par
+// score is beaten), which the five shipped maps don't do for a new one.
+void __cdecl ReadRuinMaps(void* table, int dlc) {
     if (!table) return;
-    if (g_moreRuinMaps)
-        for (int i = (first > kRuinShippedMaps ? first : kRuinShippedMaps); i < g_ruinMapCount && i < kRuinMostMaps; ++i)
-            if (BYTE* map = reinterpret_cast<BYTE*>(g_ruinMaps[i])) {
-                map[0x2D] = 0;
-                rfa::Log("Ruin map %d: %s, unlocked", i, g_ruinMaps[i]->fileName ? g_ruinMaps[i]->fileName : "(no name)");
-            }
-    int index = first;
     std::string leftOut;
-    for (void* entry = FirstEntry(table, "wc_map_list"); entry; entry = NextEntry(table, entry, "wc_map_list"), ++index) {
-        const char* fileName = EntryText(entry, "file_name");
-        if (index >= g_ruinMapCount) {  // the reader stopped before this one
+    for (void* entry = FirstEntry(table, "wc_map_list"); entry; entry = NextEntry(table, entry, "wc_map_list")) {
+        const int place = g_ruinMapCount;
+        RuinMap* map = place < kRuinMostMaps ? NewRuinMap(kRuinMapPool, nullptr, 0) : nullptr;
+        if (!map) {
+            const char* fileName = EntryText(entry, "file_name");
             leftOut += (leftOut.empty() ? "" : ", ") + std::string(fileName ? fileName : "(no file_name)");
             continue;
         }
-        RuinMap* map = g_ruinMaps[index];
-        if (!fileName || !map || (map->fileName && _stricmp(fileName, map->fileName) == 0)) continue;
-        rfa::Log("Ruin map %d is %s, as its table says (the game would have started %s)", index, fileName,
-                 map->fileName ? map->fileName : "nothing");
-        map->fileName = KeepString(kRuinStringPool, nullptr, fileName, 0, 0);
-        NameChecksum(&map->fileNameChecksum, nullptr, fileName, 0, -1);
+        ReadRuinMap(map, entry, dlc);
+        if (place < kRuinShippedMaps) {
+            const char* shipped = kShippedRuinMaps[place];
+            if (!map->fileName) {
+                map->fileName = KeepRuinString(shipped);
+                map->fileNameChecksum = RuinNameChecksum(map->fileName);
+            } else if (_stricmp(map->fileName, shipped) != 0) {
+                rfa::Log("Ruin map %d is %s, as its table says (the game would have started %s)", place, map->fileName, shipped);
+            }
+            map->roundTimeMs = kShippedRoundTimeMs;
+            map->timeBonusTimeMs = kShippedTimeBonusMs;
+            map->scoreboardIndex = place;
+            map->damageToScore = kShippedDamageToScore[place];
+        } else {
+            if (dlc == -1) map->lockedUntilEarned = false;
+            rfa::Log("Ruin map %d: %s%s", place, map->fileName ? map->fileName : "(no name)", dlc == -1 ? ", unlocked" : "");
+        }
+        g_ruinMaps[place] = map;
+        ++g_ruinMapCount;
     }
-    if (!leftOut.empty())
-        rfa::Log("The game reads at most %d Ruin maps; left out of its list: %s", g_moreRuinMaps ? kRuinMostMaps : kRuinShippedMaps, leftOut.c_str());
+    if (!leftOut.empty()) rfa::Log("Ruin has room for %d maps; left out of its list: %s", kRuinMostMaps, leftOut.c_str());
 }
+
+constexpr DWORD kReadRuinMaps = 0x50E690;
 
 // With LogLookups=1, the Ruin map list is logged too when a Ruin match begins
 // (rf4_wrecking_crew_begin_match → 0x50F400): the map chosen and every map's file name.
@@ -1008,10 +1104,10 @@ void InstallOverrides() {
         rfa::HookFunction(kLuaLoadBuffer, kLuaLoadBufferPrologue, reinterpret_cast<void*>(&LoadBufferHook)));
     g_findFile = reinterpret_cast<FindFileFn>(
         rfa::HookFunction(kFindFile, kFindFilePrologue, reinterpret_cast<void*>(&FindFileHook)));
-    g_readRuinMaps = reinterpret_cast<ReadRuinMapsFn>(
-        rfa::HookFunction(kReadRuinMaps, kReadRuinMapsPrologue, reinterpret_cast<void*>(&ReadRuinMapsHook)));
-    if (!g_readRuinMaps) rfa::Log("Could not hook the Ruin map reader; Ruin starts maps by their place in its table");
-    else AllowMoreRuinMaps();
+    if (rfa::ReplaceFunction(kReadRuinMaps, reinterpret_cast<const void*>(&ReadRuinMaps)))
+        rfa::Log("Ruin takes up to %d maps from wrecking_crew_maps.xtbl, each started by its file_name", kRuinMostMaps);
+    else
+        rfa::Log("Could not replace the Ruin map reader; Ruin keeps its five maps, started by their place in its table");
     const auto newFiles = std::count_if(g_newFiles.begin(), g_newFiles.end(),
                                         [](const auto& file) { return file.first.find('\\') != std::string::npos; });
     rfa::Log("Overrides: %u in overrides\\, and %u new files; Lua scripts %s, other files %s",

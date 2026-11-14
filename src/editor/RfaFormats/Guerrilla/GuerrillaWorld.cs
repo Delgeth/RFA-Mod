@@ -72,8 +72,11 @@ public static class GuerrillaWorld
     /// list for the minimap, which the mods read; the HUD's documents change with guerrilla_hud.dll.
     /// 7 (v0.6.3-beta): the safehouses' respawn spots, the story people's nodes, the Marauder ambush
     /// regions, the deep pits left open, and Guerrilla's 9/3/2 district people lists.
+    /// 8 (v0.6.4-beta): the action nodes and their types, the civilians' own AI properties, the walkers'
+    /// blend trees served on every load, the demolitions masters' markers and kits, the vehicle cameras'
+    /// mouse turn speed.
     /// </summary>
-    public const int Format = 7;
+    public const int Format = 8;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 

@@ -251,6 +251,21 @@ Terrain and foliage can be hidden but not picked or changed yet, and clicking th
 objects behind them. They appear once the editor has read every container. The axis widget in the
 view's corner shows which way X, Y and Z point.
 
+### Guerrilla's gameplay
+
+In a zone of the Guerrilla world (`rfg_CC_RR`), the editor also shows the places the Guerrilla
+port's gameplay uses, which the Guerrilla builder writes for the mods rather than into the zones:
+the campaign's markers (activity spawns, raid, delivery and BFTP nodes, mission starts, house
+arrests, demolitions masters, upgrade nodes, safehouses, ...), kill regions (pits and minefields),
+restricted areas (the EDF's bases), Marauder ambush regions, the buildings that change a district,
+story people, the squads' and walkers' action nodes, kiosks, respawn spots, safehouse parking and
+stations, and convoy starts.
+- In the view: places are coloured posts as tall as a person, regions see-through boxes, and
+  restricted areas see-through walls around the base.
+- In the Scene panel: the group **Guerrilla's gameplay**, by kind, each kind with an eye. Pick
+  one to see where it is and all it says in the Inspector, with a box around it in the view.
+- They are read only for now: the Guerrilla builder writes those files anew on every build.
+
 ### The Assets panel
 
 The **Assets** panel (at the bottom, beside the Log) holds everything you can add to the zone you

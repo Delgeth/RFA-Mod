@@ -305,6 +305,65 @@ void __fastcall Autoaim(BYTE* turret, void* unused) {
     if (g_watched != kNone) Watch(turret, rule);
 }
 
+// ---- The log: how the player's walker moves (Guerrilla's walk on the spot, 2026-11-13)
+// Guerrilla moves a walker by its animation's root motion alone (walker_process_movement_presim RM 0xBB83A0:
+// animlib_get_position_change, unrotated into the walker's frame); our walkers' clips keep it (header and root track).
+// Armageddon's own step of that name (0x63EB30, cdecl (walker); the name is in the exe at 0xFA1588) works leg by leg:
+// its legs from +0xED10, how many at +0xEF20 (the loop's test at 0x63EC6F), each through 0x644C80, 0x645520 and
+// 0x643DA0. While the player drives one of Guerrilla's walkers, four times a second for its first 30 s (120 lines),
+// the log gives its legs, how far those steps moved it themselves, and how far it really went since the line before.
+// [GuerrillaVehicles] WalkerLog=0 turns it off.
+constexpr DWORD kWalkerPresim = 0x63EB30, kWalkerLegCount = 0xEF20;
+constexpr int kWalkerEvery = 250, kWalkerLines = 120;
+using WalkerPresimFn = void(__cdecl*)(BYTE* walker);
+WalkerPresimFn g_walkerPresim;
+DWORD g_walkerWatched = kNone;
+int g_walkerLines, g_walkerSteps;
+DWORD g_walkerSince;
+V3 g_walkerFrom;
+float g_walkerStepMoved;
+
+float Apart(const V3& a, const V3& b) { return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)); }
+
+void __cdecl WalkerPresim(BYTE* walker) {
+    const V3 before = walker ? Pos(walker) : V3{};
+    g_walkerPresim(walker);
+    BYTE* player = walker ? Player() : nullptr;
+    if (!player || VehicleOf(player) != Handle(walker) || IsArmageddons(walker)) return;
+    const DWORD now = GetTickCount();
+    if (g_walkerWatched != Handle(walker)) {  // a new walker: start its watch
+        g_walkerWatched = Handle(walker);
+        g_walkerLines = g_walkerSteps = 0;
+        g_walkerStepMoved = 0;
+        g_walkerSince = now;
+        g_walkerFrom = before;
+    }
+    if (g_walkerLines >= kWalkerLines) return;
+    ++g_walkerSteps;
+    g_walkerStepMoved += Apart(Pos(walker), before);
+    if (now - g_walkerSince < static_cast<DWORD>(kWalkerEvery)) return;
+    const float seconds = (now - g_walkerSince) / 1000.0f, went = Apart(Pos(walker), g_walkerFrom);
+    ++g_walkerLines;
+    rfa::Log("Walkers: watch %d, %s: %d legs; %d movement steps in %.2f s moved it %.2f m themselves; it went %.2f m (%.2f m/s), now at %.1f %.1f %.1f",
+             g_walkerLines, VehicleName(walker), *reinterpret_cast<const int*>(walker + kWalkerLegCount), g_walkerSteps, seconds, g_walkerStepMoved,
+             went, seconds > 0 ? went / seconds : 0.0f, Pos(walker).x, Pos(walker).y, Pos(walker).z);
+    g_walkerSteps = 0;
+    g_walkerStepMoved = 0;
+    g_walkerSince = now;
+    g_walkerFrom = Pos(walker);
+}
+
+void StartWalkerLog() {
+    if (!rfa::IniInt(L"GuerrillaVehicles", L"WalkerLog", 1)) return;
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0xB8, 0x24, 0x1D, 0x00, 0x00};  // push ebp / mov ebp,esp / mov eax,1D24h
+    if (memcmp(reinterpret_cast<const void*>(kWalkerPresim), opening, sizeof(opening)) != 0) {
+        rfa::Log("Walkers: the walker's movement step (0x%08lX) isn't as expected; no walker log", kWalkerPresim);
+        return;
+    }
+    g_walkerPresim = reinterpret_cast<WalkerPresimFn>(rfa::HookFunction(kWalkerPresim, sizeof(opening), reinterpret_cast<void*>(&WalkerPresim)));
+    if (g_walkerPresim) rfa::Log("Walkers: the player's Guerrilla walker's movement is logged (four lines a second, its first 30 s)");
+}
+
 // ---- The log: a vehicle's gun getting and losing its gunner
 void __fastcall AttachGunner(BYTE* turret, void* unused, BYTE* human) {
     g_attachGunner(turret, unused, human);
@@ -533,6 +592,7 @@ void StartGunnerCamera() {
 void StartTurrets() {
     StartHinges();
     StartGunnerCamera();
+    StartWalkerLog();
     g_watchLog = rfa::IniInt(L"GuerrillaVehicles", L"TurretWatchLog", 0) != 0;
     if (!rfa::IniInt(L"GuerrillaVehicles", L"DriverGunAsGuerrilla", 1)) {
         rfa::Log("Turrets: a driver's gun follows the player's aim point on every vehicle, as Armageddon's ([GuerrillaVehicles] DriverGunAsGuerrilla=0)");

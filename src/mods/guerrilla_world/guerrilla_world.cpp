@@ -139,6 +139,7 @@
 #include <d3dcompiler.h>
 #include <intrin.h>
 #include <math.h>
+#include <tlhelp32.h>
 #include <stdarg.h>
 #include <algorithm>
 #include <unordered_map>
@@ -9022,6 +9023,66 @@ std::string DescribeLook(const ThreadLook& look) {
     return text;
 }
 
+// A stuck frame whose main thread is waiting (in ntdll or KERNELBASE: a wait, a sleep) shows what it waits for only
+// through the others: one line for each of the game's other threads, with where it started (its start address names
+// its kind: the job threads, streaming, audio, render) and where it is now. Each is stopped only while its registers
+// and stack are copied, as the main thread's; the list of threads is taken before any is stopped, and nothing is
+// looked up or logged until it runs again. Not while a level loads (the loading state sleeps by design: the "level
+// loaded" byte 0x133183B is 0). At most kThreadDumps stuck frames a run.
+constexpr DWORD kLevelLoaded = 0x133183B;
+constexpr int kThreadDumps = 3;
+constexpr int kMostThreads = 128;
+using NtQueryInformationThreadFn = LONG(WINAPI*)(HANDLE thread, int what, void* out, ULONG size, ULONG* written);
+
+bool InWait(DWORD eip) {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(eip)), &module) || !module)
+        return false;
+    return module == GetModuleHandleW(L"ntdll.dll") || module == GetModuleHandleW(L"KERNELBASE.dll");
+}
+
+void LogOtherThreads(DWORD mainThread, DWORD* stack, size_t stackSize) {
+    DWORD ids[kMostThreads];
+    int count = 0;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 entry = {};
+    entry.dwSize = sizeof(entry);
+    const DWORD process = GetCurrentProcessId(), self = GetCurrentThreadId();
+    for (BOOL more = Thread32First(snapshot, &entry); more && count < kMostThreads; more = Thread32Next(snapshot, &entry))
+        if (entry.th32OwnerProcessID == process && entry.th32ThreadID != mainThread && entry.th32ThreadID != self)
+            ids[count++] = entry.th32ThreadID;
+    CloseHandle(snapshot);
+    const auto query = reinterpret_cast<NtQueryInformationThreadFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+    rfa::Log("Stuck frame: the main thread waits; the game's other %d threads:", count);
+    for (int i = 0; i < count; ++i) {
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, ids[i]);
+        if (!thread) continue;
+        DWORD start = 0;
+        if (query) query(thread, 9, &start, sizeof(start), nullptr);  // ThreadQuerySetWin32StartAddress
+        CONTEXT context = {};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        size_t copied = 0;
+        bool got = false;
+        if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+            got = GetThreadContext(thread, &context) != 0;
+            if (got)
+                for (copied = stackSize; copied >= 256; copied /= 2)
+                    if (CopyIfReadable(stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(context.Esp)), copied)) break;
+            ResumeThread(thread);
+        }
+        CloseHandle(thread);
+        if (!got) continue;
+        ThreadLook look = {};
+        look.eip = context.Eip;
+        look.chainLength = copied >= 256 ? FollowFrames(stack, context.Esp, copied, context.Ebp, look.chain) : 0;
+        char started[160];
+        DescribeCodeAddress(start, started, sizeof(started));
+        rfa::Log("Stuck frame: thread %lu (started at %s) is at %s", ids[i], started, DescribeLook(look).c_str());
+    }
+}
+
 DWORD WINAPI Watchdog(void*) {
     HANDLE thread = nullptr;
     DWORD threadId = 0;
@@ -9075,9 +9136,18 @@ DWORD WINAPI Watchdog(void*) {
         last.eip = context.Eip;
         last.chainLength = copied >= 256 ? FollowFrames(stack, context.Esp, copied, context.Ebp, last.chain) : 0;
         haveLook = true;
-        if (kLookAtMs[looks - 1] == kStuckMs)
-            RFA_LOG_FIRST(10, "Stuck frame: still running after %ld ms (not ended yet); the main thread is at %s", elapsed,
-                          DescribeLook(last).c_str());
+        if (kLookAtMs[looks - 1] == kStuckMs) {
+            static int stuckLines, threadDumps;
+            if (stuckLines >= 10) continue;
+            ++stuckLines;
+            const bool loading = *reinterpret_cast<const BYTE*>(kLevelLoaded) == 0;
+            rfa::Log("Stuck frame: still running after %ld ms (not ended yet%s); the main thread is at %s", elapsed,
+                     loading ? ", a level loading" : "", DescribeLook(last).c_str());
+            if (!loading && threadDumps < kThreadDumps && InWait(last.eip)) {
+                ++threadDumps;
+                LogOtherThreads(threadId, stack, sizeof(stack));
+            }
+        }
     }
 }
 
