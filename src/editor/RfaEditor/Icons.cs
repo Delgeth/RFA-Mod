@@ -53,6 +53,7 @@ public static class Icons
     public const string Settled = "";     // ArrowDownload20: props where the running game has them
     public const string Display = "";     // Desktop20: the Direct3D view
     public const string Sculpt = "";      // PaintBrush20: sculpt the ground
+    public const string NavMesh = "";     // Path20: navigation mesh editing
     public const string GameLight = "";   // WeatherSunny20: light the level as the game does
     public const string Magnets = "";     // PlugConnected20: moved objects join the models near them
     public const string Live = "";        // ArrowSync20: changes go to the running game as they are made

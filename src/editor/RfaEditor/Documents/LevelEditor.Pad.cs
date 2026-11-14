@@ -98,6 +98,304 @@ public partial class LevelEditor
         return true;
     }
 
+    // ---- NavMesh painter -------------------------------------------------------------------------
+
+    /// <summary>The navigation file this zone has (read when the tool is first chosen).</summary>
+    NavigationFile? navMesh;
+    NavigationLayer? navLayer;
+    NavigationLayer? otherLayer;  // the layer we're not editing
+    byte[]? navMeshBytes;         // the original file bytes
+    string? navMeshName;          // the file name
+    byte[]? navMeshBefore;        // the layer as a stroke began, for undo
+    bool navMeshChanged;
+    byte[]? navMeshOriginal;      // the file as read, to tell whether there is anything to save
+
+    NavMeshMode ChosenNavMeshMode => (NavMeshMode)Math.Clamp(NavMeshModeBox.SelectedIndex, 0, (int)NavMeshMode.SetIsland);
+    int ChosenNavMeshLayer => Math.Clamp(NavMeshLayerBox.SelectedIndex, 0, 1);  // 0 = people, 1 = vehicles
+    float NavMeshRadius => (float)NavMeshRadiusSlider.Value;
+
+    enum NavMeshMode { PaintWalkable, EraseWalkable, PaintBlocked, ClearBlocked, PaintVehicle, ClearVehicle, SetIsland }
+
+    void EnsureNavMesh()
+    {
+        if (EnsureNavMeshInternal()) SetTool(LevelTool.NavMesh);
+        else SetTool(tool == LevelTool.NavMesh ? LevelTool.Move : tool);
+    }
+
+    bool EnsureNavMeshInternal()
+    {
+        if (navMesh != null) return true;
+        if (!context.Assets.IndexReady)
+        {
+            context.Log("NavMesh: the editor is still reading the game's files. Try again in a few seconds.");
+            return false;
+        }
+        navMeshName = zoneName + ".navdata_pc";
+        if (context.Assets.ReadFile(navMeshName, archive, container) is not { } file)
+        {
+            context.Log($"NavMesh: {navMeshName} not found in the game's files.");
+            return false;
+        }
+        navMeshBytes = file.Data;
+        navMeshOriginal = file.Data;
+        navMesh = NavigationFile.Read(navMeshBytes);
+        navLayer = ChosenNavMeshLayer == 0 ? navMesh.People : navMesh.Vehicles;
+        otherLayer = ChosenNavMeshLayer == 0 ? navMesh.Vehicles : navMesh.People;
+        if (navLayer == null)
+        {
+            // Create an empty layer if the zone has none
+            var (words, pools) = NavigationLayer.PlainPools(1, 0x88, people: ChosenNavMeshLayer == 0);
+            navLayer = new NavigationLayer(NavigationLayer.ArmageddonVersion, [], [], 0, [], Vector3.Zero, Vector3.Zero, words, pools);
+        }
+        navMeshBefore = navLayer.ToBytes();
+        ShowNavMesh();
+        context.Log($"NavMesh: {navMeshName} loaded. Layer: {(ChosenNavMeshLayer == 0 ? "People" : "Vehicles")} ({navLayer.Cells.Length} cells). Hold left button to paint (Shift for opposite).");
+        return true;
+    }
+
+    void OnNavMeshModeChanged(object sender, SelectionChangedEventArgs e) => ShowNavMesh();
+    void OnNavMeshLayerChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (navMesh != null)
+        {
+            navLayer = ChosenNavMeshLayer == 0 ? navMesh.People : navMesh.Vehicles;
+            otherLayer = ChosenNavMeshLayer == 0 ? navMesh.Vehicles : navMesh.People;
+            navMeshBefore = navLayer?.ToBytes();
+            ShowNavMesh();
+        }
+    }
+    void OnNavMeshBrushChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (IsLoaded) ShowNavMeshBrush();
+    }
+
+    void ShowNavMesh()
+    {
+        if (navLayer == null) return;
+        ShowNavMeshBrush();
+        ShowNavMeshLayer();
+    }
+
+    void ShowNavMeshLayer()
+    {
+        if (navLayer == null) return;
+        var cells = navLayer.Cells;
+        var vertices = navLayer.Vertices;
+        if (cells.Length == 0) return;
+
+        // One mesh a kind of cell, by its flags: 0x08 (the game's "can be switched off") red, 0x20 (vehicles') blue, else green.
+        var groups = new Model3DGroup();
+        foreach (var (flag, colour) in new[] { (0x08, Color.FromArgb(180, 200, 60, 60)), (0x20, Color.FromArgb(180, 60, 120, 255)), (0, Color.FromArgb(180, 60, 200, 60)) })
+        {
+            var kindPositions = new Point3DCollection();
+            var kindTriangles = new Int32Collection();
+            for (int i = 0; i < cells.Length; i++)
+            {
+                byte f = cells[i].Flags;
+                int kind = (f & 0x08) != 0 ? 0x08 : (f & 0x20) != 0 ? 0x20 : 0;
+                if (kind != flag) continue;
+                foreach (ushort vi in cells[i].Vertices)
+                {
+                    Vector3 v = vertices[vi];
+                    kindTriangles.Add(kindPositions.Count);
+                    kindPositions.Add(new Point3D(v.X, v.Y + 0.1, -v.Z));
+                }
+            }
+            if (kindPositions.Count == 0) continue;
+            var kindMesh = new MeshGeometry3D { Positions = kindPositions, TriangleIndices = kindTriangles };
+            kindMesh.Freeze();
+            var paint = new DiffuseMaterial(new SolidColorBrush(colour));
+            paint.Freeze();
+            groups.Children.Add(new GeometryModel3D(kindMesh, paint) { BackMaterial = paint });
+        }
+        groups.Freeze();
+        navMeshVisual.Content = groups;
+    }
+
+    void ShowNavMeshBrush()
+    {
+        if (tool != LevelTool.NavMesh || navLayer == null || NavBrushPoint() is not Vector3 centre)
+        {
+            // Could add a separate brush visual for navmesh
+            return;
+        }
+        // Brush is shown as part of the layer rendering (highlight cells under brush)
+    }
+
+    /// <summary>Starts a navmesh stroke; false if the brush isn't over the navmesh.</summary>
+    bool BeginNavMeshStroke()
+    {
+        if (navLayer == null) return false;
+        if (NavBrushPoint() is not Vector3 centre) return false;
+        CommitEdit();
+        navMeshBefore = navLayer.ToBytes();
+        navMeshChanged = true;
+        CompositionTarget.Rendering -= NavMeshFrame;
+        CompositionTarget.Rendering += NavMeshFrame;
+        return true;
+    }
+
+    void NavMeshFrame(object? sender, EventArgs e)
+    {
+        if (navLayer == null) return;
+        if (NavBrushPoint() is not Vector3 centre) return;
+
+        var vertices = navLayer.Vertices;
+        var cells = navLayer.Cells;
+        float radius = NavMeshRadius;
+        bool inverse = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        var mode = ChosenNavMeshMode;
+
+        // Find cells within radius of brush centre
+        for (int i = 0; i < cells.Length; i++)
+        {
+            var cell = cells[i];
+            var v0 = vertices[cell.Vertices[0]];
+            var v1 = vertices[cell.Vertices[1]];
+            var v2 = vertices[cell.Vertices[2]];
+            var mid = (v0 + v1 + v2) / 3;
+            if (Vector2.Distance(new Vector2(mid.X, mid.Z), new Vector2(centre.X, centre.Z)) <= radius)
+            {
+                byte flags = cell.Flags;
+                switch (mode)
+                {
+                    case NavMeshMode.PaintWalkable:
+                        if (inverse) flags |= 0x08; else flags &= 0xF7;
+                        break;
+                    case NavMeshMode.EraseWalkable:
+                        if (inverse) flags &= 0xF7; else flags |= 0x08;
+                        break;
+                    case NavMeshMode.PaintBlocked:
+                        if (inverse) flags &= 0xF7; else flags |= 0x08;
+                        break;
+                    case NavMeshMode.ClearBlocked:
+                        if (inverse) flags |= 0x08; else flags &= 0xF7;
+                        break;
+                    case NavMeshMode.PaintVehicle:
+                        if (inverse) flags &= 0xDF; else flags |= 0x20;
+                        break;
+                    case NavMeshMode.ClearVehicle:
+                        if (inverse) flags |= 0x20; else flags &= 0xDF;
+                        break;
+                    case NavMeshMode.SetIsland:
+                        // TODO: Set island number
+                        break;
+                }
+                cells[i] = cell with { Flags = flags };
+            }
+        }
+        ShowNavMeshLayer();
+    }
+
+    void EndNavMeshStroke()
+    {
+        CompositionTarget.Rendering -= NavMeshFrame;
+        if (!navMeshChanged || navMeshBefore == null || navLayer == null) return;
+        var after = navLayer.ToBytes();
+        if (navMeshBefore.AsSpan().SequenceEqual(after)) return;
+
+        void Put(bool back)
+        {
+            byte[] layerBytes = back ? navMeshBefore! : after;
+            navLayer = NavigationLayer.Read(layerBytes);
+            if (ChosenNavMeshLayer == 0) navMesh = navMesh with { People = navLayer };
+            else navMesh = navMesh with { Vehicles = navLayer };
+            navMeshBytes = navMesh.ToBytes();
+            ShowNavMeshLayer();
+            MarkUnsaved();
+        }
+        Record(new Change(null, $"NavMesh: {ChosenNavMeshMode}",
+            Undo: () => Put(true), Redo: () => Put(false)));
+        navMeshBefore = after;
+        navMeshChanged = false;
+    }
+
+    /// <summary>Regenerates the MOPP trees and island numbering for the current navigation file.</summary>
+    void OnRegenerateNavMesh(object sender, RoutedEventArgs e)
+    {
+        if (navMesh == null || navLayer == null) return;
+        CommitEdit();
+        navMeshBefore = navLayer.ToBytes();
+
+        // Rebuild MOPP tree
+        var boxes = navLayer.Cells.Select(c =>
+        {
+            var v0 = navLayer.Vertices[c.Vertices[0]];
+            var v1 = navLayer.Vertices[c.Vertices[1]];
+            var v2 = navLayer.Vertices[c.Vertices[2]];
+            var lowest = Vector3.Min(v0, Vector3.Min(v1, v2));
+            var highest = Vector3.Max(v0, Vector3.Max(v1, v2));
+            return (Min: lowest, Max: highest);
+        }).ToArray();
+        var min = new Vector3(boxes.Min(b => b.Min.X), boxes.Min(b => b.Min.Y), boxes.Min(b => b.Min.Z));
+        var max = new Vector3(boxes.Max(b => b.Max.X), boxes.Max(b => b.Max.Y), boxes.Max(b => b.Max.Z));
+        if (boxes.Length == 0)
+        {
+            context.Log("NavMesh: the layer has no cells to build a tree over.");
+            return;
+        }
+        byte[] tree = NavigationBuilder.Mopp(boxes, min, max);
+
+        // Rebuild islands
+        byte[] islands = NavigationLayer.Islands(navLayer.Cells);
+        var cells = navLayer.Cells.Select((c, i) => c with { Island = islands[i] }).ToArray();
+
+        navLayer = navLayer with { Cells = cells };
+        if (ChosenNavMeshLayer == 0) navMesh = navMesh with { People = navLayer, PeopleTree = tree };
+        else navMesh = navMesh with { Vehicles = navLayer, VehiclesTree = tree };
+        navMeshBytes = navMesh.ToBytes();
+        ShowNavMeshLayer();
+        MarkUnsaved();
+        context.Log("NavMesh: MOPP tree and islands regenerated.");
+    }
+
+    /// <summary>Where the brush is on the navigation mesh: the nearest of its cells under the mouse (or the middle of the view); null if none.</summary>
+    Vector3? NavBrushPoint()
+    {
+        if (navLayer == null || navLayer.Cells.Length == 0 || ViewArea.ActualWidth <= 0) return null;
+        Point point = brushAt is Point mouse ? mouse : new Point(ViewArea.ActualWidth / 2, ViewArea.ActualHeight / 2);
+        (Point3D origin, Vector3D direction) = camera.Ray(point, ViewArea.RenderSize);
+        var from = new Vector3((float)origin.X, (float)origin.Y, (float)-origin.Z);
+        var way = Vector3.Normalize(new Vector3((float)direction.X, (float)direction.Y, (float)-direction.Z));
+        float nearest = float.MaxValue;
+        foreach (NavigationCell cell in navLayer.Cells)
+        {
+            Vector3 a = navLayer.Vertices[cell.Vertices[0]], b = navLayer.Vertices[cell.Vertices[1]], c = navLayer.Vertices[cell.Vertices[2]];
+            // Moller-Trumbore, either side.
+            Vector3 ab = b - a, ac = c - a, p = Vector3.Cross(way, ac);
+            float det = Vector3.Dot(ab, p);
+            if (MathF.Abs(det) < 1e-8f) continue;
+            float inv = 1 / det;
+            Vector3 t = from - a;
+            float u = Vector3.Dot(t, p) * inv;
+            if (u < 0 || u > 1) continue;
+            Vector3 q = Vector3.Cross(t, ab);
+            float v = Vector3.Dot(way, q) * inv;
+            if (v < 0 || u + v > 1) continue;
+            float distance = Vector3.Dot(ac, q) * inv;
+            if (distance > 0 && distance < nearest) nearest = distance;
+        }
+        return nearest < float.MaxValue ? from + way * nearest : null;
+    }
+
+    /// <summary>Writes the navigation file if it was changed (where the zone's terrain files are); what was done, for the save's message.</summary>
+    string SaveNavMesh()
+    {
+        if (navMesh == null || navMeshName == null) return "";
+        byte[] bytes = navMesh.ToBytes();
+        if (navMeshOriginal != null && bytes.AsSpan().SequenceEqual(navMeshOriginal)) return "";
+        try
+        {
+            string written = PutTerrainFiles(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase) { [navMeshName] = bytes });
+            navMeshOriginal = bytes;
+            return $" Navigation: {written}.";
+        }
+        catch (Exception ex) when (ex is System.IO.InvalidDataException or System.IO.IOException or InvalidOperationException or ArgumentException)
+        {
+            return $" Navigation couldn't be saved: {ex.Message}.";
+        }
+    }
+
     void ResizeBrush(double factor) => SculptRadiusSlider.Value = Math.Clamp(SculptRadiusSlider.Value * factor, SculptRadiusSlider.Minimum, SculptRadiusSlider.Maximum);
 
     void OnBrushChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
