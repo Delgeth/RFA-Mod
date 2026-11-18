@@ -1,7 +1,8 @@
 -- Override of ui_main_menu_pc.lua from <game>\build\pc\cache\interface.vpp_pc (the main menu on
 -- PC). rfa_loader.dll gives the game this file instead of its own copy.
 --
--- Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
+-- Tidies the top menu: New Game, New Game+, Load Game and the downloadable content go under Campaign
+-- (Continue stays at the top). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
 -- with the editor's New level, through the loader's rfa_open_level_editor, rfa_custom_levels and
 -- rfa_delete_custom_level). Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
 -- "experimentals", which makes it show RFA-Mod's own settings (see ui_options_gameplay.lua). Every
@@ -25,6 +26,7 @@ local QUIT_GAME_ID				= 8
 local NEW_GAME_PLUS_ID			= 9
 local DLC_ID					= 10
 local LEVEL_EDITOR_ID			= 11 -- [RFA]
+local CAMPAIGN_ID				= 12 -- [RFA]
 
 -- MP sub-menu
 local MULTI_ONLINE_ID			= 101
@@ -60,6 +62,7 @@ local OPTIONS_TIER				= 3
 local DLC_TIER					= 4
 local EXTRAS_TIER				= 5
 local LEVEL_EDITOR_TIER			= 6 -- [RFA]
+local CAMPAIGN_TIER				= 7 -- [RFA]
 
 -- Demo Mode
 local DEMO_MODE = false
@@ -97,6 +100,10 @@ local MENU_DATA = {
 	MAIN_DLC = {		-- DLC option
 		{label = "MENU_DOWNLOADABLE_CONTENT",	id = DLC_ID},
 	},
+
+	MAIN_CAMPAIGN = { -- [RFA] New Game, New Game+, Load Game and the DLC, under one entry
+		{label = "CAMPAIGN",			id = CAMPAIGN_ID}, -- [RFA]
+	}, -- [RFA]
 
 	MAIN_GENERAL = {		-- Other stuff at top level
 		{label = "MENU_INFESTATION",	id = MULTIPLAYER_ID},
@@ -337,21 +344,8 @@ function ui_main_menu_construct_top_menu_from_flags()
 			tack_on_data(MENU_DATA.MAIN_CONTINUE)
 		end
 
-		tack_on_data(MENU_DATA.MAIN_NEW_GAME)
-
-		-- Check for New Game+
-		if rf4_main_menu_show_new_game_plus() then
-			tack_on_data(MENU_DATA.MAIN_NEW_GAME_PLUS)
-		end
-
-		if is_signed_into_profile() then
-			tack_on_data(MENU_DATA.MAIN_HAS_PROFILE)
-		end
-
-		-- Check for downloadable outfits or missions
-		--if rf4_dlc_is_character_unlock_available() or rf4_dlc_are_dlc04_missions_available() then
-			tack_on_data(MENU_DATA.MAIN_DLC)
-		--end
+		-- [RFA] New Game, New Game+, Load Game and the DLC: under Campaign (ui_main_menu_construct_campaign_sub_menu)
+		tack_on_data(MENU_DATA.MAIN_CAMPAIGN) -- [RFA]
 
 		-- Everything else
 		tack_on_data(MENU_DATA.MAIN_GENERAL)
@@ -399,6 +393,10 @@ function ui_main_menu_update_top_menu_and_draw(saved_id)
 		Global_last_main_menu_tier = MAIN_MENU_TIER
 		Global_last_main_menu_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
 	end
+	if Global_last_main_menu_tier == DLC_TIER then -- [RFA] the DLC is under Campaign now
+		Global_last_main_menu_tier = CAMPAIGN_TIER -- [RFA]
+		Global_last_main_menu_option = 1 -- [RFA]
+	end -- [RFA]
 	ui_main_menu_change_tier(Global_last_main_menu_tier, Global_last_main_menu_option, true)
 end
 
@@ -413,6 +411,31 @@ function dlc_sub_menu_is_valid()
 	
 	return false
 end
+
+-- [RFA] Campaign's sub-menu: what the top menu had for the story (New Game, New Game+ when there is one,
+-- [RFA] Load Game when signed in), then the downloadable content: its outfits and missions and the store
+-- [RFA] when there are any (the DLC sub-menu's), else Downloadable Content (which opens the store).
+function ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+	local sub_data = {} -- [RFA]
+	local function tack_on_data(data) -- [RFA]
+		for i, info in ipairs(data) do -- [RFA]
+			sub_data[#sub_data + 1] = info -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+	tack_on_data(MENU_DATA.MAIN_NEW_GAME) -- [RFA]
+	if rf4_main_menu_show_new_game_plus() then -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_NEW_GAME_PLUS) -- [RFA]
+	end -- [RFA]
+	if is_signed_into_profile() then -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_HAS_PROFILE) -- [RFA]
+	end -- [RFA]
+	if dlc_sub_menu_is_valid() then -- [RFA]
+		tack_on_data(ui_main_menu_construct_dlc_sub_menu()) -- [RFA]
+	else -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_DLC) -- [RFA]
+	end -- [RFA]
+	return sub_data -- [RFA]
+end -- [RFA]
 
 function ui_main_menu_construct_dlc_sub_menu()
 	local sub_data = {}
@@ -499,6 +522,8 @@ function ui_main_menu_set_screen_hint(new_tier)
 		current_id = EXTRAS_ID
 	elseif new_tier == LEVEL_EDITOR_TIER then -- [RFA]
 		current_id = LEVEL_EDITOR_ID -- [RFA]
+	elseif new_tier == CAMPAIGN_TIER then -- [RFA]
+		current_id = CAMPAIGN_ID -- [RFA]
 	end
 	
 	-- Now for the huge-ass if/thens for each ID...
@@ -529,6 +554,9 @@ function ui_main_menu_set_screen_hint(new_tier)
 	elseif current_id == DLC_ID then
 		Hint_bar:set_value("MENU_DESC_DLC")
 	
+	elseif current_id == CAMPAIGN_ID then -- [RFA]
+		Hint_bar:set_value("MENU_DESC_NEW") -- [RFA]
+
 	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
 		Hint_bar:set_value("Make your own Ruin levels in RFA-Mod's level editor, or delete the ones you made") -- [RFA]
 
@@ -581,6 +609,9 @@ function ui_main_menu_button_a(event, acceleration)
 	elseif current_id == EXTRAS_ID then
 		ui_main_menu_change_tier(EXTRAS_TIER, 1)
 
+	elseif current_id == CAMPAIGN_ID then -- [RFA]
+		ui_main_menu_change_tier(CAMPAIGN_TIER, 1) -- [RFA]
+
 	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
 		ui_main_menu_change_tier(LEVEL_EDITOR_TIER, 1) -- [RFA]
 
@@ -601,7 +632,7 @@ function ui_main_menu_button_a(event, acceleration)
 		rf4_main_menu_new_game_plus()
 
 	elseif current_id == LOAD_GAME_ID then
-		set_next_screen(NEXT_SCREEN_LOAD_GAME, MAIN_MENU_TIER)
+		set_next_screen(NEXT_SCREEN_LOAD_GAME, CAMPAIGN_TIER) -- [RFA] (under Campaign now)
 
 	elseif current_id == DLC_ID then
 	
@@ -618,7 +649,7 @@ function ui_main_menu_button_a(event, acceleration)
 		rf4_main_menu_show_dlc_store()
 		
 	elseif current_id == DLC_OUTFITS_ID then
-		set_next_screen("ui_dlc_outfits", DLC_TIER)
+		set_next_screen("ui_dlc_outfits", CAMPAIGN_TIER) -- [RFA] (under Campaign now)
 
 	elseif current_id == QUIT_GAME_ID then
 		ui_main_menu_initiate_quit_game()
@@ -872,6 +903,9 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 		elseif Global_last_main_menu_tier == LEVEL_EDITOR_TIER then -- [RFA]
 			current_option = ui_main_menu_get_option_from_data(Top_menu_data, LEVEL_EDITOR_ID) -- [RFA]
 			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
+		elseif Global_last_main_menu_tier == CAMPAIGN_TIER then -- [RFA]
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, CAMPAIGN_ID) -- [RFA]
+			sub_data = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
 		elseif Global_last_main_menu_tier == DLC_TIER then
 			if dlc_sub_menu_is_valid() then
 				current_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
@@ -925,6 +959,8 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 			sub_data = MENU_DATA.OPTIONS_SUB_MENU
 		elseif new_tier == LEVEL_EDITOR_TIER then -- [RFA]
 			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
+		elseif new_tier == CAMPAIGN_TIER then -- [RFA]
+			sub_data = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
 		elseif new_tier == EXTRAS_TIER then
 			if is_signed_into_profile() then
 				sub_data = MENU_DATA.EXTRAS_SUB_MENU
