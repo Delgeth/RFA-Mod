@@ -25,6 +25,13 @@ if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 set "LOG=%LOGDIR%\build.log"
 echo Build %DATE% %TIME% > "%LOG%"
 
+rem The MCP servers Claude runs from bin\ (bin\live_analysis_mcp.exe, bin\editor\RfaEditorMcp.exe) keep their
+rem files locked, so a build into bin\ closes them first; Claude starts them again when it next uses them.
+if "%STAGE%"=="" (
+    taskkill /f /im RfaEditorMcp.exe >> "%LOG%" 2>&1
+    taskkill /f /im live_analysis_mcp.exe >> "%LOG%" 2>&1
+)
+
 rem Visual Studio's C++ tools: vswhere (any edition, Build Tools too, previews too), else the usual folders.
 set "VCVARS="
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
