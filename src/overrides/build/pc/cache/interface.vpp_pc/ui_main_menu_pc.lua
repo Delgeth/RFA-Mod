@@ -1052,9 +1052,17 @@ local function rfa_processing_tick() -- [RFA] each frame of the wait
 		return -- [RFA]
 	end -- [RFA]
 	if Rfa_processing_frames <= 0 then return end -- [RFA]
-	local set_words = _GetAnyGlobalSilent("ui_popup_halt_set_new_data") -- [RFA]
-	if set_words ~= nil then set_words(Rfa_processing_words, "", false) end -- [RFA]
+	-- [RFA] Its big line, found in its own document: ui_popup_halt_set_new_data, called from here, looks for its
+	-- [RFA] objects in this one, doesn't find them and fails (which ended the wait, and with it the menu's input).
+	local halt = vint_document_find("ui_popup_halt") -- [RFA]
+	local word = vint_object_find("action_word", nil, halt) -- [RFA]
+	if word ~= nil and word ~= 0 then vint_set_property(word, "text_tag", Rfa_processing_words) end -- [RFA]
 	Rfa_processing_frames = Rfa_processing_frames - 1 -- [RFA]
+end -- [RFA]
+
+local function rfa_processing_wait_tick() -- [RFA] the wait's frame: nothing in it may end the wait (it gives the input back)
+	local ok, error_text = pcall(rfa_processing_tick) -- [RFA]
+	if not ok and rfa_log ~= nil then rfa_log("Main menu: the processing screen: " .. tostring(error_text)) end -- [RFA]
 end -- [RFA]
 
 local function rfa_processing_done() -- [RFA] hides it; the next popup a moment later, once it has gone
@@ -1066,7 +1074,7 @@ end -- [RFA]
 function ui_main_menu_rfa_indexing_wait() -- [RFA]
 	local ready = rfa_level_editor_ready() -- [RFA]
 	while ready == nil do -- [RFA]
-		rfa_processing_tick() -- [RFA]
+		rfa_processing_wait_tick() -- [RFA]
 		thread_yield() -- [RFA]
 		ready = rfa_level_editor_ready() -- [RFA]
 	end -- [RFA]
@@ -1179,7 +1187,7 @@ end -- [RFA]
 function ui_main_menu_rfa_delete_wait() -- [RFA] while the editor deletes the level (a few seconds)
 	local code = rfa_delete_custom_level_done() -- [RFA]
 	while code == nil do -- [RFA]
-		rfa_processing_tick() -- [RFA]
+		rfa_processing_wait_tick() -- [RFA]
 		thread_yield() -- [RFA]
 		code = rfa_delete_custom_level_done() -- [RFA]
 	end -- [RFA]
