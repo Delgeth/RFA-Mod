@@ -100,6 +100,9 @@ public sealed class JsonRpcReader : IDisposable
             if (!_detectionDone)
             {
                 int firstByte = _input.ReadByte();
+                // Skip a UTF-8 BOM and blank lines before the first message.
+                while (firstByte is 0xEF or 0xBB or 0xBF or 0x20 or 0x09 or 0x0D or 0x0A)
+                    firstByte = _input.ReadByte();
                 if (firstByte == -1) return null; // EOF
 
                 // Put the byte back by using a buffer
@@ -141,22 +144,20 @@ public sealed class JsonRpcReader : IDisposable
             {
                 Console.Error.WriteLine($"[JsonRpcReader] Parse error: {ex.Message} - JSON: {json[..Math.Min(200, json.Length)]}");
                 // If parsing fails, maybe we detected wrong format - try the other
-                if (!_detectedLengthPrefixed)
-                {
-                    // Try length-prefixed next time
-                    _detectedLengthPrefixed = true;
-                    // Re-read the same data as length-prefixed would need a fresh stream
-                    // For now just continue
-                }
+                // Skip the bad line and keep reading.
             }
         }
         return null;
     }
 
+    // One reader for the whole session: a new StreamReader per line would read ahead past the line and throw
+    // away the next messages when the client sends several at once (MCP clients do: "initialized" with "tools/list").
+    private StreamReader? _lineReader;
+
     private async Task<string?> ReadNewlineDelimitedAsync(CancellationToken ct)
     {
-        using var reader = new StreamReader(_input, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
-        return await reader.ReadLineAsync();
+        _lineReader ??= new StreamReader(_input, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, bufferSize: 65536, leaveOpen: true);
+        return await _lineReader.ReadLineAsync(ct);
     }
 
     private async Task<string?> ReadLengthPrefixedAsync(CancellationToken ct)

@@ -30,8 +30,15 @@ sealed class Program
     static async Task<int> Main(string[] args)
     {
         // Try to find mod/game folders, but don't fail if not found - tools can set up workspace
-        string modFolder = Workspace.FindModFolder();
-        string gameFolder = modFolder != null ? Workspace.FindGameFolder(modFolder) : null;
+        // --game <folder> and --mod <folder> (or RFA_GAME_DIR / RFA_MOD_DIR) override what's found from where the exe is.
+        string? modFolder = Arg(args, "--mod") ?? Environment.GetEnvironmentVariable("RFA_MOD_DIR") ?? Workspace.FindModFolder();
+        string? gameFolder = Arg(args, "--game") ?? Environment.GetEnvironmentVariable("RFA_GAME_DIR")
+                             ?? (modFolder != null ? Workspace.FindGameFolder(modFolder) : null);
+        if (gameFolder != null && !Directory.Exists(gameFolder))
+        {
+            Console.Error.WriteLine($"Game folder {gameFolder} doesn't exist");
+            gameFolder = null;
+        }
 
         if (gameFolder != null && modFolder != null)
         {
@@ -85,6 +92,13 @@ sealed class Program
 
             if (request == null) break; // EOF
 
+            // A notification (no id: "notifications/initialized", "notifications/cancelled", ...) gets no answer.
+            if (request.Id == null)
+            {
+                Console.Error.WriteLine($"[DEBUG] Notification: '{request.Method}'");
+                continue;
+            }
+
             // Initialize writer with detected format after first successful read
             if (writer == null)
             {
@@ -104,6 +118,12 @@ sealed class Program
 
         _gameLink?.Dispose();
         return 0;
+    }
+
+    static string? Arg(string[] args, string name)
+    {
+        int i = Array.FindIndex(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 && i + 1 < args.Length ? args[i + 1].TrimEnd('\\') : null;
     }
 
     static async Task<JsonRpc.Response> HandleRequestAsync(JsonRpc.Request request, CancellationToken ct)
@@ -170,7 +190,14 @@ sealed class Program
         string toolName = nameNode!.GetValue<string>();
         JsonNode? arguments = paramsObj.TryGetPropertyValue("arguments", out var argsNode) ? argsNode : null;
 
-        JsonNode? result = toolName switch
+        bool needsWorkspace = toolName is not ("create_workspace" or "start_game" or "dock_game" or "undock_game");
+        if (needsWorkspace && _workspace == null)
+            return ToolResult(request.Id, "No workspace: the game folder wasn't found. Call create_workspace with game_path and mods_path, " +
+                                          "or start the server with --game <game folder> (and --mod <mod folder>).", true);
+        JsonNode? result;
+        try
+        {
+        result = toolName switch
         {
             // Workspace tools
             "create_workspace" => await CreateWorkspaceAsync(arguments),
@@ -219,9 +246,23 @@ sealed class Program
 
             _ => throw new InvalidOperationException($"Unknown tool: {toolName}")
         };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"[DEBUG] {toolName} failed: {ex}");
+            return ToolResult(request.Id, $"{toolName} failed: {ex.GetType().Name}: {ex.Message}", true);
+        }
 
-        return JsonRpc.Success(request.Id, result);
+        return ToolResult(request.Id, result?.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) ?? "null", false);
     }
+
+    /// <summary>A tools/call answer as MCP wants it: the text in "content", and isError for a failure.</summary>
+    static JsonRpc.Response ToolResult(JsonNode? id, string text, bool isError) =>
+        JsonRpc.Success(id, new JsonObject
+        {
+            ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }),
+            ["isError"] = isError,
+        });
 
     // ===================== Workspace Tools =====================
 
