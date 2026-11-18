@@ -42,11 +42,11 @@ if not defined VCVARS (echo Visual Studio C++ tools not found: no vcvarsall.bat 
 echo vcvarsall: %VCVARS% >> "%LOG%"
 
 set "DRIVE="
-rem A letter subst still holds (a build stopped before it let go, or its folder has moved since: the letter
-rem then looks free, but subst refuses it, "Drive already SUBSTed") is passed over.
-for %%d in (R S T U V W X Y Z Q P O N M) do if not defined DRIVE if not exist %%d:\ (subst | findstr /b /i /l /c:"%%d:" >nul || set "DRIVE=%%d:")
-if not defined DRIVE (echo No free drive letter to build through & exit /b 1)
-subst %DRIVE% "%HERE:~0,-1%" >> "%LOG%" 2>&1
+rem Each free-looking letter is tried in turn, and the first one that really maps to this folder is kept.
+rem A letter can look free and still be refused ("Drive already SUBSTed": a build stopped before it let
+rem go, its folder has moved since, or another window made it), so a refusal just moves on to the next.
+for %%d in (R S T U V W X Y Z Q P O N M L K J I H G) do if not defined DRIVE if not exist %%d:\ (subst %%d: "%HERE:~0,-1%" >> "%LOG%" 2>&1 & if exist %%d:\build.cmd set "DRIVE=%%d:")
+if not defined DRIVE (echo No free drive letter to build through, see %LOG% & exit /b 1)
 if not exist %DRIVE%\build.cmd (echo Couldn't map %DRIVE% to the project folder & exit /b 1)
 set "ROOT=%DRIVE%\"
 set "OUT=%ROOT%bin"
