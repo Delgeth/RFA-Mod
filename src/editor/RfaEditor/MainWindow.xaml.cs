@@ -212,6 +212,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             searchIndex = [.. searchIndex, .. inContainers];
             context.Assets.SetIndex(searchIndex, textures);
             Log($"Ready: {searchIndex.Count:N0} files can be searched.");
+            NewLevelFromGameMenu();
             if (SearchBox.Text.Length > 0) OnSearchChanged(SearchBox, null!);
         }
         catch (Exception ex)

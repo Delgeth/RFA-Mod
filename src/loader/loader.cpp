@@ -1053,7 +1053,7 @@ int __cdecl LuaLog(lua_State* L) {
 
 // ---- The level editor, from the game's main menu (ui_main_menu_pc.lua's Level editor) ----------------
 //
-// rfa_open_level_editor() starts editor\RfaEditor.exe; rfa_custom_levels() returns the names of the Ruin
+// rfa_open_level_editor([mode]) starts editor\RfaEditor.exe (with a mode, on New level for it); rfa_custom_levels() returns the names of the Ruin
 // levels made with the editor's New level (the rows of our wrecking_crew_maps.xtbl whose archive the game
 // folder hasn't); rfa_delete_custom_level(name) starts the editor with no window to delete one, all of it,
 // as its Delete level does, and rfa_delete_custom_level_done() says when that has finished: nil while it
@@ -1084,10 +1084,14 @@ bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
     return true;
 }
 
-// Lua: rfa_open_level_editor() -> true if the editor was started
+// Lua: rfa_open_level_editor([mode]) -> true if the editor was started. With "ruin" or "infestation" it
+// opens New level for that mode, as a base, once it has read the game's files.
 int __cdecl LuaOpenLevelEditor(lua_State* L) {
-    const bool started = StartEditor(L"", true, nullptr);
-    if (started) rfa::Log("Level editor started from the main menu");
+    const char* mode = rfa::game::lua_gettop(L) >= 1 ? rfa::game::lua_tolstring(L, 1, nullptr) : nullptr;
+    const bool known = mode && (_stricmp(mode, "ruin") == 0 || _stricmp(mode, "infestation") == 0);
+    const bool started = StartEditor(known ? L"--new-level " + std::wstring(mode, mode + strlen(mode)) : L"", true, nullptr);
+    if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
+                          known ? mode : "");
     rfa::game::lua_pushboolean(L, started);
     return 1;
 }

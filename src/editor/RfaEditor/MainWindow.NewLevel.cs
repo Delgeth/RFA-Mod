@@ -72,7 +72,29 @@ public partial class MainWindow
 
     // ---- New level ---------------------------------------------------------------------------------
 
-    async void OnNewLevel(object sender, RoutedEventArgs e)
+    void OnNewLevel(object sender, RoutedEventArgs e) => ShowNewLevel(0);
+
+    /// <summary>
+    /// The mode New level opens for once the editor has read the game's files ("ruin" or "infestation"):
+    /// the game's main menu (Level editor > Create level) starts the editor with --new-level &lt;mode&gt;.
+    /// </summary>
+    internal string? NewLevelAtStart { get; set; }
+
+    /// <summary>Opens New level for <see cref="NewLevelAtStart"/>'s mode, if one was asked for (once the files are read).</summary>
+    void NewLevelFromGameMenu()
+    {
+        if (NewLevelAtStart is not { } asked) return;
+        NewLevelAtStart = null;
+        int modeIndex = asked.Equals("infestation", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        Log($"New level for {(modeIndex == 1 ? "Infestation" : "Ruin")}, as the game's menu asked.");
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        Topmost = true;  // over the game (it may be fullscreen), then back to normal
+        Topmost = false;
+        ShowNewLevel(modeIndex);
+    }
+
+    async void ShowNewLevel(int modeIndex)
     {
         if (!context.Assets.IndexReady)
         {
@@ -81,7 +103,7 @@ public partial class MainWindow
         }
         Window window = Dialog("New level");
         var form = new DialogForm(300);
-        var mode = new ComboBox { ItemsSource = new[] { "Ruin", "Infestation" }, SelectedIndex = 0 };
+        var mode = new ComboBox { ItemsSource = new[] { "Ruin", "Infestation" }, SelectedIndex = modeIndex };
         var groundLevels = NewLevel.LevelsWithGround(workspace, context.Assets);
         var template = new ComboBox { ItemsSource = groundLevels, SelectedIndex = groundLevels.Count > 0 ? 0 : -1 };
         var fileName = new TextBox { Text = "" };

@@ -41,7 +41,15 @@ public partial class App : Application
             Shutdown();
             return;
         }
-        new MainWindow(new Workspace(gameFolder, modFolder)).Show();
+        // --new-level ruin|infestation (the game's main menu, Level editor > Create level): New level opens
+        // for that mode once the editor has read the game's files.
+        int newLevel = Array.FindIndex(e.Args, a => a.Equals("--new-level", StringComparison.OrdinalIgnoreCase));
+        var main = new MainWindow(new Workspace(gameFolder, modFolder))
+        {
+            NewLevelAtStart = newLevel >= 0 ? (newLevel + 1 < e.Args.Length ? e.Args[newLevel + 1] : "ruin") : null,
+        };
+        main.Show();
+        if (main.NewLevelAtStart != null) EditorLog.Write("New level opens once the editor has read the game's files (a minute or so).");
     }
 
     /// <summary>
