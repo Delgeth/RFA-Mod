@@ -10,6 +10,14 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        // Started by the game's main menu (rfa_loader's rfa_delete_custom_level) to delete a level made with New level,
+        // with no window: RfaEditor.exe --delete-level <name>. Its exit code says how it went.
+        int delete = Array.FindIndex(e.Args, a => a.Equals("--delete-level", StringComparison.OrdinalIgnoreCase));
+        if (delete >= 0)
+        {
+            Shutdown(DeleteLevel(delete + 1 < e.Args.Length ? e.Args[delete + 1] : ""));
+            return;
+        }
         FluentLook.Load(this, new Uri("pack://application:,,,/RfaEditor;component/Theme.xaml"));
         // Nothing here is tied to one PC: the mod folder is wherever the editor was put (next to
         // rfa_mods.ini), and the game is wherever its GameDir says, or that folder itself.
@@ -34,6 +42,39 @@ public partial class App : Application
             return;
         }
         new MainWindow(new Workspace(gameFolder, modFolder)).Show();
+    }
+
+    /// <summary>
+    /// Deletes a level New level made (all of it, as Delete level does), with no window. Exit code: 0 deleted,
+    /// 1 no such level of ours, 2 the game folder wasn't found, 3 it couldn't be deleted. What was done goes to the editor's log.
+    /// </summary>
+    static int DeleteLevel(string name)
+    {
+        string modFolder = Workspace.FindModFolder();
+        EditorLog.Start(modFolder);
+        string? gameFolder = Workspace.FindGameFolder(modFolder);
+        if (gameFolder == null)
+        {
+            EditorLog.Write($"Delete level {name} (from the game's menu): the game folder wasn't found (GameDir in rfa_mods.ini).");
+            return 2;
+        }
+        var workspace = new Workspace(gameFolder, modFolder);
+        if (name.Length == 0 || !NewLevel.Made(workspace).Any(l => l.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+        {
+            EditorLog.Write($"Delete level {name} (from the game's menu): it isn't a level made with New level.");
+            return 1;
+        }
+        try
+        {
+            EditorLog.Write($"Deleted level {name} (from the game's menu):");
+            foreach (string line in new NewLevel(workspace, new GameAssets(workspace)).Remove(name)) EditorLog.Write("  " + line);
+            return 0;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            EditorLog.Write($"Delete level {name} (from the game's menu): it couldn't be deleted: {ex.Message}");
+            return 3;
+        }
     }
 
     /// <summary>

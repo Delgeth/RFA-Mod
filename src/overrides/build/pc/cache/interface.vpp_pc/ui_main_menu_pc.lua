@@ -1,7 +1,9 @@
 -- Override of ui_main_menu_pc.lua from <game>\build\pc\cache\interface.vpp_pc (the main menu on
 -- PC). rfa_loader.dll gives the game this file instead of its own copy.
 --
--- Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
+-- Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
+-- with the editor's New level, through the loader's rfa_open_level_editor, rfa_custom_levels and
+-- rfa_delete_custom_level). Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
 -- "experimentals", which makes it show RFA-Mod's own settings (see ui_options_gameplay.lua). Every
 -- line we added or changed is marked [RFA]; everything else is the game's original script. Only the
 -- [RFA] lines are this project's (GNU GPL version 3 or later, see LICENSE); the rest belongs to the
@@ -22,6 +24,7 @@ local WRECKING_CREW_ID			= 7
 local QUIT_GAME_ID				= 8
 local NEW_GAME_PLUS_ID			= 9
 local DLC_ID					= 10
+local LEVEL_EDITOR_ID			= 11 -- [RFA]
 
 -- MP sub-menu
 local MULTI_ONLINE_ID			= 101
@@ -41,6 +44,10 @@ local DLC_DLC04_MISSIONS_ID		= 302
 local DLC_SHOW_STORE_ID			= 303
 
 
+-- Level editor sub-menu -- [RFA]
+local LEVEL_CREATE_ID			= 501 -- [RFA]
+local LEVEL_DELETE_ID			= 502 -- [RFA]
+
 -- Extras sub-menu
 local EXTRAS_PLAYER_STATS_ID	= 401
 local EXTRAS_CUTSCENES_ID		= 402
@@ -52,6 +59,7 @@ local MULTIPLAYER_TIER			= 2
 local OPTIONS_TIER				= 3
 local DLC_TIER					= 4
 local EXTRAS_TIER				= 5
+local LEVEL_EDITOR_TIER			= 6 -- [RFA]
 
 -- Demo Mode
 local DEMO_MODE = false
@@ -93,6 +101,7 @@ local MENU_DATA = {
 	MAIN_GENERAL = {		-- Other stuff at top level
 		{label = "MENU_INFESTATION",	id = MULTIPLAYER_ID},
 		{label = "MENU_RUIN_MODE",		id = WRECKING_CREW_ID},
+		{label = "LEVEL EDITOR",		id = LEVEL_EDITOR_ID}, -- [RFA]
 		{label = "MENU_OPTIONS_UC",	id = OPTIONS_ID},
 		{label = "MENU_EXTRAS_UC",		id = EXTRAS_ID},
 		{label = "MENU_QUIT_DESKTOP",	id = QUIT_GAME_ID},
@@ -125,6 +134,11 @@ local MENU_DATA = {
 		{label = "EXPERIMENTALS",			id = OPTIONS_EXPERIMENTALS_ID}, -- [RFA]
 	},
 	
+	LEVEL_EDITOR_SUB_MENU = { -- [RFA]
+		{label = "CREATE LEVEL",			id = LEVEL_CREATE_ID}, -- [RFA]
+		{label = "DELETE CUSTOM LEVEL",		id = LEVEL_DELETE_ID}, -- [RFA]
+	}, -- [RFA]
+
 	EXTRAS_SUB_MENU = {
 		{label = "MENU_PLAYER_STATS",	id = EXTRAS_PLAYER_STATS_ID},
 		{label = "MENU_CUTSCENES",		id = EXTRAS_CUTSCENES_ID},
@@ -483,6 +497,8 @@ function ui_main_menu_set_screen_hint(new_tier)
 		current_id = DLC_ID
 	elseif new_tier == EXTRAS_TIER then
 		current_id = EXTRAS_ID
+	elseif new_tier == LEVEL_EDITOR_TIER then -- [RFA]
+		current_id = LEVEL_EDITOR_ID -- [RFA]
 	end
 	
 	-- Now for the huge-ass if/thens for each ID...
@@ -513,6 +529,9 @@ function ui_main_menu_set_screen_hint(new_tier)
 	elseif current_id == DLC_ID then
 		Hint_bar:set_value("MENU_DESC_DLC")
 	
+	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
+		Hint_bar:set_value("Make your own Ruin levels in RFA-Mod's level editor, or delete the ones you made") -- [RFA]
+
 	elseif current_id == QUIT_GAME_ID then
 		Hint_bar:set_value("MENU_DESC_QUIT")
 	end
@@ -561,6 +580,15 @@ function ui_main_menu_button_a(event, acceleration)
 
 	elseif current_id == EXTRAS_ID then
 		ui_main_menu_change_tier(EXTRAS_TIER, 1)
+
+	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
+		ui_main_menu_change_tier(LEVEL_EDITOR_TIER, 1) -- [RFA]
+
+	elseif current_id == LEVEL_CREATE_ID then -- [RFA]
+		ui_main_menu_rfa_create_level() -- [RFA]
+
+	elseif current_id == LEVEL_DELETE_ID then -- [RFA]
+		ui_main_menu_rfa_delete_level(1) -- [RFA]
 
 	elseif current_id == NEW_GAME_ID then
 		-- Don't animate out, just start a new game
@@ -698,6 +726,94 @@ function ui_main_menu_mouse_move(event, target_handle, mouse_x, mouse_y)
 	end
 end
 
+-- [RFA] Level editor > Create level and Delete custom level. The loader's functions (rfa_loader.dll)
+-- [RFA] start the editor, list the Ruin levels made with its New level, and have it delete one (with no
+-- [RFA] window; a thread waits for it). The game reads its map lists at start-up, so a deleted level
+-- [RFA] leaves Ruin's list once the game starts again.
+local Rfa_levels = {} -- [RFA] the levels listed in the popup
+local Rfa_level_page = 1 -- [RFA] its first level's place
+local Rfa_level_chosen = nil -- [RFA] the level to delete, once picked
+local RFA_LEVELS_SHOWN = 4 -- [RFA] how many a popup lists at once
+
+local function rfa_popup(message, callback, options) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	rf4_popup_create(message, callback, options, #options) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_popup_done(return_value) -- [RFA] a popup with only OK
+	Input_tracker:subscribe(true) -- [RFA]
+	Mouse_input_tracker:subscribe(true) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_level() -- [RFA]
+	if rfa_open_level_editor == nil then -- [RFA]
+		rfa_popup("The level editor needs RFA-Mod's loader (rfa_loader.dll).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	elseif rfa_open_level_editor() then -- [RFA]
+		rfa_popup("The level editor is starting (it opens in its own window). Use its New level to make a Ruin level; restart the game to play it.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	else -- [RFA]
+		rfa_popup("The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_level(first) -- [RFA] lists the levels from the first'th, a few at a time
+	if rfa_custom_levels == nil then -- [RFA]
+		rfa_popup("Deleting levels needs RFA-Mod's loader (rfa_loader.dll).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	Rfa_levels = {rfa_custom_levels()} -- [RFA]
+	if #Rfa_levels == 0 then -- [RFA]
+		rfa_popup("There are no custom Ruin levels: make one with Create level.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	if first > #Rfa_levels then first = 1 end -- [RFA]
+	Rfa_level_page = first -- [RFA]
+	local options = {} -- [RFA]
+	for i = first, math.min(first + RFA_LEVELS_SHOWN - 1, #Rfa_levels) do -- [RFA]
+		options[#options + 1] = Rfa_levels[i] -- [RFA]
+	end -- [RFA]
+	if #Rfa_levels > RFA_LEVELS_SHOWN then options[#options + 1] = "MORE..." end -- [RFA]
+	options[#options + 1] = "MENU_CANCEL" -- [RFA]
+	rfa_popup("Which custom Ruin level should be deleted?", "ui_main_menu_rfa_delete_picked", options) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_picked(return_value) -- [RFA]
+	local shown = math.min(RFA_LEVELS_SHOWN, #Rfa_levels - Rfa_level_page + 1) -- [RFA]
+	if return_value >= 1 and return_value <= shown then -- [RFA]
+		Rfa_level_chosen = Rfa_levels[Rfa_level_page + return_value - 1] -- [RFA]
+		rfa_popup("Delete " .. Rfa_level_chosen .. " for good? Its archive, its edits, its map list row, strings, pictures and spawn resources all go. This can't be undone.", -- [RFA]
+			"ui_main_menu_rfa_delete_confirmed", {"MENU_ACCEPT", "MENU_CANCEL"}) -- [RFA]
+	elseif return_value == shown + 1 and #Rfa_levels > RFA_LEVELS_SHOWN then -- [RFA] MORE...
+		ui_main_menu_rfa_delete_level(Rfa_level_page + RFA_LEVELS_SHOWN) -- [RFA]
+	else -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_confirmed(return_value) -- [RFA]
+	if return_value ~= 1 or Rfa_level_chosen == nil then -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA]
+	elseif rfa_delete_custom_level(Rfa_level_chosen) then -- [RFA]
+		thread_new("ui_main_menu_rfa_delete_wait") -- [RFA]
+	else -- [RFA]
+		rfa_popup(Rfa_level_chosen .. " couldn't be deleted: logs\\rfa_mods.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_wait() -- [RFA] while the editor deletes the level (a few seconds)
+	local code = rfa_delete_custom_level_done() -- [RFA]
+	while code == nil do -- [RFA]
+		thread_yield() -- [RFA]
+		code = rfa_delete_custom_level_done() -- [RFA]
+	end -- [RFA]
+	if code == 0 then -- [RFA]
+		rfa_popup(Rfa_level_chosen .. " is deleted. Restart the game to take it off Ruin's map list (until then, don't pick it).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	else -- [RFA]
+		rfa_popup(Rfa_level_chosen .. " couldn't be deleted (the editor's logs\\editor.log says why).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+	Rfa_level_chosen = nil -- [RFA]
+end -- [RFA]
+
 -- Note: current_option is ignored when returning from another tier to the main menu tier
 --
 function ui_main_menu_change_tier(new_tier, current_option, init_set)
@@ -724,6 +840,9 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 			else
 				sub_data = MENU_DATA.CREDITS_SUB_MENU
 			end			
+		elseif Global_last_main_menu_tier == LEVEL_EDITOR_TIER then -- [RFA]
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, LEVEL_EDITOR_ID) -- [RFA]
+			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
 		elseif Global_last_main_menu_tier == DLC_TIER then
 			if dlc_sub_menu_is_valid() then
 				current_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
@@ -775,6 +894,8 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 			sub_data = MENU_DATA.MULTIPLAYER_SUB_MENU
 		elseif new_tier == OPTIONS_TIER then
 			sub_data = MENU_DATA.OPTIONS_SUB_MENU
+		elseif new_tier == LEVEL_EDITOR_TIER then -- [RFA]
+			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
 		elseif new_tier == EXTRAS_TIER then
 			if is_signed_into_profile() then
 				sub_data = MENU_DATA.EXTRAS_SUB_MENU

@@ -1043,6 +1043,128 @@ int __cdecl LuaLog(lua_State* L) {
     return 0;
 }
 
+// ---- The level editor, from the game's main menu (ui_main_menu_pc.lua's Level editor) ----------------
+//
+// rfa_open_level_editor() starts editor\RfaEditor.exe; rfa_custom_levels() returns the names of the Ruin
+// levels made with the editor's New level (the rows of our wrecking_crew_maps.xtbl whose archive the game
+// folder hasn't); rfa_delete_custom_level(name) starts the editor with no window to delete one, all of it,
+// as its Delete level does, and rfa_delete_custom_level_done() says when that has finished: nil while it
+// runs, then the editor's exit code (0 deleted, 1 not a level of ours, 2 no game folder, 3 couldn't).
+
+std::wstring EditorExe() { return rfa::RootDir() + L"\\editor\\RfaEditor.exe"; }
+
+bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
+    const std::wstring exe = EditorExe();
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        rfa::Log("Level editor: %ls isn't there (build the editor, or copy bin\\editor\\ next to the loader)", exe.c_str());
+        return false;
+    }
+    std::wstring command = L"\"" + exe + L"\"" + (arguments.empty() ? L"" : L" " + arguments);
+    STARTUPINFOW startup{sizeof(startup)};
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = window ? SW_SHOWNORMAL : SW_HIDE;
+    PROCESS_INFORMATION info{};
+    const std::wstring folder = rfa::RootDir() + L"\\editor";
+    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, window ? 0 : CREATE_NO_WINDOW, nullptr,
+                        folder.c_str(), &startup, &info)) {
+        rfa::Log("Level editor: %ls couldn't be started (error %lu)", exe.c_str(), GetLastError());
+        return false;
+    }
+    CloseHandle(info.hThread);
+    if (process) *process = info.hProcess;
+    else CloseHandle(info.hProcess);
+    return true;
+}
+
+// Lua: rfa_open_level_editor() -> true if the editor was started
+int __cdecl LuaOpenLevelEditor(lua_State* L) {
+    const bool started = StartEditor(L"", true, nullptr);
+    if (started) rfa::Log("Level editor started from the main menu");
+    rfa::game::lua_pushboolean(L, started);
+    return 1;
+}
+
+// The Ruin levels made with New level: rows of our wrecking_crew_maps.xtbl (the editor writes it to
+// table.vpp_pc's folder in overrides\, or misc.vpp_pc's: every table is in both) with no game archive.
+std::vector<std::string> CustomRuinLevels() {
+    std::vector<std::string> levels;
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    for (const wchar_t* archive : {L"table.vpp_pc", L"misc.vpp_pc"}) {
+        const std::wstring path = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\" + archive + L"\\wrecking_crew_maps.xtbl";
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE) continue;
+        std::string text(GetFileSize(file, nullptr), '\0');
+        DWORD read = 0;
+        const bool ok = !text.empty() && ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+        CloseHandle(file);
+        if (!ok) continue;
+        text.resize(read);
+        for (size_t row = text.find("<wc_map_list>"); row != std::string::npos; row = text.find("<wc_map_list>", row + 1)) {
+            const size_t end = text.find("</wc_map_list>", row);
+            const size_t open = text.find("<file_name>", row);
+            if (end == std::string::npos || open == std::string::npos || open > end) continue;
+            const size_t start = open + 11, close = text.find("</file_name>", start);
+            if (close == std::string::npos || close > end) continue;
+            std::string name = text.substr(start, close - start);
+            name.erase(0, name.find_first_not_of(" \t\r\n"));
+            name.erase(name.find_last_not_of(" \t\r\n") + 1);
+            if (name.empty() || name.find_first_of("\\/:*?\"<>| ") != std::string::npos) continue;
+            const std::wstring wide(name.begin(), name.end());
+            if (GetFileAttributesW((gameDir + L"\\build\\pc\\cache\\" + wide + L".vpp_pc").c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+            if (std::find(levels.begin(), levels.end(), name) == levels.end()) levels.push_back(name);
+        }
+        break;  // the first copy found is the one the game reads
+    }
+    return levels;
+}
+
+// Lua: rfa_custom_levels() -> the names, as separate values ({rfa_custom_levels()} makes a list)
+int __cdecl LuaCustomLevels(lua_State* L) {
+    const std::vector<std::string> levels = CustomRuinLevels();
+    for (const std::string& level : levels) rfa::game::lua_pushstring(L, level.c_str());
+    return static_cast<int>(levels.size());
+}
+
+HANDLE g_deleting = nullptr;  // the editor deleting a level, while it runs
+std::string g_deletingName;
+
+// Lua: rfa_delete_custom_level(name) -> true if the editor was started to delete it
+int __cdecl LuaDeleteCustomLevel(lua_State* L) {
+    const char* name = rfa::game::lua_tolstring(L, 1, nullptr);
+    bool started = false;
+    if (g_deleting) rfa::Log("Delete custom level: already deleting %s", g_deletingName.c_str());
+    else if (name) {
+        const std::vector<std::string> levels = CustomRuinLevels();
+        if (std::find(levels.begin(), levels.end(), std::string(name)) == levels.end())
+            rfa::Log("Delete custom level: %s isn't a level made with the editor", name);
+        else if ((started = StartEditor(L"--delete-level " + std::wstring(name, name + strlen(name)), false, &g_deleting))) {
+            g_deletingName = name;
+            rfa::Log("Delete custom level: the editor is deleting %s (what it does goes to logs\\editor.log)", name);
+        }
+    }
+    rfa::game::lua_pushboolean(L, started);
+    return 1;
+}
+
+// Lua: rfa_delete_custom_level_done() -> nil while the editor is deleting, else its exit code (0: deleted)
+int __cdecl LuaDeleteCustomLevelDone(lua_State* L) {
+    if (g_deleting && WaitForSingleObject(g_deleting, 0) == WAIT_TIMEOUT) {
+        rfa::game::lua_pushnil(L);
+        return 1;
+    }
+    DWORD code = 0;
+    if (g_deleting) {
+        GetExitCodeProcess(g_deleting, &code);
+        CloseHandle(g_deleting);
+        g_deleting = nullptr;
+        rfa::Log(code == 0 ? "Delete custom level: %s deleted; the game reads its map list at start-up, so restart it"
+                           : "Delete custom level: %s wasn't deleted (editor exit code %lu)", g_deletingName.c_str(), code);
+    }
+    rfa::game::lua_pushnumber(L, static_cast<double>(code));
+    return 1;
+}
+
 // Runs instead of the game's function that registers its C functions with the menu Lua state:
 // lets it do that, then adds ours, then each mod's: a mod that exports
 //     extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(rfa::game::lua_State* L);
@@ -1053,7 +1175,11 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_get_setting", LuaGetSetting);
     lua_register(L, "rfa_set_setting", LuaSetSetting);
     lua_register(L, "rfa_log", LuaLog);
-    rfa::Log("Added rfa_get_setting, rfa_set_setting and rfa_log to the game's menu Lua");
+    lua_register(L, "rfa_open_level_editor", LuaOpenLevelEditor);
+    lua_register(L, "rfa_custom_levels", LuaCustomLevels);
+    lua_register(L, "rfa_delete_custom_level", LuaDeleteCustomLevel);
+    lua_register(L, "rfa_delete_custom_level_done", LuaDeleteCustomLevelDone);
+    rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");
     using RegisterLuaFn = void(__cdecl*)(lua_State*);
