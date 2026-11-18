@@ -628,9 +628,17 @@ auto& g_luaErrorCallback = *reinterpret_cast<LuaErrorCallbackFn*>(0x34FA99C);
 auto const SetLuaErrorCallback = reinterpret_cast<void(__cdecl*)(LuaErrorCallbackFn)>(0xD935D0);
 LuaErrorCallbackFn g_gameLuaErrorCallback;
 
+// An error raised while the game's callback handles one (a menu script reading a global that isn't
+// there, say: the menus' strict globals raise again from inside it) came back here, over and over,
+// until the stack ran out and the game ended. An error inside that is now only logged.
+thread_local int g_inLuaError = 0;
+
 void __cdecl LogLuaError(lua_State* L, const char* message) {
     RFA_LOG_FIRST(100, "Lua error: %s", message ? message : "(no message)");
+    if (g_inLuaError) return;
+    ++g_inLuaError;
     if (g_gameLuaErrorCallback) g_gameLuaErrorCallback(L, message);
+    --g_inLuaError;
 }
 
 void WatchLuaErrors() {

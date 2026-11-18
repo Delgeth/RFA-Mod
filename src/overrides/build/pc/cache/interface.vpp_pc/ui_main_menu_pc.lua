@@ -768,8 +768,10 @@ function ui_main_menu_rfa_delete_level(first) -- [RFA] lists the levels from the
 	end -- [RFA]
 	if first > #Rfa_levels then first = 1 end -- [RFA]
 	Rfa_level_page = first -- [RFA]
+	local last = first + RFA_LEVELS_SHOWN - 1 -- [RFA] (no math.min: the menus' Lua has no math)
+	if last > #Rfa_levels then last = #Rfa_levels end -- [RFA]
 	local options = {} -- [RFA]
-	for i = first, math.min(first + RFA_LEVELS_SHOWN - 1, #Rfa_levels) do -- [RFA]
+	for i = first, last do -- [RFA]
 		options[#options + 1] = Rfa_levels[i] -- [RFA]
 	end -- [RFA]
 	if #Rfa_levels > RFA_LEVELS_SHOWN then options[#options + 1] = "MORE..." end -- [RFA]
@@ -778,7 +780,8 @@ function ui_main_menu_rfa_delete_level(first) -- [RFA] lists the levels from the
 end -- [RFA]
 
 function ui_main_menu_rfa_delete_picked(return_value) -- [RFA]
-	local shown = math.min(RFA_LEVELS_SHOWN, #Rfa_levels - Rfa_level_page + 1) -- [RFA]
+	local shown = #Rfa_levels - Rfa_level_page + 1 -- [RFA]
+	if shown > RFA_LEVELS_SHOWN then shown = RFA_LEVELS_SHOWN end -- [RFA]
 	if return_value >= 1 and return_value <= shown then -- [RFA]
 		Rfa_level_chosen = Rfa_levels[Rfa_level_page + return_value - 1] -- [RFA]
 		rfa_popup("Delete " .. Rfa_level_chosen .. " for good? Its archive, its edits, its map list row, strings, pictures and spawn resources all go. This can't be undone.", -- [RFA]
