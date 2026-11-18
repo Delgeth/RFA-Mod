@@ -21,6 +21,13 @@ public partial class MainWindow
     /// <summary>Brings the Game panel forward.</summary>
     void OnShowGame(object sender, RoutedEventArgs e) => page?.ShowGame();
 
+    /// <summary>Started from the game's menu (--dock): shows the Game panel, which then docks the running game.</summary>
+    internal void ShowGameToDock()
+    {
+        Log("Started from the game's menu: the game is docked in the Game panel (Shift+F1 brings you back to the editor).");
+        page?.ShowGame();
+    }
+
     /// <summary>The open tabs whose key starts with <paramref name="prefix"/>.</summary>
     List<(string Key, IEditorDocument Document)> OpenTabs(string prefix) =>
         page?.OpenTabs(prefix)

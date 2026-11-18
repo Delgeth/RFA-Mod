@@ -733,7 +733,7 @@ end
 local Rfa_levels = {} -- [RFA] the levels listed in the popup
 local Rfa_level_page = 1 -- [RFA] its first level's place
 local Rfa_level_chosen = nil -- [RFA] the level to delete, once picked
-local RFA_LEVELS_SHOWN = 4 -- [RFA] how many a popup lists at once
+local RFA_LEVELS_SHOWN = 2 -- [RFA] how many a popup lists at once (a popup has at most 4 options: these, MORE... and Cancel)
 
 local function rfa_popup(message, callback, options) -- [RFA]
 	Input_tracker:subscribe(false) -- [RFA]
@@ -761,7 +761,7 @@ function ui_main_menu_rfa_create_mode(return_value) -- [RFA]
 	if mode == nil then -- [RFA]
 		ui_main_menu_rfa_popup_done() -- [RFA]
 	elseif rfa_open_level_editor(mode) then -- [RFA]
-		rfa_popup("The level editor is starting in its own window; New level opens once it has read the game's files (a minute or so). Restart the game to play the new level.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		rfa_popup("The level editor is starting; the game is docked in it. New level opens once it has read the game's files (a minute or so). Restart the game to play the new level.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 	else -- [RFA]
 		rfa_popup("The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 	end -- [RFA]
@@ -804,10 +804,22 @@ function ui_main_menu_rfa_delete_picked(return_value) -- [RFA]
 	end -- [RFA]
 end -- [RFA]
 
+local Rfa_deleting = false -- [RFA] the editor is deleting Rfa_level_chosen
+
+local function rfa_deleting_popup() -- [RFA] a popup with no options: the game's popups allow that
+	rf4_popup_create("Deleting Custom Level...", "ui_main_menu_rfa_deleting_closed", {}, 0) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_deleting_closed(return_value) -- [RFA] A closes it: back it comes while the editor works
+	if Rfa_deleting then rfa_deleting_popup() end -- [RFA]
+end -- [RFA]
+
 function ui_main_menu_rfa_delete_confirmed(return_value) -- [RFA]
 	if return_value ~= 1 or Rfa_level_chosen == nil then -- [RFA]
 		ui_main_menu_rfa_popup_done() -- [RFA]
 	elseif rfa_delete_custom_level(Rfa_level_chosen) then -- [RFA]
+		Rfa_deleting = true -- [RFA]
+		rfa_deleting_popup() -- [RFA]
 		thread_new("ui_main_menu_rfa_delete_wait") -- [RFA]
 	else -- [RFA]
 		rfa_popup(Rfa_level_chosen .. " couldn't be deleted: logs\\rfa_mods.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
@@ -820,6 +832,9 @@ function ui_main_menu_rfa_delete_wait() -- [RFA] while the editor deletes the le
 		thread_yield() -- [RFA]
 		code = rfa_delete_custom_level_done() -- [RFA]
 	end -- [RFA]
+	Rfa_deleting = false -- [RFA]
+	rf4_popup_close() -- [RFA] the Deleting popup
+	for i = 1, 30 do thread_yield() end -- [RFA] (half a second: it fades out first)
 	if code == 0 then -- [RFA]
 		rfa_popup(Rfa_level_chosen .. " is deleted. Restart the game to take it off Ruin's map list (until then, don't pick it).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 	else -- [RFA]

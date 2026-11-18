@@ -1089,7 +1089,8 @@ bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
 int __cdecl LuaOpenLevelEditor(lua_State* L) {
     const char* mode = rfa::game::lua_gettop(L) >= 1 ? rfa::game::lua_tolstring(L, 1, nullptr) : nullptr;
     const bool known = mode && (_stricmp(mode, "ruin") == 0 || _stricmp(mode, "infestation") == 0);
-    const bool started = StartEditor(known ? L"--new-level " + std::wstring(mode, mode + strlen(mode)) : L"", true, nullptr);
+    // --dock: the editor docks this game in its Game panel.
+    const bool started = StartEditor(known ? L"--dock --new-level " + std::wstring(mode, mode + strlen(mode)) : std::wstring(L"--dock"), true, nullptr);
     if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
                           known ? mode : "");
     rfa::game::lua_pushboolean(L, started);

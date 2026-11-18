@@ -49,6 +49,10 @@ public partial class App : Application
             NewLevelAtStart = newLevel >= 0 ? (newLevel + 1 < e.Args.Length ? e.Args[newLevel + 1] : "ruin") : null,
         };
         main.Show();
+        // --dock (the game's main menu starts the editor with it): the game that started it is docked in the
+        // Game panel, which is brought forward for it (it docks itself as soon as the panel shows).
+        if (e.Args.Any(a => a.Equals("--dock", StringComparison.OrdinalIgnoreCase)))
+            main.Dispatcher.BeginInvoke(new Action(main.ShowGameToDock), System.Windows.Threading.DispatcherPriority.Loaded);
         if (main.NewLevelAtStart != null) EditorLog.Write("New level opens once the editor has read the game's files (a minute or so).");
     }
 
