@@ -3,7 +3,9 @@
 --
 -- Groups the top menu by game: Red Faction: Armageddon (Continue, New Game, New Game+, Load Game, the
 -- downloadable content, Infestation and Ruin) and Red Faction: Guerrilla (the Guerrilla world, and its
--- builder), then Level editor, Options, Extras and Quit. Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
+-- builder), then Level editor, Options, Extras and Quit; Options > Main Menu sets how ([MainMenu] in
+-- rfa_mods.ini: the layout by game or the game's classic one, Continue at the top, which entries show,
+-- the descriptions, the decorations, opening where you left off). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
 -- with the editor's New level, through the loader's rfa_open_level_editor, rfa_custom_levels and
 -- rfa_delete_custom_level). Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
 -- "experimentals", which makes it show RFA-Mod's own settings (see ui_options_gameplay.lua). Every
@@ -45,6 +47,7 @@ local OPTIONS_GAMEPLAY_ID		= 202
 local OPTIONS_AUDIO_ID			= 203
 local OPTIONS_VIDEO_ID			= 204
 local OPTIONS_EXPERIMENTALS_ID	= 205 -- [RFA]
+local OPTIONS_MAIN_MENU_ID		= 206 -- [RFA]
 
 -- DLC sub-menu
 local DLC_OUTFITS_ID			= 301
@@ -110,7 +113,14 @@ local MENU_DATA = {
 
 	MAIN_CAMPAIGN = { -- [RFA] the games, each with its own sub-menu
 		{label = "RED FACTION: ARMAGEDDON",	id = CAMPAIGN_ID}, -- [RFA]
+	}, -- [RFA]
+
+	MAIN_GUERRILLA = { -- [RFA]
 		{label = "RED FACTION: GUERRILLA",	id = GUERRILLA_ID}, -- [RFA]
+	}, -- [RFA]
+
+	MAIN_LEVEL_EDITOR = { -- [RFA]
+		{label = "LEVEL EDITOR",		id = LEVEL_EDITOR_ID}, -- [RFA]
 	}, -- [RFA]
 
 	ARMAGEDDON_MODES = { -- [RFA] Armageddon's modes, under Red Faction: Armageddon (they were at the top)
@@ -123,8 +133,7 @@ local MENU_DATA = {
 		{label = "BUILD GUERRILLA WORLD",	id = GUERRILLA_BUILD_ID}, -- [RFA]
 	}, -- [RFA]
 
-	MAIN_GENERAL = {		-- Other stuff at top level
-		{label = "LEVEL EDITOR",		id = LEVEL_EDITOR_ID}, -- [RFA]
+	MAIN_GENERAL = {		-- Other stuff at top level ([RFA] Infestation, Ruin and Level editor have their own lists)
 		{label = "MENU_OPTIONS_UC",	id = OPTIONS_ID},
 		{label = "MENU_EXTRAS_UC",		id = EXTRAS_ID},
 		{label = "MENU_QUIT_DESKTOP",	id = QUIT_GAME_ID},
@@ -155,6 +164,7 @@ local MENU_DATA = {
 		{label = "MENU_AUDIO_UC",			id = OPTIONS_AUDIO_ID},
 		{label = "MENU_VIDEO_UC",			id = OPTIONS_VIDEO_ID},
 		{label = "EXPERIMENTALS",			id = OPTIONS_EXPERIMENTALS_ID}, -- [RFA]
+		{label = "MAIN MENU",				id = OPTIONS_MAIN_MENU_ID}, -- [RFA]
 	},
 	
 	LEVEL_EDITOR_SUB_MENU = { -- [RFA]
@@ -291,9 +301,17 @@ function ui_main_menu_init()
 	Texticles.scrolling_text2:run_text(text2_string, 0.001, true, 3)
 	Texticles.scrolling_text3:run_text(text1_string, 0.01, true, 2)
 
+	-- [RFA] Options > Main Menu > Decorations off: the scrolling numbers and the tech module, meter and corner hidden
+	if rfa_get_setting("MainMenu", "Decorations", 1) == 0 then -- [RFA]
+		for i, name in ipairs({"scrolling_text1", "scrolling_text2", "scrolling_text3", "tech_module", "tech_meter", "tech_corner_1"}) do -- [RFA]
+			local object = vint_object_find(name) -- [RFA]
+			if object ~= 0 then vint_set_property(object, "visible", false) end -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+
 	vint_dataitem_add_subscription("main_menu_update", "update", "ui_main_menu_update")
 
-	ui_main_menu_update_top_menu_and_draw()
+	ui_main_menu_update_top_menu_and_draw(nil, true) -- [RFA] (true: the menu is opening)
 end
 
 function ui_main_menu_cleanup()
@@ -337,6 +355,20 @@ function ui_main_menu_quit_game_return(return_value)
 	end
 end
 
+-- [RFA] Options > Main Menu's settings ([MainMenu] in rfa_mods.ini), read each time the menu is made.
+local Rfa_mm = {group = true, continue_at_top = true, guerrilla = true, level_editor = true, descriptions = true,
+	decorations = true, remember = true} -- [RFA]
+local function rfa_read_main_menu_settings() -- [RFA]
+	local function on(key) return rfa_get_setting("MainMenu", key, 1) ~= 0 end -- [RFA]
+	Rfa_mm.group = on("GroupByGame") -- [RFA]
+	Rfa_mm.continue_at_top = on("ContinueAtTop") -- [RFA]
+	Rfa_mm.guerrilla = on("ShowGuerrilla") -- [RFA]
+	Rfa_mm.level_editor = on("ShowLevelEditor") -- [RFA]
+	Rfa_mm.descriptions = on("Descriptions") -- [RFA]
+	Rfa_mm.decorations = on("Decorations") -- [RFA]
+	Rfa_mm.remember = on("Remember") -- [RFA]
+end -- [RFA]
+
 -- Constructs the top level menu menu based on init flags
 function ui_main_menu_construct_top_menu_from_flags()
 
@@ -355,18 +387,61 @@ function ui_main_menu_construct_top_menu_from_flags()
 		-- Use the ultra simple style menu
 		tack_on_data(MENU_DATA.MAIN_DEMO)
 	else
-		-- [RFA] Continue, New Game, New Game+, Load Game, the DLC, Infestation and Ruin: under Red Faction:
-		-- [RFA] Armageddon (ui_main_menu_construct_campaign_sub_menu); the Guerrilla world under Red Faction: Guerrilla
-		tack_on_data(MENU_DATA.MAIN_CAMPAIGN) -- [RFA]
+		rfa_read_main_menu_settings() -- [RFA]
+		if Rfa_mm.continue_at_top or not Rfa_mm.group then -- [RFA]
+		-- Check for save games
+		if rf4_main_menu_has_save_games() then
+			tack_on_data(MENU_DATA.MAIN_CONTINUE)
+		end
+		end -- [RFA]
+
+		if Rfa_mm.group then -- [RFA] by game: Continue, New Game, New Game+, Load Game, the DLC, Infestation and
+			-- [RFA] Ruin under Red Faction: Armageddon (ui_main_menu_construct_campaign_sub_menu); the Guerrilla
+			-- [RFA] world under Red Faction: Guerrilla
+			tack_on_data(MENU_DATA.MAIN_CAMPAIGN) -- [RFA]
+		else -- [RFA] the game's classic top menu
+		tack_on_data(MENU_DATA.MAIN_NEW_GAME)
+
+		-- Check for New Game+
+		if rf4_main_menu_show_new_game_plus() then
+			tack_on_data(MENU_DATA.MAIN_NEW_GAME_PLUS)
+		end
+
+		if is_signed_into_profile() then
+			tack_on_data(MENU_DATA.MAIN_HAS_PROFILE)
+		end
+
+		-- Check for downloadable outfits or missions
+		--if rf4_dlc_is_character_unlock_available() or rf4_dlc_are_dlc04_missions_available() then
+			tack_on_data(MENU_DATA.MAIN_DLC)
+		--end
+		tack_on_data(MENU_DATA.ARMAGEDDON_MODES) -- [RFA] Infestation and Ruin, as the game had them
+		end -- [RFA]
+		if Rfa_mm.guerrilla then tack_on_data(MENU_DATA.MAIN_GUERRILLA) end -- [RFA]
+		if Rfa_mm.level_editor then tack_on_data(MENU_DATA.MAIN_LEVEL_EDITOR) end -- [RFA]
 
 		-- Everything else
 		tack_on_data(MENU_DATA.MAIN_GENERAL)
 	end
 end
 
-function ui_main_menu_update_top_menu_and_draw(saved_id)
+function ui_main_menu_update_top_menu_and_draw(saved_id, rfa_opening) -- [RFA] rfa_opening
 	-- Now construct the top level menu from the flags
 	ui_main_menu_construct_top_menu_from_flags()
+
+	-- [RFA] A sub-menu whose entry isn't on the top menu now (Options > Main Menu changed it), or Open where
+	-- [RFA] you left off turned off: start at the top.
+	local rfa_tier_entry = {[CAMPAIGN_TIER] = CAMPAIGN_ID, [GUERRILLA_TIER] = GUERRILLA_ID, [LEVEL_EDITOR_TIER] = LEVEL_EDITOR_ID} -- [RFA]
+	local rfa_entry = rfa_tier_entry[Global_last_main_menu_tier] -- [RFA]
+	if Global_last_main_menu_tier == MULTIPLAYER_TIER and Rfa_mm.group then rfa_entry = CAMPAIGN_ID end -- [RFA]
+	local rfa_entry_there = (rfa_entry == nil) -- [RFA]
+	for i, option in ipairs(Top_menu_data) do -- [RFA]
+		if option.id == rfa_entry then rfa_entry_there = true end -- [RFA]
+	end -- [RFA]
+	if not rfa_entry_there or (not Rfa_mm.remember and rfa_opening and Global_last_main_menu_tier ~= OPTIONS_TIER) then -- [RFA]
+		Global_last_main_menu_tier = MAIN_MENU_TIER -- [RFA]
+		Global_last_main_menu_option = 1 -- [RFA]
+	end -- [RFA]
 
 	if Global_last_main_menu_tier == MAIN_MENU_TIER then
 		if saved_id ~= nil then
@@ -405,7 +480,7 @@ function ui_main_menu_update_top_menu_and_draw(saved_id)
 		Global_last_main_menu_tier = MAIN_MENU_TIER
 		Global_last_main_menu_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
 	end
-	if Global_last_main_menu_tier == DLC_TIER then -- [RFA] the DLC is under Campaign now
+	if Global_last_main_menu_tier == DLC_TIER and Rfa_mm.group then -- [RFA] by game, the DLC is under Armageddon
 		Global_last_main_menu_tier = CAMPAIGN_TIER -- [RFA]
 		Global_last_main_menu_option = 1 -- [RFA]
 	end -- [RFA]
@@ -527,6 +602,10 @@ function ui_main_menu_nav_down(event, acceleration)
 end
 
 function ui_main_menu_set_screen_hint(new_tier)
+	if not Rfa_mm.descriptions then -- [RFA] Options > Main Menu > Descriptions off
+		Hint_bar:set_value("") -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
 	local current_id = List:get_id()
 	if new_tier == MULTIPLAYER_TIER then
 		current_id = MULTIPLAYER_ID
@@ -662,7 +741,7 @@ function ui_main_menu_button_a(event, acceleration)
 		rf4_main_menu_new_game_plus()
 
 	elseif current_id == LOAD_GAME_ID then
-		set_next_screen(NEXT_SCREEN_LOAD_GAME, CAMPAIGN_TIER) -- [RFA] (under Campaign now)
+		set_next_screen(NEXT_SCREEN_LOAD_GAME, Rfa_mm.group and CAMPAIGN_TIER or MAIN_MENU_TIER) -- [RFA] (by game: under Armageddon)
 
 	elseif current_id == DLC_ID then
 	
@@ -679,7 +758,7 @@ function ui_main_menu_button_a(event, acceleration)
 		rf4_main_menu_show_dlc_store()
 		
 	elseif current_id == DLC_OUTFITS_ID then
-		set_next_screen("ui_dlc_outfits", CAMPAIGN_TIER) -- [RFA] (under Campaign now)
+		set_next_screen("ui_dlc_outfits", Rfa_mm.group and CAMPAIGN_TIER or DLC_TIER) -- [RFA] (by game: under Armageddon)
 
 	elseif current_id == QUIT_GAME_ID then
 		ui_main_menu_initiate_quit_game()
@@ -707,6 +786,10 @@ function ui_main_menu_button_a(event, acceleration)
 		rawset(_UGGlobals, "Rfa_options_page", "experimentals") -- [RFA]
 		set_next_screen("ui_options_gameplay", OPTIONS_TIER) -- [RFA]
 
+	elseif current_id == OPTIONS_MAIN_MENU_ID then -- [RFA]
+		rawset(_UGGlobals, "Rfa_options_page", "main_menu") -- [RFA]
+		set_next_screen("ui_options_gameplay", OPTIONS_TIER) -- [RFA]
+
 	elseif current_id == OPTIONS_AUDIO_ID then
 		set_next_screen("ui_options_audio", OPTIONS_TIER)
 
@@ -729,7 +812,7 @@ end
 
 function ui_main_menu_button_b(event, acceleration)
 	if Tween_done == true then
-		if Global_last_main_menu_tier == MULTIPLAYER_TIER then -- [RFA] Infestation's sub-menu: back to Armageddon's
+		if Global_last_main_menu_tier == MULTIPLAYER_TIER and Rfa_mm.group then -- [RFA] Infestation's sub-menu: back to Armageddon's
 			local armageddon = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
 			ui_main_menu_change_tier(CAMPAIGN_TIER, ui_main_menu_get_option_from_data(armageddon, MULTIPLAYER_ID)) -- [RFA]
 			play_ui_sound( "INT_BACK" ) -- [RFA]
@@ -979,7 +1062,7 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 	if new_tier == MAIN_MENU_TIER then
 		-- Get the selection pointing to the previous menu
 		if Global_last_main_menu_tier == MULTIPLAYER_TIER then
-			current_option = ui_main_menu_get_option_from_data(Top_menu_data, CAMPAIGN_ID) -- [RFA] Infestation is under Armageddon
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, Rfa_mm.group and CAMPAIGN_ID or MULTIPLAYER_ID) -- [RFA] (by game: under Armageddon)
 			sub_data = MENU_DATA.MULTIPLAYER_SUB_MENU
 		elseif Global_last_main_menu_tier == OPTIONS_TIER then
 			current_option = ui_main_menu_get_option_from_data(Top_menu_data, OPTIONS_ID)

@@ -4,7 +4,8 @@
 -- Adds a Field of View slider (45-170), saved to rfa_mods.ini through rfa_get_setting and
 -- rfa_set_setting, which the loader adds. Also Options > Experimentals: the main and pause menus
 -- open this screen with the global Rfa_options_page "experimentals", and it then shows RFA-Mod's own
--- settings (Rfa_experimentals) in place of the game's. Every line we added or changed is marked [RFA];
+-- settings (Rfa_experimentals) in place of the game's; Options > Main Menu opens it with "main_menu", for
+-- the main menu's layout (Rfa_main_menu). Every line we added or changed is marked [RFA];
 -- everything else is the game's original script. Only the [RFA] lines are this project's (GNU GPL
 -- version 3 or later, see LICENSE); the rest belongs to the game's owners.
 -- To compare with the original, extract it with the editor.
@@ -77,7 +78,25 @@ local Rfa_experimentals = {
 	{type = TYPE_SLIDER, label = "Clock speed", min = 0, max = 120, step = 4, current_value = 48,
 		section = "GuerrillaWorld", key = "ClockSpeed", default = 48},
 }
-local Rfa_experimental = false -- [RFA] showing Rfa_experimentals
+-- [RFA] Options > Main Menu: how the main menu is laid out ([MainMenu] in rfa_mods.ini; ui_main_menu_pc.lua
+-- reads them each time it opens).
+local Rfa_main_menu = {
+	{type = TYPE_TOGGLE, label = "Layout", options = {"BY GAME", "CLASSIC"}, current_value = 1,
+		section = "MainMenu", key = "GroupByGame", default = 1},
+	{type = TYPE_TOGGLE, label = "Continue at the top", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "MainMenu", key = "ContinueAtTop", default = 1},
+	{type = TYPE_TOGGLE, label = "Red Faction: Guerrilla", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "MainMenu", key = "ShowGuerrilla", default = 1},
+	{type = TYPE_TOGGLE, label = "Level editor", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "MainMenu", key = "ShowLevelEditor", default = 1},
+	{type = TYPE_TOGGLE, label = "Descriptions", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "MainMenu", key = "Descriptions", default = 1},
+	{type = TYPE_TOGGLE, label = "Decorations", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "MainMenu", key = "Decorations", default = 1},
+	{type = TYPE_TOGGLE, label = "Open where you left off", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
+		section = "MainMenu", key = "Remember", default = 1},
+}
+local Rfa_experimental = false -- [RFA] showing Rfa_experimentals or Rfa_main_menu (ours, none of the game's)
 
 local Anims = {}
 
@@ -202,17 +221,23 @@ function ui_options_gameplay_init()
 	-- [RFA] Options > Experimentals: our list in place of the game's, and none of its settings. (The
 	-- page is kept with rawset and read with _GetAnyGlobalSilent, system_lib's: the menus' Lua
 	-- refuses to write or read a global that wasn't declared as its script loaded.)
-	Rfa_experimental = (_GetAnyGlobalSilent("Rfa_options_page") == "experimentals")
+	local rfa_page = _GetAnyGlobalSilent("Rfa_options_page") -- [RFA]
+	Rfa_experimental = (rfa_page == "experimentals" or rfa_page == "main_menu") -- [RFA]
 	rawset(_UGGlobals, "Rfa_options_page", "gameplay")
 	if Rfa_experimental then
-		Data = Rfa_experimentals
+		Data = (rfa_page == "main_menu") and Rfa_main_menu or Rfa_experimentals -- [RFA]
 		FINE_AIM_SNAP_INDEX = nil
 		HELP_MESSAGE_INDEX = nil
 		FOV_INDEX = nil
 		GAMEPLAY_RESET_PROFILE = nil
 		DIFFICULTY_INDEX = nil
+		if rfa_page == "main_menu" then -- [RFA]
+			Hint_bar:set_header("MAIN MENU") -- [RFA]
+			Hint_bar:set_value("How the main menu is laid out and what it shows, saved in rfa_mods.ini") -- [RFA]
+		else -- [RFA]
 		Hint_bar:set_header("EXPERIMENTALS")
 		Hint_bar:set_value("RFA-Mod's settings for the Guerrilla world, saved in rfa_mods.ini")
+		end -- [RFA]
 	else -- [RFA] the game's own, as before
 	Hint_bar:set_header("MENU_GAMEPLAY_SETTINGS")
 	Hint_bar:set_value("MENU_CHANGE_GAMEPLAY_SETTINGS")
