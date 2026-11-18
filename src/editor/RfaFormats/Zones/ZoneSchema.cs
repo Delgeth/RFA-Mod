@@ -255,18 +255,34 @@ public sealed class SchemaClass
     /// <param name="choicesOf">An enum's choices from its table (<see cref="SchemaPopulate"/>), for enums that have no default of their own.</param>
     public List<NewProperty> NewObject(Vector3 position, Func<SchemaPopulate, IReadOnlyList<string>>? choicesOf = null)
     {
-        if (CantMake != null) throw new InvalidOperationException($"a new {Name} can't be made: {CantMake}");
+        if (CantMake != null)
+        {
+            // Allow creating basic versions of classes that normally need tool data
+            if (Name.Equals("object_path_road", StringComparison.OrdinalIgnoreCase))
+            {
+                return CreateDefaultRoad(position);
+            }
+            if (Name.Equals("object_spline", StringComparison.OrdinalIgnoreCase))
+            {
+                return CreateDefaultSpline(position);
+            }
+            throw new InvalidOperationException($"a new {Name} can't be made: {CantMake}");
+        }
         if (Name.Equals("navpoint", StringComparison.OrdinalIgnoreCase))
         {
             // As the game's: its position alone ("just_pos", no rotation), and its settings packed (see NavpointData).
-            int type = Array.FindIndex(NavpointData.Types, t => t.Equals(Property("navpoint_type")?.Default, StringComparison.OrdinalIgnoreCase));
+            // Use the game's navpoint_type enum (from RFG PDB) since the schema may not have the full list.
+            var navpointTypeProp = Property("navpoint_type");
+            var types = NavpointData.GetTypes(navpointTypeProp);
+            int type = Array.FindIndex(types, t => t.Equals(navpointTypeProp?.Default, StringComparison.OrdinalIgnoreCase));
             float radius = Property("outer_radius")?.DefaultNumbers() is [var r, ..] ? r : 1.35f;
             float speed = Property("navpoint_speed_limit")?.DefaultNumbers() is [var v, ..] ? v : 10;
             byte[] at = [.. BitConverter.GetBytes(position.X), .. BitConverter.GetBytes(position.Y), .. BitConverter.GetBytes(position.Z)];
+            // Use version 4 (Armageddon) navpoint data with navigation cell support
             return
             [
                 new(ZoneProperty.ValueType, NameHashes.PropertyHash("just_pos"), at),
-                new(ZoneProperty.ListType, NameHashes.PropertyHash("navpoint_data"), NavpointData.New(type < 0 ? NavpointData.PathType : type, radius, speed).ToBytes()),
+                new(ZoneProperty.ListType, NameHashes.PropertyHash("navpoint_data"), NavpointData.NewV4(type < 0 ? NavpointData.PathType : type, radius, speed).ToBytes()),
             ];
         }
         var placement = new byte[48];
@@ -281,6 +297,51 @@ public sealed class SchemaClass
             properties.Add(new NewProperty(ZoneProperty.ValueType, NameHashes.PropertyHash("object_space_bounding_box_min"), box[..12]));
             properties.Add(new NewProperty(ZoneProperty.ValueType, NameHashes.PropertyHash("object_space_bounding_box_max"), box[12..]));
         }
+        return properties;
+    }
+
+    /// <summary>Creates a default object_path_road with empty path_road_data.</summary>
+    private List<NewProperty> CreateDefaultRoad(Vector3 position)
+    {
+        var placement = new byte[48];
+        float[] numbers = [position.X, position.Y, position.Z, 1, 0, 0, 0, 1, 0, 0, 0, 1];
+        for (int i = 0; i < numbers.Length; i++) BitConverter.TryWriteBytes(placement.AsSpan(i * 4), numbers[i]);
+        var properties = new List<NewProperty> { new(ZoneProperty.ValueType, PositionAndRotation, placement) };
+
+        // Add default properties from schema
+        foreach (SchemaProperty property in all.Where(p => p.Exported))
+            if (property.DefaultValue(null) is { } value)
+                properties.Add(new NewProperty(property.ZoneType, NameHashes.PropertyHash(property.ZoneName), value));
+
+        // Add empty path_road_struct (16 bytes: num_points, points_offset, num_connections, connections_offset)
+        var structBytes = new byte[16]; // all zeros = 0 points, 0 connections
+        properties.Add(new NewProperty(ZoneProperty.ValueType, NameHashes.PropertyHash("path_road_struct"), structBytes));
+
+        // Add empty path_road_data
+        properties.Add(new NewProperty(ZoneProperty.ListType, NameHashes.PropertyHash("path_road_data"), []));
+
+        return properties;
+    }
+
+    /// <summary>Creates a default object_spline with empty object_spline_data.</summary>
+    private List<NewProperty> CreateDefaultSpline(Vector3 position)
+    {
+        var placement = new byte[48];
+        float[] numbers = [position.X, position.Y, position.Z, 1, 0, 0, 0, 1, 0, 0, 0, 1];
+        for (int i = 0; i < numbers.Length; i++) BitConverter.TryWriteBytes(placement.AsSpan(i * 4), numbers[i]);
+        var properties = new List<NewProperty> { new(ZoneProperty.ValueType, PositionAndRotation, placement) };
+
+        // Add default properties from schema
+        foreach (SchemaProperty property in all.Where(p => p.Exported))
+            if (property.DefaultValue(null) is { } value)
+                properties.Add(new NewProperty(property.ZoneType, NameHashes.PropertyHash(property.ZoneName), value));
+
+        // Add empty object_spline_data (just type = CatmullRom, 0 points)
+        var splineBytes = new byte[8];
+        BitConverter.TryWriteBytes(splineBytes.AsSpan(0), (uint)SplineData.SplineType.CatmullRom); // type
+        BitConverter.TryWriteBytes(splineBytes.AsSpan(4), 0); // num_points
+        properties.Add(new NewProperty(ZoneProperty.ListType, NameHashes.PropertyHash("object_spline_data"), splineBytes));
+
         return properties;
     }
 

@@ -3,7 +3,7 @@ using RfaFormats;
 namespace RfaEditor;
 
 /// <summary>One file inside an archive, or inside a .str2_pc container inside an archive.</summary>
-sealed class GameFile
+public sealed class GameFile
 {
     public Packfile Source { get; }
     public PackfileEntry Entry { get; }
@@ -32,7 +32,7 @@ sealed class GameFile
 }
 
 /// <summary>A file name in the search index: where it is, without keeping anything open.</summary>
-sealed record IndexedFile(string Name, string Archive, string? Container)
+public sealed record IndexedFile(string Name, string Archive, string? Container)
 {
     public string Where => Container == null ? Shown(Archive) : $"{Shown(Archive)} > {Container}";
 
@@ -100,4 +100,4 @@ static class FileIndex
 }
 
 /// <summary>Where a texture is: its texture file (header half), in a container or directly in an archive.</summary>
-sealed record TextureRef(string Archive, string? Container, string PegHeader);
+public sealed record TextureRef(string Archive, string? Container, string PegHeader);

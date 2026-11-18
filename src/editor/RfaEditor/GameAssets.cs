@@ -15,7 +15,7 @@ namespace RfaEditor;
 /// for next to whatever asks (same container, or same archive) first, then anywhere, once the
 /// index of every container is ready. Things found are kept, so each is read and decoded once.
 /// </summary>
-sealed class GameAssets
+public sealed class GameAssets
 {
     readonly Workspace workspace;
     readonly object assetLock = new();   // guards models, bitmaps, tables for parallel reads
@@ -676,10 +676,10 @@ static class Bitmaps
 }
 
 /// <summary>A chunk's files and asset list entries, to bring it into a zone (see <see cref="GameAssets.PackageOf"/>).</summary>
-sealed record ChunkPackage(string Chunk, List<(string Name, byte[] Data)> Files, List<AsmPrimitive> Primitives, AsmContainer Group);
+public sealed record ChunkPackage(string Chunk, List<(string Name, byte[] Data)> Files, List<AsmPrimitive> Primitives, AsmContainer Group);
 
 /// <summary>An object placing a chunk: in which zone file (where it is) and its handle.</summary>
-sealed record ChunkPlacement(string Archive, string? Container, string Zone, uint Handle);
+public sealed record ChunkPlacement(string Archive, string? Container, string Zone, uint Handle);
 
 /// <summary>An object of one of the game's levels to add a copy of (see <see cref="GameAssets.ObjectExamples"/>).</summary>
-sealed record ObjectExample(string Class, string Label, ChunkPlacement Place);
+public sealed record ObjectExample(string Class, string Label, ChunkPlacement Place);

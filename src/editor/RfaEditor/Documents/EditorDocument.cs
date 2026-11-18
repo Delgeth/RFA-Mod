@@ -39,7 +39,7 @@ interface IDocumentParts
 }
 
 /// <summary>What documents can use of the editor around them.</summary>
-sealed class EditorContext
+public sealed class EditorContext
 {
     public required Workspace Workspace { get; init; }
     public required GameAssets Assets { get; init; }

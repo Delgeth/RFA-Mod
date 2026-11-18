@@ -118,12 +118,12 @@ public static class NavigationBuilder
             (MathF.Abs(p.Z - zoneCorner.Y) < Near && MathF.Abs(q.Z - zoneCorner.Y) < Near) ||
             (MathF.Abs(p.Z - zoneCorner.Y - zoneWidth) < Near && MathF.Abs(q.Z - zoneCorner.Y - zoneWidth) < Near);
         var outer = across.Values.Where(e => OnBorder(vertices[corners[e.Cell][e.Edge]], vertices[corners[e.Cell][(e.Edge + 1) % 3]]))
-                          .OrderBy(e => e.Cell).ThenBy(e => e.Edge)
-                          .Select(e => new NavigationEdge((ushort)e.Cell, (byte)e.Edge, 0, uint.MaxValue)).ToArray();
+                                  .OrderBy(e => e.Cell).ThenBy(e => e.Edge)
+                                  .Select(e => new NavigationEdge((ushort)e.Cell, (byte)e.Edge, 0, uint.MaxValue)).ToArray();
 
         byte flags = vehicles ? (byte)0x20 : (byte)0;
         var cells = corners.Select((v, i) => new NavigationCell(adjacent[i], 0, 0, v, 0xFFFF, 0, place, flags, 0, place)).ToArray();
-        byte[] islands = NavigationLayer.Islands(cells);
+        byte[] islands = NavigationLayer.SwitchedOnIslands(cells);
         cells = cells.Select((c, i) => c with { Island = islands[i] }).ToArray();
         var (words, pools) = NavigationLayer.PlainPools(islands.Max() + 1, place, people: !vehicles);
         float yLow = vertices.Length > 0 ? vertices.Min(v => v.Y) : 0, yHigh = vertices.Length > 0 ? vertices.Max(v => v.Y) : 0;

@@ -158,6 +158,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         SceneViewport.Children.Add(magnetVisual);
         SceneViewport.Children.Add(helpersVisual);  // light and camera cones, invisible walls (LevelEditor.Helpers.cs)
         SceneViewport.Children.Add(navMeshVisual);
+        SceneViewport.Children.Add(navMeshBrushVisual);
         SetTool(LevelTool.Move);
         CompositionTarget.Rendering += PadFrame;
         GamePanel.ControllerChanged += ShowControllerOwner;
@@ -1337,6 +1338,9 @@ public partial class LevelEditor : UserControl, IEditorDocument
         var needs = new List<string>();
         try
         {
+            // Snap to ground: adjust Y to the ground height at this X/Z position
+            float groundY = GroundHeight(at.X, at.Z);
+            at = new Vector3(at.X, groundY, at.Z);
             added = MakeChunkObjects(chunk, at, targetContainer, needs, out how);
         }
         catch (InvalidOperationException ex)
@@ -2363,6 +2367,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
                 {
                     brushAt = point;
                     ShowBrush();
+                    break;
+                }
+                if (tool == LevelTool.NavMesh)
+                {
+                    brushAt = point;
+                    ShowNavMeshBrush();
                     break;
                 }
                 Axis? hot = selected != null && Editable(selected) ? gizmo.HandleAt(GizmoViewport, point) : null;

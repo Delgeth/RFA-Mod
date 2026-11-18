@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RfaEditorMcp</RootNamespace>
+    <AssemblyName>RfaEditorMcp</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RfaFormats\RfaFormats.csproj" />
+    <ProjectReference Include="..\RfaEditor\RfaEditor.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -3,10 +3,10 @@ using System.IO;
 namespace RfaEditor;
 
 /// <summary>The ways the Add list sorts the game's chunks.</summary>
-enum ChunkFacet { Type, Category, Setting, Pack, Container }
+public enum ChunkFacet { Type, Category, Setting, Pack, Container }
 
 /// <summary>One of the game's chunks (a building or prop model), sorted for browsing: what it is, what it's for, whose it is, and which packs have it.</summary>
-sealed record ChunkEntry(string Name, string Type, string Category, string Setting, IReadOnlyList<(string Pack, string? Container)> Places, bool Stitch = false)
+public sealed record ChunkEntry(string Name, string Type, string Category, string Setting, IReadOnlyList<(string Pack, string? Container)> Places, bool Stitch = false)
 {
     public string Of(ChunkFacet facet) => facet switch
     {

@@ -197,13 +197,20 @@ sealed class NewLevel
             report.Add("navigation: none (no ground to make it over; once you've built a floor, the NavMesh tool, N, can make one)");
         }
 
+        // The sky: its effect file and the textures it draws go with the level (the game loads them
+        // with it). The effect must be one the game has, or it shows none.
+        if (assets.ReadAnywhere(sky + ".cefct_pc") is null)
+        {
+            report.Add($"the sky effect '{sky}.cefct_pc' isn't in the game's files: the level's sky is {DefaultSky} instead");
+            sky = DefaultSky;
+        }
+        AddSky(sky, files, kinds);
+
         // Its row, strings, spawn resources and picture (before its zone, which names its spawn resources).
         string resources = AddToMode(mode, pattern, name, displayName, picture);
 
         // Its zones, new.
         var (zone, persistent) = NewZones(schema, mode, name, resources, centre, half, height, sky);
-        files[name + ".rfgzone_pc"] = zone;
-        AddSky(sky, files, kinds);
 
         // ---- The asset list: the mode's groups, listing only the level's files.
         AsmFile asm = basis.Asm;
@@ -215,7 +222,11 @@ sealed class NewLevel
         var cells = new Dictionary<int, AsmContainer>();
         for (int k = 0; k < 64; k++)
             if (Holding($"{pattern}_{k}.ctmesh_pc") is { } cell) cells[k] = cell;
-        AsmContainer? precache = asm.Containers.FirstOrDefault(c => c.Name.Equals("ns_precache", StringComparison.OrdinalIgnoreCase));
+        // ns_precache: the files the game loads with the level (its sky's, its ground textures'), in a
+        // container of their own (the game's levels have one).
+        AsmContainer precache = asm.Containers.FirstOrDefault(c => c.Name.Equals("ns_precache", StringComparison.OrdinalIgnoreCase))
+                              ?? new AsmContainer { Name = "ns_precache", Type = 17, Flags = 0x80 };
+        if (!asm.Containers.Contains(precache)) asm.Containers.Add(precache);
         foreach (AsmContainer c in asm.Containers.Where(c => !IsNsBase(c))) c.Primitives.Clear();
 
         AsmPrimitive Entry(string file)
@@ -234,7 +245,7 @@ sealed class NewLevel
             AsmContainer into = subzone.Success && cells.TryGetValue(int.Parse(subzone.Groups[1].Value), out AsmContainer? cell) ? cell : zoneGroup;
             into.Primitives.Add(Entry(file));
             bool precached = groundTextureFiles.Contains(file, StringComparer.OrdinalIgnoreCase) || skyFiles.Contains(file);
-            if (precached) precache?.Primitives.Add(Entry(file));
+            if (precached) precache.Primitives.Add(Entry(file));
         }
 
         // ns_base: every file of the level's (but its persistent zone, loose beside it).
@@ -250,10 +261,28 @@ sealed class NewLevel
         baseEntry.Primitives.Clear();
         foreach (var (file, _) in baseFiles.Where(f => !IsDataFile(f.Key))) baseEntry.Primitives.Add(Entry(file));
 
-        // ---- The archive: its asset list, its precache marker, ns_base, its zones.
+        // ns_precache: its own container, as the game reads it (the sky's effect and textures in it,
+        // so the sky is there when the game loads the level). Its files go in as the game keeps them:
+        // each header and the data file going with it.
+        var precacheFiles = new List<(string Name, byte[] Data)>();
+        foreach (AsmPrimitive p in precache.Primitives)
+        {
+            if (!files.TryGetValue(p.Name, out byte[]? header)) continue;
+            precacheFiles.Add((p.Name, header));
+            if (DataOf(p.Name) is { } dataName && files.TryGetValue(dataName, out byte[]? data)) precacheFiles.Add((dataName, data));
+        }
+        byte[] precacheBytes = Packfile.CreateContainer(precacheFiles);
+        var precachePack = Packfile.FromBytes("ns_precache.str2_pc", precacheBytes);
+        precache.DataOffset = (uint)precachePack.DataStart;
+        precache.CompressedSize = precachePack.CompressedDataSize;
+        precache.Sizes.Clear();
+        precache.Sizes.AddRange(precachePack.Entries.Select(e => (int)e.Size));
+
+        // ---- The archive: its asset list, its precache marker, ns_base, ns_precache, its zones.
         var archiveFiles = new List<(string Name, byte[] Data)> { (name + ".asm_pc", asm.ToBytes()) };
         foreach (var (file, data) in basis.Loose.Where(f => f.Key.EndsWith(".precache", StringComparison.OrdinalIgnoreCase))) archiveFiles.Add((file, data));
         archiveFiles.Add(("ns_base.str2_pc", baseBytes));
+        archiveFiles.Add(("ns_precache.str2_pc", precacheBytes));
         archiveFiles.Add((name + ".rfgzone_pc", zone));
         archiveFiles.Add(("p_" + name + ".rfgzone_pc", persistent));
         string path = Path.Combine(workspace.OverridesFolder, newArchive);
@@ -538,6 +567,8 @@ sealed class NewLevel
             skyFiles.Add(header);
             added.Add(header);
         }
+
+        // The effect, and the textures it draws (the game loads them with the level).
         Add(sky + ".cefct_pc");
         if (files.GetValueOrDefault(sky + ".cefct_pc") is { } effectFile)
             foreach (string texture in Regex.Matches(Encoding.Latin1.GetString(effectFile), @"(?<![A-Za-z0-9_])[A-Za-z0-9_]+\.tga").Select(m => m.Value).Distinct(StringComparer.OrdinalIgnoreCase))

@@ -52,7 +52,7 @@
                         <ToggleButton x:Name="SculptTool" Click="OnToolClicked" ToolTip="Sculpt the ground (T): hold the left button to raise it ([ and ] change the brush; Shift does the opposite)">
                             <TextBlock Text="{x:Static local:Icons.Sculpt}" Style="{StaticResource Icon}" />
                         </ToggleButton>
-                        <ToggleButton x:Name="NavMeshTool" Click="OnToolClicked" ToolTip="NavMesh (N): paint the navigation mesh (hold left button to add/remove walkable cells, Shift for opposite)">
+                        <ToggleButton x:Name="NavMeshTool" Click="OnToolClicked" ToolTip="NavMesh (N): paint where people and vehicles can walk and drive">
                             <TextBlock Text="{x:Static local:Icons.NavMesh}" Style="{StaticResource Icon}" />
                         </ToggleButton>
 
@@ -286,6 +286,9 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
                         <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,8">
                             <TextBlock Text="{x:Static local:Icons.NavMesh}" Style="{StaticResource Icon}" FontSize="14" Margin="0,0,8,0" />
@@ -302,19 +305,36 @@
                             <ComboBoxItem Content="Clear vehicle" ToolTip="Hold left button to clear vehicle flag from cells" />
                             <ComboBoxItem Content="Set island" ToolTip="Hold left button to assign cells to an island" />
                         </ComboBox>
-                        <TextBlock Grid.Row="2" Text="Layer" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
-                        <ComboBox x:Name="NavMeshLayerBox" Grid.Row="2" Grid.Column="1" SelectedIndex="0" Margin="0,0,0,6" MaxDropDownHeight="420"
+                        <TextBlock Grid.Row="2" Text="Island" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <TextBox x:Name="NavMeshIslandBox" Grid.Row="2" Grid.Column="1" Margin="0,0,0,6" Text="0" MaxLength="3"
+                                 ToolTip="Island number to assign (0-255). Only used in Set Island mode."
+                                 TextChanged="OnNavMeshIslandChanged" />
+                        <TextBlock Grid.Row="3" Text="Layer" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <ComboBox x:Name="NavMeshLayerBox" Grid.Row="3" Grid.Column="1" SelectedIndex="0" Margin="0,0,0,6" MaxDropDownHeight="420"
                                   ToolTip="Which navigation layer to edit" SelectionChanged="OnNavMeshLayerChanged">
                             <ComboBoxItem Content="People (walkers)" />
                             <ComboBoxItem Content="Vehicles" />
                         </ComboBox>
-                        <TextBlock Grid.Row="3" Text="Radius" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
-                        <Slider x:Name="NavMeshRadiusSlider" Grid.Row="3" Grid.Column="1" Minimum="1" Maximum="80" Value="10" VerticalAlignment="Center"
+                        <TextBlock Grid.Row="4" Text="Radius" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <Slider x:Name="NavMeshRadiusSlider" Grid.Row="4" Grid.Column="1" Minimum="1" Maximum="80" Value="10" VerticalAlignment="Center"
                                 Margin="0,0,0,6" ValueChanged="OnNavMeshBrushChanged" ToolTip="The brush's radius, in metres ([ and ])" />
-                        <TextBlock Grid.Row="4" Text="Strength" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
-                        <Slider x:Name="NavMeshStrengthSlider" Grid.Row="4" Grid.Column="1" Minimum="0.1" Maximum="10" Value="1" VerticalAlignment="Center" Margin="0,0,0,6"
+                        <TextBlock Grid.Row="5" Text="Strength" Foreground="{StaticResource DimTextBrush}" VerticalAlignment="Center" Margin="0,0,12,6" />
+                        <Slider x:Name="NavMeshStrengthSlider" Grid.Row="5" Grid.Column="1" Minimum="0.1" Maximum="10" Value="1" VerticalAlignment="Center" Margin="0,0,0,6"
                                 ToolTip="How fast a stroke works" />
-                        <Button x:Name="RegenerateNavMeshButton" Grid.Row="5" Grid.ColumnSpan="2" Content="Regenerate MOPP &amp; Islands" Padding="6,3" Click="OnRegenerateNavMesh" ToolTip="Rebuild the MOPP trees and island numbering for the current navigation file. Shift-click: make the whole mesh again over the ground as it is now" />
+                        <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Orientation="Vertical" Margin="0,6,0,0">
+                            <CheckBox x:Name="NavMeshShowIslandsBox" Content="Show island numbers" IsChecked="True"
+                                      ToolTip="Display island number on each cell" Checked="OnNavMeshVizChanged" Unchecked="OnNavMeshVizChanged" />
+                            <CheckBox x:Name="NavMeshShowConnectivityBox" Content="Show connectivity" IsChecked="False"
+                                      ToolTip="Draw lines between adjacent cells" Checked="OnNavMeshVizChanged" Unchecked="OnNavMeshVizChanged" />
+                            <CheckBox x:Name="NavMeshShowCellIndicesBox" Content="Show cell indices" IsChecked="False"
+                                      ToolTip="Display cell index on hover" Checked="OnNavMeshVizChanged" Unchecked="OnNavMeshVizChanged" />
+                            <CheckBox x:Name="NavMeshShowMoppBox" Content="Show MOPP tree bounds" IsChecked="False"
+                                      ToolTip="Display the MOPP spatial partition tree" Checked="OnNavMeshVizChanged" Unchecked="OnNavMeshVizChanged" />
+                        </StackPanel>
+                        <Button x:Name="RegenerateNavMeshButton" Grid.Row="7" Grid.ColumnSpan="2" Content="Regenerate MOPP &amp; Islands" Padding="6,3" Click="OnRegenerateNavMesh"
+                                ToolTip="Rebuild the MOPP trees and island numbering for the current navigation file. Shift-click: make the whole mesh again over the ground as it is now" />
+                        <Button x:Name="FixIsolatedIslandsButton" Grid.Row="8" Grid.ColumnSpan="2" Content="Auto-Fix Isolated Sub-Islands" Padding="6,3" Click="OnFixIsolatedIslands"
+                                ToolTip="Automatically fix isolated sub-islands by connecting walkable areas or reassigning island numbers. The game warns: 'Isolated sub-islands found! This will break pathfinding!'" />
                     </Grid>
                 </Border>
             </Grid>

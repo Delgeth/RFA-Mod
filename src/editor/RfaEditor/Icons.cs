@@ -79,7 +79,7 @@ public static class Icons
 }
 
 /// <summary>A kind of file, by its extension: its name, icon and colour in the explorer.</summary>
-sealed record FileKind(string Name, string Icon, Brush Colour)
+public sealed record FileKind(string Name, string Icon, Brush Colour)
 {
     static readonly FileKind Table = new("table", Icons.Table, Brush("#6CC28A"));
     static readonly FileKind Texture = new("texture", Icons.Texture, Brush("#B48EF0"));

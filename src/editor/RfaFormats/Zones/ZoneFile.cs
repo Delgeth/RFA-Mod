@@ -783,7 +783,7 @@ public sealed class ZoneProperty
 
     readonly ZoneObject owner;
 
-    internal ZoneProperty(ZoneObject owner, int type, uint nameHash, int valueAt, int size)
+    public ZoneProperty(ZoneObject owner, int type, uint nameHash, int valueAt, int size)
     {
         this.owner = owner;
         Type = type;

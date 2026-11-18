@@ -76,7 +76,9 @@ set IMGUI_CORE="%IMGUI%\imgui.cpp" "%IMGUI%\imgui_draw.cpp" "%IMGUI%\imgui_table
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\loader\loader.cpp" "%ROOT%src\loader\menus.cpp" %IMGUI_CORE% "%IMGUI%\backends\imgui_impl_dx11.cpp" "%IMGUI%\backends\imgui_impl_win32.cpp" /Fe"%OUT%\rfa_loader.dll" /link /IMPLIB:rfa_loader.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
 rem rfa_qol.dll: the quality-of-life mods (borderless, console, fov, video_settings, spawner), one
 rem source file each, in one DLL. The loader skips their old DLLs if an older build left them in bin\mods.
-cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\rfa_qol\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\rfa_qol.dll" /link /IMPLIB:rfa_qol.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
+cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\rfa_qol\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\rfa_qol.dll" /link /IMPLIB:rfa_qol.lib user32.lib psapi.lib dbghelp.lib >> "%LOG%" 2>&1 || goto :fail
+rem live_analysis_mcp.exe: standalone MCP server for live analysis
+cl %CFLAGS% "%ROOT%src\mods\rfa_qol\live_analysis_mcp.cpp" /Fe"%OUT%\live_analysis_mcp.exe" >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%OUT%\mods\guerrilla_world.dll" /link /IMPLIB:guerrilla_world.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_hud.dll: Guerrilla's HUD, and its keys' F7 window (ImGui).
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_hud\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
@@ -120,6 +122,8 @@ rem GuerrillaBuilder.exe, next to the editor: makes Guerrilla's world, HUD, vehi
 rem usable from your copy of Guerrilla. It took the place of four programs, whose files go from bin\editor.
 for %%t in (GuerrillaWorld GuerrillaHud GuerrillaArsenal GuerrillaPeople) do for %%e in (exe dll deps.json runtimeconfig.json pdb) do if exist "%OUT%\editor\%%t.%%e" del /q "%OUT%\editor\%%t.%%e"
 dotnet build "%ROOT%src\editor\GuerrillaBuilder\GuerrillaBuilder.csproj" -c Release -o "%OUT%\editor" --artifacts-path "%OBJ%\editor" -v q -nologo -nodeReuse:false >> "%LOG%" 2>&1 || goto :fail_unpopped
+rem RfaEditorMcp.exe: MCP server for the editor
+dotnet build "%ROOT%src\editor\RfaEditorMcp\RfaEditorMcp.csproj" -c Release -o "%OUT%\editor" --artifacts-path "%OBJ%\editor" -v q -nologo -nodeReuse:false >> "%LOG%" 2>&1 || goto :fail_unpopped
 
 :done
 cd /d "%HERE%"

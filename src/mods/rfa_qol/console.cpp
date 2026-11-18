@@ -70,6 +70,13 @@
 #include <string>
 #include <vector>
 
+// FrameUpdate callback registration variables (visible to both anonymous namespace and global console namespace)
+namespace console {
+using FrameUpdateCallback = void(__cdecl*)();
+static std::vector<FrameUpdateCallback> g_frameUpdateCallbacks;
+static std::mutex g_frameUpdateCallbacksMutex;
+}  // namespace console
+
 namespace {
 
 using rfa::game::At;
@@ -3073,6 +3080,10 @@ void AnswerLightingWanted() {
 using FrameUpdateFn = void(__cdecl*)();
 FrameUpdateFn g_frameUpdate;
 
+// FrameUpdate callback registration for other mods to run code on the main thread
+// (declared in rfa_qol.h, variables and functions defined in global console namespace)
+using FrameUpdateCallback = void(__cdecl*)();
+
 // 0x76AA50 (the handshake's "unlock the renderer"), replaced: as the game's, then the editor's commands,
 // in the window where the renderer is unlocked.
 constexpr DWORD kRenderUnlock = 0x76AA50;
@@ -3084,6 +3095,15 @@ void __cdecl RenderUnlock() {
 
 void __cdecl FrameUpdate() {
     g_frameUpdate();
+
+    // Call registered FrameUpdate callbacks (from other mods like live_analysis)
+    {
+        std::lock_guard<std::mutex> lock(console::g_frameUpdateCallbacksMutex);
+        for (auto callback : console::g_frameUpdateCallbacks) {
+            callback();
+        }
+    }
+
     ShowEditor();
     if (g_drawsConsole && g_settings.gameLog) ReadReports();
     // The editor's commands are looked for every frame (Live sends them as you drag), the rest ten times a second.
@@ -3106,6 +3126,23 @@ void __cdecl FrameUpdate() {
 }
 
 }  // namespace
+
+namespace console {
+
+void RegisterFrameUpdateCallback(FrameUpdateCallback callback) {
+    std::lock_guard<std::mutex> lock(g_frameUpdateCallbacksMutex);
+    g_frameUpdateCallbacks.push_back(callback);
+}
+
+void UnregisterFrameUpdateCallback(FrameUpdateCallback callback) {
+    std::lock_guard<std::mutex> lock(g_frameUpdateCallbacksMutex);
+    auto it = std::find(g_frameUpdateCallbacks.begin(), g_frameUpdateCallbacks.end(), callback);
+    if (it != g_frameUpdateCallbacks.end()) {
+        g_frameUpdateCallbacks.erase(it);
+    }
+}
+
+}  // namespace console
 
 void console::Init() {
     if (!rfa::game::IsSupportedBuild()) {
