@@ -1024,8 +1024,9 @@ end -- [RFA]
 -- [RFA] The game's own processing screen (ui_popup_halt: PROCESSING, its rings turning; the loader's
 -- [RFA] rfa_processing_popup shows and hides it as the game does while it saves or loads), with our words in
 -- [RFA] its big line: a popup made from inside another's callback didn't show.
--- [RFA] It stays until the wait is over: the game takes the screen down on its own (as the editor docks the
--- [RFA] game, as streaming finishes...), so each frame of the wait puts it back if it has gone.
+-- [RFA] It stays until the wait is over: each frame of the wait asks the loader to hold it, and the loader
+-- [RFA] turns away the game's own calls to take it down meanwhile (as the editor docks the game...). Should it
+-- [RFA] go anyway, the next frame puts it back.
 local Rfa_processing_words = nil -- [RFA] its words, while a wait is on
 local Rfa_processing_frames = 0 -- [RFA] frames left to put them (the game sets its own as it opens)
 

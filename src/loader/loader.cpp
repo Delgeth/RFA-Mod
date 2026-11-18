@@ -1109,12 +1109,60 @@ int __cdecl LuaLoadUiPack(lua_State* L) {
 // black) and 0x5A4060 (true: now, past the kind's least time on screen). The menu puts its own words on it.
 // The kind on screen is at 0x10FB830 (-1: none). The game takes the screen down from many places (some two
 // dozen callers of 0x5A4060) and a wait asks again each frame, so it is shown again only when it isn't ours.
+//
+// While a wait is on, the game isn't let take it down: HaltHideHook and HaltShowHook turn away its calls to hide
+// the screen or put another kind in its place (the menu's own hide goes past them). The hold lasts as long as
+// the wait asks each frame, and lapses two seconds after it stops asking, so a wait that dies can't leave the
+// screen up for good.
+using HaltShowFn = void(__cdecl*)(int kind, bool onBlack);
+using HaltHideFn = void(__cdecl*)(bool now);
+constexpr DWORD kHaltShow = 0x5A3FF0;
+constexpr size_t kHaltShowPrologue = 6;   // push ebp / mov ebp,esp / sub esp,8
+constexpr DWORD kHaltHide = 0x5A4060;
+constexpr size_t kHaltHidePrologue = 10;  // push ebp / mov ebp,esp / movzx eax,byte ptr [1363209h]
+constexpr int kHaltOurs = 4;              // MENU_PLEASE_WAIT
+HaltShowFn g_haltShow = reinterpret_cast<HaltShowFn>(kHaltShow);
+HaltHideFn g_haltHide = reinterpret_cast<HaltHideFn>(kHaltHide);
+ULONGLONG g_haltHeldUntil = 0;
+bool g_haltReleasing = false;
+
+bool HaltHeld() {
+    return !g_haltReleasing && GetTickCount64() < g_haltHeldUntil &&
+           *reinterpret_cast<volatile int*>(0x10FB830) == kHaltOurs;
+}
+
+void __cdecl HaltShowHook(int kind, bool onBlack) {
+    if (kind != kHaltOurs && kind != -1 && HaltHeld()) return;  // another kind in its place: not now
+    g_haltShow(kind, onBlack);
+}
+
+void __cdecl HaltHideHook(bool now) {
+    if (HaltHeld()) return;  // the game taking it down: not while the wait is on
+    g_haltHide(now);
+}
+
+void InstallProcessingHold() {
+    auto show = reinterpret_cast<HaltShowFn>(
+        rfa::HookFunction(kHaltShow, kHaltShowPrologue, reinterpret_cast<void*>(&HaltShowHook)));
+    auto hide = reinterpret_cast<HaltHideFn>(
+        rfa::HookFunction(kHaltHide, kHaltHidePrologue, reinterpret_cast<void*>(&HaltHideHook)));
+    if (show) g_haltShow = show;
+    if (hide) g_haltHide = hide;
+    if (!show || !hide)
+        rfa::Log("Could not hook the processing screen; the game may take it down while the menu waits (it is put back)");
+}
+
 int __cdecl LuaProcessingPopup(lua_State* L) {
     const bool on = rfa::game::lua_toboolean(L, 1) != 0;
     if (on) {
-        if (*reinterpret_cast<volatile int*>(0x10FB830) != 4) reinterpret_cast<void(__cdecl*)(int, bool)>(0x5A3FF0)(4, false);
+        g_haltHeldUntil = GetTickCount64() + 2000;
+        if (*reinterpret_cast<volatile int*>(0x10FB830) != kHaltOurs) g_haltShow(kHaltOurs, false);
+    } else {
+        g_haltHeldUntil = 0;
+        g_haltReleasing = true;
+        g_haltHide(true);
+        g_haltReleasing = false;
     }
-    else reinterpret_cast<void(__cdecl*)(bool)>(0x5A4060)(true);
     return 0;
 }
 
@@ -1472,6 +1520,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     if (rfa::game::IsSupportedBuild()) {
         InstallOverrides();
         InstallLuaFunctions();
+        InstallProcessingHold();
         InstallMenus(&g_mods);
         InstallMenuMusic();
         FindUiPack();
