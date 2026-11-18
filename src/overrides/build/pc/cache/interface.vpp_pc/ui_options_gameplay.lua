@@ -95,6 +95,12 @@ local Rfa_main_menu = {
 		section = "MainMenu", key = "Decorations", default = 1},
 	{type = TYPE_TOGGLE, label = "Open where you left off", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
 		section = "MainMenu", key = "Remember", default = 1},
+	-- Classic (the game's) or Modern (flat and sharp, in an accent colour: ui_main_menu_pc.lua's rfa_modern_style)
+	{type = TYPE_TOGGLE, label = "Style", choice = true, current_value = 1, options = {"CLASSIC", "MODERN"},
+		section = "MainMenu", key = "Style", default = 0},
+	{type = TYPE_TOGGLE, label = "Accent (Modern)", choice = true, current_value = 1,
+		options = {"BLUE", "ORANGE", "RED", "GREEN", "VIOLET", "WHITE"},
+		section = "MainMenu", key = "Accent", default = 0},
 	-- Any of the game's music for the menu: its music modes, in the loader's order (rfa_loader's kMusicModes),
 	-- saved as the place in the list from 0 (choice: not a toggle's 1 or 0). It plays as soon as it is saved.
 	{type = TYPE_TOGGLE, label = "Music", choice = true, current_value = 1,

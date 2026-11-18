@@ -5,7 +5,8 @@
 -- downloadable content, Infestation and Ruin) and Red Faction: Guerrilla (the Guerrilla world, and its
 -- builder), then Level editor, Options, Extras and Quit; Options > Main Menu sets how ([MainMenu] in
 -- rfa_mods.ini: the layout by game or the game's classic one, Continue at the top, which entries show,
--- the descriptions, the decorations, opening where you left off). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
+-- the descriptions, the decorations, opening where you left off, the style: Classic or Modern, a flat,
+-- sharp look in one accent colour, see rfa_modern_style). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
 -- with the editor's New level, through the loader's rfa_open_level_editor, rfa_custom_levels and
 -- rfa_delete_custom_level). Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
 -- "experimentals", which makes it show RFA-Mod's own settings (see ui_options_gameplay.lua). Every
@@ -201,6 +202,69 @@ local Tween_done = true
 
 local Next_screen = nil
 
+-- [RFA] Options > Main Menu > Style: Modern. The same elements as the game's menu, restyled from here
+-- [RFA] (ui_main_menu.vint_doc, vdo_menu_list, vdo_menu_button): the scrolling numbers, tech graphics and
+-- [RFA] the dotted bars behind the list go; the panel behind it turns into a dark, see-through slab; the
+-- [RFA] buttons lose their boxes and the little text beside them; the list is sharp (no blur) and the
+-- [RFA] highlighted entry is in the accent colour, without its glow; the title bar takes the accent too.
+local RFA_ACCENTS = { -- [RFA] Options > Main Menu > Accent, in its order
+	{R = 0.30, G = 0.72, B = 1.00}, -- blue
+	{R = 1.00, G = 0.55, B = 0.15}, -- orange
+	{R = 0.92, G = 0.22, B = 0.22}, -- red
+	{R = 0.35, G = 0.90, B = 0.55}, -- green
+	{R = 0.80, G = 0.45, B = 1.00}, -- violet
+	{R = 1.00, G = 1.00, B = 1.00}, -- white
+} -- [RFA]
+local Rfa_modern = false -- [RFA]
+local Rfa_accent = RFA_ACCENTS[1] -- [RFA]
+
+local function rfa_hide(name) -- [RFA]
+	local object = vint_object_find(name) -- [RFA]
+	if object ~= 0 then vint_set_property(object, "visible", false) end -- [RFA]
+end -- [RFA]
+
+local function rfa_modern_list(list) -- [RFA] a menu list (and its buttons, made again by each draw_items)
+	if not Rfa_modern or list == nil or list.handle == nil then return end -- [RFA]
+	local group = Vdo_base_object:new("list_group", list.handle) -- [RFA]
+	group:set_property("blur", 0) -- [RFA]
+	group:set_property("alpha", 0.85) -- [RFA]
+	Vdo_base_object:new("menu_list_button_text_2", list.handle):set_property("alpha", 0) -- [RFA] the glow
+	Vdo_base_object:new("menu_list_button_text", list.handle):set_color(Rfa_accent.R, Rfa_accent.G, Rfa_accent.B) -- [RFA]
+	Vdo_base_object:new("button_highlight", list.handle):set_color(Rfa_accent.R, Rfa_accent.G, Rfa_accent.B) -- [RFA]
+	if list.list_data ~= nil then -- [RFA]
+		for i, button in pairs(list.list_data.buttons) do -- [RFA]
+			Vdo_base_object:new("background", button.handle):set_property("alpha", 0) -- [RFA]
+			Vdo_base_object:new("techno_text", button.handle):set_property("alpha", 0) -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+local function rfa_modern_style() -- [RFA] the menu's own elements; the lists restyle themselves as they draw
+	local style = rfa_get_setting("MainMenu", "Style", 0) -- [RFA]
+	local accent = rfa_get_setting("MainMenu", "Accent", 0) + 1 -- [RFA]
+	Rfa_modern = (style == 1) -- [RFA]
+	Rfa_accent = RFA_ACCENTS[accent] or RFA_ACCENTS[1] -- [RFA]
+	if not Rfa_modern then return end -- [RFA]
+	for i, name in ipairs({"techno_bits", "right_dags", "right_dags_1", "right_dags_1_1", "right_dags_1_2"}) do -- [RFA]
+		rfa_hide(name) -- [RFA]
+	end -- [RFA]
+	local panel = vint_object_find("menu_dag_group") -- [RFA]
+	if panel ~= 0 then vint_set_property(panel, "alpha", 0.6) end -- [RFA]
+	for i, name in ipairs({"mask_bg1", "mask_bg2", "mask_corner"}) do -- [RFA]
+		local object = vint_object_find(name) -- [RFA]
+		if object ~= 0 then vint_set_property(object, "tint", 0.03, 0.04, 0.06) end -- [RFA]
+	end -- [RFA]
+	for i, list in ipairs({List, Sub_list}) do -- [RFA] after each draw, its buttons too
+		local draw_items = list.draw_items -- [RFA]
+		list.draw_items = function(self, infos, current_option, width) -- [RFA]
+			draw_items(self, infos, current_option, width) -- [RFA]
+			rfa_modern_list(self) -- [RFA]
+		end -- [RFA]
+		rfa_modern_list(list) -- [RFA]
+	end -- [RFA]
+	Hint_bar:set_header("MENU_TITLE_UC", Rfa_accent) -- [RFA]
+end -- [RFA]
+
 function ui_main_menu_init()
 
 	DEMO_MODE = is_demo()
@@ -311,6 +375,7 @@ function ui_main_menu_init()
 
 	vint_dataitem_add_subscription("main_menu_update", "update", "ui_main_menu_update")
 
+	rfa_modern_style() -- [RFA] Options > Main Menu > Style
 	ui_main_menu_update_top_menu_and_draw(nil, true) -- [RFA] (true: the menu is opening)
 end
 
