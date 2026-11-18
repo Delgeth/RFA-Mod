@@ -1012,6 +1012,58 @@ void Widen(const char* text, wchar_t* out, int size) {
     if (!MultiByteToWideChar(CP_ACP, 0, text ? text : "", -1, out, size)) out[0] = L'\0';
 }
 
+// ---- The main menu's music (Options > Main Menu > Music: [MainMenu] Music= in rfa_mods.ini) -----------
+//
+// The main menu plays its music by setting the music mode "Main Menu and Loading" (game_music_modes.xtbl;
+// 0x53E2A0, the mode's name, 1, 1 or 0, 0) when it starts (0x590470, the push at 0x59059E) and when it is
+// shown again (0x590CB0, the push at 0x590CE5). Both pushes are pointed at the chosen mode's name instead:
+// any of the game's 36 modes (each mission's, quest's, Infestation's and Ruin's music, the credits'). The
+// loading screens keep the menu's own. The list is in the order Options > Main Menu > Music shows it.
+constexpr const char* kMusicModes[] = {
+    "Main Menu and Loading",
+    "Mission 1", "Mission 2", "Mission 3", "Mission 4", "Mission 5", "Mission 6", "Mission 7", "Mission 8",
+    "Mission 9", "Mission 12", "Mission 13", "Mission 14", "Mission 16", "Mission 16b", "Mission 17a",
+    "Mission 17b", "Mission 17c",
+    "Quest 01", "Quest 02", "Quest 03", "Quest 04", "Quest 06", "Quest 07", "Quest 08", "Quest 10",
+    "MP_Alpha", "MP_Bravo", "MP_Charlie", "MP_Delta", "MP_Echo", "MP_Foxtrot", "MP_Golf", "MP_Hotel",
+    "Ruin_Mode", "Credits",
+};
+constexpr int kMusicModeCount = static_cast<int>(sizeof(kMusicModes) / sizeof(kMusicModes[0]));
+constexpr DWORD kMenuMusicPushes[] = {0x59059E, 0x590CE5};  // push imm32 ("Main Menu and Loading", 0xF89A24)
+constexpr DWORD kMenuMusicName = 0xF89A24;
+auto const SetMusicMode = reinterpret_cast<void(__cdecl*)(const char*, bool, bool, int)>(0x53E2A0);
+auto const ActivateMusicTrigger = reinterpret_cast<int(__cdecl*)(const char*)>(0x53E7F0);
+int g_menuMusic = 0;
+
+// Points the main menu's pushes at the chosen mode's name. False if the code isn't as expected.
+bool SetMenuMusic(int index) {
+    if (index < 0 || index >= kMusicModeCount) index = 0;
+    const DWORD name = index == 0 ? kMenuMusicName : reinterpret_cast<DWORD>(kMusicModes[index]);
+    for (DWORD push : kMenuMusicPushes) {
+        const BYTE* code = reinterpret_cast<const BYTE*>(push);
+        if (code[0] != 0x68) {
+            rfa::Log("Main menu music: the code at 0x%08lX isn't the push it should be; the game's own music plays", push);
+            return false;
+        }
+        if (!rfa::PatchCode(reinterpret_cast<void*>(push + 1), &name, sizeof(name))) return false;
+    }
+    g_menuMusic = index;
+    return true;
+}
+
+void InstallMenuMusic() {
+    const int index = rfa::IniInt(L"MainMenu", L"Music", 0);
+    if (index != 0 && SetMenuMusic(index)) rfa::Log("Main menu music: %s's", kMusicModes[g_menuMusic]);
+}
+
+// Options > Main Menu changed the music: the menu plays it now (it is open behind the options screen).
+void MenuMusicChanged(int index) {
+    if (index == g_menuMusic || !SetMenuMusic(index)) return;
+    rfa::Log("Main menu music: %s's", kMusicModes[g_menuMusic]);
+    SetMusicMode(kMusicModes[g_menuMusic], true, true, 0);
+    if (g_menuMusic == 0) ActivateMusicTrigger("Main Menu");  // as the menu starts its own
+}
+
 // Lua: rfa_get_setting(section, key, default) -> number from rfa_mods.ini
 int __cdecl LuaGetSetting(lua_State* L) {
     using namespace rfa::game;
@@ -1037,6 +1089,7 @@ int __cdecl LuaSetSetting(lua_State* L) {
     if (rfa::IniInt(sectionW, keyW, value + 1) == value) return 0;  // unchanged
     WritePrivateProfileStringW(sectionW, keyW, std::to_wstring(value).c_str(), rfa::IniPath().c_str());
     rfa::Log("Menu changed [%s] %s=%d", section, key, value);
+    if (_stricmp(section, "MainMenu") == 0 && _stricmp(key, "Music") == 0) MenuMusicChanged(value);
     using SettingChangedFn = void(__cdecl*)(const char*, const char*);
     for (HMODULE mod : g_mods)
         if (auto changed = reinterpret_cast<SettingChangedFn>(GetProcAddress(mod, "RFAMod_SettingChanged")))
@@ -1364,6 +1417,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
         InstallOverrides();
         InstallLuaFunctions();
         InstallMenus(&g_mods);
+        InstallMenuMusic();
     }
 
     const std::wstring dir = rfa::RootDir() + L"\\mods\\";

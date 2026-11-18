@@ -95,6 +95,19 @@ local Rfa_main_menu = {
 		section = "MainMenu", key = "Decorations", default = 1},
 	{type = TYPE_TOGGLE, label = "Open where you left off", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 1,
 		section = "MainMenu", key = "Remember", default = 1},
+	-- Any of the game's music for the menu: its music modes, in the loader's order (rfa_loader's kMusicModes),
+	-- saved as the place in the list from 0 (choice: not a toggle's 1 or 0). It plays as soon as it is saved.
+	{type = TYPE_TOGGLE, label = "Music", choice = true, current_value = 1,
+		options = {"THE MENU'S OWN",
+			"MISSION 1", "MISSION 2", "MISSION 3", "MISSION 4", "MISSION 5", "MISSION 6", "MISSION 7", "MISSION 8",
+			"MISSION 9", "MISSION 12", "MISSION 13", "MISSION 14", "MISSION 16", "MISSION 16B", "MISSION 17A",
+			"MISSION 17B", "MISSION 17C",
+			"SIDE QUEST 1", "SIDE QUEST 2", "SIDE QUEST 3", "SIDE QUEST 4", "SIDE QUEST 6", "SIDE QUEST 7",
+			"SIDE QUEST 8", "SIDE QUEST 10",
+			"INFESTATION A", "INFESTATION B", "INFESTATION C", "INFESTATION D", "INFESTATION E", "INFESTATION F",
+			"INFESTATION G", "INFESTATION H",
+			"RUIN", "CREDITS"},
+		section = "MainMenu", key = "Music", default = 0},
 }
 local Rfa_experimental = false -- [RFA] showing Rfa_experimentals or Rfa_main_menu (ours, none of the game's)
 
@@ -122,7 +135,10 @@ local function rfa_options_populate()
 	for index, data in pairs(Data) do
 		if data.key ~= nil then
 			local value = rfa_get_setting(data.section, data.key, data.default)
-			if data.type == TYPE_TOGGLE then
+			if data.choice then -- [RFA] a choice of many: its place from 0
+				if value < 0 or value >= #data.options then value = 0 end
+				data.current_value = value + 1
+			elseif data.type == TYPE_TOGGLE then
 				data.current_value = (value ~= 0) and 1 or 2
 			else
 				if value < data.min then
@@ -144,7 +160,9 @@ local function rfa_options_save()
 	end
 	for index, data in pairs(Data) do
 		if data.key ~= nil then
-			if data.type == TYPE_TOGGLE then
+			if data.choice then -- [RFA]
+				rfa_set_setting(data.section, data.key, data.current_value - 1)
+			elseif data.type == TYPE_TOGGLE then
 				rfa_set_setting(data.section, data.key, (data.current_value == 1) and 1 or 0)
 			else
 				rfa_set_setting(data.section, data.key, data.current_value)
