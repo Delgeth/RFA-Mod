@@ -242,8 +242,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             WriteNewLevelChoices();
             MakeLevelFromGameMenu();  // (its level made first, so the game's processing screen stays up while it is)
             // The game's main menu (Level editor > Create level) shows a popup until then: it waits for this.
-            if (System.Threading.EventWaitHandle.TryOpenExisting(@"Local\RFAModEditorReady", out var ready))
-                using (ready) ready.Set();
+            SignalGameMenuReady();
             NewLevelFromGameMenu();
             if (SearchBox.Text.Length > 0) OnSearchChanged(SearchBox, null!);
         }

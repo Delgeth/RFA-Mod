@@ -90,6 +90,66 @@ public partial class MainWindow
 
     internal NewLevelRequest? NewLevelMadeAtStart { get; set; }
 
+    /// <summary>
+    /// What the game's main menu asks for, from the arguments it starts the editor with (or sends an open one, see
+    /// <see cref="GameMenuPipe"/>): --new-level ruin|infestation opens New level for the mode; with --name (the Create
+    /// level page chose everything) the level is made with no dialog: --name &lt;file name&gt; --display &lt;name in the
+    /// menu&gt; --ground new|none --size &lt;metres&gt; --textures &lt;level&gt; --sky &lt;sky&gt; [--replace].
+    /// </summary>
+    internal static (string? Mode, NewLevelRequest? Request) MenuRequestFrom(string[] args)
+    {
+        string? Arg(string name)
+        {
+            int at = Array.FindIndex(args, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
+            return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+        }
+        int newLevel = Array.FindIndex(args, a => a.Equals("--new-level", StringComparison.OrdinalIgnoreCase));
+        string? mode = newLevel >= 0 ? (newLevel + 1 < args.Length ? args[newLevel + 1] : "ruin") : null;
+        if (mode == null || Arg("--name") is not { } levelName) return (mode, null);
+        var request = new NewLevelRequest(
+            mode.Equals("infestation", StringComparison.OrdinalIgnoreCase) ? NewLevel.Mode.Infestation : NewLevel.Mode.Ruin,
+            levelName.Trim().ToLowerInvariant(), (Arg("--display") ?? "").Trim(),
+            (Arg("--ground") ?? "new").Equals("none", StringComparison.OrdinalIgnoreCase),
+            int.TryParse(Arg("--size"), out int size) ? Math.Clamp(size, 16, 255) : 255,
+            (Arg("--textures") ?? "").Trim(), (Arg("--sky") ?? "").Trim(),
+            args.Any(a => a.Equals("--replace", StringComparison.OrdinalIgnoreCase)));
+        return (null, request);
+    }
+
+    /// <summary>
+    /// The game's main menu asked this editor, already open, for what it would have started a new one for (its
+    /// arguments, through <see cref="GameMenuPipe"/>): the game docked, and New level or the level it chose. With the
+    /// game's files read already, that happens now and the menu's processing screen ends; else once they are.
+    /// </summary>
+    internal void FromGameMenu(string[] args)
+    {
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        Topmost = true;  // over the game (it may be fullscreen), then back to normal
+        Topmost = false;
+        if (args.Any(a => a.Equals("--dock", StringComparison.OrdinalIgnoreCase))) ShowGameToDock();
+        var (mode, request) = MenuRequestFrom(args);
+        if (mode == null && request == null) return;
+        NewLevelAtStart = mode;
+        NewLevelMadeAtStart = request;
+        if (!context.Assets.IndexReady)
+        {
+            Log(request != null ? $"New level {request.Name} is made once the editor has read the game's files (a minute or so)."
+                                : "New level opens once the editor has read the game's files (a minute or so).");
+            return;
+        }
+        MakeLevelFromGameMenu();
+        SignalGameMenuReady();
+        NewLevelFromGameMenu();
+    }
+
+    /// <summary>Tells the game's main menu, waiting with its processing screen up, that the editor is ready (Local\RFAModEditorReady).</summary>
+    static void SignalGameMenuReady()
+    {
+        if (System.Threading.EventWaitHandle.TryOpenExisting(@"Local\RFAModEditorReady", out var ready))
+            using (ready) ready.Set();
+    }
+
     /// <summary>Makes <see cref="NewLevelMadeAtStart"/>'s level, if the menu asked for one (once the files are read).</summary>
     void MakeLevelFromGameMenu()
     {

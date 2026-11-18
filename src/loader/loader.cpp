@@ -1394,7 +1394,37 @@ int __cdecl LuaLevelEditorReady(lua_State* L) {
     return 1;
 }
 
-// Lua: rfa_open_level_editor([mode]) -> true if the editor was started. With "ruin" or "infestation" it
+// An editor that is open already is asked over its pipe (\\.\pipe\RFAModEditor, the editor's GameMenuPipe) instead of
+// starting another: one line, the arguments; it answers with its process id, which is watched as a started one is.
+bool SendToOpenEditor(const std::wstring& arguments, HANDLE* process) {
+    const wchar_t* name = L"\\\\.\\pipe\\RFAModEditor";
+    HANDLE pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY && WaitNamedPipeW(name, 2000))
+        pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) return false;  // no editor open
+    std::string line;
+    for (wchar_t c : arguments) line.push_back(static_cast<char>(c));  // (ASCII: the menu keeps to it)
+    line.push_back('\n');
+    DWORD written = 0, read = 0;
+    char answer[32] = {};
+    const bool sent = WriteFile(pipe, line.data(), static_cast<DWORD>(line.size()), &written, nullptr) && written == line.size() &&
+                      ReadFile(pipe, answer, sizeof(answer) - 1, &read, nullptr) && read > 0;
+    const DWORD error = sent ? 0 : GetLastError();
+    CloseHandle(pipe);
+    if (!sent) {
+        rfa::Log("Main menu: the open level editor didn't answer (error %lu); starting another", error);
+        return false;
+    }
+    const DWORD pid = strtoul(answer, nullptr, 10);
+    if (process) {
+        *process = pid ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+        if (!*process) *process = GetCurrentProcess();  // (can't watch it: taken as open, which it is)
+    }
+    rfa::Log("Main menu: the level editor was open already (pid %lu): it was asked instead of starting another", pid);
+    return true;
+}
+
+// Lua: rfa_open_level_editor([mode]) -> true if the editor was started (or the open one asked). With "ruin" or "infestation" it
 // opens New level for that mode, as a base, once it has read the game's files.
 // rfa_open_level_editor(mode, name, display, ground, size, textures, sky, replace): the Create level page chose it all
 // (ground "new" or "none", size in metres, textures a level of the game's or "" for the first, replace: make the
@@ -1426,7 +1456,7 @@ int __cdecl LuaOpenLevelEditor(lua_State* L) {
     if (g_editorReady) ResetEvent(g_editorReady);
     if (g_editorStarted) CloseHandle(g_editorStarted);
     g_editorStarted = nullptr;
-    const bool started = StartEditor(arguments, true, &g_editorStarted);
+    const bool started = SendToOpenEditor(arguments, &g_editorStarted) || StartEditor(arguments, true, &g_editorStarted);
     if (started && chosen) rfa::Log("Level editor started from the main menu to make %s, a new %s level", name.c_str(), mode.c_str());
     else if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
                                known ? mode.c_str() : "");
