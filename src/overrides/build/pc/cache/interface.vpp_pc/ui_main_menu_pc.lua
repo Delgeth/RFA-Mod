@@ -1024,7 +1024,9 @@ end -- [RFA]
 -- [RFA] The game's own processing screen (ui_popup_halt: PROCESSING, its rings turning; the loader's
 -- [RFA] rfa_processing_popup shows and hides it as the game does while it saves or loads), with our words in
 -- [RFA] its big line: a popup made from inside another's callback didn't show.
-local Rfa_processing_words = nil -- [RFA] put on the screen once it is there
+-- [RFA] It stays until the wait is over: the game takes the screen down on its own (as the editor docks the
+-- [RFA] game, as streaming finishes...), so each frame of the wait puts it back if it has gone.
+local Rfa_processing_words = nil -- [RFA] its words, while a wait is on
 local Rfa_processing_frames = 0 -- [RFA] frames left to put them (the game sets its own as it opens)
 
 local function rfa_processing(words) -- [RFA]
@@ -1035,12 +1037,17 @@ local function rfa_processing(words) -- [RFA]
 	rfa_processing_popup(true) -- [RFA]
 end -- [RFA]
 
-local function rfa_processing_tick() -- [RFA] each frame while it is up
-	if Rfa_processing_words == nil or vint_document_find("ui_popup_halt") == 0 then return end -- [RFA]
+local function rfa_processing_tick() -- [RFA] each frame of the wait
+	if Rfa_processing_words == nil then return end -- [RFA]
+	rfa_processing_popup(true) -- [RFA] back up if the game took it down (nothing if it is still ours)
+	if vint_document_find("ui_popup_halt") == 0 then -- [RFA] not there (yet, or again): words once it is
+		Rfa_processing_frames = 30 -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	if Rfa_processing_frames <= 0 then return end -- [RFA]
 	local set_words = _GetAnyGlobalSilent("ui_popup_halt_set_new_data") -- [RFA]
 	if set_words ~= nil then set_words(Rfa_processing_words, "", false) end -- [RFA]
 	Rfa_processing_frames = Rfa_processing_frames - 1 -- [RFA]
-	if Rfa_processing_frames <= 0 then Rfa_processing_words = nil end -- [RFA]
 end -- [RFA]
 
 local function rfa_processing_done() -- [RFA] hides it; the next popup a moment later, once it has gone

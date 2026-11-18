@@ -1107,9 +1107,13 @@ int __cdecl LuaLoadUiPack(lua_State* L) {
 // Lua: rfa_processing_popup(on) shows or hides the game's processing screen (ui_popup_halt), as the game does
 // while it loads or saves: 0x5A3FF0 (the kind: 4, PLEASE WAIT, its row in the table at 0x10FB838; not on
 // black) and 0x5A4060 (true: now, past the kind's least time on screen). The menu puts its own words on it.
+// The kind on screen is at 0x10FB830 (-1: none). The game takes the screen down from many places (some two
+// dozen callers of 0x5A4060) and a wait asks again each frame, so it is shown again only when it isn't ours.
 int __cdecl LuaProcessingPopup(lua_State* L) {
     const bool on = rfa::game::lua_toboolean(L, 1) != 0;
-    if (on) reinterpret_cast<void(__cdecl*)(int, bool)>(0x5A3FF0)(4, false);
+    if (on) {
+        if (*reinterpret_cast<volatile int*>(0x10FB830) != 4) reinterpret_cast<void(__cdecl*)(int, bool)>(0x5A3FF0)(4, false);
+    }
     else reinterpret_cast<void(__cdecl*)(bool)>(0x5A4060)(true);
     return 0;
 }
