@@ -1104,6 +1104,16 @@ int __cdecl LuaLoadUiPack(lua_State* L) {
     return 1;
 }
 
+// Lua: rfa_processing_popup(on) shows or hides the game's processing screen (ui_popup_halt), as the game does
+// while it loads or saves: 0x5A3FF0 (the kind: 4, PLEASE WAIT, its row in the table at 0x10FB838; not on
+// black) and 0x5A4060 (true: now, past the kind's least time on screen). The menu puts its own words on it.
+int __cdecl LuaProcessingPopup(lua_State* L) {
+    const bool on = rfa::game::lua_toboolean(L, 1) != 0;
+    if (on) reinterpret_cast<void(__cdecl*)(int, bool)>(0x5A3FF0)(4, false);
+    else reinterpret_cast<void(__cdecl*)(bool)>(0x5A4060)(true);
+    return 0;
+}
+
 // Lua: rfa_get_setting(section, key, default) -> number from rfa_mods.ini
 int __cdecl LuaGetSetting(lua_State* L) {
     using namespace rfa::game;
@@ -1350,6 +1360,7 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_console_command", LuaConsoleCommand);
     lua_register(L, "rfa_level_editor_ready", LuaLevelEditorReady);
     lua_register(L, "rfa_load_ui_pack", LuaLoadUiPack);
+    lua_register(L, "rfa_processing_popup", LuaProcessingPopup);
     rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");

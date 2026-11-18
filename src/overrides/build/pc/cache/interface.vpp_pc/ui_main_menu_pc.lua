@@ -1021,28 +1021,42 @@ function ui_main_menu_rfa_message(message) -- [RFA] a message with OK
 	rfa_popup(message, "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 end -- [RFA]
 
-local Rfa_indexing = false -- [RFA] the level editor is reading the game's files
+-- [RFA] The game's own processing screen (ui_popup_halt: PROCESSING, its rings turning; the loader's
+-- [RFA] rfa_processing_popup shows and hides it as the game does while it saves or loads), with our words in
+-- [RFA] its big line: a popup made from inside another's callback didn't show.
+local Rfa_processing_words = nil -- [RFA] put on the screen once it is there
+local Rfa_processing_frames = 0 -- [RFA] frames left to put them (the game sets its own as it opens)
 
-local function rfa_indexing_popup() -- [RFA] no options: it stays until the editor is ready
+local function rfa_processing(words) -- [RFA]
 	Input_tracker:subscribe(false) -- [RFA]
 	Mouse_input_tracker:subscribe(false) -- [RFA]
-	rf4_popup_create("Indexing the game's files... The level editor opens New level once it has read them (a minute or so); the game is docked in it.", -- [RFA]
-		"ui_main_menu_rfa_indexing_closed", {}, 0) -- [RFA]
+	Rfa_processing_words = words -- [RFA]
+	Rfa_processing_frames = 30 -- [RFA]
+	rfa_processing_popup(true) -- [RFA]
 end -- [RFA]
 
-function ui_main_menu_rfa_indexing_closed(return_value) -- [RFA] A closes it: back it comes while the editor reads
-	if Rfa_indexing then rfa_indexing_popup() end -- [RFA]
+local function rfa_processing_tick() -- [RFA] each frame while it is up
+	if Rfa_processing_words == nil or vint_document_find("ui_popup_halt") == 0 then return end -- [RFA]
+	local set_words = _GetAnyGlobalSilent("ui_popup_halt_set_new_data") -- [RFA]
+	if set_words ~= nil then set_words(Rfa_processing_words, "", false) end -- [RFA]
+	Rfa_processing_frames = Rfa_processing_frames - 1 -- [RFA]
+	if Rfa_processing_frames <= 0 then Rfa_processing_words = nil end -- [RFA]
+end -- [RFA]
+
+local function rfa_processing_done() -- [RFA] hides it; the next popup a moment later, once it has gone
+	Rfa_processing_words = nil -- [RFA]
+	rfa_processing_popup(false) -- [RFA]
+	for i = 1, 30 do thread_yield() end -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_rfa_indexing_wait() -- [RFA]
 	local ready = rfa_level_editor_ready() -- [RFA]
 	while ready == nil do -- [RFA]
+		rfa_processing_tick() -- [RFA]
 		thread_yield() -- [RFA]
 		ready = rfa_level_editor_ready() -- [RFA]
 	end -- [RFA]
-	Rfa_indexing = false -- [RFA]
-	rf4_popup_close() -- [RFA] the Indexing popup
-	for i = 1, 30 do thread_yield() end -- [RFA] (it fades out first)
+	rfa_processing_done() -- [RFA]
 	if ready then -- [RFA]
 		ui_main_menu_rfa_popup_done() -- [RFA] New level is open in the editor
 	else -- [RFA]
@@ -1065,8 +1079,7 @@ function ui_main_menu_rfa_create_mode(return_value) -- [RFA]
 	if mode == nil then -- [RFA]
 		ui_main_menu_rfa_popup_done() -- [RFA]
 	elseif rfa_open_level_editor(mode) then -- [RFA]
-		Rfa_indexing = true -- [RFA]
-		rfa_indexing_popup() -- [RFA]
+		rfa_processing("INDEXING THE GAME'S FILES") -- [RFA] until the level editor has read them (a minute or so)
 		thread_new("ui_main_menu_rfa_indexing_wait") -- [RFA]
 	else -- [RFA]
 		rfa_popup("The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
@@ -1110,22 +1123,11 @@ function ui_main_menu_rfa_delete_picked(return_value) -- [RFA]
 	end -- [RFA]
 end -- [RFA]
 
-local Rfa_deleting = false -- [RFA] the editor is deleting Rfa_level_chosen
-
-local function rfa_deleting_popup() -- [RFA] a popup with no options: the game's popups allow that
-	rf4_popup_create("Deleting Level...", "ui_main_menu_rfa_deleting_closed", {}, 0) -- [RFA]
-end -- [RFA]
-
-function ui_main_menu_rfa_deleting_closed(return_value) -- [RFA] A closes it: back it comes while the editor works
-	if Rfa_deleting then rfa_deleting_popup() end -- [RFA]
-end -- [RFA]
-
 function ui_main_menu_rfa_delete_confirmed(return_value) -- [RFA]
 	if return_value ~= 1 or Rfa_level_chosen == nil then -- [RFA]
 		ui_main_menu_rfa_popup_done() -- [RFA]
 	elseif rfa_delete_custom_level(Rfa_level_chosen) then -- [RFA]
-		Rfa_deleting = true -- [RFA]
-		rfa_deleting_popup() -- [RFA]
+		rfa_processing("DELETING LEVEL") -- [RFA] until the editor is done
 		thread_new("ui_main_menu_rfa_delete_wait") -- [RFA]
 	else -- [RFA]
 		rfa_popup(Rfa_level_chosen .. " couldn't be deleted: logs\\rfa_mods.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
@@ -1135,12 +1137,11 @@ end -- [RFA]
 function ui_main_menu_rfa_delete_wait() -- [RFA] while the editor deletes the level (a few seconds)
 	local code = rfa_delete_custom_level_done() -- [RFA]
 	while code == nil do -- [RFA]
+		rfa_processing_tick() -- [RFA]
 		thread_yield() -- [RFA]
 		code = rfa_delete_custom_level_done() -- [RFA]
 	end -- [RFA]
-	Rfa_deleting = false -- [RFA]
-	rf4_popup_close() -- [RFA] the Deleting popup
-	for i = 1, 30 do thread_yield() end -- [RFA] (half a second: it fades out first)
+	rfa_processing_done() -- [RFA]
 	if code == 0 then -- [RFA]
 		rfa_popup(Rfa_level_chosen .. " is deleted. Restart the game to take it off Ruin's map list (until then, don't pick it).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 	else -- [RFA]
