@@ -414,6 +414,7 @@ function ui_main_menu_init()
 	rfa_modern_style() -- [RFA] Options > Main Menu > Style
 	ui_main_menu_update_top_menu_and_draw(nil, true) -- [RFA] (true: the menu is opening)
 	ui_main_menu_rfa_back_from_create() -- [RFA] back from the Create level page: the editor making its level
+	ui_main_menu_rfa_failed_level_check() -- [RFA] back from a level that failed to load: say so
 end
 
 function ui_main_menu_cleanup()
@@ -1101,6 +1102,30 @@ function ui_main_menu_rfa_back_from_create() -- [RFA]
 		rawset(_UGGlobals, "Rfa_create_message", wait) -- [RFA]
 		thread_new("ui_main_menu_rfa_create_failed") -- [RFA]
 	end -- [RFA]
+end -- [RFA]
+
+-- [RFA] A level that failed to load: the loader kept the game from closing and it came back here (rfa_failed_level
+-- [RFA] gives its name once, and whether it is a custom one).
+function ui_main_menu_rfa_failed_level_check() -- [RFA]
+	local failed = _GetAnyGlobalSilent("rfa_failed_level") -- [RFA] (an older loader has none)
+	if failed == nil then return end -- [RFA]
+	local name, custom = failed() -- [RFA]
+	if name == nil then return end -- [RFA]
+	local message -- [RFA]
+	if custom then -- [RFA]
+		message = "FAILED TO LOAD CUSTOM LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. A level deleted since the game started is still in its map list, and a level made since then needs the game restarted. logs\\rfa_mods.log says more." -- [RFA]
+	else -- [RFA]
+		message = "FAILED TO LOAD LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. logs\\rfa_mods.log says more." -- [RFA]
+	end -- [RFA]
+	rawset(_UGGlobals, "Rfa_failed_message", message) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	thread_new("ui_main_menu_rfa_failed_level_show") -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_failed_level_show() -- [RFA] once the menu has come in
+	for i = 1, 10 do thread_yield() end -- [RFA]
+	rfa_popup(_GetAnyGlobalSilent("Rfa_failed_message"), "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_rfa_create_wait() -- [RFA] once the menu has come in

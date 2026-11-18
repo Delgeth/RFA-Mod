@@ -1152,6 +1152,106 @@ void InstallProcessingHold() {
         rfa::Log("Could not hook the processing screen; the game may take it down while the menu waits (it is put back)");
 }
 
+// ---- A level that fails to load: back to the main menu, which says so --------------------------------------------
+//
+// The world load (0x6C8940, fastcall, ECX = the world; false when its territory, the level's archives, couldn't be
+// read: "Could not find territory %s", the name at world +0x2554) is watched. Its caller (gs_load_process 0x55E380)
+// then unloads and goes back to the main menu (Ruin: 0x5613C0(0)), but the game has been seen closing instead: it
+// leaves through its exit state (0x14, set with 0x53FCD0) when the window's close flag (0x293A88A, read by
+// 0xCB1150) is up. While it recovers from a failed load, neither is let through: the exit becomes the main menu and
+// the close flag reads as down. The main menu then shows a message (rfa_failed_level) and the recovery ends; it
+// also lapses after a minute.
+using WorldLoadFn = unsigned(__fastcall*)(void* world);
+using SetStateFn = void(__cdecl*)(int state, bool now);
+using QuitAskedFn = bool(__cdecl*)();
+constexpr DWORD kWorldLoad = 0x6C8940;
+constexpr size_t kWorldLoadPrologue = 9;   // push ebp / mov ebp,esp / sub esp,9Ch
+constexpr DWORD kSetState = 0x53FCD0;
+constexpr size_t kSetStatePrologue = 6;    // push ebp / mov ebp,esp / sub esp,10h
+constexpr DWORD kQuitAsked = 0xCB1150;
+constexpr size_t kQuitAskedPrologue = 8;   // push ebp / mov ebp,esp / mov al,byte ptr [293A88Ah]
+constexpr int kStateExit = 0x14, kStateFrontEnd = 0;
+WorldLoadFn g_worldLoad = nullptr;
+SetStateFn g_setState = nullptr;
+QuitAskedFn g_quitAsked = nullptr;
+SRWLOCK g_failedLock = SRWLOCK_INIT;
+std::string g_failedLevel;               // for the main menu's message, until it has shown it
+volatile ULONGLONG g_failedAt = 0;       // when it failed (0: not recovering)
+volatile bool g_failedCloseLogged = false;
+
+bool RecoveringFromFailedLoad() {
+    const ULONGLONG at = g_failedAt;
+    return at != 0 && GetTickCount64() - at < 60000;
+}
+
+unsigned __fastcall WorldLoadHook(void* world) {
+    auto bytes = static_cast<const char*>(world);
+    // (Not a load put off or called off: those return false too, with these set.)
+    const bool real = *reinterpret_cast<const int*>(bytes + 0x23F4) == 0 && !(static_cast<BYTE>(bytes[0x2514]) & 0x24);
+    const unsigned loaded = g_worldLoad(world);
+    if (real && !(loaded & 0xFF)) {
+        char name[128];
+        strncpy_s(name, bytes + 0x2554, _TRUNCATE);
+        AcquireSRWLockExclusive(&g_failedLock);
+        g_failedLevel = name;
+        ReleaseSRWLockExclusive(&g_failedLock);
+        g_failedCloseLogged = false;
+        g_failedAt = GetTickCount64();
+        rfa::Log("Level %s failed to load (its archive wasn't found, or its files couldn't be read): back to the main menu", name);
+    }
+    return loaded;
+}
+
+void __cdecl SetStateHook(int state, bool now) {
+    if (state == kStateExit && RecoveringFromFailedLoad()) {
+        rfa::Log("The game was about to close after the failed load: it goes to the main menu instead");
+        state = kStateFrontEnd;
+    }
+    g_setState(state, now);
+}
+
+bool __cdecl QuitAskedHook() {
+    const bool asked = g_quitAsked();
+    if (!asked || !RecoveringFromFailedLoad()) return asked;
+    *reinterpret_cast<volatile BYTE*>(0x293A88A) = 0;
+    if (!g_failedCloseLogged) {
+        g_failedCloseLogged = true;
+        rfa::Log("The game's window was told to close while it went back from the failed load: it stays open");
+    }
+    return false;
+}
+
+void InstallLoadFailure() {
+    g_worldLoad = reinterpret_cast<WorldLoadFn>(rfa::HookFunction(kWorldLoad, kWorldLoadPrologue, reinterpret_cast<void*>(&WorldLoadHook)));
+    if (!g_worldLoad) {
+        rfa::Log("Could not hook the world load; a level that fails to load may close the game");
+        return;
+    }
+    g_setState = reinterpret_cast<SetStateFn>(rfa::HookFunction(kSetState, kSetStatePrologue, reinterpret_cast<void*>(&SetStateHook)));
+    g_quitAsked = reinterpret_cast<QuitAskedFn>(rfa::HookFunction(kQuitAsked, kQuitAskedPrologue, reinterpret_cast<void*>(&QuitAskedHook)));
+    if (!g_setState || !g_quitAsked) rfa::Log("Could not hook the game's exit; a level that fails to load may still close the game");
+}
+
+// Lua: rfa_failed_level() -> the level that failed to load since the main menu last asked, and whether it is a custom
+// one (no archive of the game's), or nil. Asking ends the recovery (see above).
+int __cdecl LuaFailedLevel(lua_State* L) {
+    AcquireSRWLockExclusive(&g_failedLock);
+    const std::string name = g_failedLevel;
+    g_failedLevel.clear();
+    ReleaseSRWLockExclusive(&g_failedLock);
+    g_failedAt = 0;
+    if (name.empty()) {
+        rfa::game::lua_pushnil(L);
+        return 1;
+    }
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    const std::wstring archive = gameDir + L"\\build\\pc\\cache\\" + std::wstring(name.begin(), name.end()) + L".vpp_pc";
+    rfa::game::lua_pushstring(L, name.c_str());
+    rfa::game::lua_pushboolean(L, GetFileAttributesW(archive.c_str()) == INVALID_FILE_ATTRIBUTES);
+    return 2;
+}
+
 int __cdecl LuaProcessingPopup(lua_State* L) {
     const bool on = rfa::game::lua_toboolean(L, 1) != 0;
     if (on) {
@@ -1553,6 +1653,7 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_level_editor_ready", LuaLevelEditorReady);
     lua_register(L, "rfa_load_ui_pack", LuaLoadUiPack);
     lua_register(L, "rfa_processing_popup", LuaProcessingPopup);
+    lua_register(L, "rfa_failed_level", LuaFailedLevel);
     lua_register(L, "rfa_new_level_check", LuaNewLevelCheck);
     lua_register(L, "rfa_new_level_suggest", LuaNewLevelSuggest);
     lua_register(L, "rfa_new_level_choices", LuaNewLevelChoices);
@@ -1668,6 +1769,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
         InstallOverrides();
         InstallLuaFunctions();
         InstallProcessingHold();
+        InstallLoadFailure();
         InstallMenus(&g_mods);
         InstallMenuMusic();
         FindUiPack();
