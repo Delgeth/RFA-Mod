@@ -212,6 +212,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             searchIndex = [.. searchIndex, .. inContainers];
             context.Assets.SetIndex(searchIndex, textures);
             Log($"Ready: {searchIndex.Count:N0} files can be searched.");
+            // The game's main menu (Level editor > Create level) shows a popup until then: it waits for this.
+            if (System.Threading.EventWaitHandle.TryOpenExisting(@"Local\RFAModEditorReady", out var ready))
+                using (ready) ready.Set();
             NewLevelFromGameMenu();
             if (SearchBox.Text.Length > 0) OnSearchChanged(SearchBox, null!);
         }

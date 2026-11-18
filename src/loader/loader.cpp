@@ -1119,13 +1119,38 @@ int __cdecl LuaOpenGuerrillaBuilder(lua_State* L) {
     return 1;
 }
 
+// The editor started from the menu, and the event it sets once it has read (indexed) the game's files
+// (Local\RFAModEditorReady: RfaEditor's MainWindow sets it after "Ready: ... files can be searched").
+HANDLE g_editorStarted = nullptr;
+HANDLE g_editorReady = nullptr;
+
+// Lua: rfa_level_editor_ready() -> nil while the editor started from the menu is reading the game's files,
+// true once it has, false if it closed first (or wasn't started).
+int __cdecl LuaLevelEditorReady(lua_State* L) {
+    if (g_editorReady && WaitForSingleObject(g_editorReady, 0) == WAIT_OBJECT_0) {
+        rfa::game::lua_pushboolean(L, 1);
+        return 1;
+    }
+    if (g_editorStarted && WaitForSingleObject(g_editorStarted, 0) == WAIT_TIMEOUT) {
+        rfa::game::lua_pushnil(L);
+        return 1;
+    }
+    rfa::game::lua_pushboolean(L, 0);
+    return 1;
+}
+
 // Lua: rfa_open_level_editor([mode]) -> true if the editor was started. With "ruin" or "infestation" it
 // opens New level for that mode, as a base, once it has read the game's files.
 int __cdecl LuaOpenLevelEditor(lua_State* L) {
     const char* mode = rfa::game::lua_gettop(L) >= 1 ? rfa::game::lua_tolstring(L, 1, nullptr) : nullptr;
     const bool known = mode && (_stricmp(mode, "ruin") == 0 || _stricmp(mode, "infestation") == 0);
     // --dock: the editor docks this game in its Game panel.
-    const bool started = StartEditor(known ? L"--dock --new-level " + std::wstring(mode, mode + strlen(mode)) : std::wstring(L"--dock"), true, nullptr);
+    if (!g_editorReady) g_editorReady = CreateEventW(nullptr, TRUE, FALSE, L"Local\\RFAModEditorReady");
+    if (g_editorReady) ResetEvent(g_editorReady);
+    if (g_editorStarted) CloseHandle(g_editorStarted);
+    g_editorStarted = nullptr;
+    const bool started = StartEditor(known ? L"--dock --new-level " + std::wstring(mode, mode + strlen(mode)) : std::wstring(L"--dock"), true,
+                                     &g_editorStarted);
     if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
                           known ? mode : "");
     rfa::game::lua_pushboolean(L, started);
@@ -1230,6 +1255,7 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_guerrilla_world_built", LuaGuerrillaWorldBuilt);
     lua_register(L, "rfa_open_guerrilla_builder", LuaOpenGuerrillaBuilder);
     lua_register(L, "rfa_console_command", LuaConsoleCommand);
+    lua_register(L, "rfa_level_editor_ready", LuaLevelEditorReady);
     rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");

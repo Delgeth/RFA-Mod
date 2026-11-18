@@ -837,6 +837,35 @@ function ui_main_menu_rfa_message(message) -- [RFA] a message with OK
 	rfa_popup(message, "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 end -- [RFA]
 
+local Rfa_indexing = false -- [RFA] the level editor is reading the game's files
+
+local function rfa_indexing_popup() -- [RFA] no options: it stays until the editor is ready
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	rf4_popup_create("Indexing the game's files... The level editor opens New level once it has read them (a minute or so); the game is docked in it.", -- [RFA]
+		"ui_main_menu_rfa_indexing_closed", {}, 0) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_indexing_closed(return_value) -- [RFA] A closes it: back it comes while the editor reads
+	if Rfa_indexing then rfa_indexing_popup() end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_indexing_wait() -- [RFA]
+	local ready = rfa_level_editor_ready() -- [RFA]
+	while ready == nil do -- [RFA]
+		thread_yield() -- [RFA]
+		ready = rfa_level_editor_ready() -- [RFA]
+	end -- [RFA]
+	Rfa_indexing = false -- [RFA]
+	rf4_popup_close() -- [RFA] the Indexing popup
+	for i = 1, 30 do thread_yield() end -- [RFA] (it fades out first)
+	if ready then -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA] New level is open in the editor
+	else -- [RFA]
+		rfa_popup("The level editor closed before it had read the game's files. logs\\editor.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
 function ui_main_menu_rfa_create_level() -- [RFA] asks which mode the new level is for
 	if rfa_open_level_editor == nil then -- [RFA]
 		rfa_popup("The level editor needs RFA-Mod's loader (rfa_loader.dll).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
@@ -852,7 +881,9 @@ function ui_main_menu_rfa_create_mode(return_value) -- [RFA]
 	if mode == nil then -- [RFA]
 		ui_main_menu_rfa_popup_done() -- [RFA]
 	elseif rfa_open_level_editor(mode) then -- [RFA]
-		rfa_popup("The level editor is starting; the game is docked in it. New level opens once it has read the game's files (a minute or so). Restart the game to play the new level.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		Rfa_indexing = true -- [RFA]
+		rfa_indexing_popup() -- [RFA]
+		thread_new("ui_main_menu_rfa_indexing_wait") -- [RFA]
 	else -- [RFA]
 		rfa_popup("The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 	end -- [RFA]
