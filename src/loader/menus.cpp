@@ -113,7 +113,46 @@ bool WrapMethod(void* object, int slot, Fn replacement, Fn* original) {
     return true;
 }
 
+// Typing into the main menu's text fields (Level editor > Create level's names: loader.cpp's rfa_text_*). While it
+// is on, the window's keyboard messages are ours: its characters go into the text, Enter ends it (kept), Esc ends
+// it (put back), and nothing reaches the game (its menu would take the letters for moves and Space for a press).
+// The window's messages and the menu's Lua both run on the game's thread; the lock is for safety only.
+SRWLOCK g_typingLock = SRWLOCK_INIT;
+bool g_typing = false;
+bool g_typingFile = false;  // a file name: lower case letters, digits and _ only (capitals made lower, spaces and - made _)
+size_t g_typingMost = 0;
+std::string g_typed;
+int g_typingEnd = -1;  // -1 none, 0 typing, 1 kept (Enter), 2 put back (Esc)
+
+bool Typed(UINT message, WPARAM w, LPARAM l) {
+    AcquireSRWLockExclusive(&g_typingLock);
+    const bool on = g_typing;
+    if (on) {
+        if (message == WM_CHAR) {
+            wchar_t c = static_cast<wchar_t>(w);
+            if (c == L'\b') {
+                if (!g_typed.empty()) g_typed.pop_back();
+            } else if (c >= 32 && c < 127 && g_typed.size() < g_typingMost) {
+                if (g_typingFile) {
+                    if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+                    if (c == L' ' || c == L'-') c = L'_';
+                    const bool fits = (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9' && !g_typed.empty()) || (c == L'_' && !g_typed.empty());
+                    if (fits) g_typed.push_back(static_cast<char>(c));
+                } else if (c != L'"' && c != L'\\') {  // (the editor's command line carries it)
+                    g_typed.push_back(static_cast<char>(c));
+                }
+            }
+        } else if (message == WM_KEYDOWN && (w == VK_RETURN || w == VK_ESCAPE) && !(l & (1 << 30))) {  // (not a held key repeating)
+            g_typing = false;
+            g_typingEnd = w == VK_RETURN ? 1 : 2;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_typingLock);
+    return on && (message == WM_CHAR || message == WM_KEYDOWN || message == WM_KEYUP || message == WM_DEADCHAR);
+}
+
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (Typed(message, w, l)) return 0;
     if (message == WM_KEYDOWN && g_menuKey && w == g_menuKey && !(l & (1 << 30)) && !g_failed) {
         ToggleMenus();
         return 0;
@@ -452,6 +491,33 @@ HRESULT WINAPI CreateFactory(REFIID id, void** factory) {
 }
 
 }  // namespace
+
+bool BeginTyping(const std::string& text, bool fileName, size_t most) {
+    if (!g_window || !g_windowProc) return false;  // the game's window isn't ours to read yet
+    AcquireSRWLockExclusive(&g_typingLock);
+    g_typing = true;
+    g_typingFile = fileName;
+    g_typingMost = most;
+    g_typed = text.substr(0, most);
+    g_typingEnd = 0;
+    ReleaseSRWLockExclusive(&g_typingLock);
+    return true;
+}
+
+int TypingState(std::string* text) {
+    AcquireSRWLockShared(&g_typingLock);
+    if (text) *text = g_typed;
+    const int end = g_typingEnd;
+    ReleaseSRWLockShared(&g_typingLock);
+    return end;
+}
+
+void EndTyping() {
+    AcquireSRWLockExclusive(&g_typingLock);
+    g_typing = false;
+    g_typingEnd = -1;
+    ReleaseSRWLockExclusive(&g_typingLock);
+}
 
 void InstallMenus(const std::vector<HMODULE>* mods) {
     g_mods = mods;

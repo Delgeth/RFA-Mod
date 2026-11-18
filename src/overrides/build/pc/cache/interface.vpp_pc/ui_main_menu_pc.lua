@@ -413,6 +413,7 @@ function ui_main_menu_init()
 
 	rfa_modern_style() -- [RFA] Options > Main Menu > Style
 	ui_main_menu_update_top_menu_and_draw(nil, true) -- [RFA] (true: the menu is opening)
+	ui_main_menu_rfa_back_from_create() -- [RFA] back from the Create level page: the editor making its level
 end
 
 function ui_main_menu_cleanup()
@@ -826,7 +827,12 @@ function ui_main_menu_button_a(event, acceleration)
 		ui_main_menu_change_tier(LEVEL_EDITOR_TIER, 1) -- [RFA]
 
 	elseif current_id == LEVEL_CREATE_ID then -- [RFA]
-		ui_main_menu_rfa_create_level() -- [RFA]
+		if _GetAnyGlobalSilent("rfa_new_level_check") ~= nil then -- [RFA] the menu's own page (ui_options_gameplay.lua's create_level)
+			rawset(_UGGlobals, "Rfa_options_page", "create_level") -- [RFA]
+			set_next_screen("ui_options_gameplay", LEVEL_EDITOR_TIER) -- [RFA]
+		else -- [RFA] an older loader: which mode, then the editor's own New level
+			ui_main_menu_rfa_create_level() -- [RFA]
+		end -- [RFA]
 
 	elseif current_id == LEVEL_DELETE_ID then -- [RFA]
 		ui_main_menu_rfa_delete_level(1) -- [RFA]
@@ -1070,6 +1076,34 @@ function ui_main_menu_rfa_indexing_wait() -- [RFA]
 	else -- [RFA]
 		rfa_popup("The level editor closed before it had read the game's files. logs\\editor.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 	end -- [RFA]
+end -- [RFA]
+
+-- [RFA] Back from the Create level page (ui_options_gameplay.lua): it started the editor with everything chosen
+-- [RFA] (Rfa_create_wait true), or couldn't (a message): the processing screen until the editor has read the game's
+-- [RFA] files and made the level.
+function ui_main_menu_rfa_back_from_create() -- [RFA]
+	local wait = _GetAnyGlobalSilent("Rfa_create_wait") -- [RFA]
+	if wait == nil then return end -- [RFA]
+	rawset(_UGGlobals, "Rfa_create_wait", nil) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	if wait == true then -- [RFA]
+		thread_new("ui_main_menu_rfa_create_wait") -- [RFA]
+	else -- [RFA]
+		rawset(_UGGlobals, "Rfa_create_message", wait) -- [RFA]
+		thread_new("ui_main_menu_rfa_create_failed") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_wait() -- [RFA] once the menu has come in
+	for i = 1, 10 do thread_yield() end -- [RFA]
+	rfa_processing("MAKING THE LEVEL") -- [RFA] (the editor reads the game's files first: a minute or so)
+	ui_main_menu_rfa_indexing_wait() -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_failed() -- [RFA]
+	for i = 1, 10 do thread_yield() end -- [RFA]
+	rfa_popup(_GetAnyGlobalSilent("Rfa_create_message"), "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_rfa_create_level() -- [RFA] asks which mode the new level is for

@@ -1296,20 +1296,160 @@ int __cdecl LuaLevelEditorReady(lua_State* L) {
 
 // Lua: rfa_open_level_editor([mode]) -> true if the editor was started. With "ruin" or "infestation" it
 // opens New level for that mode, as a base, once it has read the game's files.
+// rfa_open_level_editor(mode, name, display, ground, size, textures, sky, replace): the Create level page chose it all
+// (ground "new" or "none", size in metres, textures a level of the game's or "" for the first, replace: make the
+// editor's level of that name again); the editor makes the level with no dialog once it has read the files, and opens it.
 int __cdecl LuaOpenLevelEditor(lua_State* L) {
-    const char* mode = rfa::game::lua_gettop(L) >= 1 ? rfa::game::lua_tolstring(L, 1, nullptr) : nullptr;
-    const bool known = mode && (_stricmp(mode, "ruin") == 0 || _stricmp(mode, "infestation") == 0);
+    using namespace rfa::game;
+    const int given = lua_gettop(L);
+    auto Text = [&](int at) -> std::string {
+        const char* text = given >= at ? lua_tolstring(L, at, nullptr) : nullptr;
+        return text ? text : "";
+    };
+    auto Wide = [](const std::string& text) { return std::wstring(text.begin(), text.end()); };  // (ASCII: the menu keeps to it)
+    auto Quoted = [&](const std::string& text) { return L"\"" + Wide(text) + L"\""; };
+    const std::string mode = Text(1), name = Text(2);
+    const bool known = _stricmp(mode.c_str(), "ruin") == 0 || _stricmp(mode.c_str(), "infestation") == 0;
     // --dock: the editor docks this game in its Game panel.
+    std::wstring arguments = L"--dock";
+    if (known) arguments += L" --new-level " + Wide(mode);
+    // The Create level page chose everything: the editor makes the level with no dialog (see its App.xaml.cs).
+    const bool chosen = known && !name.empty();
+    if (chosen) {
+        const int size = given >= 5 ? static_cast<int>(lua_tonumber(L, 5)) : 255;
+        arguments += L" --name " + Quoted(name) + L" --display " + Quoted(Text(3)) +
+                     L" --ground " + (Text(4) == "none" ? L"none" : L"new") + L" --size " + std::to_wstring(size) +
+                     L" --textures " + Quoted(Text(6)) + L" --sky " + Quoted(Text(7));
+        if (given >= 8 && lua_toboolean(L, 8)) arguments += L" --replace";
+    }
     if (!g_editorReady) g_editorReady = CreateEventW(nullptr, TRUE, FALSE, L"Local\\RFAModEditorReady");
     if (g_editorReady) ResetEvent(g_editorReady);
     if (g_editorStarted) CloseHandle(g_editorStarted);
     g_editorStarted = nullptr;
-    const bool started = StartEditor(known ? L"--dock --new-level " + std::wstring(mode, mode + strlen(mode)) : std::wstring(L"--dock"), true,
-                                     &g_editorStarted);
-    if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
-                          known ? mode : "");
-    rfa::game::lua_pushboolean(L, started);
+    const bool started = StartEditor(arguments, true, &g_editorStarted);
+    if (started && chosen) rfa::Log("Level editor started from the main menu to make %s, a new %s level", name.c_str(), mode.c_str());
+    else if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
+                               known ? mode.c_str() : "");
+    lua_pushboolean(L, started);
     return 1;
+}
+
+// ---- Level editor > Create level, the menu's own page ------------------------------------------------------------
+
+// A file name New level takes: lower case letters, digits and _, 2 to 31, a letter first (as the editor checks).
+bool GoodLevelName(const std::string& name) {
+    if (name.size() < 2 || name.size() > 31 || name[0] < 'a' || name[0] > 'z') return false;
+    for (char c : name)
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    return true;
+}
+
+// "ok", "bad" (not a file name New level takes), "game" (one of the game's own levels) or "taken" (a level the editor
+// made already: it can be made again, new).
+const char* LevelNameCheck(const std::string& name) {
+    if (!GoodLevelName(name)) return "bad";
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    const std::wstring archive = L"\\build\\pc\\cache\\" + std::wstring(name.begin(), name.end()) + L".vpp_pc";
+    if (GetFileAttributesW((rfa::RootDir() + L"\\overrides" + archive).c_str()) != INVALID_FILE_ATTRIBUTES) return "taken";
+    if (GetFileAttributesW((gameDir + archive).c_str()) != INVALID_FILE_ATTRIBUTES) return "game";
+    return "ok";
+}
+
+// Lua: rfa_new_level_check(name) -> "ok", "bad", "game" or "taken" (see LevelNameCheck)
+int __cdecl LuaNewLevelCheck(lua_State* L) {
+    const char* name = rfa::game::lua_tolstring(L, 1, nullptr);
+    rfa::game::lua_pushstring(L, LevelNameCheck(name ? name : ""));
+    return 1;
+}
+
+// Lua: rfa_new_level_suggest(mode) -> a free file name for a new level of the mode: custom_ruin_01, custom_ruin_02...
+int __cdecl LuaNewLevelSuggest(lua_State* L) {
+    const char* mode = rfa::game::lua_tolstring(L, 1, nullptr);
+    const std::string stem = (mode && _stricmp(mode, "infestation") == 0) ? "custom_infestation_" : "custom_ruin_";
+    std::string name = stem + "01";
+    for (int n = 1; n < 100; ++n) {
+        char number[4];
+        sprintf_s(number, "%02d", n);
+        if (strcmp(LevelNameCheck(stem + number), "ok") == 0) {
+            name = stem + number;
+            break;
+        }
+    }
+    rfa::game::lua_pushstring(L, name.c_str());
+    return 1;
+}
+
+// What the page offers for ground textures and sky: editor\new_level_choices.txt, which the editor writes each time it
+// has read the game's files (texture=<level> and sky=<sky> lines). Read again each time the page asks how many.
+std::vector<std::string> g_choiceTextures, g_choiceSkies;
+
+void ReadNewLevelChoices() {
+    g_choiceTextures.clear();
+    g_choiceSkies.clear();
+    const std::wstring path = rfa::RootDir() + L"\\editor\\new_level_choices.txt";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    std::string text(GetFileSize(file, nullptr), '\0');
+    DWORD read = 0;
+    const bool ok = !text.empty() && ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+    CloseHandle(file);
+    if (!ok) return;
+    text.resize(read);
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.rfind("texture=", 0) == 0 && line.size() > 8) g_choiceTextures.push_back(line.substr(8));
+        else if (line.rfind("sky=", 0) == 0 && line.size() > 4) g_choiceSkies.push_back(line.substr(4));
+    }
+}
+
+// Lua: rfa_new_level_choices(kind) -> how many there are of "texture" or "sky" (0: the editor hasn't listed them yet)
+int __cdecl LuaNewLevelChoices(lua_State* L) {
+    const char* kind = rfa::game::lua_tolstring(L, 1, nullptr);
+    ReadNewLevelChoices();
+    const auto& list = (kind && strcmp(kind, "sky") == 0) ? g_choiceSkies : g_choiceTextures;
+    rfa::game::lua_pushnumber(L, static_cast<double>(list.size()));
+    return 1;
+}
+
+// Lua: rfa_new_level_choice(kind, n) -> the n'th (from 1) of rfa_new_level_choices' list, or nil
+int __cdecl LuaNewLevelChoice(lua_State* L) {
+    const char* kind = rfa::game::lua_tolstring(L, 1, nullptr);
+    const int n = static_cast<int>(rfa::game::lua_tonumber(L, 2));
+    const auto& list = (kind && strcmp(kind, "sky") == 0) ? g_choiceSkies : g_choiceTextures;
+    if (n >= 1 && n <= static_cast<int>(list.size())) rfa::game::lua_pushstring(L, list[n - 1].c_str());
+    else rfa::game::lua_pushnil(L);
+    return 1;
+}
+
+// Lua: rfa_text_begin(text, kind) -> true if typing has begun: the keyboard types into `text` ("file": a file name,
+// lower case letters, digits and _, up to 31; anything else: a name, up to 40) until Enter or Esc (see menus.cpp).
+int __cdecl LuaTextBegin(lua_State* L) {
+    const char* text = rfa::game::lua_tolstring(L, 1, nullptr);
+    const char* kind = rfa::game::lua_tolstring(L, 2, nullptr);
+    const bool file = kind && strcmp(kind, "file") == 0;
+    rfa::game::lua_pushboolean(L, BeginTyping(text ? text : "", file, file ? 31 : 40));
+    return 1;
+}
+
+// Lua: rfa_text_state() -> what is typed, and -1 (not typing), 0 (typing), 1 (Enter: kept) or 2 (Esc: put back)
+int __cdecl LuaTextState(lua_State* L) {
+    std::string text;
+    const int state = TypingState(&text);
+    rfa::game::lua_pushstring(L, text.c_str());
+    rfa::game::lua_pushnumber(L, state);
+    return 2;
+}
+
+// Lua: rfa_text_end() -> the keyboard is the game's again
+int __cdecl LuaTextEnd(lua_State*) {
+    EndTyping();
+    return 0;
 }
 
 // The Ruin levels made with New level: rows of our wrecking_crew_maps.xtbl (the editor writes it to
@@ -1413,6 +1553,13 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_level_editor_ready", LuaLevelEditorReady);
     lua_register(L, "rfa_load_ui_pack", LuaLoadUiPack);
     lua_register(L, "rfa_processing_popup", LuaProcessingPopup);
+    lua_register(L, "rfa_new_level_check", LuaNewLevelCheck);
+    lua_register(L, "rfa_new_level_suggest", LuaNewLevelSuggest);
+    lua_register(L, "rfa_new_level_choices", LuaNewLevelChoices);
+    lua_register(L, "rfa_new_level_choice", LuaNewLevelChoice);
+    lua_register(L, "rfa_text_begin", LuaTextBegin);
+    lua_register(L, "rfa_text_state", LuaTextState);
+    lua_register(L, "rfa_text_end", LuaTextEnd);
     rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");

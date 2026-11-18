@@ -44,9 +44,30 @@ public partial class App : Application
         // --new-level ruin|infestation (the game's main menu, Level editor > Create level): New level opens
         // for that mode once the editor has read the game's files.
         int newLevel = Array.FindIndex(e.Args, a => a.Equals("--new-level", StringComparison.OrdinalIgnoreCase));
+        string? asked = newLevel >= 0 ? (newLevel + 1 < e.Args.Length ? e.Args[newLevel + 1] : "ruin") : null;
+        // With --name (the menu's Create level page chose everything): the level is made with no dialog. Its choices:
+        // --name <file name> --display <name in the menu> --ground new|none --size <metres> --textures <level> --sky <sky> [--replace]
+        string? Arg(string name)
+        {
+            int at = Array.FindIndex(e.Args, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
+            return at >= 0 && at + 1 < e.Args.Length ? e.Args[at + 1] : null;
+        }
+        MainWindow.NewLevelRequest? request = null;
+        if (asked != null && Arg("--name") is { } levelName)
+        {
+            request = new MainWindow.NewLevelRequest(
+                asked.Equals("infestation", StringComparison.OrdinalIgnoreCase) ? NewLevel.Mode.Infestation : NewLevel.Mode.Ruin,
+                levelName.Trim().ToLowerInvariant(), (Arg("--display") ?? "").Trim(),
+                (Arg("--ground") ?? "new").Equals("none", StringComparison.OrdinalIgnoreCase),
+                int.TryParse(Arg("--size"), out int size) ? Math.Clamp(size, 16, 255) : 255,
+                (Arg("--textures") ?? "").Trim(), (Arg("--sky") ?? "").Trim(),
+                e.Args.Any(a => a.Equals("--replace", StringComparison.OrdinalIgnoreCase)));
+            asked = null;
+        }
         var main = new MainWindow(new Workspace(gameFolder, modFolder))
         {
-            NewLevelAtStart = newLevel >= 0 ? (newLevel + 1 < e.Args.Length ? e.Args[newLevel + 1] : "ruin") : null,
+            NewLevelAtStart = asked,
+            NewLevelMadeAtStart = request,
         };
         main.Show();
         // --dock (the game's main menu starts the editor with it): the game that started it is docked in the
@@ -54,6 +75,7 @@ public partial class App : Application
         if (e.Args.Any(a => a.Equals("--dock", StringComparison.OrdinalIgnoreCase)))
             main.Dispatcher.BeginInvoke(new Action(main.ShowGameToDock), System.Windows.Threading.DispatcherPriority.Loaded);
         if (main.NewLevelAtStart != null) EditorLog.Write("New level opens once the editor has read the game's files (a minute or so).");
+        if (request != null) EditorLog.Write($"New level {request.Name} ({request.Mode}) is made once the editor has read the game's files (a minute or so).");
     }
 
     /// <summary>

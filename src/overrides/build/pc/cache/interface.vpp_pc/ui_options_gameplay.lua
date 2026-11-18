@@ -115,7 +115,19 @@ local Rfa_main_menu = {
 			"RUIN", "CREDITS"},
 		section = "MainMenu", key = "Music", default = 0},
 }
-local Rfa_experimental = false -- [RFA] showing Rfa_experimentals or Rfa_main_menu (ours, none of the game's)
+local Rfa_experimental = false -- [RFA] showing Rfa_experimentals, Rfa_main_menu or Rfa_create_level (ours, none of the game's)
+-- [RFA] Level editor > Create level: the menu's own page for a new level (what the editor's New level asks, all of it
+-- chosen here; the editor then makes it with no dialog and opens it). Mode, ground and ground size are kept in
+-- rfa_mods.ini ([NewLevel]); the names are typed (the loader's rfa_text_*: the game has no text box); the ground
+-- textures and skies are what the editor listed when it last read the game's files (rfa_new_level_choices).
+local Rfa_page = "gameplay" -- [RFA] which page this is (Rfa_options_page as it opened)
+local Rfa_create_level = nil -- [RFA] its rows, made as it opens
+local RFA_ROW_MODE, RFA_ROW_FILE, RFA_ROW_DISPLAY, RFA_ROW_GROUND, RFA_ROW_SIZE, RFA_ROW_TEXTURES, RFA_ROW_SKY = 1, 2, 3, 4, 5, 6, 7 -- [RFA]
+local RFA_SIZES = {32, 64, 96, 128, 160, 192, 224, 255} -- [RFA] the ground's size, metres (New level's)
+local RFA_CREATE_HINT = "A new level, made by the level editor and opened in it once it has read the game's files" -- [RFA]
+local Rfa_typing = nil -- [RFA] the row being typed in
+local Rfa_settle = false -- [RFA] just after typing: the key that ended it isn't taken for a press too
+local Rfa_name_typed = false -- [RFA] the file name was typed (else it follows the mode: custom_ruin_01...)
 
 local Anims = {}
 
@@ -208,6 +220,177 @@ local function rfa_slider_to_mouse(mouse_x)
 	rfa_options_save()
 end
 
+-- Level editor > Create level (see Rfa_create_level above).
+local function rfa_create_rows()
+	local textures, skies, sizes = {}, {}, {}
+	local count = rfa_new_level_choices("texture")
+	for i = 1, count do textures[i] = rfa_new_level_choice("texture", i) or "?" end
+	if count == 0 then textures[1] = "AUTOMATIC" end -- the editor hasn't listed them yet: it takes the first
+	local sky_count = rfa_new_level_choices("sky")
+	local sky_default = 1
+	for i = 1, sky_count do
+		skies[i] = rfa_new_level_choice("sky", i) or "?"
+		if skies[i] == "env_sur_day_sky" then sky_default = i end
+	end
+	if sky_count == 0 then skies[1] = "env_sur_day_sky" end
+	for i, size in ipairs(RFA_SIZES) do sizes[i] = size .. " M" end
+	sizes[#sizes] = "255 M (THE WHOLE ZONE)"
+	Rfa_create_level = {
+		{type = TYPE_TOGGLE, label = "Mode", choice = true, current_value = 1, options = {"RUIN", "INFESTATION"},
+			section = "NewLevel", key = "Mode", default = 0},
+		{type = TYPE_BUTTON, label = "File name", current_value = 1, options = {""}, rfa_text = "file", rfa_value = ""},
+		{type = TYPE_BUTTON, label = "Name in the menu", current_value = 1, options = {""}, rfa_text = "display", rfa_value = ""},
+		{type = TYPE_TOGGLE, label = "Ground", choice = true, current_value = 1, options = {"NEW, FLAT", "NONE (CAVES, INTERIORS)"},
+			section = "NewLevel", key = "Ground", default = 0},
+		{type = TYPE_TOGGLE, label = "Ground size", choice = true, current_value = #RFA_SIZES, options = sizes,
+			section = "NewLevel", key = "GroundSize", default = #RFA_SIZES - 1},
+		{type = TYPE_TOGGLE, label = "Ground textures", current_value = 1, options = textures, rfa_auto = (count == 0)},
+		{type = TYPE_TOGGLE, label = "Sky", current_value = sky_default, options = skies},
+		{type = TYPE_BUTTON, label = "CREATE LEVEL", rfa_create = true},
+	}
+end
+
+local function rfa_mode_name()
+	return (Data[RFA_ROW_MODE].current_value == 2) and "infestation" or "ruin"
+end
+
+-- What a text row shows when not being typed in.
+local function rfa_text_shown(data)
+	if data.rfa_text == "display" and data.rfa_value == "" then return "(THE FILE NAME)" end
+	return data.rfa_value
+end
+
+-- A text row's value, on screen too (the list keeps its buttons: the highlight takes the new width).
+local function rfa_show_text(row, text)
+	Data[row].options[1] = text
+	local button = (List.buttons ~= nil) and List.buttons[row] or nil
+	if button ~= nil then
+		button:set_value(text)
+		if List:get_selection() == row and not List:return_state() then List.highlight:set_width(button:get_text_width()) end
+	end
+end
+
+-- A free file name for the mode, unless one was typed.
+local function rfa_suggest_name()
+	if Rfa_name_typed then return end
+	Data[RFA_ROW_FILE].rfa_value = rfa_new_level_suggest(rfa_mode_name())
+	Data[RFA_ROW_FILE].options[1] = Data[RFA_ROW_FILE].rfa_value
+	Data[RFA_ROW_DISPLAY].options[1] = rfa_text_shown(Data[RFA_ROW_DISPLAY])
+end
+
+local function rfa_popup(message, callback, options)
+	Input_tracker:subscribe(false)
+	if Mouse_input_tracker ~= nil then Mouse_input_tracker:subscribe(false) end
+	rf4_popup_create(message, callback, options, #options)
+end
+
+function ui_options_gameplay_rfa_popup_done()
+	Input_tracker:subscribe(true)
+	if Mouse_input_tracker ~= nil then Mouse_input_tracker:subscribe(true) end
+end
+
+function ui_options_gameplay_rfa_settle()
+	for i = 1, 15 do thread_yield() end
+	Rfa_settle = false
+end
+
+local function rfa_end_typing(keep)
+	local row = Rfa_typing
+	if row == nil then return end
+	local text = rfa_text_state()
+	rfa_text_end()
+	Rfa_typing = nil
+	local data = Data[row]
+	if keep and (text ~= "" or data.rfa_text == "display") then
+		data.rfa_value = text
+		if data.rfa_text == "file" then Rfa_name_typed = true end
+	end
+	rfa_show_text(row, rfa_text_shown(data))
+	if Mouse_input_tracker ~= nil then Mouse_input_tracker:subscribe(true) end
+	Hint_bar:set_value(RFA_CREATE_HINT)
+	Rfa_settle = true
+	thread_new("ui_options_gameplay_rfa_settle")
+end
+
+-- Each frame while typing: what is typed, on the row (the loader's window hook has the keyboard: Enter keeps it,
+-- Esc puts back what it was).
+function ui_options_gameplay_rfa_typing()
+	while Rfa_typing ~= nil do
+		local text, state = rfa_text_state()
+		if state == 0 then
+			rfa_show_text(Rfa_typing, text .. "_")
+		else
+			rfa_end_typing(state == 1)
+		end
+		thread_yield()
+	end
+end
+
+local function rfa_begin_typing(row)
+	local data = Data[row]
+	if not rfa_text_begin(data.rfa_value, data.rfa_text) then
+		rfa_popup("Typing needs RFA-Mod's in-game menus (the loader hooks the game's window for them). The suggested file name can still be used.",
+			"ui_options_gameplay_rfa_popup_done", {"MENU_OK"})
+		return
+	end
+	play_ui_sound("INT_SELECT")
+	Rfa_typing = row
+	if Mouse_input_tracker ~= nil then Mouse_input_tracker:subscribe(false) end
+	Hint_bar:set_value(data.rfa_text == "file" and "Type the file name (letters, digits and _): Enter keeps it, Esc puts back the old one"
+		or "Type the name the map list shows: Enter keeps it, Esc puts back the old one")
+	thread_new("ui_options_gameplay_rfa_typing")
+end
+
+-- Leaves the page, as Back does.
+local function rfa_leave()
+	Input_tracker:subscribe(false)
+	if Mouse_input_tracker ~= nil then Mouse_input_tracker:subscribe(false) end
+	Anims.list_in:stop()
+	Anims.list_out:play()
+	Anims.list_out_tween = Vdo_tween_object:new("list_anchor_twn_2")
+	Anims.list_out_tween:set_property("end_event", "ui_options_gameplay_anim_done")
+	Tween_done = false
+end
+
+-- Starts the editor with everything chosen, and goes back to the main menu, which shows the processing screen
+-- until the editor has read the game's files and made the level (ui_main_menu_rfa_back_from_create).
+local function rfa_create_go(replace)
+	local ground = (Data[RFA_ROW_GROUND].current_value == 2) and "none" or "new"
+	local textures_row = Data[RFA_ROW_TEXTURES]
+	local textures = textures_row.rfa_auto and "" or textures_row.options[textures_row.current_value]
+	local sky = Data[RFA_ROW_SKY].options[Data[RFA_ROW_SKY].current_value]
+	local size = RFA_SIZES[Data[RFA_ROW_SIZE].current_value] or 255
+	local started = rfa_open_level_editor(rfa_mode_name(), Data[RFA_ROW_FILE].rfa_value, Data[RFA_ROW_DISPLAY].rfa_value,
+		ground, size, textures, sky, replace)
+	if started then
+		rawset(_UGGlobals, "Rfa_create_wait", true)
+	else
+		rawset(_UGGlobals, "Rfa_create_wait", "The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.")
+	end
+	rfa_options_save()
+	rfa_leave()
+end
+
+function ui_options_gameplay_rfa_replace(return_value)
+	ui_options_gameplay_rfa_popup_done()
+	if return_value == 1 then rfa_create_go(true) end
+end
+
+local function rfa_create()
+	local name = Data[RFA_ROW_FILE].rfa_value
+	local check = rfa_new_level_check(name)
+	if check == "bad" then
+		rfa_popup("The file name has to be 2 to 31 lower case letters, digits and _, a letter first.", "ui_options_gameplay_rfa_popup_done", {"MENU_OK"})
+	elseif check == "game" then
+		rfa_popup(name .. " is one of the game's own levels: choose another file name.", "ui_options_gameplay_rfa_popup_done", {"MENU_OK"})
+	elseif check == "taken" then
+		rfa_popup("There is already a level " .. name .. " made with the editor. Make it again, new? Its edits are lost.",
+			"ui_options_gameplay_rfa_replace", {"MENU_ACCEPT", "MENU_CANCEL"})
+	else
+		rfa_create_go(false)
+	end
+end
+
 function ui_options_gameplay_init()
 	-- Subscribe to the button presses we need
 	Input_tracker = Vdo_input_tracker:new()
@@ -246,16 +429,24 @@ function ui_options_gameplay_init()
 	-- page is kept with rawset and read with _GetAnyGlobalSilent, system_lib's: the menus' Lua
 	-- refuses to write or read a global that wasn't declared as its script loaded.)
 	local rfa_page = _GetAnyGlobalSilent("Rfa_options_page") -- [RFA]
-	Rfa_experimental = (rfa_page == "experimentals" or rfa_page == "main_menu") -- [RFA]
+	Rfa_page = rfa_page or "gameplay" -- [RFA]
+	Rfa_experimental = (rfa_page == "experimentals" or rfa_page == "main_menu" or rfa_page == "create_level") -- [RFA]
 	rawset(_UGGlobals, "Rfa_options_page", "gameplay")
 	if Rfa_experimental then
 		Data = (rfa_page == "main_menu") and Rfa_main_menu or Rfa_experimentals -- [RFA]
+		if rfa_page == "create_level" then -- [RFA]
+			rfa_create_rows() -- [RFA]
+			Data = Rfa_create_level -- [RFA]
+		end -- [RFA]
 		FINE_AIM_SNAP_INDEX = nil
 		HELP_MESSAGE_INDEX = nil
 		FOV_INDEX = nil
 		GAMEPLAY_RESET_PROFILE = nil
 		DIFFICULTY_INDEX = nil
-		if rfa_page == "main_menu" then -- [RFA]
+		if rfa_page == "create_level" then -- [RFA]
+			Hint_bar:set_header("CREATE LEVEL") -- [RFA]
+			Hint_bar:set_value(RFA_CREATE_HINT) -- [RFA]
+		elseif rfa_page == "main_menu" then -- [RFA]
 			Hint_bar:set_header("MAIN MENU") -- [RFA]
 			Hint_bar:set_value("How the main menu is laid out and what it shows, saved in rfa_mods.ini") -- [RFA]
 		else -- [RFA]
@@ -301,6 +492,10 @@ function ui_options_gameplay_init()
 	vint_dataresponder_request("ui_gameplay_populate", "ui_options_gameplay_populate")
 	end -- [RFA]
 	rfa_options_populate() -- [RFA]
+	if Rfa_page == "create_level" then -- [RFA] its mode as kept: a free file name for it
+		Rfa_name_typed = false -- [RFA]
+		rfa_suggest_name() -- [RFA]
+	end -- [RFA]
 	
 	-- Draw the list for the first time
 	List:draw_items(Data, 1, 650)
@@ -361,6 +556,8 @@ function ui_options_gameplay_init()
 end
 
 function ui_options_gameplay_cleanup()
+	if Rfa_typing ~= nil then rfa_text_end() end -- [RFA] the keyboard is the game's again
+	Rfa_typing = nil -- [RFA]
 	-- Nuke all button subscriptions	
 	Input_tracker:subscribe(false)
 	
@@ -409,22 +606,26 @@ end
 
 
 function ui_options_gameplay_nav_up(event, acceleration)
+	if Rfa_typing ~= nil or Rfa_settle then return end -- [RFA] the keyboard is typing
 	-- Move highlight up
 	List:move_cursor(-1)
 end
 
 function ui_options_gameplay_nav_down(event, acceleration)
+	if Rfa_typing ~= nil or Rfa_settle then return end -- [RFA] the keyboard is typing
 	-- Move highlight down
 	List:move_cursor(1)
 end
 
 function ui_options_gameplay_nav_left(event, acceleration)
+	if Rfa_typing ~= nil or Rfa_settle then return end -- [RFA] the keyboard is typing
 	-- Move highlight left
 	List:move_slider(-1)
 	rfa_options_save() -- [RFA] shows the new FOV while the slider moves
 end
 
 function ui_options_gameplay_nav_right(event, acceleration)
+	if Rfa_typing ~= nil or Rfa_settle then return end -- [RFA] the keyboard is typing
 	-- Move highlight right
 	List:move_slider(1)
 	rfa_options_save() -- [RFA] shows the new FOV while the slider moves
@@ -442,6 +643,23 @@ function ui_options_gameplay_difficulty_return(return_value)
 end
 
 function ui_options_gameplay_button_a(event, acceleration)
+	if Rfa_typing ~= nil then -- [RFA] typing: a pad's A keeps it (the keyboard's Enter does that itself)
+		local gamepad = _GetAnyGlobalSilent("pc_is_active_input_gamepad") -- [RFA]
+		if gamepad ~= nil and gamepad() then rfa_end_typing(true) end -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	if Rfa_settle then return end -- [RFA]
+	if Tween_done == true and Rfa_page == "create_level" and not List:return_state() then -- [RFA] Create level's names and its button
+		local data = List:return_selected_data() -- [RFA]
+		if data ~= nil and data.rfa_text ~= nil then -- [RFA]
+			rfa_begin_typing(List:get_selection()) -- [RFA]
+			return -- [RFA]
+		elseif data ~= nil and data.rfa_create then -- [RFA]
+			play_ui_sound( "INT_SELECT" ) -- [RFA]
+			rfa_create() -- [RFA]
+			return -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
 	if Tween_done == true then
 		local selection = List:get_selection()
 	
@@ -472,11 +690,16 @@ function ui_options_gameplay_button_a(event, acceleration)
 			List:button_a("ui_options_gameplay")
 			ui_options_gameplay_return_values()
 			rfa_update_hints() -- [RFA]
+			if Rfa_page == "create_level" and not List:return_state() then -- [RFA] a mode chosen: its file name follows
+				rfa_suggest_name() -- [RFA]
+				rfa_show_text(RFA_ROW_FILE, Data[RFA_ROW_FILE].options[1]) -- [RFA]
+			end -- [RFA]
 		end
 	end
 end
 
 function ui_options_gameplay_button_b(event, acceleration)
+	if Rfa_typing ~= nil or Rfa_settle then return end -- [RFA] typing: Esc is the loader's (puts the text back)
 	if Tween_done == true then
 		play_ui_sound( "INT_BACK" )
 	
