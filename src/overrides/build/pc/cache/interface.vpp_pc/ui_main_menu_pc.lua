@@ -929,7 +929,7 @@ end -- [RFA]
 local Rfa_deleting = false -- [RFA] the editor is deleting Rfa_level_chosen
 
 local function rfa_deleting_popup() -- [RFA] a popup with no options: the game's popups allow that
-	rf4_popup_create("Deleting Custom Level...", "ui_main_menu_rfa_deleting_closed", {}, 0) -- [RFA]
+	rf4_popup_create("Deleting Level...", "ui_main_menu_rfa_deleting_closed", {}, 0) -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_rfa_deleting_closed(return_value) -- [RFA] A closes it: back it comes while the editor works
