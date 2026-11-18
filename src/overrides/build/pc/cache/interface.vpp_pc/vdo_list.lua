@@ -152,7 +152,8 @@ function Vdo_list:move_cursor(direction, is_index_set)
 end
 
 -- [RFA] Shows the RFA_LIST_SHOWN choices around index (the window moves only as far as it must), in the places
--- [RFA] the last RFA_LIST_SHOWN of a short list have: the last shown where the last choice is, the rest above it.
+-- [RFA] the first RFA_LIST_SHOWN choices have: the option list puts the list's top by its own row (it lowers
+-- [RFA] the list by its length) and the rest runs down from there.
 function Vdo_list:rfa_scroll_to(index) -- [RFA]
 	local data = self.list_data -- [RFA]
 	if data == nil or data.num_buttons <= RFA_LIST_SHOWN or data.base_y == nil then return end -- [RFA]
@@ -166,7 +167,8 @@ function Vdo_list:rfa_scroll_to(index) -- [RFA]
 		local shown = (i >= data.window_start and i <= window_end) -- [RFA]
 		button:set_property("visible", shown) -- [RFA]
 		if shown then -- [RFA]
-			button:set_property("anchor", data.base_x, data.base_y - (LIST_BUTTON_SPACING * (window_end - i))) -- [RFA]
+			local top_y = data.base_y - (LIST_BUTTON_SPACING * (data.num_buttons - 1)) -- [RFA] where the first choice is
+			button:set_property("anchor", data.base_x, top_y + (LIST_BUTTON_SPACING * (i - data.window_start))) -- [RFA]
 		end -- [RFA]
 	end -- [RFA]
 end -- [RFA]
