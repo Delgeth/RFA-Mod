@@ -239,6 +239,37 @@ local function rfa_modern_list(list) -- [RFA] a menu list (and its buttons, made
 	end -- [RFA]
 end -- [RFA]
 
+-- [RFA] The UI pack's pictures (RFA-Mod's rfa_ui_modern, which the editor makes): the highlight's ends and middle
+-- [RFA] (a bar down its left, a light band, a line along its bottom, the right end fading) and the panel's
+-- [RFA] corner rounded. Without the pack (not made yet, or made since the game started) the style does without.
+local RFA_UI_PACK = "rfa_ui_modern" -- [RFA]
+local function rfa_ui_pack_pictures() -- [RFA]
+	for i, list in ipairs({List, Sub_list}) do -- [RFA]
+		local highlight = list.highlight -- [RFA]
+		if highlight ~= nil and highlight.left ~= nil then -- [RFA]
+			highlight.left:set_property("image", "rfa_modern_hl_left") -- [RFA]
+			highlight.center:set_property("image", "rfa_modern_hl_center") -- [RFA]
+			highlight.right:set_property("image", "rfa_modern_hl_right") -- [RFA]
+			for j, part in ipairs({highlight.left, highlight.center, highlight.right}) do -- [RFA]
+				part:set_color(Rfa_accent.R, Rfa_accent.G, Rfa_accent.B) -- [RFA]
+			end -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+	local corner = vint_object_find("mask_corner") -- [RFA]
+	if corner ~= 0 then vint_set_property(corner, "image", "rfa_modern_corner") end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_ui_pack_wait() -- [RFA] while the pack's document loads (a few frames)
+	for i = 1, 600 do -- [RFA] (ten seconds at most)
+		if vint_document_find(RFA_UI_PACK) ~= 0 then -- [RFA]
+			rfa_ui_pack_pictures() -- [RFA]
+			return -- [RFA]
+		end -- [RFA]
+		thread_yield() -- [RFA]
+	end -- [RFA]
+	rfa_log("UI pack: rfa_ui_modern didn't load; the Modern style does without its pictures") -- [RFA]
+end -- [RFA]
+
 local function rfa_modern_style() -- [RFA] the menu's own elements; the lists restyle themselves as they draw
 	local style = rfa_get_setting("MainMenu", "Style", 0) -- [RFA]
 	local accent = rfa_get_setting("MainMenu", "Accent", 0) + 1 -- [RFA]
@@ -263,6 +294,11 @@ local function rfa_modern_style() -- [RFA] the menu's own elements; the lists re
 		rfa_modern_list(list) -- [RFA]
 	end -- [RFA]
 	Hint_bar:set_header("MENU_TITLE_UC", Rfa_accent) -- [RFA]
+	if vint_document_find(RFA_UI_PACK) ~= 0 then -- [RFA] the UI pack, loaded already
+		rfa_ui_pack_pictures() -- [RFA]
+	elseif rfa_load_ui_pack() then -- [RFA]
+		thread_new("ui_main_menu_rfa_ui_pack_wait") -- [RFA]
+	end -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_init()

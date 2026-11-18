@@ -1064,6 +1064,46 @@ void MenuMusicChanged(int index) {
     if (g_menuMusic == 0) ActivateMusicTrigger("Main Menu");  // as the menu starts its own
 }
 
+// ---- RFA-Mod's UI pack (the main menu's Modern style's pictures: the editor's RfaFormats UiPack) ------------
+//
+// A document of pictures only, rfa_ui_modern, in overrides\build\pc\cache, listed in the interface's asset list
+// and project overrides. The game reads those lists once, as it starts: a document it doesn't know stops it
+// ("no SRID"), so it is loaded only if all of it was there when the game started.
+constexpr char kUiPackDocument[] = "rfa_ui_modern";
+bool g_uiPackThere = false;
+
+bool FileHolds(const std::wstring& path, const char* text) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    std::string bytes(GetFileSize(file, nullptr), '\0');
+    DWORD read = 0;
+    const bool ok = !bytes.empty() && ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+    CloseHandle(file);
+    return ok && bytes.find(text, 0) != std::string::npos;
+}
+
+void FindUiPack() {
+    const std::wstring cache = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\";
+    g_uiPackThere = GetFileAttributesW((cache + L"rfa_ui_modern.str2_pc").c_str()) != INVALID_FILE_ATTRIBUTES &&
+                    GetFileAttributesW((cache + L"rfa_ui_modern2.str2_pc").c_str()) != INVALID_FILE_ATTRIBUTES &&
+                    FileHolds(cache + L"interface.vpp_pc\\vint_doc_containers.asm_pc", "rfa_ui_modern2") &&
+                    FileHolds(cache + L"misc.vpp_pc\\rfg.vint_proj", "<doc_name>rfa_ui_modern</doc_name>");
+    rfa::Log(g_uiPackThere ? "UI pack: rfa_ui_modern is there (the main menu's Modern style uses its pictures)"
+                           : "UI pack: not there yet (the editor makes it; the main menu's Modern style does without its pictures)");
+}
+
+// Lua: rfa_load_ui_pack() -> true if the UI pack's document is being loaded (it is there), false if not. The menu
+// waits for vint_document_find to find it before it shows its pictures.
+int __cdecl LuaLoadUiPack(lua_State* L) {
+    if (g_uiPackThere) {
+        using LoadDocumentFn = unsigned short(__cdecl*)(const char*, int, float, int, int, int, int);
+        // As guerrilla_hud loads its documents while playing (the console's vint_doc_load does so too).
+        reinterpret_cast<LoadDocumentFn>(0x563990)(kUiPackDocument, 0, 0.0f, 0, 0, 0x80, 0);
+    }
+    rfa::game::lua_pushboolean(L, g_uiPackThere);
+    return 1;
+}
+
 // Lua: rfa_get_setting(section, key, default) -> number from rfa_mods.ini
 int __cdecl LuaGetSetting(lua_State* L) {
     using namespace rfa::game;
@@ -1309,6 +1349,7 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_open_guerrilla_builder", LuaOpenGuerrillaBuilder);
     lua_register(L, "rfa_console_command", LuaConsoleCommand);
     lua_register(L, "rfa_level_editor_ready", LuaLevelEditorReady);
+    lua_register(L, "rfa_load_ui_pack", LuaLoadUiPack);
     rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");
@@ -1418,6 +1459,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
         InstallLuaFunctions();
         InstallMenus(&g_mods);
         InstallMenuMusic();
+        FindUiPack();
     }
 
     const std::wstring dir = rfa::RootDir() + L"\\mods\\";

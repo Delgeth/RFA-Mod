@@ -175,7 +175,7 @@ public static partial class GuerrillaHud
 
     // Our sheet table, in place of the game's bitmap_sheets. Not named rfg_..., so that taking the
     // world's rfg_* files away never takes it with them (see Remove).
-    const string SheetTableName = "guerrilla_hud_sheets";
+    internal const string SheetTableName = "guerrilla_hud_sheets";
     const string WholeSheetSuffix = "_sheet";                // a whole-texture picture's texture, made a sheet of one
     const string AlwaysLoaded = "interface-backend";  // in Armageddon's project, loaded from start-up
 
@@ -555,6 +555,8 @@ public static partial class GuerrillaHud
                                          $"sheets for {string.Join(", ", wholeNamed)}" +
                                          (zonePictures > 0 ? $" and {zonePictures} zone pictures" : "") +
                                          $" to the game's sheet table as {sheetTable}.xtbl, which rfg.vint_proj now names" : ""));
+        // RFA-Mod's UI pack shares the asset list, project and sheet table just written from the game's: added again.
+        if (UiPack.Installed(overridesFolder)) report.AddRange(UiPack.Build(gameFolder, overridesFolder));
         return report;
     }
 
@@ -868,7 +870,7 @@ public static partial class GuerrillaHud
     /// file in it, and per primitive (by the template primitive it copies) its file's size and its
     /// g-file's.
     /// </summary>
-    static AsmContainer Entry(AsmContainer template, string name, Packfile container, List<(string File, int Like)> primitives)
+    internal static AsmContainer Entry(AsmContainer template, string name, Packfile container, List<(string File, int Like)> primitives)
     {
         var entry = new AsmContainer
         {
@@ -937,7 +939,7 @@ public static partial class GuerrillaHud
     }
 
     /// <summary>The sheet table the project names (the game reads only its first &lt;bmp_sheet_file&gt;, 0xC502F5): where its file name is.</summary>
-    static (int At, int Length) SheetTableInProject(string projectText)
+    internal static (int At, int Length) SheetTableInProject(string projectText)
     {
         int entry = projectText.IndexOf("<bmp_sheet_file>", StringComparison.OrdinalIgnoreCase);
         int start = entry < 0 ? -1 : projectText.IndexOf("<filename>", entry, StringComparison.OrdinalIgnoreCase);
@@ -951,7 +953,7 @@ public static partial class GuerrillaHud
     /// Armageddon's interface project with these documents added to the end of its list, and its
     /// sheet table swapped for ours, if there is one.
     /// </summary>
-    static string WithDocuments(string projectText, List<string> documents, string? sheetTable)
+    internal static string WithDocuments(string projectText, List<string> documents, string? sheetTable)
     {
         string newline = projectText.Contains("\r\n") ? "\r\n" : "\n";
         int end = projectText.LastIndexOf("</documents>", StringComparison.OrdinalIgnoreCase);
