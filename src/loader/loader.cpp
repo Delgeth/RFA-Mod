@@ -1059,12 +1059,11 @@ int __cdecl LuaLog(lua_State* L) {
 // as its Delete level does, and rfa_delete_custom_level_done() says when that has finished: nil while it
 // runs, then the editor's exit code (0 deleted, 1 not a level of ours, 2 no game folder, 3 couldn't).
 
-std::wstring EditorExe() { return rfa::RootDir() + L"\\editor\\RfaEditor.exe"; }
-
-bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
-    const std::wstring exe = EditorExe();
+// One of the mod's tools in editor\ (RfaEditor.exe, GuerrillaBuilder.exe), started with its folder as its own.
+bool StartTool(const wchar_t* name, const std::wstring& arguments, bool window, HANDLE* process) {
+    const std::wstring exe = rfa::RootDir() + L"\\editor\\" + name;
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        rfa::Log("Level editor: %ls isn't there (build the editor, or copy bin\\editor\\ next to the loader)", exe.c_str());
+        rfa::Log("Main menu: %ls isn't there (build the editor, or copy bin\\editor\\ next to the loader)", exe.c_str());
         return false;
     }
     std::wstring command = L"\"" + exe + L"\"" + (arguments.empty() ? L"" : L" " + arguments);
@@ -1075,13 +1074,49 @@ bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
     const std::wstring folder = rfa::RootDir() + L"\\editor";
     if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, window ? 0 : CREATE_NO_WINDOW, nullptr,
                         folder.c_str(), &startup, &info)) {
-        rfa::Log("Level editor: %ls couldn't be started (error %lu)", exe.c_str(), GetLastError());
+        rfa::Log("Main menu: %ls couldn't be started (error %lu)", exe.c_str(), GetLastError());
         return false;
     }
     CloseHandle(info.hThread);
     if (process) *process = info.hProcess;
     else CloseHandle(info.hProcess);
     return true;
+}
+
+bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
+    return StartTool(L"RfaEditor.exe", arguments, window, process);
+}
+
+// Lua: rfa_guerrilla_world_built() -> whether editor\GuerrillaBuilder.exe has made the Guerrilla world
+// (its archives, overrides\build\pc\cache\rfg_l0.vpp_pc and rfg_l1.vpp_pc)
+int __cdecl LuaGuerrillaWorldBuilt(lua_State* L) {
+    const std::wstring cache = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\";
+    const bool built = GetFileAttributesW((cache + L"rfg_l0.vpp_pc").c_str()) != INVALID_FILE_ATTRIBUTES ||
+                       GetFileAttributesW((cache + L"rfg_l1.vpp_pc").c_str()) != INVALID_FILE_ATTRIBUTES;
+    rfa::game::lua_pushboolean(L, built);
+    return 1;
+}
+
+// Lua: rfa_console_command(line) -> true if rfa_qol's console will run it (as typed) at the start of the next
+// frame: not from inside the menu's script, which a level load would take away under it.
+int __cdecl LuaConsoleCommand(lua_State* L) {
+    const char* line = rfa::game::lua_tolstring(L, 1, nullptr);
+    using QueueFn = int(__cdecl*)(const char*);
+    bool queued = false;
+    for (HMODULE mod : g_mods)
+        if (auto queue = reinterpret_cast<QueueFn>(GetProcAddress(mod, "RFAQol_QueueConsoleCommand")))
+            if (!queued) queued = queue(line) != 0;
+    if (!queued) rfa::Log("Main menu: \"%s\" couldn't be run: it needs rfa_qol's console (console=1 under [Mods])", line ? line : "");
+    rfa::game::lua_pushboolean(L, queued);
+    return 1;
+}
+
+// Lua: rfa_open_guerrilla_builder() -> true if editor\GuerrillaBuilder.exe was started
+int __cdecl LuaOpenGuerrillaBuilder(lua_State* L) {
+    const bool started = StartTool(L"GuerrillaBuilder.exe", L"", true, nullptr);
+    if (started) rfa::Log("Guerrilla builder started from the main menu");
+    rfa::game::lua_pushboolean(L, started);
+    return 1;
 }
 
 // Lua: rfa_open_level_editor([mode]) -> true if the editor was started. With "ruin" or "infestation" it
@@ -1192,6 +1227,9 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_custom_levels", LuaCustomLevels);
     lua_register(L, "rfa_delete_custom_level", LuaDeleteCustomLevel);
     lua_register(L, "rfa_delete_custom_level_done", LuaDeleteCustomLevelDone);
+    lua_register(L, "rfa_guerrilla_world_built", LuaGuerrillaWorldBuilt);
+    lua_register(L, "rfa_open_guerrilla_builder", LuaOpenGuerrillaBuilder);
+    lua_register(L, "rfa_console_command", LuaConsoleCommand);
     rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");

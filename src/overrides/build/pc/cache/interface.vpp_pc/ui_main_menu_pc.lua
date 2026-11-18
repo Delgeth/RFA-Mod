@@ -1,8 +1,9 @@
 -- Override of ui_main_menu_pc.lua from <game>\build\pc\cache\interface.vpp_pc (the main menu on
 -- PC). rfa_loader.dll gives the game this file instead of its own copy.
 --
--- Tidies the top menu: New Game, New Game+, Load Game and the downloadable content go under Campaign
--- (Continue stays at the top). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
+-- Groups the top menu by game: Red Faction: Armageddon (Continue, New Game, New Game+, Load Game, the
+-- downloadable content, Infestation and Ruin) and Red Faction: Guerrilla (the Guerrilla world, and its
+-- builder), then Level editor, Options, Extras and Quit. Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
 -- with the editor's New level, through the loader's rfa_open_level_editor, rfa_custom_levels and
 -- rfa_delete_custom_level). Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
 -- "experimentals", which makes it show RFA-Mod's own settings (see ui_options_gameplay.lua). Every
@@ -26,7 +27,12 @@ local QUIT_GAME_ID				= 8
 local NEW_GAME_PLUS_ID			= 9
 local DLC_ID					= 10
 local LEVEL_EDITOR_ID			= 11 -- [RFA]
-local CAMPAIGN_ID				= 12 -- [RFA]
+local CAMPAIGN_ID				= 12 -- [RFA] Red Faction: Armageddon
+local GUERRILLA_ID				= 13 -- [RFA] Red Faction: Guerrilla
+
+-- Red Faction: Guerrilla sub-menu -- [RFA]
+local GUERRILLA_WORLD_ID		= 601 -- [RFA]
+local GUERRILLA_BUILD_ID		= 602 -- [RFA]
 
 -- MP sub-menu
 local MULTI_ONLINE_ID			= 101
@@ -62,7 +68,8 @@ local OPTIONS_TIER				= 3
 local DLC_TIER					= 4
 local EXTRAS_TIER				= 5
 local LEVEL_EDITOR_TIER			= 6 -- [RFA]
-local CAMPAIGN_TIER				= 7 -- [RFA]
+local CAMPAIGN_TIER				= 7 -- [RFA] Red Faction: Armageddon
+local GUERRILLA_TIER			= 8 -- [RFA] Red Faction: Guerrilla
 
 -- Demo Mode
 local DEMO_MODE = false
@@ -101,13 +108,22 @@ local MENU_DATA = {
 		{label = "MENU_DOWNLOADABLE_CONTENT",	id = DLC_ID},
 	},
 
-	MAIN_CAMPAIGN = { -- [RFA] New Game, New Game+, Load Game and the DLC, under one entry
-		{label = "CAMPAIGN",			id = CAMPAIGN_ID}, -- [RFA]
+	MAIN_CAMPAIGN = { -- [RFA] the games, each with its own sub-menu
+		{label = "RED FACTION: ARMAGEDDON",	id = CAMPAIGN_ID}, -- [RFA]
+		{label = "RED FACTION: GUERRILLA",	id = GUERRILLA_ID}, -- [RFA]
+	}, -- [RFA]
+
+	ARMAGEDDON_MODES = { -- [RFA] Armageddon's modes, under Red Faction: Armageddon (they were at the top)
+		{label = "MENU_INFESTATION",	id = MULTIPLAYER_ID},
+		{label = "MENU_RUIN_MODE",		id = WRECKING_CREW_ID},
+	}, -- [RFA]
+
+	GUERRILLA_SUB_MENU = { -- [RFA]
+		{label = "GUERRILLA WORLD",			id = GUERRILLA_WORLD_ID}, -- [RFA]
+		{label = "BUILD GUERRILLA WORLD",	id = GUERRILLA_BUILD_ID}, -- [RFA]
 	}, -- [RFA]
 
 	MAIN_GENERAL = {		-- Other stuff at top level
-		{label = "MENU_INFESTATION",	id = MULTIPLAYER_ID},
-		{label = "MENU_RUIN_MODE",		id = WRECKING_CREW_ID},
 		{label = "LEVEL EDITOR",		id = LEVEL_EDITOR_ID}, -- [RFA]
 		{label = "MENU_OPTIONS_UC",	id = OPTIONS_ID},
 		{label = "MENU_EXTRAS_UC",		id = EXTRAS_ID},
@@ -339,12 +355,8 @@ function ui_main_menu_construct_top_menu_from_flags()
 		-- Use the ultra simple style menu
 		tack_on_data(MENU_DATA.MAIN_DEMO)
 	else
-		-- Check for save games
-		if rf4_main_menu_has_save_games() then
-			tack_on_data(MENU_DATA.MAIN_CONTINUE)
-		end
-
-		-- [RFA] New Game, New Game+, Load Game and the DLC: under Campaign (ui_main_menu_construct_campaign_sub_menu)
+		-- [RFA] Continue, New Game, New Game+, Load Game, the DLC, Infestation and Ruin: under Red Faction:
+		-- [RFA] Armageddon (ui_main_menu_construct_campaign_sub_menu); the Guerrilla world under Red Faction: Guerrilla
 		tack_on_data(MENU_DATA.MAIN_CAMPAIGN) -- [RFA]
 
 		-- Everything else
@@ -412,15 +424,18 @@ function dlc_sub_menu_is_valid()
 	return false
 end
 
--- [RFA] Campaign's sub-menu: what the top menu had for the story (New Game, New Game+ when there is one,
+-- [RFA] Red Faction: Armageddon's sub-menu: what the top menu had for the story (Continue with saves, New Game, New Game+ when there is one,
 -- [RFA] Load Game when signed in), then the downloadable content: its outfits and missions and the store
--- [RFA] when there are any (the DLC sub-menu's), else Downloadable Content (which opens the store).
+-- [RFA] when there are any (the DLC sub-menu's), else Downloadable Content (which opens the store); then Infestation and Ruin.
 function ui_main_menu_construct_campaign_sub_menu() -- [RFA]
 	local sub_data = {} -- [RFA]
 	local function tack_on_data(data) -- [RFA]
 		for i, info in ipairs(data) do -- [RFA]
 			sub_data[#sub_data + 1] = info -- [RFA]
 		end -- [RFA]
+	end -- [RFA]
+	if rf4_main_menu_has_save_games() then -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_CONTINUE) -- [RFA]
 	end -- [RFA]
 	tack_on_data(MENU_DATA.MAIN_NEW_GAME) -- [RFA]
 	if rf4_main_menu_show_new_game_plus() then -- [RFA]
@@ -434,6 +449,7 @@ function ui_main_menu_construct_campaign_sub_menu() -- [RFA]
 	else -- [RFA]
 		tack_on_data(MENU_DATA.MAIN_DLC) -- [RFA]
 	end -- [RFA]
+	tack_on_data(MENU_DATA.ARMAGEDDON_MODES) -- [RFA]
 	return sub_data -- [RFA]
 end -- [RFA]
 
@@ -524,6 +540,8 @@ function ui_main_menu_set_screen_hint(new_tier)
 		current_id = LEVEL_EDITOR_ID -- [RFA]
 	elseif new_tier == CAMPAIGN_TIER then -- [RFA]
 		current_id = CAMPAIGN_ID -- [RFA]
+	elseif new_tier == GUERRILLA_TIER then -- [RFA]
+		current_id = GUERRILLA_ID -- [RFA]
 	end
 	
 	-- Now for the huge-ass if/thens for each ID...
@@ -555,7 +573,10 @@ function ui_main_menu_set_screen_hint(new_tier)
 		Hint_bar:set_value("MENU_DESC_DLC")
 	
 	elseif current_id == CAMPAIGN_ID then -- [RFA]
-		Hint_bar:set_value("MENU_DESC_NEW") -- [RFA]
+		Hint_bar:set_value("Armageddon's story, its downloadable content, Infestation and Ruin") -- [RFA]
+
+	elseif current_id == GUERRILLA_ID then -- [RFA]
+		Hint_bar:set_value("Red Faction: Guerrilla's world, built from your own copy of Guerrilla") -- [RFA]
 
 	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
 		Hint_bar:set_value("Make your own Ruin levels in RFA-Mod's level editor, or delete the ones you made") -- [RFA]
@@ -611,6 +632,15 @@ function ui_main_menu_button_a(event, acceleration)
 
 	elseif current_id == CAMPAIGN_ID then -- [RFA]
 		ui_main_menu_change_tier(CAMPAIGN_TIER, 1) -- [RFA]
+
+	elseif current_id == GUERRILLA_ID then -- [RFA]
+		ui_main_menu_change_tier(GUERRILLA_TIER, 1) -- [RFA]
+
+	elseif current_id == GUERRILLA_WORLD_ID then -- [RFA]
+		ui_main_menu_rfa_guerrilla_world() -- [RFA]
+
+	elseif current_id == GUERRILLA_BUILD_ID then -- [RFA]
+		ui_main_menu_rfa_guerrilla_build() -- [RFA]
 
 	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
 		ui_main_menu_change_tier(LEVEL_EDITOR_TIER, 1) -- [RFA]
@@ -699,7 +729,11 @@ end
 
 function ui_main_menu_button_b(event, acceleration)
 	if Tween_done == true then
-		if Global_last_main_menu_tier ~= MAIN_MENU_TIER then
+		if Global_last_main_menu_tier == MULTIPLAYER_TIER then -- [RFA] Infestation's sub-menu: back to Armageddon's
+			local armageddon = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+			ui_main_menu_change_tier(CAMPAIGN_TIER, ui_main_menu_get_option_from_data(armageddon, MULTIPLAYER_ID)) -- [RFA]
+			play_ui_sound( "INT_BACK" ) -- [RFA]
+		elseif Global_last_main_menu_tier ~= MAIN_MENU_TIER then -- [RFA] (elseif)
 			ui_main_menu_change_tier(MAIN_MENU_TIER, 1)
 			play_ui_sound( "INT_BACK" )
 		else
@@ -757,6 +791,28 @@ function ui_main_menu_mouse_move(event, target_handle, mouse_x, mouse_y)
 	end
 end
 
+-- [RFA] Red Faction: Guerrilla > Guerrilla World: the console's level rfg_12_11 (rfa_qol's rfa_console_command
+-- [RFA] runs it at the next frame), once editor\\GuerrillaBuilder.exe has made the world (rfa_guerrilla_world_built);
+-- [RFA] Build Guerrilla World starts the builder (rfa_open_guerrilla_builder).
+function ui_main_menu_rfa_guerrilla_world() -- [RFA]
+	if not rfa_guerrilla_world_built() then -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla world isn't built yet: Build Guerrilla World makes it from your own copy of Red Faction: Guerrilla. Restart the game once it is built.") -- [RFA]
+	elseif rfa_console_command("level rfg_12_11") then -- [RFA]
+		Input_tracker:subscribe(false) -- [RFA] the level is loading
+		Mouse_input_tracker:subscribe(false) -- [RFA]
+	else -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla world needs RFA-Mod's console: console=1 under [Mods] in rfa_mods.ini.") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_guerrilla_build() -- [RFA]
+	if rfa_open_guerrilla_builder() then -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla builder is starting in its own window: click Build there, then restart the game.") -- [RFA]
+	else -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla builder couldn't be started: editor\\GuerrillaBuilder.exe wasn't found next to the mod. logs\\rfa_mods.log says more.") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
 -- [RFA] Level editor > Create level and Delete custom level. The loader's functions (rfa_loader.dll)
 -- [RFA] start the editor, list the Ruin levels made with its New level, and have it delete one (with no
 -- [RFA] window; a thread waits for it). The game reads its map lists at start-up, so a deleted level
@@ -775,6 +831,10 @@ end -- [RFA]
 function ui_main_menu_rfa_popup_done(return_value) -- [RFA] a popup with only OK
 	Input_tracker:subscribe(true) -- [RFA]
 	Mouse_input_tracker:subscribe(true) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_message(message) -- [RFA] a message with OK
+	rfa_popup(message, "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_rfa_create_level() -- [RFA] asks which mode the new level is for
@@ -888,7 +948,7 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 	if new_tier == MAIN_MENU_TIER then
 		-- Get the selection pointing to the previous menu
 		if Global_last_main_menu_tier == MULTIPLAYER_TIER then
-			current_option = ui_main_menu_get_option_from_data(Top_menu_data, MULTIPLAYER_ID)
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, CAMPAIGN_ID) -- [RFA] Infestation is under Armageddon
 			sub_data = MENU_DATA.MULTIPLAYER_SUB_MENU
 		elseif Global_last_main_menu_tier == OPTIONS_TIER then
 			current_option = ui_main_menu_get_option_from_data(Top_menu_data, OPTIONS_ID)
@@ -906,6 +966,9 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 		elseif Global_last_main_menu_tier == CAMPAIGN_TIER then -- [RFA]
 			current_option = ui_main_menu_get_option_from_data(Top_menu_data, CAMPAIGN_ID) -- [RFA]
 			sub_data = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+		elseif Global_last_main_menu_tier == GUERRILLA_TIER then -- [RFA]
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, GUERRILLA_ID) -- [RFA]
+			sub_data = MENU_DATA.GUERRILLA_SUB_MENU -- [RFA]
 		elseif Global_last_main_menu_tier == DLC_TIER then
 			if dlc_sub_menu_is_valid() then
 				current_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
@@ -961,6 +1024,8 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
 		elseif new_tier == CAMPAIGN_TIER then -- [RFA]
 			sub_data = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+		elseif new_tier == GUERRILLA_TIER then -- [RFA]
+			sub_data = MENU_DATA.GUERRILLA_SUB_MENU -- [RFA]
 		elseif new_tier == EXTRAS_TIER then
 			if is_signed_into_profile() then
 				sub_data = MENU_DATA.EXTRAS_SUB_MENU

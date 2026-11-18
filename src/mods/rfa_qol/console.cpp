@@ -75,6 +75,9 @@ namespace console {
 using FrameUpdateCallback = void(__cdecl*)();
 static std::vector<FrameUpdateCallback> g_frameUpdateCallbacks;
 static std::mutex g_frameUpdateCallbacksMutex;
+// Console commands the game's menus asked for (rfa_console_command), run at the start of the next frame.
+static std::vector<std::string> g_menuCommands;
+static std::mutex g_menuCommandsMutex;
 }  // namespace console
 
 namespace {
@@ -3104,6 +3107,18 @@ void __cdecl FrameUpdate() {
         }
     }
 
+    // Commands from the game's menus (Red Faction: Guerrilla > Guerrilla World: level rfg_12_11), run here,
+    // on the main thread between frames, not from inside the menu's script.
+    std::vector<std::string> menuCommands;
+    {
+        std::lock_guard<std::mutex> lock(console::g_menuCommandsMutex);
+        menuCommands.swap(console::g_menuCommands);
+    }
+    for (const std::string& command : menuCommands) {
+        rfa::Log("Running \"%s\" for the game's menu", command.c_str());
+        if (g_runConsoleCommand) g_runConsoleCommand("%s", command.c_str());
+    }
+
     ShowEditor();
     if (g_drawsConsole && g_settings.gameLog) ReadReports();
     // The editor's commands are looked for every frame (Live sends them as you drag), the rest ten times a second.
@@ -3128,6 +3143,15 @@ void __cdecl FrameUpdate() {
 }  // namespace
 
 namespace console {
+
+// A console command, run as if typed at the start of the next frame (for the game's menus, through the
+// loader's rfa_console_command: RFAQol_QueueConsoleCommand).
+bool QueueCommand(const char* line) {
+    if (!line || !*line || strlen(line) >= 250) return false;
+    std::lock_guard<std::mutex> lock(g_menuCommandsMutex);
+    g_menuCommands.emplace_back(line);
+    return true;
+}
 
 void RegisterFrameUpdateCallback(FrameUpdateCallback callback) {
     std::lock_guard<std::mutex> lock(g_frameUpdateCallbacksMutex);

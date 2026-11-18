@@ -13,6 +13,8 @@ void Init();
 using FrameUpdateCallback = void(__cdecl*)();
 void RegisterFrameUpdateCallback(FrameUpdateCallback callback);
 void UnregisterFrameUpdateCallback(FrameUpdateCallback callback);
+// Runs a console command at the start of the next frame (RFAQol_QueueConsoleCommand). False if it's too long.
+bool QueueCommand(const char* line);
 }
 
 namespace fov {

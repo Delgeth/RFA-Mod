@@ -49,6 +49,7 @@ bool StartPart(const wchar_t* name, InitFn init) {
     return true;
 }
 
+bool g_consoleRunning = false;
 bool g_fovRunning = false;
 bool g_spawnerRunning = false;
 bool g_limitsRunning = false;
@@ -58,7 +59,7 @@ bool g_graphicsRunning = false;
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     StartPart(L"borderless", borderless::Init);
-    StartPart(L"console", console::Init);
+    g_consoleRunning = StartPart(L"console", console::Init);
     g_fovRunning = StartPart(L"fov", fov::Init);
     StartPart(L"video_settings", video_settings::Init);
     g_spawnerRunning = StartPart(L"spawner", spawner::Init);
@@ -66,6 +67,12 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_graphicsRunning = StartPart(L"graphics", graphics::Init);
     StartPart(L"streaming", streaming::Init);
     StartPart(L"rfa_live_analysis", live_analysis::Init);
+}
+
+// A console command for the next frame, from the loader's rfa_console_command (the main menu's Guerrilla
+// World uses it). 0 if the console part is off (it runs them) or the line is too long.
+extern "C" __declspec(dllexport) int __cdecl RFAQol_QueueConsoleCommand(const char* line) {
+    return g_consoleRunning && console::QueueCommand(line) ? 1 : 0;
 }
 
 // The game's menus changed a setting: only fov listens.
