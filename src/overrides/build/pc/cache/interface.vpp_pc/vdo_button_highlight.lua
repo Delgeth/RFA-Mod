@@ -87,7 +87,7 @@ end -- [RFA]
 -- [RFA] Only the thread changes what moves, so if it ever stops, everything is simply left where the game put it.
 -- [RFA] Back in the Classic style the thread puts back what it changed and ends.
 local RFA_SPACING = 40 -- [RFA] between a list's entries (the game's: 34)
-local RFA_PANEL_TINT = 46 -- [RFA] how much of the picture shows through the panel (of 255; it darkens by multiplying)
+local RFA_PANEL_TINT = 82 -- [RFA] how much of the picture shows through the panel (of 255; it darkens by multiplying)
 local RFA_HIDE = {"techno_bits", "right_dags", "right_dags_1", "right_dags_1_1", "right_dags_1_2", "tech_corner_1",
 	"tech_meter", "tech_module", "scrolling_text1", "scrolling_text2", "scrolling_text3",
 	"techno_text1", "techno_text2", "tech_corner", "ruin_tech"} -- [RFA] the game's decorations (both screens)
@@ -126,7 +126,9 @@ function rfa_theme_list(list, fresh) -- [RFA] fresh: just drawn (its entries are
 	group:set_property("blur", 0) -- [RFA]
 	group:set_property("alpha", 0.9) -- [RFA] (the game's 0.6: the panel behind is dark now)
 	Vdo_base_object:new("menu_list_button_text_2", list.handle):set_property("alpha", 0) -- [RFA] the glow
-	Vdo_base_object:new("menu_list_button_text", list.handle):set_color(COLOR_HIGHLIGHT_TEXT.R, COLOR_HIGHLIGHT_TEXT.G, COLOR_HIGHLIGHT_TEXT.B) -- [RFA]
+	local text = Vdo_base_object:new("menu_list_button_text", list.handle) -- [RFA] the highlighted entry's words
+	text:set_color(COLOR_HIGHLIGHT_TEXT.R, COLOR_HIGHLIGHT_TEXT.G, COLOR_HIGHLIGHT_TEXT.B) -- [RFA]
+	text:set_property("text_scale", 0.9, 0.9) -- [RFA] (the game's 1.1: it ran past the panel)
 	Vdo_base_object:new("button_highlight", list.handle):set_color(255, 255, 255) -- [RFA] (its parts carry the accent)
 	local data = list.list_data -- [RFA]
 	if data ~= nil and data.buttons ~= nil then -- [RFA]
@@ -237,6 +239,7 @@ function rfa_theme_screen(lists) -- [RFA]
 	else -- [RFA]
 		for i, list in ipairs(lists) do rfa_theme_list(list) end -- [RFA]
 	end -- [RFA]
+	state.pack = pack -- [RFA]
 	if pack and state.corner ~= nil and state.corner ~= 0 then -- [RFA]
 		vint_set_property(state.corner, "image", "rfa_modern_corner") -- [RFA]
 	end -- [RFA]
@@ -324,12 +327,12 @@ local function rfa_theme_screen_frame(state, dt) -- [RFA]
 		local width = bg1.cx -- [RFA]
 		if corner ~= nil then width = corner.cx end -- [RFA] (the line stops where the corner begins)
 		if height < 0 then height = 0 end -- [RFA]
-		vint_set_property(state.rail, "anchor", dx - 6, dy) -- [RFA]
-		vint_set_property(state.rail, "scale", 3, -height) -- [RFA]
+		vint_set_property(state.rail, "anchor", dx - 6, dy - height) -- [RFA] (drawn downward: a flipped one doesn't show)
+		vint_set_property(state.rail, "scale", 3, height) -- [RFA]
 		vint_set_property(state.rail, "tint", accent.R, accent.G, accent.B) -- [RFA]
 		vint_set_property(state.rail, "alpha", 0.75 + 0.25 * wave) -- [RFA]
-		vint_set_property(state.glow, "anchor", dx - 10, dy) -- [RFA]
-		vint_set_property(state.glow, "scale", 11, -height) -- [RFA]
+		vint_set_property(state.glow, "anchor", dx - 12, dy - height) -- [RFA]
+		vint_set_property(state.glow, "scale", 15, height) -- [RFA]
 		vint_set_property(state.glow, "tint", accent.R, accent.G, accent.B) -- [RFA]
 		vint_set_property(state.glow, "alpha", 0.06 + 0.08 * wave) -- [RFA]
 		local grown = rfa_ease_out(clock / 0.6) -- [RFA] the line draws itself across as the menu opens
@@ -376,10 +379,16 @@ local function rfa_theme_screen_frame(state, dt) -- [RFA]
 			end -- [RFA]
 			local h = list.highlight -- [RFA]
 			if h ~= nil and h.left ~= nil then -- [RFA]
-				local a = 0.8 + 0.2 * wave -- [RFA]
-				h.left:set_property("alpha", a) -- [RFA]
-				h.center:set_property("alpha", a) -- [RFA]
-				h.right:set_property("alpha", a) -- [RFA]
+				if state.pack then -- [RFA] the pack's bar
+					local a = 0.8 + 0.2 * wave -- [RFA]
+					h.left:set_property("alpha", a) -- [RFA]
+					h.center:set_property("alpha", a) -- [RFA]
+					h.right:set_property("alpha", a) -- [RFA]
+				else -- [RFA] without it, a soft band of the accent only (the game's ends are heavy)
+					h.left:set_property("alpha", 0) -- [RFA]
+					h.right:set_property("alpha", 0) -- [RFA]
+					h.center:set_property("alpha", 0.3 + 0.14 * wave) -- [RFA]
+				end -- [RFA]
 			end -- [RFA]
 		end -- [RFA]
 	end -- [RFA]
