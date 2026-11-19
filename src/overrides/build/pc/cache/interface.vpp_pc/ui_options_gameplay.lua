@@ -187,6 +187,19 @@ local function rfa_options_save()
 			end
 		end
 	end
+	-- [RFA] Main Menu's Style and Accent take effect at once: the shared colours (vdo_button_highlight.lua's
+	-- [RFA] rfa_theme_apply; what is drawn after takes them) and this page's own highlight.
+	local apply = _GetAnyGlobalSilent("rfa_theme_apply") -- [RFA]
+	if Rfa_page == "main_menu" and apply ~= nil then -- [RFA]
+		apply() -- [RFA]
+		local highlight = List.highlight -- [RFA]
+		if highlight ~= nil and highlight.left ~= nil then -- [RFA]
+			for i, part in ipairs({highlight.left, highlight.center, highlight.right}) do -- [RFA]
+				part:set_color(COLOR_HIGHLIGHT_BAR.R, COLOR_HIGHLIGHT_BAR.G, COLOR_HIGHLIGHT_BAR.B) -- [RFA]
+			end -- [RFA]
+			rfa_theme_highlight(highlight) -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
 end
 
 -- As in the audio menu: an open slider shows its own confirm/cancel, so the hint bar hides.
