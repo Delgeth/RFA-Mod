@@ -920,7 +920,7 @@ sealed class ZonePropertyRows
                     TextWrapping = TextWrapping.Wrap,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                     MaxHeight = 200,
-                    Background = Theme.Brush("BackgroundBrush"),
+                    Background = Theme.Brush("InputBrush"),
                     BorderBrush = Theme.Brush("StrongBorderBrush"),
                     BorderThickness = new Thickness(1)
                 };
