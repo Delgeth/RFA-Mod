@@ -271,6 +271,14 @@ public partial class LevelEditor
             if (left.Count > 0)
                 context.Log($"Spawn resources: {level.Entry} already lists {MostResourceCharacters} characters, as many as the game streams; left out: {string.Join(", ", left)}. " +
                             "Take some out with Spawn resources, or use squads of fewer kinds of people.");
+            if (added.Count == 0 && removed.Count == 0 && SpawnResourceFiles.GuerrillaLacks(context.Workspace, entry.Name))
+            {
+                // The Guerrilla world's copy of the table, which the game reads in place of the override, was made before
+                // this level's entry was: the entry goes into it as it is.
+                SpawnResourceFiles.Change(context.Workspace, table => SpawnResource.Read(table, entry.Name) == null ? entry.WriteTo(table) : null);
+                context.Log($"Spawn resources: {entry.Name} copied into mods\\guerrilla_world\\spawn_resource.xtbl, which the game reads in place of the table with the Guerrilla world installed " +
+                            "(the level had Armageddon's Default without it). Restart the game for it to apply.");
+            }
             if (added.Count == 0 && removed.Count == 0)
             {
                 WriteAddedRecord(record);  // (an entry seen for the first time)
@@ -289,7 +297,7 @@ public partial class LevelEditor
                 }
                 catch (Exception ex) when (ex is IOException or InvalidDataException) { }
             }
-            string from = level.Entry;
+            string from = level.Entry, guerrillaToo = "";
             if (sharing > 1)
             {
                 var taken = SpawnResource.Names(resources).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -301,14 +309,14 @@ public partial class LevelEditor
                 string table = Encoding.Latin1.GetString(context.Workspace.Read(SpawnTablesArchive, level.Table));
                 string changed = LevelFiles.WithRowValue(table, level.Row, level.KeyTag, level.Key, "resource_reservation", own)
                                  ?? throw new InvalidDataException($"{level.Table}'s row for {level.Key} couldn't be changed");
-                context.Workspace.WriteOverride(SpawnTablesArchive, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(entry.WriteTo(resources, from)));
+                guerrillaToo = SpawnResourceFiles.Write(context.Workspace, entry, from);
                 context.Workspace.WriteOverride(SpawnTablesArchive, level.Table, Encoding.Latin1.GetBytes(changed));
                 context.Log($"Spawn resources: {level.Key} shared {from} with {sharing - 1} other level(s); it has its own now, \"{own}\" ({level.Table} names it).");
             }
-            else context.Workspace.WriteOverride(SpawnTablesArchive, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(entry.WriteTo(resources)));
+            else guerrillaToo = SpawnResourceFiles.Write(context.Workspace, entry);
             WriteAddedRecord(record);
             if (added.Count > 0)
-                context.Log($"Spawn resources: added to {entry.Name}, for the level's spawn nodes: {string.Join(", ", added)}.");
+                context.Log($"Spawn resources: added to {entry.Name}{guerrillaToo}, for the level's spawn nodes: {string.Join(", ", added)}.");
             if (removed.Count > 0)
                 context.Log($"Spawn resources: taken out of {entry.Name}, as no spawn node needs them now: {string.Join(", ", removed)}.");
             context.Log("  The game reads its tables at start-up: restart it for a normal load to have them" + (added.Count > 0 ? " (Live spawns new ones now)." : "."));
