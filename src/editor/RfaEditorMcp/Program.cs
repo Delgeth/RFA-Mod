@@ -32,6 +32,13 @@ sealed class Program
         // Try to find mod/game folders, but don't fail if not found - tools can set up workspace
         // --game <folder> and --mod <folder> (or RFA_GAME_DIR / RFA_MOD_DIR) override what's found from where the exe is.
         string? modFolder = Arg(args, "--mod") ?? Environment.GetEnvironmentVariable("RFA_MOD_DIR") ?? Workspace.FindModFolder();
+        // The MCP servers run only when the player has turned them on: [Mcp] Enabled=1 in the mod
+        // folder's rfa_mods.ini (off by default).
+        if (!McpEnabled(modFolder))
+        {
+            Console.Error.WriteLine("RFA-Mod's MCP servers are off. To use them, set Enabled=1 under [Mcp] in rfa_mods.ini.");
+            return 1;
+        }
         string? gameFolder = Arg(args, "--game") ?? Environment.GetEnvironmentVariable("RFA_GAME_DIR")
                              ?? (modFolder != null ? Workspace.FindGameFolder(modFolder) : null);
         if (gameFolder != null && !Directory.Exists(gameFolder))
@@ -124,6 +131,25 @@ sealed class Program
     {
         int i = Array.FindIndex(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
         return i >= 0 && i + 1 < args.Length ? args[i + 1].TrimEnd('\\') : null;
+    }
+
+    /// <summary>True if the mod folder's rfa_mods.ini says Enabled=1 under [Mcp]; false if it doesn't, or can't be read.</summary>
+    static bool McpEnabled(string? modFolder)
+    {
+        if (modFolder == null) return false;
+        string ini = Path.Combine(modFolder, "rfa_mods.ini");
+        if (!File.Exists(ini)) return false;
+        bool inSection = false;
+        foreach (string raw in File.ReadLines(ini))
+        {
+            string line = raw.Trim();
+            if (line.StartsWith('[')) { inSection = string.Equals(line, "[Mcp]", StringComparison.OrdinalIgnoreCase); continue; }
+            if (!inSection || line.StartsWith(';')) continue;
+            int eq = line.IndexOf('=');
+            if (eq > 0 && string.Equals(line[..eq].Trim(), "Enabled", StringComparison.OrdinalIgnoreCase))
+                return line[(eq + 1)..].Trim() == "1";
+        }
+        return false;
     }
 
     static async Task<JsonRpc.Response> HandleRequestAsync(JsonRpc.Request request, CancellationToken ct)

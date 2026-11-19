@@ -688,11 +688,28 @@ std::string HandleRequest(const std::string& request) {
     }
 }
 
+// The MCP servers run only when the player has turned them on: [Mcp] Enabled=1 in the rfa_mods.ini
+// beside this program (off by default).
+bool McpEnabled() {
+    wchar_t path[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return false;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return false;
+    wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"rfa_mods.ini");
+    return GetPrivateProfileIntW(L"Mcp", L"Enabled", 0, path) != 0;
+}
+
 int main() {
     // Disable buffering for stdio
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+
+    if (!McpEnabled()) {
+        fprintf(stderr, "RFA-Mod's MCP servers are off. To use them, set Enabled=1 under [Mcp] in rfa_mods.ini.\n");
+        return 1;
+    }
 
     fprintf(stderr, "RFA Live Analysis MCP Server starting...\n");
 

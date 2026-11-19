@@ -42,7 +42,8 @@ public partial class App : Application
             return;
         }
         // --new-level and the Create level page's choices (see MainWindow.MenuRequestFrom).
-        var (asked, request) = MainWindow.MenuRequestFrom(e.Args);
+        // (global:: because inside App, MainWindow alone is Application's MainWindow property.)
+        var (asked, request) = global::RfaEditor.MainWindow.MenuRequestFrom(e.Args);
         var main = new MainWindow(new Workspace(gameFolder, modFolder))
         {
             NewLevelAtStart = asked,

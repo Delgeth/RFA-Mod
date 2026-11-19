@@ -27,6 +27,8 @@
 #include <tlhelp32.h>
 #include <map>
 #include <algorithm>
+#include <sddl.h>
+#pragma comment(lib, "advapi32.lib")
 
 namespace live_analysis {
 
@@ -341,21 +343,44 @@ void Shutdown() {
     rfa::Log("Live analysis mod shutdown complete");
 }
 
+// Who may open the pipe: the system and the Windows user the game runs as, nobody else. Null (the
+// default rights) if the user can't be read.
+PSECURITY_DESCRIPTOR PipeSecurity() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return nullptr;
+    BYTE buffer[256] = {};
+    DWORD size = 0;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetTokenInformation(token, TokenUser, buffer, sizeof(buffer), &size)) {
+        wchar_t* sid = nullptr;
+        if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer)->User.Sid, &sid)) {
+            const std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + std::wstring(sid) + L")";
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr);
+            LocalFree(sid);
+        }
+    }
+    CloseHandle(token);
+    return descriptor;
+}
+
 // Named pipe server thread - handles communication with external tools
 void PipeServerThread() {
     rfa::Log("Pipe server thread started");
+    // Only this PC (PIPE_REJECT_REMOTE_CLIENTS) and only this Windows user (the security below).
+    SECURITY_ATTRIBUTES security = {sizeof(security), PipeSecurity(), FALSE};
+    if (!security.lpSecurityDescriptor) rfa::Log("Pipe: couldn't limit it to this Windows user; the default rights apply");
 
     while (g_pipeRunning) {
         // Create the named pipe
         HANDLE pipe = CreateNamedPipeW(
             kPipeName,
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             65536,  // output buffer
             65536,  // input buffer
             5000,   // timeout
-            nullptr
+            security.lpSecurityDescriptor ? &security : nullptr
         );
 
         if (pipe == INVALID_HANDLE_VALUE) {
