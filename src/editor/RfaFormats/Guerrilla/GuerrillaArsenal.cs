@@ -229,7 +229,7 @@ public static class GuerrillaArsenal
         GuerrillaSoundBanks? soundBanks = null;
         try
         {
-            soundBanks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, GuerrillaVehicleSounds.Part, GuerrillaVehicleSounds.BankPrefix);
+            soundBanks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, GuerrillaVehicleSounds.Part, GuerrillaVehicleSounds.BankPrefix) { Adpcm = GuerrillaSoundBanks.WorldSoundsAdpcm };
             soundFoley = GuerrillaVehicleSounds.Build(soundBanks, guerrillaTables,
                                                       wanted.Where(entries.ContainsKey).Select(v => entries[v]).Distinct(), soundLog);
         }

@@ -284,39 +284,149 @@ float GuerrillaKioskDb(float distance) {
     return gain > 0.0f ? (std::max)(-96.3f, 20.0f * std::log10(gain)) : -96.3f;
 }
 
-// The check of the broadcast's 3D sound in game. The user heard it "as if right next to it", while offline every link
-// looked right (docs: "In game: no fade, and the kiosk heard ..."). Every 2 s of a broadcast it logs the camera's
-// distance to the kiosk; where the game has the broadcast's sound object (its first place +0x24; +0x8B how many places,
-// 1 or more for a 3D one); how far the game measured its listener, the camera, at its last update (+0x0C); and what
-// Guerrilla's curve gives there.
+// What Wwise itself holds of the broadcast's distance (read only). Every sound of ours fades on the game parameter
+// game_distance, which the game sets on each sound object (guerrilla_world: "Sound distances"). Wwise keeps it in its
+// RTPC manager (the pointer at 0x34FB8E0): game parameters in 193 lists by id from +4, each {id, next, its global value
+// +8, the game objects' own values +0x0C..+0x10 (8 bytes each: the registered object, the value), the subscriptions
+// +0x18..+0x1C}. A subscription is {the node, the property +4, ..., the game object it is for +0x0C, its kind +0x10,
+// its curves +0x14..+0x18 (0x14 bytes each, the game parameter at +4)}. A node's id is at +0x0C, its play count (a
+// 16-bit count) at +0x18: Wwise passes a game object's new value to a node's kind 2 subscription only while that count
+// isn't 0, and never to kind 1 (0xE91A80, from SetRTPCInternal 0xE92730). The game objects are in Wwise's registry
+// (the pointer at 0x34FB8D0): 193 lists by id from +0x28, each {next, the id, the registered object}.
+// The sound engine's own thread may be changing all this while it is read, so a read that faults is said, not fatal.
+constexpr DWORD kWwiseRtpcManager = 0x34FB8E0, kWwiseRegistry = 0x34FB8D0, kGameDistance = 0x85C3E987;
+constexpr unsigned kWwiseLists = 193, kListedPlaying = 6;
+
+struct WwiseView {
+    bool parameterFound, registered, hasValue;
+    float value, global;
+    unsigned objectsWithValue, subscriptions, nodeSubscriptions, playing, listed;
+    DWORD playingIds[kListedPlaying];
+    int lineKind;  // the playing line's node's subscription kind, -1 without one
+    unsigned lineCurves, linePlays;
+};
+
+bool ReadWwiseView(DWORD gameObject, DWORD lineNode, WwiseView* view) {
+    __try {
+        const BYTE* manager = *reinterpret_cast<const BYTE* const*>(kWwiseRtpcManager);
+        const BYTE* registry = *reinterpret_cast<const BYTE* const*>(kWwiseRegistry);
+        if (!manager || !registry) return false;
+        const BYTE* registered = nullptr;
+        for (const BYTE* item = *reinterpret_cast<const BYTE* const*>(registry + 0x28 + (gameObject % kWwiseLists) * 4); item;
+             item = *reinterpret_cast<const BYTE* const*>(item))
+            if (*reinterpret_cast<const DWORD*>(item + 4) == gameObject) {
+                registered = *reinterpret_cast<const BYTE* const*>(item + 8);
+                break;
+            }
+        view->registered = registered != nullptr;
+        const BYTE* parameter = *reinterpret_cast<const BYTE* const*>(manager + 4 + (kGameDistance % kWwiseLists) * 4);
+        while (parameter && *reinterpret_cast<const DWORD*>(parameter) != kGameDistance) parameter = *reinterpret_cast<const BYTE* const*>(parameter + 4);
+        view->parameterFound = parameter != nullptr;
+        if (!parameter) return true;
+        view->global = *reinterpret_cast<const float*>(parameter + 8);
+        const BYTE* values = *reinterpret_cast<const BYTE* const*>(parameter + 0x0C);
+        const BYTE* valuesEnd = *reinterpret_cast<const BYTE* const*>(parameter + 0x10);
+        view->objectsWithValue = values ? static_cast<unsigned>((valuesEnd - values) / 8) : 0;
+        for (unsigned i = 0; registered && i < view->objectsWithValue; ++i)
+            if (*reinterpret_cast<const BYTE* const*>(values + i * 8) == registered) {
+                view->hasValue = true;
+                view->value = *reinterpret_cast<const float*>(values + i * 8 + 4);
+                break;
+            }
+        const BYTE* const* subscription = *reinterpret_cast<const BYTE* const* const*>(parameter + 0x18);
+        const BYTE* const* subscriptionsEnd = *reinterpret_cast<const BYTE* const* const*>(parameter + 0x1C);
+        for (; subscription && subscription < subscriptionsEnd; ++subscription) {
+            const BYTE* s = *subscription;
+            ++view->subscriptions;
+            const DWORD kind = *reinterpret_cast<const DWORD*>(s + 0x10);
+            if (kind != 1 && kind != 2) continue;
+            ++view->nodeSubscriptions;
+            const BYTE* node = *reinterpret_cast<const BYTE* const*>(s);
+            const DWORD id = *reinterpret_cast<const DWORD*>(node + 0x0C);
+            const unsigned plays = *reinterpret_cast<const WORD*>(node + 0x18);
+            if (plays) {
+                if (view->listed < kListedPlaying) view->playingIds[view->listed++] = id;
+                ++view->playing;
+            }
+            if (id == lineNode) {
+                view->lineKind = static_cast<int>(kind);
+                view->linePlays = plays;
+                for (const BYTE* curve = *reinterpret_cast<const BYTE* const*>(s + 0x14); curve < *reinterpret_cast<const BYTE* const*>(s + 0x18); curve += 0x14)
+                    if (*reinterpret_cast<const DWORD*>(curve + 4) == kGameDistance) ++view->lineCurves;
+            }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The newsreader's line's node in our bank: WwiseBankWriter.ObjectId of "sound:line:<name>" in the builder's voice
+// bank, rfgk_voc_kiosk (GuerrillaKiosks: the prefix rfgk_ and Guerrilla's wave bank voc_kiosk).
+DWORD LineNode(const std::string& line) { return line.empty() ? 0 : WwiseNameId("rfg:rfgk_voc_kiosk:sound:line:" + line); }
+
+// The check of the broadcast's 3D sound in game. The user, 2026-11-19 10:42: "kiosk still is playing at full volume
+// even tho I walked away", with every fade on game_distance and the distance sent at least every 500 ms. Every 5 s of a
+// broadcast (36 lines a run, the first at its start) it logs the camera's distance to the kiosk; the game's sound
+// object (where: its first place +0x24; +0x8B how many places, 1 or more for a 3D one; and how far the game measured
+// its listener at its last update, +0x0C); and what Wwise holds (WwiseView): the object registered, its game_distance
+// and the global one, the subscriptions to game_distance and which of their nodes play now, and whether the playing
+// line's node is among them. So the next run tells a distance Wwise never got from a fade Wwise has but doesn't apply.
 double g_nextSoundCheckMs = 0.0;
 int g_soundChecks = 0;
 
 void CheckSound(const BYTE* kiosk) {
-    if (!rfa::DetailLog() || g_clockMs < g_nextSoundCheckMs || g_soundChecks >= 90) return;  // with Log=1: 3 minutes of broadcasts a run
-    g_nextSoundCheckMs = g_clockMs + 2000.0;
+    if (g_clockMs < g_nextSoundCheckMs || g_soundChecks >= 36) return;
+    g_nextSoundCheckMs = g_clockMs + 5000.0;
     ++g_soundChecks;
     const float camera = Distance(g_cameraPosition, PlaceOf(kiosk));
     const BYTE* object = SoundObjectFromHandle(g_soundObject);
     if (!object) {
-        rfa::LogDetail("Broadcast sound: camera %.1f m from the kiosk; the game has no sound object for the broadcast's handle %lu", camera, g_soundObject);
+        rfa::Log("Broadcast sound: camera %.1f m from the kiosk; the game has no sound object for the broadcast's handle %lu", camera, g_soundObject);
         return;
     }
-    rfa::LogDetail("Broadcast sound: camera %.1f m from the kiosk; the sound object %.1f m from the kiosk, %u place(s), its listener %.1f m away as the "
-             "game measured it, given to Wwise as game_distance (audiolib's listener %.1f m from the camera); Guerrilla's curve gives the "
-             "newsreader %.1f dB here",
-             camera, Distance(reinterpret_cast<const float*>(object + 0x24), PlaceOf(kiosk)), static_cast<unsigned>(object[0x8B]),
-             *reinterpret_cast<const float*>(object + 0x0C), Distance(g_listenerPosition, g_cameraPosition), GuerrillaKioskDb(camera));
-    // The listener's front and top as audiolib gives them to Wwise: Wwise needs them of length 1 and at right angles.
+    const float* place = reinterpret_cast<const float*>(object + 0x24);
+    char game[256];
+    sprintf_s(game, "the game's sound object %08lX at %.1f %.1f %.1f (%.1f m from the kiosk, %u place(s)), its listener %.1f m away as the game measured it",
+              static_cast<DWORD>(reinterpret_cast<uintptr_t>(object)), place[0], place[1], place[2], Distance(place, PlaceOf(kiosk)),
+              static_cast<unsigned>(object[0x8B]), *reinterpret_cast<const float*>(object + 0x0C));
+    const bool linePlaying = g_voice && SoundGameObject(g_voice) != 0;
+    const char* playing = linePlaying ? "the line" : "no line";
+    const char* music = g_loopPlaying && SoundGameObject(g_loopPlaying) != 0 ? ", the music's loop" : "";
+    const DWORD lineNode = linePlaying ? LineNode(g_voiceLine) : 0;
+    WwiseView view{};
+    view.lineKind = -1;
+    char wwise[640];
+    if (!ReadWwiseView(static_cast<DWORD>(reinterpret_cast<uintptr_t>(object)), lineNode, &view))
+        sprintf_s(wwise, "Wwise's state couldn't be read this time");
+    else if (!view.parameterFound)
+        sprintf_s(wwise, "Wwise has no game_distance at all (%s)", view.registered ? "the object is registered" : "nor the object registered");
+    else {
+        char ids[kListedPlaying * 9 + 1] = "";
+        for (unsigned i = 0; i < view.listed; ++i) sprintf_s(ids + i * 9, sizeof(ids) - i * 9, " %08lX", view.playingIds[i]);
+        char line[160];
+        if (!lineNode) sprintf_s(line, "no line playing");
+        else if (view.lineKind < 0) sprintf_s(line, "the line %s's node %08lX NOT subscribed", g_voiceLine.c_str(), lineNode);
+        else
+            sprintf_s(line, "the line %s's node %08lX subscribed (kind %d, %u curve(s) on game_distance, playing %u)", g_voiceLine.c_str(), lineNode, view.lineKind,
+                      view.lineCurves, view.linePlays);
+        sprintf_s(wwise, "Wwise: the object %s, its game_distance %s%.1f m (the global value %.1f m, %u objects with their own); %u subscriptions to "
+                         "game_distance (%u of nodes), %u of their nodes playing:%s; %s",
+                  view.registered ? "registered" : "NOT registered", view.hasValue ? "" : "NONE, so ", view.hasValue ? view.value : view.global, view.global,
+                  view.objectsWithValue, view.subscriptions, view.nodeSubscriptions, view.playing, ids, line);
+    }
+    rfa::Log("Broadcast sound: camera %.1f m from the kiosk; %s; playing %s%s; Guerrilla's curve gives the newsreader %.1f dB here; %s", camera, game, playing,
+             music, GuerrillaKioskDb(camera), wwise);
+    // The listener as audiolib gives it to Wwise (its front and top need length 1 and right angles), with Log=1.
     static const float zero[3] = {0.0f, 0.0f, 0.0f};
-    if (g_soundChecks <= 5)
-        rfa::LogDetail("Broadcast sound: the listener's front %.2f %.2f %.2f (length %.2f), top %.2f %.2f %.2f (length %.2f), their dot product %.2f; "
-                 "the sound object's orientation %.2f %.2f %.2f",
-                 g_listenerFront[0], g_listenerFront[1], g_listenerFront[2], Distance(g_listenerFront, zero), g_listenerTop[0], g_listenerTop[1],
-                 g_listenerTop[2], Distance(g_listenerTop, zero),
-                 g_listenerFront[0] * g_listenerTop[0] + g_listenerFront[1] * g_listenerTop[1] + g_listenerFront[2] * g_listenerTop[2],
-                 reinterpret_cast<const float*>(object + 0x30)[0], reinterpret_cast<const float*>(object + 0x30)[1],
-                 reinterpret_cast<const float*>(object + 0x30)[2]);
+    if (g_soundChecks <= 2)
+        rfa::LogDetail("Broadcast sound: audiolib's listener %.1f m from the camera, its front %.2f %.2f %.2f (length %.2f), top %.2f %.2f %.2f (length %.2f), "
+                       "their dot product %.2f; the sound object's orientation %.2f %.2f %.2f",
+                       Distance(g_listenerPosition, g_cameraPosition), g_listenerFront[0], g_listenerFront[1], g_listenerFront[2], Distance(g_listenerFront, zero),
+                       g_listenerTop[0], g_listenerTop[1], g_listenerTop[2], Distance(g_listenerTop, zero),
+                       g_listenerFront[0] * g_listenerTop[0] + g_listenerFront[1] * g_listenerTop[1] + g_listenerFront[2] * g_listenerTop[2],
+                       reinterpret_cast<const float*>(object + 0x30)[0], reinterpret_cast<const float*>(object + 0x30)[1],
+                       reinterpret_cast<const float*>(object + 0x30)[2]);
 }
 
 const char* ScreenName(int screen) {

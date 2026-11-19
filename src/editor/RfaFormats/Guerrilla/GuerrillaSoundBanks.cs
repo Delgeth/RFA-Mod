@@ -164,6 +164,16 @@ public sealed class GuerrillaSoundBanks
     public bool Adpcm { get; init; }
 
     /// <summary>
+    /// The codec of the world's sounds: the vehicles', effects' and weapons' parts. Every sound of ours is a stream
+    /// the game's reader fetches piece by piece, and as uncompressed sound they starved in play (Wwise's "Source
+    /// starvation", the runs of 2026-11-19: the player's engine's layers, other vehicles', destruction hits). Wwise
+    /// ADPCM is 3.6 times fewer bytes, the cache of pieces holds 3.6 times more seconds of it, and it is close to
+    /// Guerrilla's own waves, which are MS-ADPCM in blocks of 64 samples with their loops on those blocks. The main
+    /// session, 2026-11-19: "On ADPCM: yes, go ahead".
+    /// </summary>
+    public const bool WorldSoundsAdpcm = true;
+
+    /// <summary>
     /// The game loads this part's banks as it starts (audio_banks load_at_boot True, the default). False: they are
     /// listed only, and a mod loads each when it needs it (the people's voices: guerrilla_voices, by the bank's id).
     /// </summary>
@@ -331,13 +341,13 @@ public sealed class GuerrillaSoundBanks
             if (track.Waves.Count == 1 || !track.Picks)
             {
                 var (waveBank, wave) = track.Waves[0];
-                return bank.Sound(trackKey, bank.Medium(Sounds.ReadWave(waveBank, wave)), loops, trackSettings, under, to);
+                return bank.Sound(trackKey, bank.Medium(Sounds.ReadWave(waveBank, wave), loops), loops, trackSettings, under, to);
             }
             uint container = bank.ObjectId("random:" + trackKey);
             var children = new List<uint>();
             int n = 0;
             foreach (var (waveBank, wave) in track.Waves)
-                children.Add(bank.Sound($"{trackKey}#{n++}", bank.Medium(Sounds.ReadWave(waveBank, wave)), loops, new WwiseBankWriter.Settings(), container));
+                children.Add(bank.Sound($"{trackKey}#{n++}", bank.Medium(Sounds.ReadWave(waveBank, wave), loops), loops, new WwiseBankWriter.Settings(), container));
             return bank.Random(trackKey, children, trackSettings, under, to);
         }
         if (!layered) return Track(sound, key, settings, parent, output);
@@ -756,20 +766,31 @@ public sealed class GuerrillaSoundBanks
     public const uint TopBus = 0x1001382D;
     public const ushort GameTopBusLimit = 128, TopBusLimit = 256;
 
+    /// <summary>
+    /// The bus of the effects' sounds that play once (<see cref="WwiseBankWriter.EffectsBus"/>): Armageddon's 15 at once,
+    /// its buses' under it counted in. Guerrilla's own categories have no such cap (only each cue's own number, 2 to 8
+    /// for its destruction cues), and a car through a building fills 15 at once: the run of 2026-11-19 01:41 had 1,833
+    /// destruction impacts in ten seconds, and the effects' one-shots, which give up when there is no room, were
+    /// silent. The user, 2026-11-19 (through the main session), on raising the audio limits: 64.
+    /// </summary>
+    public const ushort GameEffectsBusLimit = 15, EffectsBusLimit = 64;
+
     static string InitBankPath(string overrides) => Path.Combine(overrides, "build", "pc", "cache", InitBankArchive, InitBank);
 
     /// <summary>
-    /// Writes the override of Armageddon's init.bnk_pc: the player's own file as it is but for one number, the top
-    /// bus's limit (<see cref="TopBusLimit"/>). A bus is an object of type 8 in the bank's HIRC part: its id, its
-    /// parent (4 bytes), volume, LFE, pitch and low-pass (4 each), whether the newest is ended (1), then how many play
-    /// at once (2). The number is changed only where it is the game's own; else nothing is written and the build stops.
+    /// Writes the override of Armageddon's init.bnk_pc: the player's own file as it is but for two numbers, the top
+    /// bus's limit (<see cref="TopBusLimit"/>) and the effects' bus's (<see cref="EffectsBusLimit"/>). A bus is an
+    /// object of type 8 in the bank's HIRC part: its id, its parent (4 bytes), volume, LFE, pitch and low-pass (4
+    /// each), whether the newest is ended (1), then how many play at once (2). Each number is changed only where it
+    /// is the game's own; else nothing is written and the build stops.
     /// </summary>
     static string WriteBusLimit(string game, string overrides)
     {
         var boot = Packfile.Open(Path.Combine(game, "build", "pc", "cache", InitBankArchive));
         byte[] bank = boot.Read(boot.Find(InitBank) ?? throw new InvalidDataException($"no {InitBank} in Armageddon's {InitBankArchive}"));
         const int limitAt = 4 + 4 + 16 + 1;  // from the object's id
-        int found = -1;
+        var raises = new (uint Bus, ushort Game, ushort Ours)[] { (TopBus, GameTopBusLimit, TopBusLimit), (WwiseBankWriter.EffectsBus, GameEffectsBusLimit, EffectsBusLimit) };
+        var found = new Dictionary<uint, int>();
         for (int at = 0; at + 8 <= bank.Length;)
         {
             int size = BitConverter.ToInt32(bank, at + 4);
@@ -780,20 +801,25 @@ public sealed class GuerrillaSoundBanks
                     uint type = BitConverter.ToUInt32(bank, o);
                     int length = BitConverter.ToInt32(bank, o + 4);
                     if (length < 4) break;
-                    if (type == 8 && BitConverter.ToUInt32(bank, o + 8) == TopBus && length >= limitAt + 2) found = o + 8 + limitAt;
+                    uint id = BitConverter.ToUInt32(bank, o + 8);
+                    if (type == 8 && length >= limitAt + 2 && raises.Any(r => r.Bus == id)) found[id] = o + 8 + limitAt;
                     o += 8 + length;
                 }
             at += 8 + size;
         }
-        if (found < 0) throw new InvalidDataException($"Armageddon's {InitBank} has no bus {TopBus:X8}: the sounds' limit can't be raised");
-        ushort limit = BitConverter.ToUInt16(bank, found);
-        if (limit != GameTopBusLimit)
-            throw new InvalidDataException($"Armageddon's {InitBank}: the bus {TopBus:X8} lets {limit} sounds play at once, not the {GameTopBusLimit} expected; left as it is");
-        BitConverter.GetBytes(TopBusLimit).CopyTo(bank, found);
+        foreach (var (bus, armageddons, _) in raises)
+        {
+            if (!found.TryGetValue(bus, out int place)) throw new InvalidDataException($"Armageddon's {InitBank} has no bus {bus:X8}: its sounds' limit can't be raised");
+            ushort limit = BitConverter.ToUInt16(bank, place);
+            if (limit != armageddons)
+                throw new InvalidDataException($"Armageddon's {InitBank}: the bus {bus:X8} lets {limit} sounds play at once, not the {armageddons} expected; left as it is");
+        }
+        foreach (var (bus, _, ours) in raises) BitConverter.GetBytes(ours).CopyTo(bank, found[bus]);
         string path = InitBankPath(overrides);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, bank);
-        return $"the game's sounds at once: {TopBusLimit} (Armageddon's {GameTopBusLimit}), the top bus's limit in an override of its own {InitBankArchive}\\{InitBank}";
+        return $"the game's sounds at once: {TopBusLimit} (Armageddon's {GameTopBusLimit}), the top bus's limit, and the effects' one-shots {EffectsBusLimit} " +
+               $"(Armageddon's {GameEffectsBusLimit}), in an override of its own {InitBankArchive}\\{InitBank}";
     }
 
     /// <summary>Says that posting <paramref name="stopEvent"/> stops the loop <paramref name="loopEvent"/> posted (the game posts it when it stops that sound).</summary>
@@ -819,6 +845,17 @@ public sealed class GuerrillaSoundBanks
             total += bankFile.Length + mediaFile.Length;
             lines.Add($"{name}: {bank.Counts()} ({mediaFile.Length / 1048576.0:0.0} MB)");
         }
+        // What the game's reader streams: the media as written against the same sound uncompressed.
+        long pcm = banks.Values.Sum(b => b.MediaBytes.Pcm), written = banks.Values.Sum(b => b.MediaBytes.Written);
+        if (Adpcm)
+        {
+            int waves = banks.Values.Sum(b => b.AdpcmCheck.Count), loops = banks.Values.Sum(b => b.AdpcmLoops.Loops), kept = banks.Values.Sum(b => b.AdpcmLoops.KeptPcm);
+            double worst = banks.Values.Where(b => b.AdpcmCheck.Count > 0).Select(b => b.AdpcmCheck.Worst).DefaultIfEmpty(0).Min();
+            double mean = waves > 0 ? banks.Values.Sum(b => b.AdpcmCheck.Sum) / waves : 0;
+            lines.Add($"media {written / 1048576.0:0.0} MB as Wwise ADPCM ({pcm / 1048576.0:0.0} MB as PCM): {waves} waves, decoded again {mean:0.#} dB " +
+                      $"from Guerrilla's on average, the worst {worst:0.#} dB; {loops} looping sounds' waves, {kept} of them kept uncompressed (their loop off ADPCM's blocks of 64 samples)");
+        }
+        else lines.Add($"media {written / 1048576.0:0.0} MB as PCM");
         if (builtSets.Count > 0) lines.Add($"attack-loop-release sets, played as Guerrilla plays them: {string.Join("; ", builtSets)}");
         if (builtFar.Count > 0) lines.Add($"far versions played beside the near cue: {string.Join("; ", builtFar)}");
         Directory.CreateDirectory(modFolder);

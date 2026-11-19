@@ -46,6 +46,9 @@ Slider g_sliders[] = {
     {L"SunShafts", "Sun shafts", 0, 3, 1, false, "With Guerrilla's tone mapping: the glow streaming round the sun. 1 = Guerrilla's, 0 = none", 0},
     {L"SunCorona", "Sun corona", 0, 2, 1, false, "The sun's rays, glow, halo and lens flares when you look toward it. 1 = Guerrilla's, 0 = none", 0},
     {L"Fog", "Fog", 0, 3, 1, false, "How thick Guerrilla's haze is. 1 = Guerrilla's, 0 = none", 0},
+    {L"FarClip", "View distance", 475, 1500, 475, true,
+     "How far the camera draws, in metres. 475 = Guerrilla's: zones and buildings load out of sight. Farther shows more, "
+     "and things appearing as they load", 0},
     {L"Sharpen", "Sharpening", 0, 100, 40, true, "Contrast-adaptive sharpening under the HUD. 0 = none, 100 = strongest", 0},
     {L"ClockSpeed", "Clock speed", 0, 480, 48, true, "Game seconds a real second: 48 makes a day in half an hour. 0 = the game's own clock", 0},
 };

@@ -770,7 +770,7 @@ public static class GuerrillaWeapons
                 lowPegs.Add(PegFile.Read(guerrillaItemsMp.Read(mpHeader), guerrillaItemsMp.Read(mpData)));
             ItemAssets = AsmFile.Read(gameItems.Read(gameItems.Find("items_containers.asm_pc") ?? throw new InvalidDataException("no items_containers.asm_pc in Armageddon's items.vpp_pc")));
             gameModels = new HashSet<string>(ItemAssets.Containers.SelectMany(c => c.Primitives.Select(p => p.Name)), StringComparer.OrdinalIgnoreCase);
-            Sounds = new GuerrillaSoundBanks(guerrillaCache, guerrillaMisc, SoundPart, SoundBankPrefix);
+            Sounds = new GuerrillaSoundBanks(guerrillaCache, guerrillaMisc, SoundPart, SoundBankPrefix) { Adpcm = GuerrillaSoundBanks.WorldSoundsAdpcm };
         }
 
         /// <summary>The player's animations' cues not made: Guerrilla's own files haven't them.</summary>
@@ -1050,8 +1050,16 @@ public static class GuerrillaWeapons
                             ? (npcDamage * GuerrillaBulletStructureScale).ToString("0.##", CultureInfo.InvariantCulture) : "0");
                 }
             Copy(g, "Headshot_Multiplier", f);
+            // A weapon's own explosion: Guerrilla's weapon_info has one (m_explosion_info, +0x15C) that serves its
+            // projectile and, for a weapon lying in the world, weapon::explode (RM 0xBDD240: a non-inventory one,
+            // the propane tank; from its bullet hit, weapon::process_bullet_hit RM 0xBE2E50, and from explosions).
+            // Armageddon's weapon explode (0x742260, the weapon's bullet hit 0x7418E0 and its explosion and melee
+            // hits) reads the explosion from the firing mode (+0x1AC, "Explosion") and does nothing without one;
+            // a weapon with a projectile has it on the projectile only. So a non-inventory weapon (the tank) has it
+            // in its firing mode too: shot or blown up where it lies, it goes off, as Guerrilla's.
+            bool explodesWhereItLies = guerrillaFlags.Any(f => f.Equals("non-inventory", StringComparison.OrdinalIgnoreCase));
             foreach (var (field, ourField) in new[] { ("Explosion", "Explosion"), ("AIExplosion", "AI_Explosion") })
-                if (projectile == null && G(field) is { } explosion)
+                if ((projectile == null || explodesWhereItLies) && G(field) is { } explosion)
                 {
                     string ourExplosion = GuerrillaEffectTables.Added(explosion);
                     if (worldExplosions.Contains(ourExplosion)) f.AddElement(ourField, ourExplosion);

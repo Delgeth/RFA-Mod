@@ -130,7 +130,7 @@ public sealed class GuerrillaKiosks
 
     /// <summary>
     /// The newsreader's own part (kiosk_voices_sound_banks.txt): its bank is Wwise ADPCM (<see cref="VoicesAdpcm"/>),
-    /// which a part sets for all its banks, while the music's loop must stay PCM (the writer has no ADPCM loop yet).
+    /// which a part sets for all its banks (the music's part is ADPCM too since 2026-11-19, its loop on ADPCM's blocks or uncompressed).
     /// </summary>
     public const string VoicePart = "kiosk_voices";
 
@@ -170,7 +170,9 @@ public sealed class GuerrillaKiosks
     {
         var defaults = XtblFile.FromBytes(guerrillaTables.Read(guerrillaTables.Find("pa_defaults.xtbl")!)).Entries.FirstOrDefault();
         string? Setting(string name) => defaults == null ? null : Deep(defaults, name);
-        var banks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, SoundPart, SoundBankPrefix);
+        // The broadcast's music (its loop starved in the run of 2026-11-19 02:39 as the world's uncompressed sounds did):
+        // in Wwise ADPCM as the world's sounds, its loop kept uncompressed if it is off ADPCM's blocks (WwiseBankWriter.Medium).
+        var banks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, SoundPart, SoundBankPrefix) { Adpcm = GuerrillaSoundBanks.WorldSoundsAdpcm };
         var list = new List<string>();
         var problems = new List<string>();
 

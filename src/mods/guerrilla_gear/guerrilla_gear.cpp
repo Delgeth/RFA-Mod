@@ -190,27 +190,20 @@
 // (the game's own drop of an inventory record, 0x8A2DB0: cdecl, the human, the record; from his hands
 // or his slots) and the better given into its slot.
 //
-// A carried thing thrown (Guerrilla's propane tank). Guerrilla's Mason picks a tank up, throws it, and
-// it is gone from his hands: its weapon is "non-inventory", and what flies is the weapon's projectile,
-// which goes off where it hits. Armageddon kept Guerrilla's throw (a weapon whose shot is "Thrown": the
-// player's attack 0x8BAAF0 -> 0x8A3FC0, the throw's animation; the thing is let go at the animation's
-// "impact start" trigger, 0x8A1E50 -> the weapon's launch, 0x7323C0: thiscall, position, orientation,
-// velocity, whether it is placed) but its launch has two ways: a weapon in the inventory throws its
-// projectile and keeps the weapon; a "non-inventory" one (weapon entry +0xA, 0x10) throws no
-// projectile: it is unequipped (0x85D3C0), the carried weapon itself let fly, its record taken out of
-// the inventory (0x85C260) and the player's last weapon equipped (0x8BB420); it lies where it lands to
-// be picked up again. For Guerrilla's the launch is wrapped, and for one of its carried weapons whose
-// shot names a projectile it runs both ways: first with the entry's flag lifted for the call (the
-// projectile), then as it is (the carried one out of the hands and the inventory, the last weapon
-// back: the game's own way, so the hands, the inventory and the animation group change together), and
-// the weapon let fly is destroyed at once, as Guerrilla deletes it (human_delete_item_from_inventory):
-// the game's own destroy (0x6D5450, the world's: thiscall, the object, true; the script function
-// sf_of_delete_object's way; it marks the object and takes its body away, the world deletes it later).
-// Destroying the carried weapon WITHOUT the second way (the first try, 2026-11-10) left its record in
-// the inventory and in his hands with no weapon behind it: he stood carrying nothing, and setting it
-// down (0x8BA7C0, from the controls 0x4E1478 and again from the equip 0x85D287) read through the empty
-// hand (the user's crash at 0x8BA7D7). Should the game find no last weapon to go back to, the heading
-// step gives him his sledgehammer (Guerrilla's player_equip_sledgehammer) or the first weapon in his slots.
+// A carried thing thrown (Guerrilla's propane tank). Guerrilla's Mason picks a tank up and throws it: its
+// weapon is "non-inventory", and launch_thrown_weapon (RM 0xBE79A0) throws the item itself, no projectile:
+// out of his hands, enable_physics, human_remove_item_from_inventory, havok_body_apply_linear_velocity and a
+// random spin, then player_equip_item (his last weapon). The tank bounces and rolls, and goes off only from
+// damage (its item: can_explode, damaged_by_bullets, damaged_by_explosions); carried, its melee is the bash
+// (propane_tank_melee). Armageddon kept that launch (a "Thrown" shot: the player's attack 0x8BAAF0 ->
+// 0x8A3FC0, let go at the animation's "impact start", 0x8A1E50 -> the weapon's launch 0x7323C0: thiscall,
+// position, orientation, velocity, placed; a non-inventory weapon: unequipped 0x85D3C0, let fly, its record
+// out of the inventory 0x85C260, the last weapon equipped 0x8BB420). So the throw is the game's own; the
+// launch is wrapped only to log it and to watch his hands after: should the game find no last weapon to go
+// back to, the heading step gives him his sledgehammer (Guerrilla's player_equip_sledgehammer) or the first
+// weapon in his slots. (Until 2026-11-19 the mod threw the weapon's projectile instead, which blew up on
+// contact: the user's "they only explode when shot", Re-Mars-tered's way.) Set down (another weapon, a swap)
+// it leaves his hands as Guerrilla's (SetDown, below).
 
 // Materials the game draws red (a diagnostic). The game's shader library (0x6F2660 gives it) keeps each
 // shader under its name with a version for each kind of mesh and variant, a 4 by 4 table filled from the
@@ -1380,12 +1373,8 @@ LaunchThrownFn g_launchThrown;
 
 constexpr DWORD kWeaponFlagsB = 0xA;          // a weapon entry's second byte of flags
 constexpr BYTE kNonInventory = 0x10;          // "non-inventory": carried in both hands, in no slot
-constexpr int kThrownShot = 4;                // a firing mode's Shot_Type (its +0): "Thrown"
-constexpr DWORD kShotProjectile = 0x3C;       // and the projectile its shot names
-constexpr DWORD kWeaponItem = 0x14;           // a weapon entry -> its items_3d entry (whose +0 is its name)
 constexpr ULONGLONG kHandsWatchMs = 5000;     // how long after a carried throw his hands are watched
 constexpr ULONGLONG kHandsSettleMs = 300;     // the game's own equip gets this long first, and between tries
-auto const DestroyObject = reinterpret_cast<bool(__fastcall*)(void* world, void* unused, BYTE* object, bool flag)>(0x6D5450);
 // The record in a hand (0: the main one) and the one on its way there (thiscall: the human, the hand),
 // and the player's equip (cdecl: the player, the record or null, the hand, two flags).
 auto const RecordEquipped = reinterpret_cast<BYTE*(__fastcall*)(BYTE* human, void* unused, int hand)>(0x84E840);
@@ -1403,37 +1392,20 @@ const char* RecordName(const BYTE* record) {
 BYTE* __fastcall LaunchThrown(BYTE* weapon, void* unused, const float* position, const float* orientation,
                               const float* velocity, bool placed) {
     BYTE* info = weapon ? *reinterpret_cast<BYTE**>(weapon + kWeaponInfo) : nullptr;
-    const BYTE* mode = info && (info[kWeaponFlagsB] & kNonInventory) && IsGuerrillaGun(info)
-                           ? FiringModeInfo(weapon + kFiringModeSlot, nullptr) : nullptr;
-    if (!mode || *reinterpret_cast<const int*>(mode) != kThrownShot || !*reinterpret_cast<void* const*>(mode + kShotProjectile))
-        return g_launchThrown(weapon, unused, position, orientation, velocity, placed);
-    // Only for the player with this very weapon in his hands (the game's way below takes the record in
-    // his hand for the carried weapon's); anyone else throws as the game has it.
     BYTE* player = LocalPlayer();
-    const BYTE* inHand = player ? RecordEquipped(player, nullptr, 0) : nullptr;
-    if (!inHand || ObjectFromHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(inHand + kInventoryInfo)) != weapon)
-        return g_launchThrown(weapon, unused, position, orientation, velocity, placed);
-    // Its projectile, as a weapon in the inventory throws its own.
-    info[kWeaponFlagsB] &= static_cast<BYTE>(~kNonInventory);
-    BYTE* projectile = g_launchThrown(weapon, unused, position, orientation, velocity, placed);
-    info[kWeaponFlagsB] |= kNonInventory;
-    if (!projectile) {
-        rfa::Log("Thrown: %s not thrown (the game made no projectile); it stays in his hands", WeaponName(info));
-        return nullptr;
+    const BYTE* inHand = player && info && (info[kWeaponFlagsB] & kNonInventory) && IsGuerrillaGun(info) ? RecordEquipped(player, nullptr, 0) : nullptr;
+    const bool carried = inHand && ObjectFromHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(inHand + kInventoryInfo)) == weapon;
+    // Guerrilla's launch_thrown_weapon (RM 0xBE79A0) throws a carried weapon itself, as the game's own
+    // non-inventory launch does: no projectile, the tank flies with its physics on, bounces, and only its
+    // damage (shot, blown up) sets it off.
+    BYTE* result = g_launchThrown(weapon, unused, position, orientation, velocity, placed);
+    if (carried) {
+        rfa::Log("Thrown: %s thrown as Guerrilla's (the tank itself; it goes off only when shot or blown up); in his hands now: %s; on its way: %s",
+                 WeaponName(info), RecordName(RecordEquipped(player, nullptr, 0)), RecordName(RecordWanted(player, nullptr, 0)));
+        g_carriedThrownAt = GetTickCount64();
+        g_nextHandsCheck = g_carriedThrownAt + kHandsSettleMs;
     }
-    // The one he carried, the game's own way for a carried weapon: out of his hands and his inventory,
-    // his last weapon back. That lets the weapon itself fly; Guerrilla deletes it, so it is destroyed at
-    // once (it is nobody's by now, and its body gone before it can touch the projectile).
-    g_launchThrown(weapon, unused, position, orientation, velocity, placed);
-    DestroyObject(kWorld, nullptr, weapon, true);
-    // (Its item's name is logged for the tank drawn red, 2026-11-11: which items_3d entry the game drew.)
-    const BYTE* item = *reinterpret_cast<const BYTE* const*>(info + kWeaponItem);
-    rfa::LogDetail("Thrown: %s (its item: %s) thrown as its projectile; the one carried is out of his hands (in them now: %s; on its way: %s)",
-             WeaponName(info), item && *reinterpret_cast<const char* const*>(item) ? *reinterpret_cast<const char* const*>(item) : "none",
-             RecordName(RecordEquipped(player, nullptr, 0)), RecordName(RecordWanted(player, nullptr, 0)));
-    g_carriedThrownAt = GetTickCount64();
-    g_nextHandsCheck = g_carriedThrownAt + kHandsSettleMs;
-    return projectile;
+    return result;
 }
 
 // From the player's heading step, for a few seconds after he threw what he carried: if the game's own
@@ -1491,18 +1463,66 @@ bool __cdecl SetDown(BYTE* human) {
     const float place[3] = {at[0] + facing[0] * kSetDownAhead, at[1] + facing[1] * kSetDownAhead, at[2] + facing[2] * kSetDownAhead};
     const float still[3] = {0.0f, 0.0f, 0.0f};
     g_launchThrown(weapon, nullptr, place, reinterpret_cast<const float*>(weapon + 0x10), still, false);
-    rfa::LogDetail("Thrown: %s set down as Guerrilla's (no animation; in his hands now: %s)", WeaponName(info), RecordName(RecordEquipped(player, nullptr, 0)));
+    rfa::Log("Thrown: %s set down as Guerrilla's (no animation; in his hands now: %s)", WeaponName(info), RecordName(RecordEquipped(player, nullptr, 0)));
     return true;
+}
+
+// Picking a carried thing up (Armageddon's 0x8BA2F0, cdecl: the player, and whether to take it or only ask; the use
+// key's 0x8BA100 sends a non-inventory weapon there): what he aims at (player +0x1540) comes off its parent, its
+// physics body is told to ignore him, it goes into his inventory (0x85B3E0 with slot -1: the first free selection
+// slot, as Guerrilla's human_find_open_inventory_selection_slot gives its tank) and is equipped (0x85CEE0), as
+// Guerrilla's player_pickup_non_inventory (RM 0xAC2720). The user's 12:08 run of 2026-11-19: the first tank he took
+// went into his weapon select with something box-like at his hands until he changed weapons and took it again;
+// then it was right. The code alone doesn't say why, so each pickup writes what it found and what it left: the thing's
+// item flags (+0x108: bit 0 respawn, which makes the inventory take a copy and leave the thing where it lies, 0x85B7CD;
+// 4 held; 6 preplaced), its parent (+0x6C) and physics body (+0x4C) before; after, the record that holds the tank,
+// its selection slot (+0x10) and whether its weapon is the very thing he took.
+constexpr DWORD kPickUpCarried = 0x8BA2F0;
+constexpr size_t kPickUpCarriedPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0B0h
+using PickUpCarriedFn = bool(__cdecl*)(BYTE* player, bool take);
+PickUpCarriedFn g_pickUpCarried;
+
+constexpr DWORD kUseTarget = 0x1540;   // the player -> the handle of what the use key acts on
+constexpr DWORD kItemFlags = 0x108;    // an item's flags (obj_item_flags)
+constexpr DWORD kParent = 0x6C;        // an object's parent's handle (-1: none)
+constexpr DWORD kPhysicsBody = 0x4C;   // an object's physics body (-1: none)
+constexpr DWORD kRecordSlot = 0x10;    // an inventory record's selection slot (-1: none)
+constexpr int kWeaponKind = 9;         // an object's subtype (+0x7B) for a weapon
+auto const CarriedObjectAt = reinterpret_cast<BYTE*(__thiscall*)(void* world, DWORD handle)>(0x6CB9E0);  // any kind
+auto const CarriedObjectKind = reinterpret_cast<int(__thiscall*)(const BYTE* object)>(0x423530);
+auto const CarriedHandleOf = reinterpret_cast<DWORD(__thiscall*)(const BYTE* object)>(0x424850);
+
+DWORD Field(const BYTE* object, DWORD offset) { return *reinterpret_cast<const DWORD*>(object + offset); }
+
+bool __cdecl PickUpCarried(BYTE* player, bool take) {
+    BYTE* target = take && player && player == LocalPlayer() ? CarriedObjectAt(kWorld, Field(player, kUseTarget)) : nullptr;
+    BYTE* weapon = target && CarriedObjectKind(target) == kWeaponKind ? target : nullptr;
+    const BYTE* info = weapon ? *reinterpret_cast<const BYTE* const*>(weapon + kWeaponInfo) : nullptr;
+    if (!info || !IsGuerrillaGun(info)) return g_pickUpCarried(player, take);
+    const DWORD handle = CarriedHandleOf(weapon), flags = Field(weapon, kItemFlags);
+    const DWORD parent = Field(weapon, kParent), body = Field(weapon, kPhysicsBody);
+    const bool taken = g_pickUpCarried(player, take);
+    const BYTE* record = HasItem(player, *reinterpret_cast<const void* const*>(info + kInventoryInfo));
+    const int slot = record ? static_cast<int>(Field(record, kRecordSlot)) : -2;
+    const DWORD holds = record ? Field(record, kInventoryInfo) : 0xFFFFFFFF;
+    rfa::Log("Thrown: %s %s (handle %08X; item flags %08X, parent %08X, body %08X before; item flags %08X, parent %08X after); "
+             "its record: %s, selection slot %d, %s; in his hands: %s (on its way: %s)",
+             WeaponName(info), taken ? "picked up" : "not picked up", handle, flags, parent, body, Field(weapon, kItemFlags), Field(weapon, kParent),
+             record ? "there" : "none", slot, !record ? "-" : holds == handle ? "the thing he took" : "another object (a copy)",
+             RecordName(RecordEquipped(player, nullptr, 0)), RecordName(RecordWanted(player, nullptr, 0)));
+    return taken;
 }
 
 void ThrownCarried() {
     g_launchThrown = reinterpret_cast<LaunchThrownFn>(
         rfa::HookFunction(kLaunchThrown, kLaunchThrownPrologue, reinterpret_cast<void*>(&LaunchThrown)));
     if (!g_launchThrown) rfa::Log("Thrown: could not wrap the weapons' launch; a thrown tank stays in the hands");
-    else rfa::Log("Thrown: a carried weapon (Guerrilla's propane tank) is thrown as its projectile and leaves the hands");
+    else rfa::Log("Thrown: a carried weapon (Guerrilla's propane tank) is thrown itself, as Guerrilla's: it bounces, and goes off only when shot or blown up");
     g_setDown = reinterpret_cast<SetDownFn>(rfa::HookFunction(kSetDown, kSetDownPrologue, reinterpret_cast<void*>(&SetDown)));
     if (!g_setDown) rfa::Log("Thrown: could not wrap the set-down; a carried tank is put down Armageddon's way");
     else rfa::Log("Thrown: a carried tank set down (another weapon, a swap) leaves his hands as Guerrilla's: no animation, it drops");
+    g_pickUpCarried = reinterpret_cast<PickUpCarriedFn>(rfa::HookFunction(kPickUpCarried, kPickUpCarriedPrologue, reinterpret_cast<void*>(&PickUpCarried)));
+    if (!g_pickUpCarried) rfa::Log("Thrown: could not wrap the pickup of a carried thing; what a tank's pickup does isn't written here");
 }
 
 // ---- Materials the game draws red (see the top)

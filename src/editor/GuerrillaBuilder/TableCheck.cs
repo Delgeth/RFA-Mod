@@ -132,8 +132,10 @@ static class TableCheck
         string cache = Path.Combine(setup.Overrides, "build", "pc", "cache");
         if (!Directory.Exists(cache)) return true;
         byte[] placed = [0x00, 0x00, 0xC8, 0x42, 0x01, 0x03, 0x00, 0x00, 0x00];  // 3D, game-defined (WwiseBankWriter.NodeBase)
-        int withFade = 0, without = 0;
+        int withFade = 0, without = 0, sharedIds = 0;
         var lacking = new List<string>();
+        // Each curve's id: Armageddon's are all different, and ours must be too (726 of our fades had one id, 2026-11-19).
+        var curveIds = new HashSet<uint>();
         foreach (string file in Directory.EnumerateFiles(cache, "rfg*.bnk_pc").Where(f => !f.EndsWith("_media.bnk_pc", StringComparison.OrdinalIgnoreCase)))
         {
             byte[] d = File.ReadAllBytes(file);
@@ -159,6 +161,7 @@ static class TableCheck
                             for (int c = 0; c < curves && q + 20 <= end; c++)
                             {
                                 uint parameter = BitConverter.ToUInt32(d, q + 5), property = BitConverter.ToUInt32(d, q + 9);
+                                if (!curveIds.Add(BitConverter.ToUInt32(d, q + 13))) sharedIds++;
                                 int points = BitConverter.ToUInt16(d, q + 18);
                                 if (parameter == WwiseBankWriter.GameDistance && property == 0) fades = true;
                                 q += 20 + 12 * points;
@@ -173,7 +176,9 @@ static class TableCheck
         }
         log.Line($"Sound distance check: {withFade} of our 3D sounds and mixers fade on the game's distance" +
                  (without > 0 ? $"; {without} don't (they'd play at full volume however far: {string.Join(", ", lacking)})" : "") +
+                 (sharedIds > 0 ? $"; {sharedIds} of their curves have an id another curve has (to look into: banks built before 2026-11-19 shared them; building the world, vehicles and weapons parts gives each its own)" : $"; their {curveIds.Count} curves' ids all different") +
                  (withFade > MostDistanceCurves ? $"; that is past the {MostDistanceCurves} curves the fades are known to work with (to look into: hang more of them from mixers)" : ""));
+        // (Shared curve ids are warned of, not failed: bin's banks built before the writer gave each its own still have them.)
         return without == 0;
     }
 

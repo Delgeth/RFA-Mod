@@ -211,7 +211,8 @@ SetStreamRadiusFn g_setStreamRadius;
 // buildings, made again when it comes back) or a column of zones 500 m off unloads and loads again
 // within seconds (in the run of 2026-11-12, 96 of 533 sub-zone loads were one loaded again within
 // 15 s). Guerrilla streams the same way, but its camera draws nothing past 475 m, so its edges are
-// out of sight; ours draw to 1500 m. In our worlds the update is handed a held position instead,
+// out of sight; ours drew to 1500 m (now to FarClip=, Guerrilla's 475 unless a player asks for more:
+// see ApplyEnvSettings). In our worlds the update is handed a held position instead,
 // moved to the camera only once it has gone StreamSteady= metres from it across the ground (its height
 // always the camera's), so a swing of the camera no longer moves the box.
 constexpr DWORD kStreamUpdate = 0x6B28B0;
@@ -551,6 +552,19 @@ void ReadStreamSteady() {
     g_streamSteady = steady >= 0 ? steady : kDefaultStreamSteady;
 }
 
+// How far the camera draws in our worlds, in metres (FarClip=; see ApplyEnvSettings; also read again whenever
+// rfa_mods.ini is saved). Guerrilla's camera draws to 475 m (camera_system_init's far clip), inside the 510 m its
+// zones stay loaded around it, so zones and buildings load out of sight in its haze. Farther shows more, but also
+// the world's edge and buildings appearing as they load. Held to 475-1500 (Guerrilla's night sky is drawn 474 m
+// out; past 1,500 m nothing is loaded); 0 = the zones' own far clip, from their environment boxes.
+constexpr float kGuerrillaFarClip = 475.0f, kMostFarClip = 1500.0f;
+float g_farClip = kGuerrillaFarClip;
+
+void ReadFarClip() {
+    const float farClip = static_cast<float>(_wtof(rfa::IniString(L"GuerrillaWorld", L"FarClip", L"475").c_str()));
+    g_farClip = farClip <= 0 ? 0 : std::clamp(farClip, kGuerrillaFarClip, kMostFarClip);
+}
+
 // Whether our worlds draw their ground as far as Guerrilla does (GroundDetail=; see RunGroundDetail).
 // Also read again whenever rfa_mods.ini is saved.
 bool g_groundDetail = true;
@@ -856,6 +870,9 @@ void CheckSettings() {
     const float steadyBefore = g_streamSteady;
     ReadStreamSteady();
     if (g_streamSteady != steadyBefore) rfa::Log("Streaming: follows the camera once it has gone %.0f m (was %.0f; 0 = every frame)", g_streamSteady, steadyBefore);
+    const float farClipBefore = g_farClip;
+    ReadFarClip();
+    if (g_farClip != farClipBefore) rfa::Log("View distance: %.0f m (was %.0f; 0 = the zones' own)", g_farClip, farClipBefore);
     ReadGroundDetail();
     const float shineBefore = g_shine;
     ReadShine();
@@ -2624,7 +2641,13 @@ float4 SunPixel(SunPoint p) : SV_Target
 // picture's size. SourcePixel: the sky round the sun, the picture averaged over 4 × 4 samples where
 // nothing was drawn (the depth at the far plane), times a round fall-off the sun's size across
 // (Guerrilla's sun mask: a texture its compositor makes at start, rl_hdr_compositor::initialize, 64 ×
-// 64, 1 at the middle falling in a straight line to 0 at its edge, laid round the sun). BlurPixel: a
+// 64, 1 at the middle falling in a straight line to 0 at its edge, laid round the sun). Guerrilla's
+// pass also multiplies the picture by a mask texture; in Re-Mars-tered that is a picture of its own
+// (the colour buffer of m_pSsaoBlurTarget[0], borrowed) that render_scene_part2 clears to black and
+// then draws the skybox, and the landmarks, into before the scene: the sky alone, black wherever
+// anything else is, so the same pixels as ours. Whether it holds the sky's colour or only some of its
+// channels (the sky's pixel shader writes its colour, alpha 1) isn't known; ours counts the sky's
+// pixels whole. BlurPixel: a
 // 5 × 5 Gaussian. RadialPixel: 16 samples on the way from the pixel toward the sun, the nearer the
 // pixel the more each counts (base − k × step ÷ 16), all times a fall-off with the distance from the
 // sun across the screen, e^(curve base × (min(distance, radius) ÷ radius)^exponent) + shift (never
@@ -2652,31 +2675,36 @@ float4 ShaftVertex(uint id : SV_VertexID) : SV_Position
     return float4(corner * float2(2, -2) + float2(-1, 1), 0, 1);
 }
 
+// (Its alpha, which nothing draws with, is the share of its 16 taps that were sky: the log's "Sun shafts at" line reads it.)
 float4 SourcePixel(float4 position : SV_Position) : SV_Target
 {
     float2 at = position.xy * Texel.xy;
     float3 sky = 0;
+    float seen = 0;
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
         {
             float2 tap = at + (float2(x, y) - 1.5) * Texel.zw;
             float depth = Depth.Load(int3(tap / Texel.zw, 0)).x;
             if (abs(depth - Sun.w) < 0.0000001)
+            {
                 sky += max(Source.SampleLevel(Smooth, tap, 0).rgb, 0);
+                seen += 1;
+            }
         }
     float fromSun = length(position.xy - Sun.xy / Texel.xy) / Strength.w;  // in the sun's sizes
-    return float4(sky / 16 * saturate(1 - 2 * fromSun), 1);
+    return float4(sky / 16 * saturate(1 - 2 * fromSun), seen / 16);
 }
 
 float4 BlurPixel(float4 position : SV_Position) : SV_Target
 {
     float2 at = position.xy * Texel.xy;
     float weights[3] = {Blur.x, Blur.y, Blur.z};
-    float3 sum = 0;
+    float4 sum = 0;
     for (int y = -2; y <= 2; ++y)
         for (int x = -2; x <= 2; ++x)
-            sum += Source.SampleLevel(Smooth, at + float2(x, y) * Texel.xy, 0).rgb * weights[abs(x)] * weights[abs(y)];
-    return float4(sum, 1);
+            sum += Source.SampleLevel(Smooth, at + float2(x, y) * Texel.xy, 0) * weights[abs(x)] * weights[abs(y)];
+    return sum;
 }
 
 float4 RadialPixel(float4 position : SV_Position) : SV_Target
@@ -3310,8 +3338,8 @@ ID3D11ShaderResourceView* OrbitalTexture(Orbital& orbital) {
 }
 
 // Guerrilla's sun shaft settings (Re-Mars-tered's Rl_sun_shafts_*, their starting values): the sun's
-// size in half-size texels, the strength (taken × 0.15625, and by a value already in the constants
-// whose meaning isn't known, taken as 1), base and step, the fall-off's radius and curve, and the
+// size in half-size texels, the strength (taken × 0.15625, and by the renderer's fade colour, 1 but in
+// a screen fade), base and step, the fall-off's radius and curve, and the
 // Gaussian's rho and multiplier.
 constexpr float kShaftSunSize = 300, kShaftScale = 1, kShaftBaseLum = 1, kShaftLumStep = 1, kShaftRadius = 5, kShaftCurveBase = -4,
                 kShaftCurveExponent = 1.6f, kShaftCurveShift = -0.02f, kShaftBlurRho = 0.75f, kShaftBlurMultiplier = 1;
@@ -3333,7 +3361,27 @@ ID3D11Texture2D* g_shaft[2] = {};  // half the picture's size, 16-bit float: dra
 ID3D11RenderTargetView* g_shaftTarget[2] = {};
 ID3D11ShaderResourceView* g_shaftView[2] = {};
 UINT g_shaftWidth = 0, g_shaftHeight = 0;
+// What the log's "Sun shafts at" line reads back (with Log=1, every 10 s; see WatchShafts): a texel of the
+// blurred sky round the sun at the sun's place, and one of the shafts at the picture's middle.
+ID3D11Texture2D* g_shaftReadback = nullptr;  // 2 × 1 texels, the half-size targets' format, for reading
+bool g_shaftReadPending = false;
+ULONGLONG g_lastShaftLog = 0;
+struct ShaftLook {
+    float hours;      // the time of day
+    float sunHeight;  // degrees above the horizon (negative below it)
+    float at[2];      // the sun's place on the picture (0 to 1 across and down)
+    bool skyRead;     // whether that place is on the picture, so the sky round the sun was read
+    bool depthKept;   // whether the shafts read the depth kept at the sky step (else the game's own at the frame's end)
+};
+ShaftLook g_shaftLook = {};
 ID3D11ShaderResourceView* g_shaftDepth = nullptr;  // the G-buffer's depth, kept from the light pass for the shafts and the corona
+// The depth the shafts read, at the tone mapping at the frame's end: a copy of the G-buffer's depth made at the sky step
+// (see KeepShaftDepth), when the fog and the corona read it too. Read at the frame's end itself, it gave no pixel at the
+// far plane: the sky round the sun came out black every time (the user's 2026-11-19 run).
+ID3D11Texture2D* g_shaftDepthCopy = nullptr;
+ID3D11ShaderResourceView* g_shaftDepthCopyView = nullptr;
+bool g_shaftDepthKept = false;        // this frame's copy is made
+bool g_shaftDepthCopyFailed = false;  // it can't be made: the shafts read the game's own depth
 bool CoronaWanted();  // (the sun's corona, below)
 float g_farDepth = 1;                              // the depth buffer's value at the far plane (from the sky step)
 
@@ -4667,23 +4715,31 @@ void DrawFog() {
     if (gameDepth) gameDepth->Release();
 }
 
-// Where the sun is on the picture (0 to 1 across, and down): false while it is down or behind the camera.
+// Where the sun is on the picture (0 to 1 across, and down; past those when it is off the picture): false
+// while it is behind the camera. That is Re-Mars-tered's own rule for its sun shafts: its scene render
+// (rl_scene_renderer::render_scene_part2) draws them only while the camera's forward and the way to the sun
+// make a positive dot product, with Rl_sun_shafts_enabled; it never asks whether the sun is above the
+// horizon, so neither does this (below it, the sky the shafts are made from is ground anyway). Its place for
+// them is the sun's own way each frame (the orbital's effect, object_effect::update_render, hands it to
+// game_render_set_sun_shafts_position; game_render_setup_frame adds the camera's place), with no height test
+// there either. Their tint's last factor is the renderer's fade colour (rl_state_manager::m_fade_color), 1
+// but in a screen fade, so ours is 1.
 bool SunOnPicture(UINT width, UINT height, float (&at)[2]) {
     float toward[3];
     SunToward(toward);
-    if (toward[1] < 0 || height == 0) return false;
+    if (height == 0) return false;
     const float* axes[3] = {&g_cameraRotation[0], &g_cameraRotation[3], &g_cameraRotation[6]};  // right, up, forward
     float along[3];
     for (int a = 0; a < 3; ++a) along[a] = toward[0] * axes[a][0] + toward[1] * axes[a][1] + toward[2] * axes[a][2];
-    if (along[2] < 0.01f) return false;
+    if (along[2] <= 0) return false;
     const float tanUp = tanf(g_cameraFov * 3.14159265f / 360.0f), tanAcross = tanUp * width / height;
     at[0] = 0.5f + 0.5f * along[0] / (along[2] * tanAcross);
     at[1] = 0.5f - 0.5f * along[1] / (along[2] * tanUp);
     return true;
 }
 
-// Guerrilla's sun shafts for this frame (see kShaftShader), from the scene and the G-buffer's depth,
-// into the first half-size target: the view to read them from, or none. Draws with the tone mapping's
+// Guerrilla's sun shafts for this frame (see kShaftShader), from the scene and the G-buffer's depth
+// (as kept at the sky step, see KeepShaftDepth), into the first half-size target: the view to read them from, or none. Draws with the tone mapping's
 // sampler, depth and rasterizer states (set by the caller, who puts the device context back).
 ID3D11ShaderResourceView* DrawShafts(ID3D11ShaderResourceView* scene, UINT width, UINT height, const float (&sun)[2]) {
     if (!g_shaftVertex && !MakeShaftObjects()) {
@@ -4738,7 +4794,8 @@ ID3D11ShaderResourceView* DrawShafts(ID3D11ShaderResourceView* scene, UINT width
         ID3D11RenderTargetView* target;
         ID3D11ShaderResourceView* inputs[2];
     };
-    const Pass passes[3] = {{g_shaftSource, g_shaftTarget[0], {scene, g_shaftDepth}},
+    ID3D11ShaderResourceView* const depth = g_shaftDepthKept ? g_shaftDepthCopyView : g_shaftDepth;
+    const Pass passes[3] = {{g_shaftSource, g_shaftTarget[0], {scene, depth}},
                             {g_shaftBlur, g_shaftTarget[1], {g_shaftView[0], nullptr}},
                             {g_shaftRadial, g_shaftTarget[0], {g_shaftView[1], nullptr}}};
     for (const Pass& pass : passes) {
@@ -4751,6 +4808,84 @@ ID3D11ShaderResourceView* DrawShafts(ID3D11ShaderResourceView* scene, UINT width
     g_context->PSSetShaderResources(0, 2, none);
     g_context->OMSetRenderTargets(0, nullptr, nullptr);
     return g_shaftView[0];
+}
+
+// A 16-bit float, as the half-size targets hold them, as a float.
+float FromHalf(uint16_t half) {
+    const int exponent = (half >> 10) & 31, fraction = half & 1023;
+    float value;
+    if (exponent == 0) value = ldexpf(static_cast<float>(fraction), -24);  // the smallest, without the leading 1
+    else if (exponent == 31) value = fraction ? NAN : INFINITY;
+    else value = ldexpf(static_cast<float>(fraction | 1024), exponent - 25);
+    return (half & 0x8000) ? -value : value;
+}
+
+// The log's "Sun shafts at" line, with Log=1, every 10 seconds: the hour, how high the sun is, where it is on the
+// picture, and what the shafts are made of there, to set beside Re-Mars-tered at the same hour, place and facing.
+// When shafts were drawn, a texel of the blurred sky round the sun is copied from the sun's place (when that is on
+// the picture) and one of the shafts from the picture's middle, and read a frame or two later without waiting;
+// with the sun behind the camera (none drawn, as in Re-Mars-tered) the line says so at once. The values are the
+// scene's own (before the tone mapping's × 8, the eye and the bloom).
+void WatchShafts(ID3D11ShaderResourceView* drawn, const float (&sunAt)[2]) {
+    if (g_shaftReadPending) {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (FAILED(g_context->Map(g_shaftReadback, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) return;
+        const uint16_t* texels = static_cast<const uint16_t*>(mapped.pData);
+        float sky[3], shafts[3];
+        for (int i = 0; i < 3; ++i) {
+            sky[i] = FromHalf(texels[i]);
+            shafts[i] = FromHalf(texels[4 + i]);
+        }
+        const float skyShare = FromHalf(texels[3]);  // the source pass's alpha, blurred: how much of the taps there were sky
+        g_context->Unmap(g_shaftReadback, 0);
+        g_shaftReadPending = false;
+        const ShaftLook& look = g_shaftLook;
+        static int told = 0;
+        if (told++ >= 60) return;
+        if (look.skyRead)
+            rfa::LogDetail("Sun shafts at %.2f h: the sun %.0f degrees up, on the picture at %.2f %.2f; the sky round it %.3f %.3f %.3f "
+                           "(%.0f%% of it sky, by the depth %s), the shafts at the picture's middle %.4f %.4f %.4f (the scene's values)",
+                           look.hours, look.sunHeight, look.at[0], look.at[1], sky[0], sky[1], sky[2], skyShare * 100,
+                           look.depthKept ? "kept at the sky step" : "at the frame's end", shafts[0], shafts[1], shafts[2]);
+        else
+            rfa::LogDetail("Sun shafts at %.2f h: the sun %.0f degrees up, off the picture at %.2f %.2f (none of the sky round it on the "
+                           "picture); the shafts at the picture's middle %.4f %.4f %.4f (the scene's values)",
+                           look.hours, look.sunHeight, look.at[0], look.at[1], shafts[0], shafts[1], shafts[2]);
+        return;
+    }
+    if (GetTickCount64() - g_lastShaftLog < 10000) return;
+    g_lastShaftLog = GetTickCount64();
+    float toward[3];
+    SunToward(toward);
+    const float height = asinf(toward[1] < -1 ? -1 : toward[1] > 1 ? 1 : toward[1]) * 180.0f / 3.14159265f;
+    if (!drawn) {
+        static int toldNone = 0;
+        if (toldNone++ < 30)
+            rfa::LogDetail("Sun shafts at %.2f h: none, the sun (%.0f degrees up) is behind the camera; Re-Mars-tered draws none then either",
+                           g_timeOfDay, height);
+        return;
+    }
+    if (!g_shaftReadback) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = 2;
+        desc.Height = 1;
+        desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &g_shaftReadback))) return;
+    }
+    g_shaftLook = {g_timeOfDay, height, {sunAt[0], sunAt[1]}, false, g_shaftDepthKept};
+    const int x = static_cast<int>(floorf(sunAt[0] * g_shaftWidth)), y = static_cast<int>(floorf(sunAt[1] * g_shaftHeight));
+    if (x >= 0 && y >= 0 && x < static_cast<int>(g_shaftWidth) && y < static_cast<int>(g_shaftHeight)) {
+        const D3D11_BOX sun = {static_cast<UINT>(x), static_cast<UINT>(y), 0, static_cast<UINT>(x) + 1, static_cast<UINT>(y) + 1, 1};
+        g_context->CopySubresourceRegion(g_shaftReadback, 0, 0, 0, 0, g_shaft[1], 0, &sun);
+        g_shaftLook.skyRead = true;
+    }
+    const D3D11_BOX middle = {g_shaftWidth / 2, g_shaftHeight / 2, 0, g_shaftWidth / 2 + 1, g_shaftHeight / 2 + 1, 1};
+    g_context->CopySubresourceRegion(g_shaftReadback, 0, 1, 0, 0, g_shaft[0], 0, &middle);
+    g_shaftReadPending = true;
 }
 
 // Guerrilla's tone mapping, drawn over Armageddon's final picture (its target, 8-bit) from the scene it
@@ -5066,6 +5201,7 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
         g_context->VSSetShader(g_toneVertex, nullptr, 0);
         g_context->PSSetConstantBuffers(0, 1, &g_toneConstants);
     }
+    if (rfa::DetailLog() && SunShaftsOn() && g_shaftDepth) WatchShafts(sunShafts, sunAt);
 
     // The picture, over Armageddon's.
     const D3D11_VIEWPORT whole = {0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
@@ -5133,6 +5269,56 @@ bool TextureOf(ID3D11View* view, D3D11_TEXTURE2D_DESC& desc) {
     return ok;
 }
 
+// At the sky step: the G-buffer's depth copied for the sun shafts, which are drawn at the tone mapping at the frame's end
+// (the copy made again when the depth's size or format changes). Once it can't be made, the shafts read the game's own.
+void KeepShaftDepth() {
+    if (!g_shaftDepth || !g_device || !g_context || g_shaftDepthCopyFailed) return;
+    ID3D11Resource* resource = nullptr;
+    g_shaftDepth->GetResource(&resource);
+    ID3D11Texture2D* depth = nullptr;
+    if (resource) {
+        resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&depth));
+        resource->Release();
+    }
+    if (!depth) return;
+    D3D11_TEXTURE2D_DESC desc;
+    depth->GetDesc(&desc);
+    D3D11_TEXTURE2D_DESC have = {};
+    if (g_shaftDepthCopy) g_shaftDepthCopy->GetDesc(&have);
+    if (!g_shaftDepthCopy || have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format ||
+        have.MipLevels != desc.MipLevels || have.ArraySize != desc.ArraySize || have.SampleDesc.Count != desc.SampleDesc.Count) {
+        if (g_shaftDepthCopyView) g_shaftDepthCopyView->Release();
+        if (g_shaftDepthCopy) g_shaftDepthCopy->Release();
+        g_shaftDepthCopyView = nullptr;
+        g_shaftDepthCopy = nullptr;
+        D3D11_TEXTURE2D_DESC copy = desc;
+        copy.Usage = D3D11_USAGE_DEFAULT;
+        copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        copy.CPUAccessFlags = 0;
+        copy.MiscFlags = 0;
+        D3D11_SHADER_RESOURCE_VIEW_DESC view;
+        g_shaftDepth->GetDesc(&view);
+        const bool made = SUCCEEDED(g_device->CreateTexture2D(&copy, nullptr, &g_shaftDepthCopy)) &&
+                          SUCCEEDED(g_device->CreateShaderResourceView(g_shaftDepthCopy, &view, &g_shaftDepthCopyView));
+        if (!made) {
+            if (g_shaftDepthCopyView) g_shaftDepthCopyView->Release();
+            if (g_shaftDepthCopy) g_shaftDepthCopy->Release();
+            g_shaftDepthCopyView = nullptr;
+            g_shaftDepthCopy = nullptr;
+            g_shaftDepthCopyFailed = true;
+            depth->Release();
+            rfa::Log("Sun shafts: could not keep a copy of the depth (%u x %u, format %d); they read the game's own at the frame's end",
+                     desc.Width, desc.Height, static_cast<int>(desc.Format));
+            return;
+        }
+        rfa::Log("Sun shafts: the depth kept from the sky step for them (%u x %u, format %d)", desc.Width, desc.Height,
+                 static_cast<int>(desc.Format));
+    }
+    g_context->CopyResource(g_shaftDepthCopy, depth);
+    depth->Release();
+    g_shaftDepthKept = true;
+}
+
 // Right after Armageddon's last composite step in our worlds: its target and the scene (t0) and bloom
 // (t5) it drew from, still bound, then Guerrilla's tone mapping over its picture.
 void ToneMapAfterComposite() {
@@ -5160,6 +5346,7 @@ void ToneMapAfterComposite() {
         if (view) view->Release();
     if (g_shaftDepth) g_shaftDepth->Release();
     g_shaftDepth = nullptr;
+    g_shaftDepthKept = false;
 }
 
 // During the light pass in our worlds, the first time its check runs (all is bound by then), the
@@ -5340,6 +5527,7 @@ void __fastcall LightPass(void* renderer, void* unused) {
     DropFogInputs();
     if (g_shaftDepth) g_shaftDepth->Release();
     g_shaftDepth = nullptr;
+    g_shaftDepthKept = false;
     g_noteFog = ours && ((g_fog > 0 && !g_fogFailed) || SunShaftsOn() || CoronaWanted());
     g_lightPass(renderer, unused);
     g_noteFog = false;
@@ -5432,6 +5620,7 @@ void __fastcall RenderSkybox(void* renderer, void* unused) {
         g_shaftDepth = g_fogDepth;
         g_shaftDepth->AddRef();
     }
+    if (ours && SunShaftsOn() && g_shaftDepth && !g_shaftDepthKept) KeepShaftDepth();
     if (!g_fogPending) DropFogInputs();
     if (!ours || !g_skyOn || g_drawingFailed || !g_context) return;
     if (!g_skyVertex) {
@@ -6559,9 +6748,28 @@ bool ZoneWindLimits(float& low, float& top) {
     return true;
 }
 
+// The same blend carries the boxes' view: while +0xCC (affects_visibility) is set, the apply hands +0xD0
+// (cull_distance) and +0xD4 (far_clip) to the scene (0x4ECEC0, 0x4ECEE0), and the far clip becomes the camera's
+// far plane (the depth's IR_Similarity_Data). Both are 475 m by the zone schema's defaults, Guerrilla's camera's
+// far clip; our world's boxes once asked for 1,500 m. In our worlds the far clip is FarClip= instead (Guerrilla's
+// 475 by default; see ReadFarClip); the cull distance stays the boxes'.
+constexpr size_t kEnvAffectsVisibility = 0xCC, kEnvFarClip = 0xD4;
+
 void __cdecl ApplyEnvSettings(BYTE* settings, void* scene, const float* where) {
     // (The blend is the caller's own copy, made each frame.)
-    if (settings && InOurWorld()) *reinterpret_cast<int*>(settings + kEnvWeatherOn) = 0;
+    if (settings && InOurWorld()) {
+        *reinterpret_cast<int*>(settings + kEnvWeatherOn) = 0;
+        if (g_farClip > 0 && *reinterpret_cast<int*>(settings + kEnvAffectsVisibility) != 0) {
+            float& farClip = *reinterpret_cast<float*>(settings + kEnvFarClip);
+            static float told = -1;
+            if (told != g_farClip) {
+                told = g_farClip;
+                rfa::Log("View distance: the camera draws to %.0f m in world \"%s\" (FarClip=; Guerrilla's 475; the zones' boxes say %.0f m)",
+                         g_farClip, WorldName(), farClip);
+            }
+            farClip = g_farClip;
+        }
+    }
     g_applyEnvSettings(settings, scene, where);
 }
 
@@ -6964,6 +7172,171 @@ void GuerrillaParticleLight() {
     }
 }
 
+// ---- Guerrilla's gusts
+//
+// Guerrilla's dust (dust_update, RM 0x6EBBF0) also plays gusts on the ground ahead of the player: every 0.2 s, while
+// the particles in use are under half of all it has (particles_parametric_max less the manager's free ones,
+// vfx_particle_system_manager::get_num_particles_parametric_free; Dust_gust_parametric_threshold 0.5), it picks a
+// place: at even odds near (6 m ahead along the player's forward, then up to 30 m either way across x and z) or far
+// (70 m ahead, up to 50 m). There it asks for the ground (get_terrain_effect_material, 0x6E1900): the terrain's height,
+// and at four points 4 m off diagonally, given up if any is more than 0.5 m off the first (a slope), the gust put at
+// the highest; then the effect material of the zone there (the zone's get_effect_material, its virtual +0x60 with
+// -1, the place, 0). Of that material's gusts of that range (rfg_effect_materials.xtbl's Gust_Effects), the first
+// whose chance beats a roll plays, else the likeliest; with no turn, tinted with the material's tint if it has one.
+// Armageddon has the same particle manager (its pointer at 0x26BF27C; parametric particles at most 0x1111300, the
+// free ones counted at +0x74), the same height query (0x7748E0), the zone at a place (0x6CB3C0) and its effect
+// material (Armageddon's object virtual +0x68, as the glass code's), effects_play (0x4EB460) and an effect's tint
+// (0x4F8370), but no gusts. The world builder writes Guerrilla's gust lists to mods\guerrilla_world\gusts.txt
+// (GuerrillaGusts) and adds their effects; in our worlds the mod plays them with the dust (Dust=), as Guerrilla's.
+// (Guerrilla also takes a gust away at once if its effect object isn't a streamed one, which with the ground loaded
+// there it is; not done here.)
+constexpr float kGustEvery = 0.2f, kGustParticleShare = 0.5f, kGustNearChance = 0.5f;
+constexpr float kGustNearAhead = 6, kGustNearSpread = 30, kGustFarAhead = 70, kGustFarSpread = 50;
+constexpr float kGustSlopeRange = 4, kGustSlopeMost = 0.5f;
+BYTE* const* const kParticleManager = reinterpret_cast<BYTE* const*>(0x26BF27C);
+const int* const kParametricParticlesMost = reinterpret_cast<const int*>(0x1111300);
+constexpr size_t kParametricParticlesFree = 0x74;
+constexpr size_t kObjectForward = 0x28;          // an object's turn, rows from +0x10: its forward axis
+constexpr size_t kZoneMaterialSlot = 0x68 / 4;   // an object's method: its effect material at a piece and place
+constexpr size_t kMaterialTintColour = 0x24, kMaterialTintIsOn = 0x34;  // an effect material's tint (4 floats) and whether it has one
+using GustGroundFn = bool(__cdecl*)(float* height, float x, float z, float* normal, int flags);
+auto const GustGround = reinterpret_cast<GustGroundFn>(0x7748E0);
+using GustZoneMaterialFn = BYTE(__fastcall*)(void* zone, void* unused, int piece, const float* at, int zero);
+using GustRandomFn = float(__cdecl*)(float low, float high);
+auto const GustRandom = reinterpret_cast<GustRandomFn>(0xC8BC00);
+using SetEffectTintFn = void(__fastcall*)(BYTE* effect, void* unused, const float* colour);
+auto const SetEffectTint = reinterpret_cast<SetEffectTintFn>(0x4F8370);
+const char* EffectMaterialName(DWORD number);  // (below, with Guerrilla's material events)
+BYTE* EffectMaterialRecord(DWORD number);
+
+struct GustEffect {
+    std::string name;
+    int number = -2;  // its number in effects.xtbl, once asked (-1: the game hasn't it)
+    float chance;     // 0 to 1
+    bool close;       // near the player (Guerrilla's Near), else far off
+    float fadeIn;
+};
+struct GustMaterial {
+    std::string material;
+    std::vector<GustEffect> gusts;
+};
+std::vector<GustMaterial> g_gustMaterials;
+float g_gustClock = 0;
+bool g_gustsLoaded = false;
+
+void LoadGusts() {
+    g_gustsLoaded = true;
+    std::vector<BYTE> file;
+    if (!ReadWholeFile(DataFolder() + L"gusts.txt", file) || file.empty()) {
+        rfa::Log("Gusts: no gusts.txt from the world builder; no gusts");
+        return;
+    }
+    const std::string text(file.begin(), file.end());
+    size_t count = 0;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::vector<std::string> words;
+        for (size_t from = 0; from <= line.size();) {
+            size_t tab = line.find('\t', from);
+            if (tab == std::string::npos) tab = line.size();
+            words.push_back(line.substr(from, tab - from));
+            from = tab + 1;
+        }
+        if (words.size() == 2 && words[0] == "material") g_gustMaterials.push_back({words[1], {}});
+        else if (words.size() == 5 && words[0] == "gust" && !g_gustMaterials.empty()) {
+            GustEffect gust;
+            gust.name = words[1];
+            gust.chance = static_cast<float>(atof(words[2].c_str()));
+            gust.close = words[3] == "1";
+            gust.fadeIn = static_cast<float>(atof(words[4].c_str()));
+            g_gustMaterials.back().gusts.push_back(gust);
+            ++count;
+        }
+    }
+    rfa::Log("Gusts: %zu of Guerrilla's on %zu materials (gusts.txt); played ahead of the player in our worlds", count, g_gustMaterials.size());
+}
+
+// The ground at a place as Guerrilla's gusts take it: false on a slope or where no ground is loaded; else the place
+// raised to the highest of its five heights, and the zone's effect material there.
+bool GustGroundAt(float (&place)[3], BYTE& material) {
+    float first = place[1], normal[3];
+    if (!GustGround(&first, place[0], place[2], normal, 0)) return false;
+    static const float kCorners[4][2] = {{1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
+    float highest = first;
+    for (const auto& corner : kCorners) {
+        float height = place[1];
+        if (!GustGround(&height, place[0] + corner[0] * kGustSlopeRange, place[2] + corner[1] * kGustSlopeRange, normal, 0)) return false;
+        if (fabsf(height - first) > kGustSlopeMost) return false;
+        if (height > highest) highest = height;
+    }
+    place[1] = highest;
+    BYTE* zone = ZoneAt(kWorld, nullptr, place);
+    if (!zone) return false;
+    auto const zoneMaterial = reinterpret_cast<GustZoneMaterialFn>((*reinterpret_cast<void***>(zone))[kZoneMaterialSlot]);
+    material = zoneMaterial(zone, nullptr, -1, place, 0);
+    return true;
+}
+
+// The gust to play from a material's list for this range (Guerrilla's: the first whose chance beats a roll, else the
+// likeliest), or null.
+GustEffect* PickGust(GustMaterial& material, bool close) {
+    for (GustEffect& gust : material.gusts)
+        if (gust.close == close && gust.chance >= GustRandom(0, 1)) return &gust;
+    GustEffect* likeliest = nullptr;
+    for (GustEffect& gust : material.gusts)
+        if (gust.close == close && (!likeliest || gust.chance >= likeliest->chance)) likeliest = &gust;
+    return likeliest;
+}
+
+// Each frame in our worlds, with the dust: Guerrilla's gusts.
+void GustUpdate(float seconds) {
+    if (!InOurWorld() || !g_dust) {
+        g_gustClock = 0;
+        return;
+    }
+    if (!g_gustsLoaded) LoadGusts();
+    if (g_gustMaterials.empty()) return;
+    g_gustClock += seconds;
+    if (g_gustClock < kGustEvery) return;
+    g_gustClock = 0;
+    // The particles in use, as a share of all of them.
+    const BYTE* manager = *kParticleManager;
+    const int most = *kParametricParticlesMost;
+    if (!manager || most <= 0) return;
+    const int used = most - *reinterpret_cast<const int*>(manager + kParametricParticlesFree);
+    if (static_cast<float>(used) / static_cast<float>(most) >= kGustParticleShare) return;
+    // A place ahead of the player.
+    const BYTE* player = LocalPlayer();
+    if (!player) return;
+    const bool close = GustRandom(0, 1) <= kGustNearChance;
+    const float ahead = close ? kGustNearAhead : kGustFarAhead, spread = close ? kGustNearSpread : kGustFarSpread;
+    const float* at = reinterpret_cast<const float*>(player + kPlayerPlace);
+    const float* forward = reinterpret_cast<const float*>(player + kObjectForward);
+    float place[3] = {at[0] + forward[0] * ahead + GustRandom(-spread, spread), at[1] + forward[1] * ahead,
+                      at[2] + forward[2] * ahead + GustRandom(-spread, spread)};
+    BYTE material = 0xFF;
+    if (!GustGroundAt(place, material) || material == 0xFF) return;
+    const char* name = EffectMaterialName(material);
+    if (!name) return;
+    auto found = std::find_if(g_gustMaterials.begin(), g_gustMaterials.end(), [&](const GustMaterial& m) { return _stricmp(m.material.c_str(), name) == 0; });
+    if (found == g_gustMaterials.end()) return;
+    GustEffect* gust = PickGust(*found, close);
+    if (!gust) return;
+    if (gust->number == -2) gust->number = EffectNumber(gust->name.c_str());
+    if (gust->number < 0) return;
+    const int handle = EffectsPlay(gust->number, place, kIdentityTurn, false, -1, -1, -1, false, 0, 0);
+    BYTE* effect = handle != -1 ? ObjectFromHandle(kWorld, nullptr, handle) : nullptr;
+    if (!effect) return;
+    const BYTE* record = EffectMaterialRecord(material);
+    if (record && record[kMaterialTintIsOn]) SetEffectTint(effect, nullptr, reinterpret_cast<const float*>(record + kMaterialTintColour));
+    RFA_LOG_DETAIL_FIRST(30, "Gusts: %s on %s at %.0f %.0f %.0f (%s; particles in use %d of %d)", gust->name.c_str(), name, place[0], place[1], place[2],
+                         close ? "near" : "far", used, most);
+}
+
 void GlassUpdate();  // (below, with Guerrilla's broken glass)
 void BuildingsUpdate();  // (below, with Guerrilla's buildings)
 void TurbinesUpdate(float seconds);  // (below, with Guerrilla's wind turbines)
@@ -6979,6 +7352,7 @@ void __cdecl EffectsUpdate(float seconds) {
     TurbinesUpdate(seconds);
     g_effectsUpdate(seconds);
     DustUpdate();
+    GustUpdate(seconds);
     if (InOurWorld()) GuerrillaParticleLight();
 }
 
@@ -7588,6 +7962,13 @@ const char* EffectMaterialName(DWORD number) {
     return materials && number < count ? reinterpret_cast<const char*>(materials + number * kEffectMaterialSize) : nullptr;
 }
 
+// An effect material's record by its number, or null.
+BYTE* EffectMaterialRecord(DWORD number) {
+    BYTE* materials = *reinterpret_cast<BYTE* const*>(kEffectMaterials);
+    const DWORD count = *reinterpret_cast<const DWORD*>(kEffectMaterialCount);
+    return materials && number < count ? materials + number * kEffectMaterialSize : nullptr;
+}
+
 MaterialEvents* GuerrillaMaterial(const char* name) {
     if (!name) return nullptr;
     for (MaterialEvents& m : g_materialEvents)
@@ -7679,6 +8060,183 @@ void LoadMaterialEvents() {
     g_materialEventsOn = true;
     rfa::Log("Material events: %zu of Guerrilla's materials, %zu rows; in the Guerrilla world the pieces play Guerrilla's effects and sounds",
              g_materialEvents.size(), rows);
+}
+
+// ---- Guerrilla's wheel effects
+//
+// Each frame, for each car, the game's wheel code (0x5F51A0, cdecl: the car) plays at every wheel that touches the
+// ground (the zone's terrain, not an object) the ground's effect material's dust: its +0x78 front and +0x7C rear
+// effect's numbers (-1: none, and then the wheel table's front and rear), tyre tracks while +0x74 is set, tinted
+// with +0x24 (red, green, blue, alpha, 0 to 1) while +0x34 is set; braking, peeling and skidding play the wheel
+// table's effects. That table (vehicle_wheel_surface_effects.xtbl's one row, read at 0x630B70) is kept as five
+// effect numbers at 0x10FC52C: front, rear, skid, peel, brake. Guerrilla's wheel code is the same
+// (automobile_effects_handle_wheel_effects), and both games' tables name the same effects, but Armageddon's
+// files for them are loaded only with its own levels, so in our worlds the wheels kicked up nothing, and its
+// tints are its own (its Terrain a pale grey, Guerrilla's a sandy orange).
+//
+// The world builder adds Guerrilla's wheel effects to the world's tables (their files in every zone) and writes
+// Guerrilla's values to mods\guerrilla_world\wheel_effects.txt (GuerrillaWheelEffects): the wheel table's five
+// effects, then each of Guerrilla's materials with its tracks, front and rear effects and tint. Both of the
+// game's tables are read once for every level, so in our worlds the mod wraps the wheel code: for each call it
+// gives the materials and the wheel table Guerrilla's values, runs the game's code, and puts Armageddon's back,
+// so nothing else, and none of Armageddon's levels, sees them.
+constexpr DWORD kWheelEffects = 0x5F51A0;
+constexpr size_t kWheelEffectsPrologue = 9;  // push ebp / mov ebp,esp / sub esp,534h
+using WheelEffectsFn = void(__cdecl*)(void* car);
+WheelEffectsFn g_wheelEffects;
+constexpr DWORD kWheelTableEffects = 0x10FC52C;  // front, rear, skid, peel, brake: five effects' numbers
+constexpr int kWheelTableFields = 5;
+const char* const kWheelTableFieldNames[kWheelTableFields] = {"front", "rear", "skid", "peel", "brake"};
+constexpr size_t kMaterialTint = 0x24, kMaterialTintOn = 0x34, kMaterialTracks = 0x74, kMaterialFront = 0x78, kMaterialRear = 0x7C;
+
+struct WheelMaterial {
+    std::string name;
+    bool tracks = false;
+    std::string front, rear;  // effects' names in the world's tables (empty: none)
+    bool tinted = false;
+    float tint[3] = {};       // 0 to 1
+    int number = -1;          // the game's effect material of this name (-1: it has none)
+    int frontNumber = -1, rearNumber = -1;
+};
+std::string g_wheelTableNames[kWheelTableFields];
+int g_wheelTableNumbers[kWheelTableFields];
+std::vector<WheelMaterial> g_wheelMaterials;
+bool g_wheelNumbered = false;
+
+// What a material had before the wheel code ran with Guerrilla's values, to put back.
+struct WheelMaterialBefore {
+    float tint[3];
+    BYTE tintOn, tracks;
+    int front, rear;
+};
+
+// The materials' and effects' numbers, the first time the wheel code runs in our world (the tables are read by then).
+void NumberWheelEffects() {
+    g_wheelNumbered = true;
+    for (int i = 0; i < kWheelTableFields; ++i)
+        g_wheelTableNumbers[i] = g_wheelTableNames[i].empty() ? -1 : EffectNumber(g_wheelTableNames[i].c_str());
+    const DWORD count = *reinterpret_cast<const DWORD*>(kEffectMaterialCount);
+    size_t found = 0, dusty = 0;
+    std::string missing;
+    for (WheelMaterial& m : g_wheelMaterials) {
+        m.number = -1;
+        for (DWORD n = 0; n < count && m.number < 0; ++n)
+            if (const char* name = EffectMaterialName(n); name && _stricmp(name, m.name.c_str()) == 0) m.number = static_cast<int>(n);
+        if (m.number < 0) {
+            missing += missing.empty() ? m.name : ", " + m.name;
+            continue;
+        }
+        ++found;
+        m.frontNumber = m.front.empty() ? -1 : EffectNumber(m.front.c_str());
+        m.rearNumber = m.rear.empty() ? -1 : EffectNumber(m.rear.c_str());
+        if (m.frontNumber >= 0 || m.rearNumber >= 0) ++dusty;
+    }
+    rfa::Log("Wheel effects: %zu of Guerrilla's %zu materials found among the game's (%zu with dust of their own)%s%s; the wheel table's "
+             "front %d, rear %d, skid %d, peel %d, brake %d", found, g_wheelMaterials.size(), dusty, missing.empty() ? "" : "; not found: ",
+             missing.c_str(), g_wheelTableNumbers[0], g_wheelTableNumbers[1], g_wheelTableNumbers[2], g_wheelTableNumbers[3], g_wheelTableNumbers[4]);
+}
+
+void __cdecl WheelEffects(void* car) {
+    BYTE* materials = *reinterpret_cast<BYTE**>(kEffectMaterials);
+    if (!InOurWorld() || !materials) {
+        g_wheelEffects(car);
+        return;
+    }
+    if (!g_wheelNumbered) NumberWheelEffects();
+    RFA_LOG_FIRST(4, "Wheel effects: the wheels play Guerrilla's dust, braking and skids in world \"%s\"", WorldName());
+    int* table = reinterpret_cast<int*>(kWheelTableEffects);
+    int tableBefore[kWheelTableFields];
+    for (int i = 0; i < kWheelTableFields; ++i) {
+        tableBefore[i] = table[i];
+        table[i] = g_wheelTableNumbers[i];
+    }
+    static std::vector<WheelMaterialBefore> before;
+    before.resize(g_wheelMaterials.size());
+    for (size_t i = 0; i < g_wheelMaterials.size(); ++i) {
+        const WheelMaterial& m = g_wheelMaterials[i];
+        if (m.number < 0) continue;
+        BYTE* at = materials + m.number * kEffectMaterialSize;
+        WheelMaterialBefore& was = before[i];
+        memcpy(was.tint, at + kMaterialTint, sizeof(was.tint));
+        was.tintOn = at[kMaterialTintOn];
+        was.tracks = at[kMaterialTracks];
+        memcpy(&was.front, at + kMaterialFront, sizeof(int));
+        memcpy(&was.rear, at + kMaterialRear, sizeof(int));
+        if (m.tinted) memcpy(at + kMaterialTint, m.tint, sizeof(m.tint));
+        at[kMaterialTintOn] = m.tinted ? 1 : 0;
+        at[kMaterialTracks] = m.tracks ? 1 : 0;
+        memcpy(at + kMaterialFront, &m.frontNumber, sizeof(int));
+        memcpy(at + kMaterialRear, &m.rearNumber, sizeof(int));
+    }
+    g_wheelEffects(car);
+    for (size_t i = 0; i < g_wheelMaterials.size(); ++i) {
+        const WheelMaterial& m = g_wheelMaterials[i];
+        if (m.number < 0) continue;
+        BYTE* at = materials + m.number * kEffectMaterialSize;
+        const WheelMaterialBefore& was = before[i];
+        memcpy(at + kMaterialTint, was.tint, sizeof(was.tint));
+        at[kMaterialTintOn] = was.tintOn;
+        at[kMaterialTracks] = was.tracks;
+        memcpy(at + kMaterialFront, &was.front, sizeof(int));
+        memcpy(at + kMaterialRear, &was.rear, sizeof(int));
+    }
+    for (int i = 0; i < kWheelTableFields; ++i) table[i] = tableBefore[i];
+}
+
+void LoadWheelEffects() {
+    std::vector<BYTE> file;
+    if (!ReadWholeFile(DataFolder() + L"wheel_effects.txt", file) || file.empty()) {
+        rfa::Log("Wheel effects: no wheel_effects.txt from the world builder; the wheels play Armageddon's own (nothing shows in our worlds)");
+        return;
+    }
+    const std::string text(file.begin(), file.end());
+    bool haveWheel = false;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::vector<std::string> words;
+        for (size_t from = 0; from <= line.size();) {
+            size_t tab = line.find('\t', from);
+            if (tab == std::string::npos) tab = line.size();
+            words.push_back(line.substr(from, tab - from));
+            from = tab + 1;
+        }
+        auto effect = [](const std::string& word) { return word == "-" ? std::string() : word; };
+        if (words.size() == 1 + kWheelTableFields && words[0] == "wheel") {
+            for (int i = 0; i < kWheelTableFields; ++i) g_wheelTableNames[i] = effect(words[1 + i]);
+            haveWheel = true;
+        } else if (words.size() == 8 && words[0] == "material") {
+            WheelMaterial m;
+            m.name = words[1];
+            m.tracks = words[2] == "1";
+            m.front = effect(words[3]);
+            m.rear = effect(words[4]);
+            m.tinted = words[5] != "-";
+            for (int i = 0; i < 3 && m.tinted; ++i) m.tint[i] = static_cast<float>(atoi(words[5 + i].c_str())) / 255.0f;
+            g_wheelMaterials.push_back(m);
+        }
+    }
+    if (!haveWheel || g_wheelMaterials.empty()) {
+        g_wheelMaterials.clear();
+        rfa::Log("Wheel effects: wheel_effects.txt has no wheel line or no material; the wheels play Armageddon's own");
+        return;
+    }
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x34, 0x05, 0x00, 0x00};
+    if (memcmp(reinterpret_cast<const void*>(kWheelEffects), opening, sizeof(opening)) == 0)
+        g_wheelEffects = reinterpret_cast<WheelEffectsFn>(rfa::HookFunction(kWheelEffects, kWheelEffectsPrologue, reinterpret_cast<void*>(&WheelEffects)));
+    if (!g_wheelEffects) {
+        g_wheelMaterials.clear();
+        rfa::Log("Wheel effects: could not wrap the game's wheel code (it isn't as expected); the wheels play Armageddon's own");
+        return;
+    }
+    std::string table;
+    for (int i = 0; i < kWheelTableFields; ++i)
+        table += std::string(i ? ", " : "") + kWheelTableFieldNames[i] + " " + (g_wheelTableNames[i].empty() ? "none" : g_wheelTableNames[i]);
+    rfa::Log("Wheel effects: Guerrilla's for %zu materials and the wheel table (%s); in our worlds the wheels play them", g_wheelMaterials.size(),
+             table.c_str());
 }
 
 // ---- Room for the materials' effects
@@ -7849,12 +8407,15 @@ void MoreSoundEngineRoom() {
 // were in use with 81 pieces out, so the pieces can't be raised alone: 315 pieces would need about 70 KB, and a
 // full record pool is "Not enough memory to start stream".
 // The user's OK for the sound limits was asked through the main session ("you have the okay to raise the limits
-// more"); both numbers were told to them. The mod makes the pieces' memory 8 MB (315 pieces) and the records'
+// more"); both numbers were told to them. The mod made the pieces' memory 8 MB (315 pieces) and the records'
 // 256 KB, both or neither (each value and its opcode checked first, and that the audio hasn't started): about
 // 6 MB more of the process's memory, none of the game's audio pool (Wwise's pools are the process's own, see "Room
 // in the sound engine's own memory"). The log's "Wwise memory:" lines and F7 Limits show both pools' use.
+// 2026-11-19 (the user, through the main session: "raise the audio limits"): 16 MB, 630 pieces, for Wwise reading
+// each stream a second ahead where it read 380 ms (see "How far ahead the sound engine reads"); at 380 ms the most
+// ever used was 5 MB of the 8. 630 pieces need about 140 KB of records, so the records' 256 KB stay.
 constexpr DWORD kStreamMemoryValue = 0x536622;   // the value of the mov at 0x53661F (C7 45 A8, then it)
-constexpr DWORD kGameStreamMemory = 0x240000, kStreamMemory = 0x800000;
+constexpr DWORD kGameStreamMemory = 0x240000, kStreamMemory = 0x1000000;
 constexpr DWORD kStreamMemoryInUse = 0x27454DC;  // where the audio set-up keeps the size once it has run
 constexpr DWORD kStreamRecordsValue = 0xB97804;  // the value of the mov at 0xB97801 (C7 45 84, then it)
 constexpr DWORD kGameStreamRecords = 0x10000, kStreamRecords = 0x40000;
@@ -7888,6 +8449,151 @@ void MoreStreamRoom() {
     }
     rfa::Log("Stream memory: %lu bytes for the streams' pieces (the game's %lu: %lu pieces where it had %lu) and %lu for their records (the game's %lu)",
              kStreamMemory, kGameStreamMemory, kStreamMemory / 0x6800, kGameStreamMemory / 0x6800, kStreamRecords, kGameStreamRecords);
+}
+
+// ---- How far ahead the sound engine reads its streams
+//
+// Wwise keeps each playing stream a set time ahead of what it plays (its stream device's "target buffer length").
+// The game takes Wwise's default for it: 380 ms (the float at 0x10AE6C8, read only by AK::StreamMgr::
+// GetDefaultDeviceSettings 0xECAB60, which only the game's audio set-up calls, at 0xB97830; the game then sets the
+// device's memory, pieces, scheduler and 18 requests at once, not this). That was enough for Armageddon's Vorbis.
+// Every one of Guerrilla's sounds is a stream of uncompressed sound read through the game's own reader (one thread,
+// 0xB9C310, 24 requests at a time, through its cache of pieces), and the runs of 2026-11-19 had Wwise's "Source
+// starvation" 120 times (the player's engine's layers, other vehicles', destruction hits), with the streams' pools
+// nearly empty and the reader asked for only a few pieces a second: the pieces came late, not too few. A second
+// ahead rides out a late piece nearly three times as long. The user, through the main session: "raise the audio
+// limits". The value is changed only while it is Wwise's 380 and the audio hasn't started (0x27454DC still 0).
+constexpr DWORD kStreamLookAheadValue = 0x10AE6C8;
+constexpr float kGameStreamLookAheadMs = 380.0f, kStreamLookAheadMs = 1000.0f;
+
+void MoreStreamLookAhead() {
+    if (*reinterpret_cast<const DWORD*>(kStreamMemoryInUse) != 0) {
+        rfa::Log("Stream look-ahead: the game's audio has already started; it keeps Wwise's %.0f ms", kGameStreamLookAheadMs);
+        return;
+    }
+    if (*reinterpret_cast<const float*>(kStreamLookAheadValue) != kGameStreamLookAheadMs) {
+        rfa::Log("Stream look-ahead: Wwise's value (0x010AE6C8) isn't the %.0f ms expected; left as it is", kGameStreamLookAheadMs);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kStreamLookAheadValue), &kStreamLookAheadMs, sizeof(kStreamLookAheadMs))) {
+        rfa::Log("Stream look-ahead: could not change Wwise's value; it keeps %.0f ms", kGameStreamLookAheadMs);
+        return;
+    }
+    rfa::Log("Stream look-ahead: Wwise reads each stream %.0f ms ahead (its default %.0f ms)", kStreamLookAheadMs, kGameStreamLookAheadMs);
+}
+
+// ---- Room in the game's audio pool, and so in its cache of stream pieces
+//
+// The game's pool "audio" (0x26AF858; size +0x44, used +0x4C) is made at start-up in 0xA45600 from the start-up
+// allocator 0xA44A20 (the process's own memory, aligned) with the size in [ebp-1F8h]: 0xF80000 bytes (15.5 MB), set
+// by one of two identical movs a flag picks (0xA46B8A and 0xA46B96: mov dword ptr [ebp-1F8h], then the value). The
+// banks' slots are cut from it, and all that is left becomes the cache of stream pieces in front of the game's
+// reader (0xB9B870: half of it as blocks of 0x6810 bytes, the rest as blocks of 0x2810, their count worked out from
+// the room, so a bigger pool is a bigger cache). It was full in every run (15,856 of 15,872 KB: about 10 MB of
+// cache) and a third of the pieces asked for had to come from the disk. An engine of Guerrilla's is 2-3 MB of loops
+// read again on every turn of the loop, so 10 MB held four vehicles' engines. The user, through the main session:
+// "raise the audio limits": 32 MB (a cache of about 26 MB), both values or neither, before the pool is made.
+constexpr DWORD kAudioPool = 0x26AF858;
+constexpr DWORD kAudioPoolValues[] = {0xA46B90, 0xA46B9C};  // the values of the two movs at 0xA46B8A and 0xA46B96
+constexpr DWORD kGameAudioPool = 0xF80000, kAudioPoolSize = 0x2000000;
+
+void MoreAudioPool() {
+    if (*reinterpret_cast<const DWORD*>(kAudioPool + 0x44) != 0) {
+        rfa::Log("Audio pool: already made; it keeps its %lu bytes", *reinterpret_cast<const DWORD*>(kAudioPool + 0x44));
+        return;
+    }
+    const BYTE opening[] = {0xC7, 0x85, 0x08, 0xFE, 0xFF, 0xFF};  // mov dword ptr [ebp-1F8h], value
+    for (DWORD value : kAudioPoolValues)
+        if (memcmp(reinterpret_cast<const void*>(value - sizeof(opening)), opening, sizeof(opening)) != 0 || rfa::CodeValue(value) != kGameAudioPool) {
+            rfa::Log("Audio pool: the game's code (0x%08lX) isn't as expected; it keeps its %lu bytes", value - static_cast<DWORD>(sizeof(opening)),
+                     kGameAudioPool);
+            return;
+        }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kAudioPoolValues[0]), &kAudioPoolSize, sizeof(kAudioPoolSize))) {
+        rfa::Log("Audio pool: could not change the game's code; it keeps its %lu bytes", kGameAudioPool);
+        return;
+    }
+    if (!rfa::PatchCode(reinterpret_cast<void*>(kAudioPoolValues[1]), &kAudioPoolSize, sizeof(kAudioPoolSize))) {
+        const bool back = rfa::PatchCode(reinterpret_cast<void*>(kAudioPoolValues[0]), &kGameAudioPool, sizeof(kGameAudioPool));
+        rfa::Log("Audio pool: could not change the game's code; it keeps its %lu bytes%s", kGameAudioPool,
+                 back ? "" : " (one of its two values could not be put back)");
+        return;
+    }
+    rfa::Log("Audio pool: %lu bytes (the game's %lu); what the banks' slots leave of it is the cache of stream pieces", kAudioPoolSize, kGameAudioPool);
+}
+
+// ---- A sound's distance, given to Wwise whenever it has changed
+//
+// Every sound of Guerrilla's fades with the game parameter game_distance (0x85C3E987), which Armageddon's audiolib
+// sets on each sound object (see WwiseBankWriter.GameDistance). Its update of an object (0xB81D00, every 33 ms)
+// measures the nearest of the object's places from the listener into +0x0C and sends it only if 0xB86900 says it
+// has changed: by more than 0.05 m from +0x10, which the update then sets to +0x0C every time, sent or not. So the
+// change it looks at is one tick's: under 1.5 m/s between the listener and the sound (walking away from a kiosk,
+// a car rolling up), nothing is sent, and Wwise keeps the distance last sent however far the two drift apart.
+// Armageddon's own sounds hardly use the parameter (Wwise's own attenuation places them); for ours it is the whole
+// fade. The user, 2026-11-19: "not respecting the distance, for instance the kiosk".
+// Guerrilla works out a sound's volume from its distance at every update. The mod replaces 0xB86900 (a thiscall
+// on the object, called only from that update) so the distance is compared with the one last sent for that
+// object: sent once it differs by more than the game's 0.05 m, the first time the mod sees the object (or after
+// 100 ms without an update: the game reuses its sound objects' records), and again every 500 ms in any case, so
+// a value Wwise dropped with a game object it forgot is put back soon. A line every 10 s (with Log=1) says how
+// many were sent, and how many the game's own rule would have sent.
+constexpr DWORD kDistanceChanged = 0xB86900;
+constexpr float kDistanceStep = 0.05f;  // the game's own
+constexpr DWORD kDistanceGapMs = 100, kDistanceResendMs = 500;
+
+struct SentDistance {
+    float distance;
+    DWORD sentAt, seenAt;
+};
+std::unordered_map<const BYTE*, SentDistance> g_sentDistances;
+SRWLOCK g_sentDistancesLock = SRWLOCK_INIT;
+DWORD g_distancesSince = 0;
+long g_distanceUpdates = 0, g_distancesSent = 0, g_distancesByGameRule = 0;
+int g_distanceLines = 0;
+
+bool __fastcall DistanceToSend(const BYTE* object, void* /*unused*/) {
+    const float distance = *reinterpret_cast<const float*>(object + 0x0C);
+    const float lastUpdate = *reinterpret_cast<const float*>(object + 0x10);
+    const DWORD now = GetTickCount();
+    AcquireSRWLockExclusive(&g_sentDistancesLock);
+    auto [entry, first] = g_sentDistances.try_emplace(object, SentDistance{distance, now, now});
+    SentDistance& sent = entry->second;
+    const bool send = first || now - sent.seenAt > kDistanceGapMs || fabsf(distance - sent.distance) > kDistanceStep ||
+                      now - sent.sentAt >= kDistanceResendMs;
+    sent.seenAt = now;
+    if (send) {
+        sent.distance = distance;
+        sent.sentAt = now;
+    }
+    ++g_distanceUpdates;
+    if (send) ++g_distancesSent;
+    if (fabsf(distance - lastUpdate) > kDistanceStep) ++g_distancesByGameRule;
+    if (g_distancesSince == 0) g_distancesSince = now;
+    if (now - g_distancesSince >= 10000 && g_distanceLines < 30) {
+        ++g_distanceLines;
+        rfa::LogDetail("Sound distances (10 s): %ld updates of %u sound objects, %ld distances sent to Wwise (the game's own rule: %ld)", g_distanceUpdates,
+                       static_cast<unsigned>(g_sentDistances.size()), g_distancesSent, g_distancesByGameRule);
+        g_distancesSince = now;
+        g_distanceUpdates = g_distancesSent = g_distancesByGameRule = 0;
+    }
+    ReleaseSRWLockExclusive(&g_sentDistancesLock);
+    return send;
+}
+
+void InstallSoundDistances() {
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x0C, 0x89, 0x4D, 0xF8};  // push ebp / mov ebp,esp / sub esp,0Ch / mov [ebp-8],ecx
+    if (memcmp(reinterpret_cast<const void*>(kDistanceChanged), opening, sizeof(opening)) != 0) {
+        rfa::Log("Sound distances: the game's code (0x00B86900) isn't as expected; a sound's distance goes to Wwise by the game's own rule");
+        return;
+    }
+    if (!rfa::ReplaceFunction(kDistanceChanged, reinterpret_cast<const void*>(&DistanceToSend))) {
+        rfa::Log("Sound distances: could not change the game's code; a sound's distance goes to Wwise by the game's own rule");
+        return;
+    }
+    rfa::Log("Sound distances: each sound's distance goes to Wwise once it differs by more than %.2f m from the one last sent (the game: from the one "
+             "33 ms before), and every %lu ms in any case",
+             kDistanceStep, kDistanceResendMs);
 }
 
 // ---- The music's format test (console command rfg_music_test)
@@ -8013,9 +8719,11 @@ void MusicTestFrame() {
 // held guns ended in a fight, hits were cut short: the run of 2026-11-11 00:43). The user: "you have the okay to
 // raise the limits more". The Guerrilla builder writes an override of the player's own init.bnk_pc with that one
 // number made 256 (GuerrillaSoundBanks.WriteBusLimit; the game's code isn't touched); this says in the log what
-// the override holds (a bus: an object of type 8, its limit 25 bytes after its id).
-constexpr DWORD kTopSoundBus = 0x1001382D;
-constexpr DWORD kGameSoundsAtOnce = 128;
+// the override holds (a bus: an object of type 8, its limit 25 bytes after its id). The same override lets the
+// effects' bus for one-shots (0x2785E1AB) play 64 where Armageddon's let 15 (2026-11-19: a car through a building
+// had 1,833 destruction impacts in ten seconds, and the one-shots past 15 never sounded).
+constexpr DWORD kTopSoundBus = 0x1001382D, kEffectsSoundBus = 0x2785E1AB;
+constexpr DWORD kGameSoundsAtOnce = 128, kGameEffectSoundsAtOnce = 15;
 
 void LogSoundLimit() {
     std::vector<BYTE> bank;
@@ -8023,6 +8731,7 @@ void LogSoundLimit() {
         rfa::Log("Sounds at once: the game's own %lu (there is no override of its init.bnk_pc)", kGameSoundsAtOnce);
         return;
     }
+    WORD top = 0, effects = 0;
     for (size_t at = 0; at + 8 <= bank.size();) {
         DWORD size = 0;
         memcpy(&size, &bank[at + 4], sizeof(size));
@@ -8037,18 +8746,19 @@ void LogSoundLimit() {
                 memcpy(&length, &bank[object + 4], sizeof(length));
                 memcpy(&id, &bank[object + 8], sizeof(id));
                 if (length < 4 || object + 8 + length > bank.size()) break;
-                if (type == 8 && id == kTopSoundBus && length >= 27) {
-                    WORD limit = 0;
-                    memcpy(&limit, &bank[object + 8 + 25], sizeof(limit));
-                    rfa::Log("Sounds at once: %u (the game's own %lu), the top bus's limit in the override of init.bnk_pc", limit, kGameSoundsAtOnce);
-                    return;
-                }
+                if (type == 8 && (id == kTopSoundBus || id == kEffectsSoundBus) && length >= 27)
+                    memcpy(id == kTopSoundBus ? &top : &effects, &bank[object + 8 + 25], sizeof(WORD));
                 object += 8 + length;
             }
         }
         at += 8 + size;
     }
-    rfa::Log("Sounds at once: the override of init.bnk_pc has no bus 0x%08lX; the limit isn't known", kTopSoundBus);
+    if (top == 0) {
+        rfa::Log("Sounds at once: the override of init.bnk_pc has no bus 0x%08lX; the limit isn't known", kTopSoundBus);
+        return;
+    }
+    rfa::Log("Sounds at once: %u (the game's own %lu), the top bus's limit, and %u of the effects' one-shots (the game's own %lu), in the override of init.bnk_pc",
+             top, kGameSoundsAtOnce, effects, kGameEffectSoundsAtOnce);
 }
 
 // ---- Room for more visual effects
@@ -9903,8 +10613,26 @@ void PropUp(const BYTE* prop, float* up) {
     up[2] = m[5];
 }
 
+// Guerrilla's melee hit on a loose prop. Both games' melee (Guerrilla's object_mover::process_melee_hit RM 0xA139C0,
+// Armageddon's 0x8DA940, vtable +0x78) apply the move's structure figure as damage of kind 5, then push the body with the
+// move's ImpactForce (the same in both: the per-set figure, times the attacker's upgrades). The prop's apply_damage (both:
+// the figure × 200 ÷ the body's mass off its hit points; taken away only when a flagged vehicle hits it, or at 0 hit points
+// if its physical material is crushable) takes the figure as it comes. Our melee table carries Guerrilla's structure figures
+// × 100, as Guerrilla's buildings take them (its rfg_mover::apply_damage multiplies a melee hit by 100 itself, Armageddon's
+// doesn't; see the world builder's melee moves), so a loose prop took 100 times Guerrilla's: the hammer's 150,000 for 1,500
+// took the blue barrel's 50,000 hit points at one blow (1,500 takes 3,000 of them a blow, as in Guerrilla). The user saw
+// hammered barrels go (2026-11-19); what took them once their hit points were gone isn't known. In our worlds a melee hit on
+// a loose prop is Guerrilla's figure again.
+constexpr int kMeleeDamageKind = 5;
+constexpr float kGuerrillaMeleeBuildingScale = 100.0f;
+
 DWORD __fastcall PropDamaged(BYTE* prop, void* unused, float damage, int kind, const float* a, const float* b, BYTE* attacker, DWORD handle,
                              float scale, int x, int y, int z) {
+    if (kind == kMeleeDamageKind && InOurWorld()) {
+        RFA_LOG_FIRST(1, "Props: a melee hit on a loose prop takes Guerrilla's figure, the table's divided by %.0f (%.0f for %.0f)",
+                      kGuerrillaMeleeBuildingScale, damage / kGuerrillaMeleeBuildingScale, damage);
+        damage /= kGuerrillaMeleeBuildingScale;
+    }
     if (!g_propLog || !prop || !PropLineLeft())
         return g_propDamage(prop, unused, damage, kind, a, b, attacker, handle, scale, x, y, z);
     const BYTE* player = LocalPlayer();
@@ -10240,7 +10968,9 @@ void InstallBuildings() {
         if (memcmp(reinterpret_cast<const void*>(kPropDamage), propOpening, sizeof(propOpening)) == 0 &&
             *reinterpret_cast<const DWORD*>(kPropVtable + 0xA4) == kPropDamage)
             g_propDamage = reinterpret_cast<PropDamageFn>(rfa::HookFunction(kPropDamage, kPropDamagePrologue, reinterpret_cast<void*>(&PropDamaged)));
-        if (!g_propDamage) rfa::Log("Props: could not wrap the game's damage to a prop (its code isn't as expected); PropLog= does nothing");
+        if (!g_propDamage)
+            rfa::Log("Props: could not wrap the game's damage to a prop (its code isn't as expected); a melee hit on one takes the table's "
+                     "building figure, and PropLog= does nothing");
     }
     if (memcmp(reinterpret_cast<const void*>(kResetLinkStrengths), resetOpening, sizeof(resetOpening)) == 0)
         g_resetLinkStrengths = reinterpret_cast<ResetLinkStrengthsFn>(
@@ -10304,6 +11034,8 @@ void InstallBuildings() {
 constexpr DWORD kSetMoverCallbacks = 0x7A4650;
 constexpr size_t kSetMoverCallbacksPrologue = 6;  // push ebp / mov ebp,esp / sub esp,20h
 constexpr size_t kMoverLevelObject = 0xB4, kMoverDamagedCallback = 0xC0, kMoverDestroyedCallback = 0xC4, kMoverHandle = 0x68;
+constexpr size_t kMoverStreamedInCallback = 0xBC;  // (Guerrilla's on_stream_in_callback, one place earlier)
+constexpr int kStreamedInEvent = 0x23;             // Armageddon's stream-in event (its mover callback 0x7A4A20; Guerrilla's 0x1E)
 // A mover with this flag (its flags at +0xF0) gets no callbacks in either game: Armageddon's setup zeroes them and
 // stops (0x7A46CE), as Guerrilla's does (mover_flags & 4, 0xAD9678). Seen on blades' pieces (their level object's
 // name, made in play), so Guerrilla's turbine code leaves them alone too.
@@ -10338,6 +11070,7 @@ std::vector<Turbine> g_turbines;                              // from turbines.t
 // The damaged and destroyed callbacks the game gave each mover we wrap, by its handle: ours call them first.
 struct MoverCallbacksBefore {
     MoverCallbackFn damaged, destroyed;
+    MoverCallbackFn streamedIn;  // (only Guerrilla's custom objects' are wrapped)
 };
 std::unordered_map<DWORD, MoverCallbacksBefore> g_moverCallbacks;
 struct MotorWatch {
@@ -10395,6 +11128,8 @@ void BuildingDamaged(const MoverEvent& event);    // (below, with the buildings 
 void BuildingDestroyed(const MoverEvent& event);
 void ForgetBuildingStates();
 
+void CustomObjectDamaged(const MoverEvent& event);  // (below, Guerrilla's custom objects)
+
 // Each mover's damaged and destroyed callbacks in our worlds: the game's own first, then what we keep of it.
 int __cdecl MoverDamaged(const MoverEvent* event, void* notify) {
     const auto found = event ? g_moverCallbacks.find(event->handle) : g_moverCallbacks.end();
@@ -10402,10 +11137,316 @@ int __cdecl MoverDamaged(const MoverEvent* event, void* notify) {
     if (!event || event->type != kDamagedEvent || !InOurWorld()) return result;
     BuildingDamaged(*event);
     TurbineDamaged(*event);
+    CustomObjectDamaged(*event);
     return result;
 }
 
+// ---- Guerrilla's custom objects: effects that stop, objects that die when moved
+//
+// Guerrilla's custom object setup (custom_object_set_callbacks, RM 0xAD9670) gives some movers code of their own by
+// their level object's name (each mover otherwise: its custom effects started when it streams in, unless it is
+// killed, custom_effects_start_all, and stopped when it is destroyed). Armageddon starts and stops them the same
+// way and has the same stop (0x7A5B80, cdecl: the mover; it stops the effects whose handles are at [mover+0xB4]+4
+// on), but none of Guerrilla's kinds. In our worlds these are Guerrilla's, by the same names (as Guerrilla's level
+// objects or ours, "rfg_" before them):
+// - Smokestacks (smokestack_a, 0102smokestack_a, 0105smokestack_a): an rfg_mover stack smokes only while it has
+//   taken no damage. Streamed in already damaged (its percent destroyed above 0) it doesn't start
+//   (stop_effect_on_destroyable_stream_in_callback); its first damage stops it
+//   (stop_effect_on_destroyable_damaged_callback). A general_mover stack keeps its smoke.
+// - Vents and antennas (ind_vent_wall01, res_vent_roof_A, res_vent_wall_A, EDF_antenna): the same damage rule, and a
+//   watch (stop_effect_on_move_do_frame_callback): once its body moves at all (or it is no longer a streamed
+//   object), its effects (the vents' heat, the antennas' lights) stop and the watch ends.
+// - PA speakers and portable comms (PA_speaker, edf_portable_comm_a): a watch (kill_on_move_do_frame_callback): once
+//   its body moves at all, the object is given its level object's own hit points as damage of the level-object
+//   kind (it dies, with its death effects) and the watch ends.
+// - Fire barrels (tank_fire01_a): streamed in tipped over (its up axis less than 0.9 up) its fire doesn't start
+//   (fire_barrel_stream_in_callback); else a watch (fire_barrel_do_frame_callback): while it is a streamed object,
+//   once it leans past that (knocked over) its fire goes out 3 s later.
+// - Power cores (EDFPower_Core): their effects follow their damage, effect_percent (variable 10 in both games): as
+//   they stream in, 1 - their hit points left over their level object's (power_core_stream_in_callback); on each
+//   damaged event, the event's share of damage (power_core_damaged_callback).
+// - Mission computers (miss_comp_adv_A): of their three effects only the first and third show while no one uses
+//   them (computer_stream_in_callback); destroyed, all three are taken away at once (computer_destroyed_callback).
+//   Not yet: someone using one at an action node swaps the third for the second and back (computer_use_action_callback,
+//   on Guerrilla's use event 0x33): Armageddon's mover use slot (+0xC8) is a stub and its use event isn't known.
+// Not yet: the excavator (0101machine_big_mining_a_blade, _engine): its blade's human collision (damage, ragdoll), its
+// motor's watch and the engine's death stopping the motor.
+// The stream-in rules run after the game's own stream-in callback (wrapped, +0xBC, event 0x23), as Guerrilla's run in
+// its stream-in callbacks.
+// The watches run in the effects' frame update (TurbinesUpdate). Guerrilla's look at the object's body's speed as
+// Armageddon has it too (havok_body_get_linear_velocity, 0x776740 here: moving is any speed at all) and at whether it
+// is still a streamed object (obj_flags.streamed, +0x55 bit 0x10 in Guerrilla: once it isn't, a vent's effects stop
+// and a barrel's watch ends). Armageddon's place for that flag isn't known (its object flags aren't all laid out as
+// Guerrilla's), so here an object counts as streamed while it lasts, as one placed in a zone stays.
+constexpr DWORD kStopCustomEffects = 0x7A5B80;
+using StopCustomEffectsFn = void(__cdecl*)(BYTE* mover);
+auto const StopCustomEffects = reinterpret_cast<StopCustomEffectsFn>(kStopCustomEffects);
+bool g_stopOnMoveOn = false;  // the game's stop is as expected (checked at start-up)
+enum class CustomKind { None, Smokestack, StopOnMove, KillOnMove, FireBarrel, PowerCore, Computer };
+struct CustomName {
+    const char* name;
+    CustomKind kind;
+};
+const CustomName kCustomNames[] = {
+    {"smokestack_a", CustomKind::Smokestack}, {"0102smokestack_a", CustomKind::Smokestack}, {"0105smokestack_a", CustomKind::Smokestack},
+    {"ind_vent_wall01", CustomKind::StopOnMove}, {"res_vent_roof_A", CustomKind::StopOnMove}, {"res_vent_wall_A", CustomKind::StopOnMove},
+    {"EDF_antenna", CustomKind::StopOnMove},     {"PA_speaker", CustomKind::KillOnMove},       {"edf_portable_comm_a", CustomKind::KillOnMove},
+    {"tank_fire01_a", CustomKind::FireBarrel},   {"EDFPower_Core", CustomKind::PowerCore},     {"miss_comp_adv_A", CustomKind::Computer},
+};
+constexpr size_t kCustomObjectBody = 0x4C;     // an object's physics body's handle (-1: none)
+constexpr size_t kMoverEffectHandles = 0x04;   // in a mover's record ([mover+0xB4]): its 3 custom effects' handles
+constexpr int kMoverEffectCount = 3;
+constexpr size_t kMoverHitpointsLeft = 0x1C;   // in that record: its hit points left (a whole number; Guerrilla's +0x24)
+constexpr int kEffectPercentVariable = 10;     // effect_percent, in both games' vfx_expression_variables.xtbl
+using SetEffectPercentFn = void(__fastcall*)(BYTE* effect, void* unused, int variable, float value);  // object_effect::set_expression_variable
+auto const SetEffectPercent = reinterpret_cast<SetEffectPercentFn>(0x4F8250);
+using BodyVelocityFn = void(__cdecl*)(DWORD body, float* velocity);  // 0x776740, Guerrilla's havok_body_get_linear_velocity
+auto const BodyVelocity = reinterpret_cast<BodyVelocityFn>(0x776740);
+constexpr float kFireBarrelUpright = 0.9f;     // Guerrilla's: its up axis's height at least this
+constexpr float kFireBarrelOutAfter = 3.0f;    // seconds (Guerrilla's 3,000 ms timer)
+constexpr size_t kObjectUpHeight = 0x20;       // an object's turn, rows from +0x10: its up axis's height
+constexpr size_t kRfgMoverDestroyed = 0x13C;   // an rfg_mover's percent destroyed (0 to 1)
+constexpr size_t kObjectKind = 0x7A, kObjectSubkind = 0x7B;  // an object's type (2 a mover) and subtype (1 an rfg_mover)
+constexpr size_t kLevelObjectHitpoints = 0x44;  // a level object's Hitpoints (a whole number; Guerrilla's +0x4C)
+struct CustomWatch {
+    DWORD handle;
+    CustomKind kind;
+    float at[3];
+    bool seen;
+    float burning;  // a fire barrel's time leaning (below 0: not leaning)
+};
+std::vector<CustomWatch> g_customWatches;
+
+// A mover's level object (its properties at [mover+0xB4], whose first field is the level object, whose first field
+// is the name), or null.
+const BYTE* MoverLevelObject(const BYTE* mover) {
+    const BYTE* custom = *reinterpret_cast<BYTE* const*>(mover + kMoverLevelObject);
+    return custom ? *reinterpret_cast<BYTE* const*>(custom) : nullptr;
+}
+
+const char* MoverLevelObjectName(const BYTE* mover) {
+    const BYTE* levelObject = MoverLevelObject(mover);
+    return levelObject ? *reinterpret_cast<const char* const*>(levelObject) : nullptr;
+}
+
+CustomKind CustomKindOf(const char* name) {
+    if (!name) return CustomKind::None;
+    if (_strnicmp(name, "rfg_", 4) == 0) name += 4;
+    for (const CustomName& custom : kCustomNames)
+        if (_stricmp(name, custom.name) == 0) return custom.kind;
+    return CustomKind::None;
+}
+
+bool IsRfgMover(const BYTE* object) { return object[kObjectKind] == 2 && object[kObjectSubkind] == 1; }
+
+const char* KindName(CustomKind kind) {
+    switch (kind) {
+        case CustomKind::Smokestack: return "smokestack";
+        case CustomKind::StopOnMove: return "vent or antenna";
+        case CustomKind::KillOnMove: return "PA speaker or comm";
+        case CustomKind::FireBarrel: return "fire barrel";
+        case CustomKind::PowerCore: return "power core";
+        case CustomKind::Computer: return "computer";
+        default: return "?";
+    }
+}
+
+void StopObjectEffects(BYTE* mover, DWORD handle, CustomKind kind, const char* why) {
+    StopCustomEffects(mover);
+    const char* name = MoverLevelObjectName(mover);
+    RFA_LOG_DETAIL_FIRST(60, "Effects: %s %08lX (%s): its effects stopped, %s, as Guerrilla's", name ? name : "?", handle, KindName(kind), why);
+}
+
+// A PA speaker or comm that moved: its own hit points as level-object damage, as Guerrilla's kill_on_move does.
+void KillMovedObject(BYTE* mover, DWORD handle) {
+    const BYTE* levelObject = MoverLevelObject(mover);
+    const int hitpoints = levelObject ? *reinterpret_cast<const int*>(levelObject + kLevelObjectHitpoints) : 0;
+    if (hitpoints <= 0 || hitpoints > 10000000) {
+        RFA_LOG_FIRST(4, "Effects: %08lX moved, but its level object's hit points read %d; left alive", handle, hitpoints);
+        return;
+    }
+    static const float kNoDirection[3] = {0, 0, 0};
+    float at[3];
+    memcpy(at, mover + 4, sizeof(at));
+    auto const applyDamage = reinterpret_cast<ApplyDamageFn>((*reinterpret_cast<void** const*>(mover))[kApplyDamageSlot]);
+    applyDamage(mover, nullptr, static_cast<float>(hitpoints), kLevelObjectDamage, at, kNoDirection, nullptr, 0xFFFFFFFF, 1.0f, 0, false, false);
+    const char* name = MoverLevelObjectName(mover);
+    RFA_LOG_DETAIL_FIRST(60, "Effects: %s %08lX moved: given its %d hit points of damage, as Guerrilla's kill on move", name ? name : "?", handle,
+                         hitpoints);
+}
+
+// A mover's custom effects' handles: three at [mover+0xB4]+4 (Guerrilla's m_custom_effects, at +8 of its record).
+DWORD* MoverEffectHandles(BYTE* mover) {
+    BYTE* custom = *reinterpret_cast<BYTE**>(mover + kMoverLevelObject);
+    return custom ? reinterpret_cast<DWORD*>(custom + kMoverEffectHandles) : nullptr;
+}
+
+// A power core's effects told how damaged it is (power_core_set_effect_variables: effect_percent, variable 10 in
+// both games, on each of its custom effects).
+void SetPowerCoreEffects(BYTE* mover, DWORD handle, float percent, const char* why) {
+    DWORD* handles = MoverEffectHandles(mover);
+    if (!handles) return;
+    for (int i = 0; i < kMoverEffectCount; ++i)
+        if (handles[i] != 0xFFFFFFFF)
+            if (BYTE* effect = ObjectFromHandle(kWorld, nullptr, handles[i])) SetEffectPercent(effect, nullptr, kEffectPercentVariable, percent);
+    const char* name = MoverLevelObjectName(mover);
+    RFA_LOG_DETAIL_FIRST(40, "Effects: %s %08lX (power core): its effects' effect_percent %.2f, %s, as Guerrilla's", name ? name : "?", handle, percent, why);
+}
+
+// A computer's effect taken away at once (Guerrilla's computer code destroys them, not fades them).
+void DestroyMoverEffect(BYTE* mover, int slot) {
+    DWORD* handles = MoverEffectHandles(mover);
+    if (!handles || handles[slot] == 0xFFFFFFFF) return;
+    if (BYTE* effect = ObjectFromHandle(kWorld, nullptr, handles[slot])) DestroyGameObject(kWorld, nullptr, effect, false);
+    handles[slot] = 0xFFFFFFFF;
+}
+
+// On a mover's damaged event in our worlds: a smokestack, vent or antenna that is an rfg_mover has its effects
+// stopped at its first damage (stop_effect_on_destroyable_damaged_callback); a power core's effects take the damage's
+// share (power_core_damaged_callback).
+void CustomObjectDamaged(const MoverEvent& event) {
+    auto watch = std::find_if(g_customWatches.begin(), g_customWatches.end(), [&](const CustomWatch& w) { return w.handle == event.handle; });
+    if (watch == g_customWatches.end()) return;
+    BYTE* mover = GameObjectFromHandle(kWorld, nullptr, event.handle);
+    if (!mover) return;
+    if (watch->kind == CustomKind::PowerCore) {
+        SetPowerCoreEffects(mover, event.handle, event.share, "damaged");
+        return;
+    }
+    if ((watch->kind != CustomKind::Smokestack && watch->kind != CustomKind::StopOnMove) || !IsRfgMover(mover)) return;
+    StopObjectEffects(mover, event.handle, watch->kind, "at its first damage");
+    g_customWatches.erase(watch);
+}
+
+// On a mover's destroyed event in our worlds, before the game's own: a computer's effects are taken away at once
+// (computer_destroyed_callback), where the game's would fade them.
+void CustomObjectDestroyed(const MoverEvent& event) {
+    auto watch = std::find_if(g_customWatches.begin(), g_customWatches.end(), [&](const CustomWatch& w) { return w.handle == event.handle; });
+    if (watch == g_customWatches.end() || watch->kind != CustomKind::Computer) return;
+    if (BYTE* mover = GameObjectFromHandle(kWorld, nullptr, event.handle)) {
+        for (int i = 0; i < kMoverEffectCount; ++i) DestroyMoverEffect(mover, i);
+        RFA_LOG_DETAIL_FIRST(20, "Effects: computer %08lX destroyed: its effects taken away, as Guerrilla's", event.handle);
+    }
+    g_customWatches.erase(watch);
+}
+
+// On a mover's stream-in event in our worlds, after the game's own (which starts its custom effects, as Guerrilla's
+// custom_effects_start_all): Guerrilla's stream-in callbacks for its kinds, and their watches begin.
+void CustomObjectStreamedIn(DWORD handle) {
+    auto watch = std::find_if(g_customWatches.begin(), g_customWatches.end(), [&](const CustomWatch& w) { return w.handle == handle; });
+    if (watch == g_customWatches.end()) return;
+    BYTE* mover = GameObjectFromHandle(kWorld, nullptr, handle);
+    if (!mover) return;
+    watch->seen = true;
+    watch->burning = -1;
+    const float upHeight = *reinterpret_cast<const float*>(mover + kObjectUpHeight);
+    bool done = false;
+    switch (watch->kind) {
+        case CustomKind::Smokestack:
+            // stop_effect_on_destroyable_stream_in_callback: an rfg_mover stack already damaged doesn't smoke. (Its first
+            // damage is watched from its damaged event; a general_mover stack keeps its smoke.)
+            if (IsRfgMover(mover) && *reinterpret_cast<const float*>(mover + kRfgMoverDestroyed) > 0)
+                StopObjectEffects(mover, handle, watch->kind, "streamed in damaged");
+            done = !IsRfgMover(mover) || *reinterpret_cast<const float*>(mover + kRfgMoverDestroyed) > 0;
+            break;
+        case CustomKind::FireBarrel:
+            // fire_barrel_stream_in_callback: tipped over, no fire (and no watch).
+            if (upHeight < kFireBarrelUpright) {
+                StopObjectEffects(mover, handle, watch->kind, "streamed in tipped over");
+                done = true;
+            }
+            break;
+        case CustomKind::PowerCore: {
+            // power_core_stream_in_callback: 1 - its hit points left over its level object's, held to 0-1. (Its watch
+            // stays, for its damaged events.)
+            const BYTE* custom = *reinterpret_cast<BYTE* const*>(mover + kMoverLevelObject);
+            const BYTE* levelObject = MoverLevelObject(mover);
+            const int most = levelObject ? *reinterpret_cast<const int*>(levelObject + kLevelObjectHitpoints) : 0;
+            if (custom && most > 0) {
+                const float left = static_cast<float>(*reinterpret_cast<const int*>(custom + kMoverHitpointsLeft)) / static_cast<float>(most);
+                SetPowerCoreEffects(mover, handle, std::clamp(1 - left, 0.0f, 1.0f), "streamed in");
+            }
+            break;
+        }
+        case CustomKind::Computer:
+            // computer_stream_in_callback starts its first and third effects only: its second (the screen of someone
+            // using it) waits for a user. (Its watch stays, for its destroyed event.)
+            DestroyMoverEffect(mover, 1);
+            RFA_LOG_DETAIL_FIRST(20, "Effects: computer %08lX streamed in: its second effect taken away (no one using it), as Guerrilla's", handle);
+            break;
+        default:
+            break;
+    }
+    if (done) g_customWatches.erase(watch);
+}
+
+// The movers' stream-in callbacks in our worlds, for Guerrilla's custom objects: the game's own first, then theirs.
+int __cdecl MoverStreamedIn(const MoverEvent* event, void* notify) {
+    const auto found = event ? g_moverCallbacks.find(event->handle) : g_moverCallbacks.end();
+    const int result = found != g_moverCallbacks.end() && found->second.streamedIn ? found->second.streamedIn(event, notify) : 0;
+    if (event && event->type == kStreamedInEvent && InOurWorld()) CustomObjectStreamedIn(event->handle);
+    return result;
+}
+
+// Each frame in our worlds: Guerrilla's watches.
+void WatchCustomObjects(float seconds) {
+    for (size_t k = 0; k < g_customWatches.size();) {
+        CustomWatch& watch = g_customWatches[k];
+        BYTE* mover = GameObjectFromHandle(kWorld, nullptr, watch.handle);
+        if (!mover) {
+            g_customWatches.erase(g_customWatches.begin() + k);
+            continue;
+        }
+        const float upHeight = *reinterpret_cast<const float*>(mover + kObjectUpHeight);
+        bool done = false;
+        if (!watch.seen) {  // (watched from its stream-in, as Guerrilla's watches start: CustomObjectStreamedIn)
+            ++k;
+            continue;
+        }
+        {
+            // Its body's speed, as Guerrilla's watches read it (havok_body_get_linear_velocity; "moving" is any speed
+            // at all, vector::is_null false), or none without a body.
+            const bool wantsSpeed = watch.kind == CustomKind::StopOnMove || watch.kind == CustomKind::KillOnMove;
+            const DWORD body = wantsSpeed ? *reinterpret_cast<const DWORD*>(mover + kCustomObjectBody) : 0xFFFFFFFF;
+            float velocity[3] = {};
+            if (body != 0xFFFFFFFF) BodyVelocity(body, velocity);
+            const bool moving = body != 0xFFFFFFFF && (velocity[0] != 0 || velocity[1] != 0 || velocity[2] != 0);
+            switch (watch.kind) {
+                case CustomKind::StopOnMove:
+                    // (Guerrilla's: with no body, its effects stop at once.)
+                    if (body == 0xFFFFFFFF || moving) {
+                        StopObjectEffects(mover, watch.handle, watch.kind, body == 0xFFFFFFFF ? "it has no body" : "its body moved");
+                        done = true;
+                    }
+                    break;
+                case CustomKind::KillOnMove:
+                    // (Guerrilla's: with no body, the watch ends and it lives.)
+                    if (moving) KillMovedObject(mover, watch.handle);
+                    done = body == 0xFFFFFFFF || moving;
+                    break;
+                case CustomKind::FireBarrel:
+                    // (Guerrilla ends this watch once the barrel isn't a streamed object; knocked over it still is,
+                    // so its fire goes out 3 s after it leans. Here the watch ends with the barrel.)
+                    if (watch.burning >= 0 || upHeight < kFireBarrelUpright) {
+                        if (watch.burning < 0) watch.burning = 0;
+                        watch.burning += seconds;
+                        if (watch.burning >= kFireBarrelOutAfter) {
+                            StopObjectEffects(mover, watch.handle, watch.kind, "3 s after it leaned over");
+                            done = true;
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (done) g_customWatches.erase(g_customWatches.begin() + k);
+        else ++k;
+    }
+}
+
 int __cdecl MoverDestroyed(const MoverEvent* event, void* notify) {
+    if (event && event->type == kDestroyedEvent && InOurWorld()) CustomObjectDestroyed(*event);
     const auto found = event ? g_moverCallbacks.find(event->handle) : g_moverCallbacks.end();
     const int result = found != g_moverCallbacks.end() && found->second.destroyed ? found->second.destroyed(event, notify) : 0;
     if (event && event->type == kDestroyedEvent && InOurWorld()) BuildingDestroyed(*event);
@@ -10419,6 +11460,19 @@ bool __cdecl SetMoverCallbacks(BYTE* mover, bool flag) {
     const bool result = g_setMoverCallbacks(mover, flag);
     if (!mover || !InOurWorld()) return result;
     if (*reinterpret_cast<const DWORD*>(mover + kMoverCallbackFlags) & kMoverNoCallbacks) return result;  // none in either game
+    // Guerrilla's custom objects (see WatchCustomObjects): watched from their setup, as Guerrilla's setup does.
+    if (const CustomKind kind = g_stopOnMoveOn ? CustomKindOf(MoverLevelObjectName(mover)) : CustomKind::None; kind != CustomKind::None) {
+        const DWORD watched = *reinterpret_cast<const DWORD*>(mover + kMoverHandle);
+        if (std::none_of(g_customWatches.begin(), g_customWatches.end(), [&](const CustomWatch& w) { return w.handle == watched; }))
+            g_customWatches.push_back({watched, kind, {}, false, -1.0f});
+        // Its stream-in callback wrapped, for Guerrilla's stream-in callbacks after the game's own (see MoverStreamedIn).
+        auto& streamedIn = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverStreamedInCallback);
+        if (streamedIn != &MoverStreamedIn) g_moverCallbacks[watched].streamedIn = streamedIn;
+        if (streamedIn) streamedIn = &MoverStreamedIn;
+        else CustomObjectStreamedIn(watched);  // (no stream-in callback of the game's: its watch begins now)
+        RFA_LOG_FIRST(1, "Effects: Guerrilla's smokestacks, vents, antennas, PA speakers, comms, fire barrels, power cores and computers act as "
+                         "Guerrilla's in our worlds");
+    }
     auto& damaged = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverDamagedCallback);
     auto& destroyed = *reinterpret_cast<MoverCallbackFn*>(mover + kMoverDestroyedCallback);
     if (!damaged && !destroyed) return result;
@@ -10441,10 +11495,12 @@ void TurbinesUpdate(float seconds) {
         g_motorsWatched.clear();
         g_bladesTimers.clear();
         g_motorsKilled.clear();
+        g_customWatches.clear();
         ForgetBuildingStates();
         return;
     }
     if (seconds <= 0) return;
+    WatchCustomObjects(seconds);
     for (size_t k = 0; k < g_motorsWatched.size();) {
         MotorWatch& watch = g_motorsWatched[k];
         BYTE* motor = GameObjectFromHandle(kWorld, nullptr, watch.motor);
@@ -10497,6 +11553,11 @@ void InstallTurbines() {
         fclose(file);
     }
     LoadBuildingList();
+    const BYTE stopOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08};
+    g_stopOnMoveOn = memcmp(reinterpret_cast<const void*>(kStopCustomEffects), stopOpening, sizeof(stopOpening)) == 0;
+    if (!g_stopOnMoveOn)
+        rfa::Log("Effects: the game's stop for an object's effects isn't as expected; Guerrilla's smokestacks, vents, antennas, PA speakers, comms "
+                 "and fire barrels act as Armageddon's");
     const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20};
     if (memcmp(reinterpret_cast<const void*>(kSetMoverCallbacks), opening, sizeof(opening)) == 0)
         g_setMoverCallbacks = reinterpret_cast<SetMoverCallbacksFn>(
@@ -10511,6 +11572,78 @@ void InstallTurbines() {
     else
         rfa::Log("Wind turbines: %u read from mods\\guerrilla_world\\turbines.txt; Guerrilla's turbine code plays on them in our worlds",
                  static_cast<unsigned>(g_turbines.size()));
+}
+
+// ---- Guerrilla's props' balance point
+//
+// A loose prop (a general_mover made from one of its chunk file's general objects: barrels, crates, chairs) gets its
+// body's mass properties from that general object's box, which both games' files keep in the file's own scene. Guerrilla's
+// blue barrel (tank_empty01_a) stands on that scene's floor: its box 0.00 to 0.98 m up, its own origin (the record's place)
+// at 0.49 m, its middle. Guerrilla's havok_body_calc_mass_props for a box (RM 0x80E3D0, called by general_mover::stream)
+// gives a solid box's inertia and the centre of mass at the body's own origin: zero. Armageddon's (0x776A20, cdecl: from,
+// to, mass, the centre of mass and the inertia out) gives the same inertia but the centre of mass at the box's middle, and
+// its general mover's body (0x8CCEB0, vtable 0xFCE88C +0x18: thiscall, one byte, ret 4) keeps it for a general object (a
+// broken-off piece's is worked out again after). Armageddon's own props sit at their scene's origin, so the box's middle
+// is theirs; Guerrilla's are off by their record's place: the blue barrel's balance point came 0.49 m above its middle, at
+// its lid, the fire barrel's (tank_fire01_a) and the explosive one's (tank_Explosive01_A) just above theirs, so a knock
+// turned each over onto its lid, where it stayed (the user's 2026-11-19 run). In our worlds a general mover's body has
+// Guerrilla's: the centre of mass at its origin, the rest as the game works it out.
+constexpr DWORD kGeneralMoverBody = 0x8CCEB0;
+constexpr size_t kGeneralMoverBodyPrologue = 9;  // push ebp / mov ebp,esp / sub esp,1F8h
+constexpr DWORD kGeneralMoverBodySlot = 0x18;    // in the general movers' vtable (kPropVtable)
+constexpr DWORD kBoxMassProperties = 0x776A20;
+constexpr size_t kBoxMassPropertiesPrologue = 6;  // push ebp / mov ebp,esp / sub esp,34h
+using GeneralMoverBodyFn = bool(__fastcall*)(BYTE* mover, void* unused, bool flag);
+using BoxMassPropertiesFn = void(__cdecl*)(const float* from, const float* to, float mass, float* centre, float* inertia);
+GeneralMoverBodyFn g_generalMoverBody;
+BoxMassPropertiesFn g_boxMassProperties;
+thread_local BYTE* t_bodyOf = nullptr;  // the general mover in our worlds whose body is being made
+volatile LONG g_balanceLines = 0;
+
+bool __fastcall GeneralMoverBody(BYTE* mover, void* unused, bool flag) {
+    BYTE* const before = t_bodyOf;
+    t_bodyOf = InOurWorld() ? mover : nullptr;
+    const bool made = g_generalMoverBody(mover, unused, flag);
+    t_bodyOf = before;
+    return made;
+}
+
+// Its level object's name, read with care (the body is made as it streams in), or null.
+const char* PropName(const BYTE* mover) {
+    const BYTE* custom = nullptr;
+    if (!CopyIfReadable(&custom, mover + kMoverLevelObject, sizeof(custom)) || !ReadableMemory(custom, sizeof(void*))) return nullptr;
+    const BYTE* levelObject = *reinterpret_cast<BYTE* const*>(custom);
+    if (!ReadableMemory(levelObject, sizeof(void*))) return nullptr;
+    const char* name = *reinterpret_cast<const char* const*>(levelObject);
+    return ReadableMemory(name, 1) ? name : nullptr;
+}
+
+void __cdecl BoxMassProperties(const float* from, const float* to, float mass, float* centre, float* inertia) {
+    g_boxMassProperties(from, to, mass, centre, inertia);
+    const BYTE* const mover = t_bodyOf;
+    if (!mover || !centre) return;
+    if (InterlockedIncrement(&g_balanceLines) <= 8) {
+        const char* name = PropName(mover);
+        rfa::LogDetail("Props: %s (%.0f kg): its balance point at its origin, as Guerrilla's (Armageddon's: its box's middle, %.2f %.2f %.2f m off)",
+                       name ? name : "a prop", mass, centre[0], centre[1], centre[2]);
+    }
+    centre[0] = centre[1] = centre[2] = 0;
+}
+
+void InstallPropBalance() {
+    const BYTE bodyOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xF8, 0x01, 0x00, 0x00};
+    const BYTE massOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x34};
+    if (memcmp(reinterpret_cast<const void*>(kGeneralMoverBody), bodyOpening, sizeof(bodyOpening)) == 0 &&
+        memcmp(reinterpret_cast<const void*>(kBoxMassProperties), massOpening, sizeof(massOpening)) == 0 &&
+        *reinterpret_cast<const DWORD*>(kPropVtable + kGeneralMoverBodySlot) == kGeneralMoverBody) {
+        g_boxMassProperties = reinterpret_cast<BoxMassPropertiesFn>(
+            rfa::HookFunction(kBoxMassProperties, kBoxMassPropertiesPrologue, reinterpret_cast<void*>(&BoxMassProperties)));
+        if (g_boxMassProperties)
+            g_generalMoverBody = reinterpret_cast<GeneralMoverBodyFn>(
+                rfa::HookFunction(kGeneralMoverBody, kGeneralMoverBodyPrologue, reinterpret_cast<void*>(&GeneralMoverBody)));
+    }
+    if (g_generalMoverBody) rfa::Log("Props: in our worlds a loose prop's balance point is its origin, as Guerrilla's (Armageddon's: its box's middle)");
+    else rfa::Log("Props: could not wrap the making of a prop's body (the game's code isn't as expected); props balance as Armageddon's");
 }
 
 // ---- The buildings, for Guerrilla's minimap (for guerrilla_hud)
@@ -10839,11 +11972,16 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     MoreEmitterRoom();
     MoreMaterialEffectRoom();
     LoadMaterialEvents();
+    LoadWheelEffects();
     InstallBuildings();
     InstallTurbines();
+    InstallPropBalance();
     InstallLadders();
     MoreSoundEngineRoom();
     MoreStreamRoom();
+    MoreStreamLookAhead();
+    MoreAudioPool();
+    InstallSoundDistances();
     LogSoundLimit();
     MoreUnbatchedRenderableRoom();
     g_loadShaders =reinterpret_cast<LoadShadersFn>(rfa::HookFunction(kLoadShaders, kLoadShadersPrologue, reinterpret_cast<void*>(&LoadShaders)));
@@ -10865,6 +12003,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ReadZoneSize();
     ReadStreamRadius();
     ReadStreamSteady();
+    ReadFarClip();
     ReadGroundDetail();
     ReadShine();
     ReadBloom();

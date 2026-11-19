@@ -80,6 +80,11 @@ public static partial class GuerrillaHud
             UpgradePictures: true, GuerrillaTextSizes: true),
         new("rfg_ui_demolitions", ["key_178", "key_124"], GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons,
             ExtraTextures: ["interface-pc"], RenamedGlobals: ["STAMP_PAD"], GuerrillaTextSizes: true),
+        // Guerrilla's activity-complete screen, a Transporter's or a Collateral Damage's results (its raids', house arrest's
+        // and area defense's are its mission-complete screen, rfg_ui_mission_complete): Enter and Esc (key_178, key_124)
+        // in its hints. Its STAMP_PAD is rfg_ui_hud_missions' too, and its HINT_PAD the world map's: renamed.
+        new("rfg_ui_activity_complete", ["key_178", "key_124"], GuerrillaScript: true, BridgedItems: true, ExtraTextures: ["interface-pc"],
+            RenamedGlobals: ["STAMP_PAD", "HINT_PAD"], GuerrillaTextSizes: true),
         // Guerrilla's handbook (its pause menu's HANDBOOK): its pages and entries (GuerrillaHandbook, handbook.txt), the
         // weapons' icons its combat page shows, the PC keys A, D and Esc for its hints (ui_bms_pc_buttons: key_48, key_50,
         // key_124). The mod loads it only while it's open, and each entry's own picture from a document of its own, the

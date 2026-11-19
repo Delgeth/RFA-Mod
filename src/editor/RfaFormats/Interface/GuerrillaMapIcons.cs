@@ -62,8 +62,9 @@ public static partial class GuerrillaMapIcons
 
     /// <summary>
     /// Guerrilla's object classes that add an icon, and the minimap element each adds (minimap_elements:
-    /// see docs). Missions and activities are shown where they start; their end points (convoy, courier)
-    /// only showed while one ran, and aren't written.
+    /// see docs). Missions and activities are shown where they start (for the classes in
+    /// <see cref="StartedAtSpawn"/>, at the object_activity_spawn that names them); their end points (convoy,
+    /// courier) only showed while one ran, and aren't written.
     /// </summary>
     static readonly (string Class, string Element)[] IconClasses =
     [
@@ -75,6 +76,23 @@ public static partial class GuerrillaMapIcons
         ("object_riding_shotgun_node", "MAP_ELEMENT_RIDING_SHOTGUN"),
         ("object_area_defense_node", "MAP_ELEMENT_AREA_DEFENSE"),
         ("object_delivery_node", "MAP_ELEMENT_GUERRILLA_EXPRESS"),  // Guerrilla Express: a delivery's start (start_node)
+    ];
+
+    /// <summary>
+    /// The activities whose start icon Guerrilla draws at an object_activity_spawn, not at their node. The
+    /// spawn's activity_type names a base activity (activity.xtbl); object_activity_spawn::level_init_post
+    /// (RM 0xA60C60) links it to the first node of these classes, in this order (find_activity_node 0xA4A100,
+    /// 0xA4A160, 0xA4A1C0), whose type (the property: a Name in the table) has that base activity, and a spawn
+    /// no node has gets none. The icon is the node's element at the spawn, while the node can_spawn
+    /// (offensive_raid_data::render_inactive_icons 0x7853F0, activity_house_arrest::add_start_up_icons 0x782910,
+    /// activity_area_defense_data::activity_do_frame_inactive 0x7A8BF0). No spawn names a defensive raid
+    /// (je_rd: the natural spawner starts those), so they have no start icon.
+    /// </summary>
+    static readonly (string Class, string Property, string Table, string Entry, string BaseActivity)[] StartedAtSpawn =
+    [
+        ("object_raid_node", "raid_type", "raid_data.xtbl", "RaidData", "base_activity_data"),
+        ("object_house_arrest_node", "house_arrest_type", "activity_house_arrest.xtbl", "house_arrest", "base_activity_data"),
+        ("object_area_defense_node", "area_defense_type", "activity_area_defense.xtbl", "Activity_area_defense", "Base_Data"),
     ];
 
     static readonly (string What, string Tag)[] HintTags =
@@ -124,10 +142,15 @@ public static partial class GuerrillaMapIcons
         int tags = 0, bombs = 0;
         var counts = new SortedDictionary<string, int>();
         var classes = IconClasses.ToDictionary(c => NameHashes.ClassHash(c.Class), c => c);
-        foreach (PackfileEntry entry in zoneScripts.Entries.Where(e => e.Name.StartsWith("p_terr01_", StringComparison.OrdinalIgnoreCase) &&
-                                                                           e.Name.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
-                                                           .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
-            foreach (GuerrillaZoneObject zoneObject in GuerrillaZones.Objects(zoneScripts.Read(entry)))
+        // The persistent zones' objects, all read first: an activity spawn's node can be in another zone.
+        List<GuerrillaZoneObject> persistent = zoneScripts.Entries.Where(e => e.Name.StartsWith("p_terr01_", StringComparison.OrdinalIgnoreCase) &&
+                                                                              e.Name.EndsWith(".rfgzone_pc", StringComparison.OrdinalIgnoreCase))
+                                                              .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                                                              .SelectMany(e => GuerrillaZones.Objects(zoneScripts.Read(e))).ToList();
+        Dictionary<string, GuerrillaZoneObject> spawnNodes = SpawnNodes(misc, persistent);
+        uint spawnClass = NameHashes.ClassHash("object_activity_spawn");
+        var startedAtSpawn = StartedAtSpawn.Select(s => NameHashes.ClassHash(s.Class)).ToHashSet();
+        foreach (GuerrillaZoneObject zoneObject in persistent)
             {
                 if (zoneObject.ClassHash == bftpClass && zoneObject.Value("pair_number") is { Length: >= 4 } pairValue)
                 {
@@ -145,9 +168,18 @@ public static partial class GuerrillaMapIcons
                     }
                     continue;
                 }
-                if (!classes.TryGetValue(zoneObject.ClassHash, out var kind) || !elements.TryGetValue(kind.Element, out Element? element)) continue;
-                if (Flag(zoneObject, "DISABLED") == true || Flag(zoneObject, "enabled") == false) continue;  // a house arrest Guerrilla never offers
-                if (kind.Class == "object_delivery_node" && Flag(zoneObject, "start_node") != true) continue;  // only where a delivery starts
+                // An activity spawn shows the start icon of the node it is linked to, at its own place; those nodes show none.
+                GuerrillaZoneObject node = zoneObject;
+                if (zoneObject.ClassHash == spawnClass)
+                {
+                    if (zoneObject.Text("activity_type") is not { } activity || !spawnNodes.TryGetValue(activity, out GuerrillaZoneObject? linked)) continue;
+                    node = linked;
+                }
+                else if (startedAtSpawn.Contains(zoneObject.ClassHash)) continue;
+                if (!classes.TryGetValue(node.ClassHash, out var kind) || !elements.TryGetValue(kind.Element, out Element? element)) continue;
+                // A house arrest no mission has enabled yet (activity_enable_specific clears it; missions aren't ported).
+                if (Flag(node, "DISABLED") == true || Flag(node, "enabled") == false) continue;
+                if (kind.Class == "object_delivery_node" && Flag(node, "start_node") != true) continue;  // only where a delivery starts
                 float x = (zoneObject.BoundsMin.X + zoneObject.BoundsMax.X) / 2, z = (zoneObject.BoundsMin.Z + zoneObject.BoundsMax.Z) / 2;
                 if (placed.Any(p => p.Picture == element.Picture && Math.Abs(p.X - x) < SamePlaceMetres && Math.Abs(p.Z - z) < SamePlaceMetres)) continue;
                 placed.Add((element.Picture, x, z));
@@ -238,6 +270,29 @@ public static partial class GuerrillaMapIcons
 
     /// <summary>A one-byte flag property, or null if the object hasn't it.</summary>
     static bool? Flag(GuerrillaZoneObject zoneObject, string name) => zoneObject.Value(name) is { Length: >= 1 } value ? value[0] != 0 : null;
+
+    /// <summary>
+    /// Each base activity that a node of <see cref="StartedAtSpawn"/> has, to that node: the first of the first
+    /// class to have it, as object_activity_spawn::level_init_post links a spawn whose activity_type names it.
+    /// </summary>
+    static Dictionary<string, GuerrillaZoneObject> SpawnNodes(Packfile misc, List<GuerrillaZoneObject> objects)
+    {
+        var nodes = new Dictionary<string, GuerrillaZoneObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (objectClass, property, table, entry, baseActivity) in StartedAtSpawn)
+        {
+            if (misc.Find(table) is not { } file) continue;
+            // The table's entries: each Name (as the node's property names it) to its base activity.
+            var activities = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match block in Regex.Matches(Encoding.Latin1.GetString(misc.Read(file)), $"<{entry}>.*?</{entry}>",
+                                                  RegexOptions.Singleline | RegexOptions.IgnoreCase))
+                if (Tag(block.Value, "Name") is { } name && Tag(block.Value, baseActivity) is { } activity) activities.TryAdd(name, activity);
+            uint classHash = NameHashes.ClassHash(objectClass);
+            foreach (GuerrillaZoneObject node in objects)
+                if (node.ClassHash == classHash && node.Text(property) is { } type && activities.TryGetValue(type, out string? activity))
+                    nodes.TryAdd(activity, node);
+        }
+        return nodes;
+    }
 
     /// <summary>minimap_icon_info.xtbl: each element by name (MAP_ELEMENT_...).</summary>
     static Dictionary<string, Element> Elements(string table)

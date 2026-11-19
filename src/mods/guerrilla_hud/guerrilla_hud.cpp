@@ -496,6 +496,7 @@ struct Document {
     bool whileCabinet = false;  // loaded and drawn only while Guerrilla's weapon cabinet is open
     bool whileLiberation = false;  // loaded and drawn only while the district-liberated screen is open
     bool whileActivity = false;    // loaded and drawn only while an activity's briefing or results screen is open
+    bool whileActivityComplete = false;  // loaded and drawn only while Guerrilla's activity-complete screen is open
     bool whileHandbook = false;  // loaded and drawn only while Guerrilla's handbook is open
     bool handbookPicture = false;  // one of the handbook's entries' pictures: loaded while its entry is shown
     bool zoneSet = false;    // one of the four documents of the zones' pictures (ZoneSetDocument)
@@ -646,9 +647,12 @@ bool CabinetIsOpen();  // Guerrilla's weapon cabinet (below)
 void CloseCabinet(const char* why, bool giveAmmo);
 bool LiberationIsOpen();    // Guerrilla's district-liberated screen (below)
 bool ActivityScreenOpen();  // an activity's briefing or results screen (below)
+bool ActivityCompleteOpen();  // Guerrilla's activity-complete screen (below)
 // A screen of ours that pauses the game and hides the HUD: a safehouse's (the shop or the cabinet), or one the campaign
-// raises (a district liberated, an activity's briefing or results).
-bool StationScreenOpen() { return ShopIsOpen() || CabinetIsOpen() || LiberationIsOpen() || ActivityScreenOpen(); }
+// raises (a district liberated, an activity's briefing or results, Guerrilla's activity-complete screen).
+bool StationScreenOpen() {
+    return ShopIsOpen() || CabinetIsOpen() || LiberationIsOpen() || ActivityScreenOpen() || ActivityCompleteOpen();
+}
 bool HandbookIsOpen();  // Guerrilla's handbook (below)
 bool HandbookClosing();
 void FollowHandbook();
@@ -1055,7 +1059,8 @@ bool AnyHandbookDocumentLoaded() {
 
 // A screen's document, loaded only while it's open (the handbook's, the shop's, the cabinet's; see Wanted).
 bool ScreenDocument(const Document& doc) {
-    return doc.whileHandbook || doc.handbookPicture || doc.whileShop || doc.whileCabinet || doc.whileLiberation || doc.whileActivity;
+    return doc.whileHandbook || doc.handbookPicture || doc.whileShop || doc.whileCabinet || doc.whileLiberation || doc.whileActivity ||
+           doc.whileActivityComplete;
 }
 
 bool AnyScreenDocumentLoaded() {
@@ -1093,6 +1098,7 @@ bool Wanted(const Document& doc) {
     if (doc.whileCabinet) return CabinetIsOpen();
     if (doc.whileLiberation) return LiberationIsOpen();
     if (doc.whileActivity) return ActivityScreenOpen();
+    if (doc.whileActivityComplete) return ActivityCompleteOpen();
     if (doc.whileHandbook) return HandbookIsOpen() || AnyHandbookPictureLoaded();
     if (doc.handbookPicture) {
         if (doc.loaded && HandbookPictureKept(doc)) return true;
@@ -1107,13 +1113,15 @@ bool Wanted(const Document& doc) {
 // While a shop or the weapon cabinet is open only its screen is drawn (Guerrilla hid its HUD for them).
 bool ShouldDraw(const Document& doc, bool hudRuns) {
     const bool shop = ShopIsOpen(), cabinet = CabinetIsOpen(), handbook = HandbookIsOpen();
-    const bool liberation = LiberationIsOpen(), activity = ActivityScreenOpen();
-    if ((shop || cabinet || handbook || liberation || activity) && !(shop && doc.whileShop) && !(cabinet && doc.whileCabinet) &&
-        !(handbook && doc.whileHandbook) && !(liberation && doc.whileLiberation) && !(activity && doc.whileActivity) && !doc.zoneSet &&
-        !doc.handbookPicture && !doc.onTop)
+    const bool liberation = LiberationIsOpen(), activity = ActivityScreenOpen(), activityComplete = ActivityCompleteOpen();
+    if ((shop || cabinet || handbook || liberation || activity || activityComplete) && !(shop && doc.whileShop) &&
+        !(cabinet && doc.whileCabinet) && !(handbook && doc.whileHandbook) && !(liberation && doc.whileLiberation) &&
+        !(activity && doc.whileActivity) && !(activityComplete && doc.whileActivityComplete) && !doc.zoneSet && !doc.handbookPicture &&
+        !doc.onTop)
         return false;
     return doc.drawn && hudRuns && (!doc.whileOpen || g_mapOpen) && (!doc.whileShop || shop) && (!doc.whileCabinet || cabinet) &&
-           (!doc.whileHandbook || handbook) && (!doc.whileLiberation || liberation) && (!doc.whileActivity || activity);
+           (!doc.whileHandbook || handbook) && (!doc.whileLiberation || liberation) && (!doc.whileActivity || activity) &&
+           (!doc.whileActivityComplete || activityComplete);
 }
 
 // The draw list draws in the order documents were added to it, and adds a new one last: a document added after one that
@@ -1180,7 +1188,8 @@ void FollowTheWorld() {
         AddCampaignScreenCommands();
         FollowCampaignScreens();
         StepCampaignScreens();
-        if (!HandbookIsOpen() && !HandbookClosing() && !LiberationIsOpen() && !ActivityScreenOpen()) FollowSafehouses();
+        if (!HandbookIsOpen() && !HandbookClosing() && !LiberationIsOpen() && !ActivityScreenOpen() && !ActivityCompleteOpen())
+            FollowSafehouses();
         FollowMessages(g_hudFrameMs);
     } else {
         g_view.active = false;
@@ -4343,12 +4352,236 @@ void StepActivityScreen() {
     }
 }
 
+// ---- Guerrilla's activity-complete screen: a Transporter's or a Collateral Damage's results
+//
+// Guerrilla's activities raised it as they ended: hud_ui_activity_complete_start RM 0x846670(mode, success), from
+// delivery's do_end_processing (Guerrilla Express, shown as Transporter), vehicle rail's determine_reward_and_end (Riding
+// Shotgun, shown as Collateral Damage), and the raids', house arrest's and area defense's ends (never demolitions
+// master, convoys or couriers). The activity's mode gave the screen's (AC) number (VEHICLE_RAIL 1 -> 5, DELIVERY 4 -> 4;
+// RAID_DEFEND 8 -> 1, RAID_ATTACK 9 -> 9, HOUSE_ARREST 10 -> 2, AREA_DEFENSE 16 -> 8), and a failure the tag of the game
+// log's reason (gamelog_complete_reasons 2 MENU_YOU_DIED, 4 ACTIVITY_FAIL_OUT_OF_TIME, 5 _AWAY_FROM_VEH, 6 _VEH_DESTROYED,
+// 7 _VEH_ESCAPED, 8 _LEFT_AREA, 9 _OUT_OF_AMMO, 10 _HOSTAGES_DEAD, 11 _BUILDING_DESTROYED, 12 _DAMAGE; none for the
+// others). Its game state came up at the next frame the game wasn't paused (_do_frame 0x846620), loaded the number's
+// document (cUI_activity_complete_doc 0x1660F60: rfg_ui_activity_complete for 4 and 5 alone; the raids, house arrest and
+// area defense show Guerrilla's mission-complete screen, rfg_ui_mission_complete, not ported), hid the HUD, and once its
+// document was in read the activity's numbers (_process 0x856530): guerrilla_express_load_info 0x846230 from
+// activity_guerrilla_express_get_score_results 0x76C900 (the pro and target times, the best, 0 for none, and yours, in
+// ms), riding_shotgun_load_info 0x846110 from activity_riding_shotgun_get_score_results 0x75AC10 (the goal, the
+// soldiers', structures' and vehicles' damage, the score: their sum to the hundredth, the colonists' deaths: the penalty,
+// and the total, in millions). Then each frame its data items: ActivityComplete (process_activity_information 0x845B80:
+// the number, complete, the title (ACT_GEXPRESS_NAME, ACT_SHOTGUN_NAME), the failure's tag, and two hints: the first
+// MENU_CONTINUE, or MENU_RETRY after a failure (both kinds have a replay then, 0x12FB268); the second offered only after a
+// failure (MENU_EXIT) or a Transporter won (MENU_RETRY: its replay on a success, 0x12FB290); their key pictures only once
+// its script lets the buttons in, rfg_enable_button_input 0x1660DC5; hide_overall only for Collateral Damage in some of
+// its languages, not English) and ActivityTallys (process_activity_tallys 0x856000: seven texts, the goal, then each of
+// its three tallies' numbers in turn; Transporter's "%i:%.02i.%.02i" (minutes, seconds, hundredths) from the second,
+// Collateral Damage's "%.2f"). Its script starts each tally as its block fades in (rfg_start_activity_complete(1 to 3):
+// _start_tally 0x846880), whose numbers then count from 0 to theirs in 1.5 s while the buttons are out; once they're in,
+// every number is shown as it is. Then the first hint's key (Btn_menu_select, or a click on the hint) or the second's
+// closed it (check_for_user_input_complete 0x845F00): the first replays a failed activity, or ends it (Collateral
+// Damage's after a fade to black); the second replays a Transporter won, or ends a failed one; then a dead player's
+// world loads its last save again, and a success shows the upgrades it unlocked.
+// Here: asked for by GuerrillaHud_ActivityComplete (the end of the file: what guerrilla_campaign calls as one of these
+// two kinds ends, once one is ported), or by the console's rfg_activity_complete (to see it), and opened at the next HUD
+// update the game isn't paused nor another of our screens up; the game paused while it's open, as Guerrilla's state
+// did; the hints' keys Enter, and Esc (or Backspace) for the second (Guerrilla's PC key pictures key_178, key_124 in
+// them). The player's choice goes to guerrilla_campaign's GuerrillaCampaign_ActivityCompleteChoose(choice), if it has
+// it: 1 the first hint (a failure: replay it; else end it), 2 the second (a Transporter won: replay it; a failure: end
+// it); the campaign does the rest (the fade, the reload, the upgrades). Not here: the blur, the music's fade, a click
+// on a hint, and its sounds (HUD_OBJECTIVE_HEADING, the tally's money loop: the interface's sound banks are full).
+
+// What an activity gives the screen as it ends (GuerrillaHud_ActivityComplete): Guerrilla's
+// hud_ui_activity_complete_start(mode, success), the game log's reason for a failure, and the numbers its kind's loader
+// read.
+struct ActivityResults {
+    int size;           // sizeof(ActivityResults), 44
+    int mode;           // Guerrilla's activity mode: 1 vehicle rail (Collateral Damage), 4 delivery (Transporter)
+    int success;        // 1 won, 0 failed
+    int reason;         // a failure's gamelog_complete_reasons (2 died, 4 out of time, ... 12 not enough damage), else 0
+    float numbers[7];   // Transporter: the pro, target, best (0 for none) and your times, in ms; Collateral Damage:
+                        // the goal, soldiers, structures, vehicles, score, deaths and total, in millions
+};
+static_assert(sizeof(ActivityResults) == 44, "GuerrillaHud_ActivityComplete's results are 44 bytes");
+using CampaignActivityCompleteChooseFn = void(__cdecl*)(int choice);
+
+constexpr int kAcTransporter = 4, kAcCollateralDamage = 5;  // the screen's numbers of the two kinds it shows
+constexpr int kAcNoChoice = 0, kAcFirstHint = 1, kAcSecondHint = 2;
+constexpr float kAcTallySeconds = 1.5f;                     // a tally's count up (process_activity_tallys)
+const char* const kActivityCompleteDocument = "rfg_ui_activity_complete";
+
+struct ActivityCompleteTally {  // one of process_activity_tallys' three (0x2B9DB3C, 0x28 bytes each)
+    int count = 0;              // its numbers, at most 4
+    float target[4] = {};
+    float progress = -1.0f;     // the seconds it has counted, -1 before its script starts it
+};
+
+struct ActivityCompleteScreen {
+    bool pending = false;       // asked for, not open yet
+    ActivityResults results{};
+    bool test = false;          // the console's: no one is told the choice
+    std::string why;
+    bool open = false, paused = false;
+    int ac = 0;                 // the screen's number: 4 Transporter, 5 Collateral Damage
+    bool success = false;
+    const char* title = "";     // Guerrilla's tags
+    const char* failure = nullptr;
+    bool goalShown = false;     // Collateral Damage's goal (the first number, not counted)
+    float goal = 0.0f;
+    ActivityCompleteTally tallies[3];
+    bool input = false;         // its script lets the keys in (rfg_enable_button_input)
+    ULONGLONG openedAt = 0, lastStep = 0;
+    unsigned version = 0;       // changes as it opens and as the keys come in (its hints show then)
+    bool enterDown = true, escDown = true;
+};
+ActivityCompleteScreen g_activityComplete;
+
+bool ActivityCompleteOpen() { return g_activityComplete.open; }
+
+// The screen's number for Guerrilla's activity mode (hud_ui_activity_complete_start's table), 0 for one it doesn't show
+// (the raids, house arrest and area defense: Guerrilla's mission-complete screen, not ported).
+int ActivityCompleteNumber(int mode) {
+    if (mode == 1) return kAcCollateralDamage;  // ACTIVITY_MODE_VEHICLE_RAIL
+    if (mode == 4) return kAcTransporter;       // ACTIVITY_MODE_DELIVERY
+    return 0;
+}
+
+// A failure's tag for the game log's reason (hud_ui_activity_complete_start's table), null for none.
+const char* ActivityFailureTag(int reason) {
+    static const char* const tags[] = {"MENU_YOU_DIED", nullptr, "ACTIVITY_FAIL_OUT_OF_TIME", "ACTIVITY_FAIL_AWAY_FROM_VEH",
+                                       "ACTIVITY_FAIL_VEH_DESTROYED", "ACTIVITY_FAIL_VEH_ESCAPED", "ACTIVITY_FAIL_LEFT_AREA",
+                                       "ACTIVITY_FAIL_OUT_OF_AMMO", "ACTIVITY_FAIL_HOSTAGES_DEAD", "ACTIVITY_FAIL_BUILDING_DESTROYED",
+                                       "ACTIVITY_FAIL_DAMAGE"};
+    return reason >= 2 && reason <= 12 ? tags[reason - 2] : nullptr;
+}
+
+// The second hint: offered after a failure (exit) and after a Transporter won (its replay on a success: retry).
+bool ActivityCompleteRetriesWon(const ActivityCompleteScreen& s) { return s.success && s.ac == kAcTransporter; }
+bool ActivityCompleteSecondHint(const ActivityCompleteScreen& s) { return !s.success || ActivityCompleteRetriesWon(s); }
+
+// Asks for the screen: false while one is up or waiting, or for a mode it doesn't show (hud_ui_activity_complete_start's
+// answer).
+bool AskActivityComplete(const ActivityResults& results, bool test, const char* why) {
+    ActivityCompleteScreen& s = g_activityComplete;
+    if (s.pending || s.open) {
+        rfa::Log("Activity-complete screen: asked for again while one is up (%s); not shown", why);
+        return false;
+    }
+    if (ActivityCompleteNumber(results.mode) == 0) {
+        rfa::Log("Activity-complete screen: Guerrilla's activity mode %d isn't one it shows (%s)", results.mode, why);
+        return false;
+    }
+    s.pending = true;
+    s.results = results;
+    s.test = test;
+    s.why = why;
+    return true;
+}
+
+// Guerrilla's _enter and its kind's loader: the title, the failure, the goal and the tallies.
+void OpenActivityComplete() {
+    ActivityCompleteScreen& s = g_activityComplete;
+    const ActivityResults& r = s.results;
+    s.pending = false;
+    CloseOtherScreens("the activity-complete screen");
+    s.open = true;
+    s.ac = ActivityCompleteNumber(r.mode);
+    s.success = r.success != 0;
+    s.failure = s.success ? nullptr : ActivityFailureTag(r.reason);
+    for (ActivityCompleteTally& tally : s.tallies) tally = ActivityCompleteTally{};
+    if (s.ac == kAcTransporter) {
+        // guerrilla_express_load_info: no goal; the pro, target and best times; yours.
+        s.title = "ACT_GEXPRESS_NAME";
+        s.goalShown = false;
+        s.goal = 0.0f;
+        s.tallies[0].count = 3;
+        for (int i = 0; i < 3; ++i) s.tallies[0].target[i] = r.numbers[i];
+        s.tallies[1].count = 1;
+        s.tallies[1].target[0] = r.numbers[3];
+    } else {
+        // riding_shotgun_load_info: the goal; the soldiers', structures' and vehicles' damage and the score; the deaths;
+        // the total.
+        s.title = "ACT_SHOTGUN_NAME";
+        s.goalShown = true;
+        s.goal = r.numbers[0];
+        s.tallies[0].count = 4;
+        for (int i = 0; i < 4; ++i) s.tallies[0].target[i] = r.numbers[1 + i];
+        s.tallies[1].count = 1;
+        s.tallies[1].target[0] = r.numbers[5];
+        s.tallies[2].count = 1;
+        s.tallies[2].target[0] = r.numbers[6];
+    }
+    s.input = false;
+    s.openedAt = GetTickCount64();
+    s.enterDown = s.escDown = true;
+    ++s.version;
+    if (!s.paused) {
+        PauseGame(1, 1, 0, 0);
+        s.paused = true;
+    }
+    rfa::Log("Activity-complete screen: %s %s%s%s (%s); the game paused", GuerrillaText(s.title).c_str(), s.success ? "complete" : "failed",
+             s.failure ? ", " : "", s.failure ? s.failure : "", s.why.c_str());
+}
+
+// Closed: the choice (a hint, or none) to the campaign, unless it's the console's.
+void CloseActivityComplete(int choice, const char* why) {
+    ActivityCompleteScreen& s = g_activityComplete;
+    if (!s.open) return;
+    s.open = false;
+    if (s.paused) {
+        UnpauseGame(1, 1);
+        s.paused = false;
+    }
+    g_shop.useDown = true;
+    rfa::LogDetail("Activity-complete screen closed: choice %d (%s)", choice, why);
+    static auto choose =
+        reinterpret_cast<CampaignActivityCompleteChooseFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_ActivityCompleteChoose"));
+    if (choice != kAcNoChoice && !s.test && choose) choose(choice);
+}
+
+// Each HUD update while it's open: the tallies counting, then its keys, once its script lets them in.
+void StepActivityComplete() {
+    ActivityCompleteScreen& s = g_activityComplete;
+    if (!s.input)
+        for (ActivityCompleteTally& tally : s.tallies)
+            if (tally.progress >= 0.0f)
+                tally.progress = (std::min)(tally.progress + static_cast<float>(g_hudFrameMs) / 1000.0f, kAcTallySeconds);
+    const Document* doc = FindDocument(kActivityCompleteDocument);
+    if (!doc || doc->missing) {
+        CloseActivityComplete(kAcFirstHint, "no rfg_ui_activity_complete document");
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    const bool resumed = now - s.lastStep > kHudGoneAfterMs;
+    s.lastStep = now;
+    if (!GameFocused() || resumed) {
+        s.enterDown = s.escDown = true;
+        return;
+    }
+    if (!s.input && now - s.openedAt > kScreenStepMostMs) {
+        s.input = true;
+        ++s.version;
+        rfa::Log("Activity-complete screen: its script never let the keys in; they're taken anyway");
+    }
+    const bool enter = Pressed(VK_RETURN, s.enterDown);
+    const bool esc = Pressed(VK_ESCAPE, s.escDown) || HeldDown(VK_BACK);
+    if (!s.input) return;
+    if (enter) {
+        CloseActivityComplete(kAcFirstHint, "Enter");
+    } else if (esc && ActivityCompleteSecondHint(s)) {
+        g_full.swallowPauseUntil = now + kSwallowPauseMs;
+        CloseActivityComplete(kAcSecondHint, "Esc");
+    }
+}
+
 // Each HUD update in our worlds: the campaign's activity and rings asked for, and the console's liberated screen.
 void FollowCampaignScreens() {
     if (g_liberationPending.wanted) {
         g_liberationPending.wanted = false;
         OpenLiberation(g_liberationPending.district, g_liberationPending.key, g_liberationPending.controlMax, 0, "the console's rfg_liberated");
     }
+    // The activity-complete screen asked for comes up once the game isn't paused (Guerrilla's _do_frame), with none of
+    // our screens nor the loader's menus or the console up.
+    if (g_activityComplete.pending && !g_mapOpen && !OurScreenOpen() && !MenusShown() && !GamePausedNow()) OpenActivityComplete();
     static auto activity = reinterpret_cast<CampaignActivityFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_Activity"));
     static auto choose = ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_ActivityChoose");
     ActivityScreen& s = g_activity;
@@ -4386,12 +4619,16 @@ void FollowCampaignScreens() {
 void StepCampaignScreens() {
     if (g_liberation.open) StepLiberation();
     if (g_activity.open) StepActivityScreen();
+    if (g_activityComplete.open) StepActivityComplete();
 }
 
-// A level load: both closed (an activity's screen answered as Guerrilla's would close: accept, close).
+// A level load: all closed (an activity's screen answered as Guerrilla's would close: accept, close; the
+// activity-complete screen with no choice: the campaign's activity goes with the level).
 void CloseCampaignScreens(const char* why) {
     CloseLiberation(why);
     CloseActivityScreen(why);
+    CloseActivityComplete(kAcNoChoice, why);
+    g_activityComplete.pending = false;
     g_activity.screen = 0;
     g_activity.answered = 0;
     g_liberationPending.wanted = false;
@@ -4425,12 +4662,94 @@ void LiberatedCommand() {
     ConsolePrint("Guerrilla's district-liberated screen for %s (close the console; Enter, Space or a click goes on)\n", name.c_str());
 }
 
+// The console's rfg_activity_complete: Guerrilla's activity-complete screen with sample numbers, to see it; nothing
+// changes, and no one is told the choice. rfg_activity_complete transporter|collateral [won|failed] [reason]: a
+// Transporter's (Guerrilla Express; "express" too) or a Collateral Damage's (Riding Shotgun; "shotgun" too) results, won
+// (the default) or failed, for a reason (died, time, left_vehicle, vehicle_destroyed, escaped, left_area, ammo, hostages,
+// building, damage; by default Transporter's time, Collateral Damage's damage). The numbers are Guerrilla's own test
+// numbers (its loaders' debug branch, never on in its game), Transporter's read as seconds (its times are in ms).
+// Each call of 0xC7D570(kinds, 0) reads the command's next word into 0x28FF0B8 (as the campaign's commands read theirs).
+using ParseArgumentsFn = void(__cdecl*)(int kinds, int flags);
+auto const ParseArguments = reinterpret_cast<ParseArgumentsFn>(0xC7D570);
+auto const g_commandWord = reinterpret_cast<const char*>(0x28FF0B8);
+constexpr int kArgumentNone = 1, kArgumentWord = 2;
+BYTE g_activityCompleteCommand[32];
+
+struct FailureReasonWord {
+    const char* word;
+    int reason;  // gamelog_complete_reasons
+};
+const FailureReasonWord kFailureReasonWords[] = {{"died", 2},       {"time", 4},     {"left_vehicle", 5}, {"vehicle_destroyed", 6},
+                                                 {"escaped", 7},    {"left_area", 8}, {"ammo", 9},         {"hostages", 10},
+                                                 {"building", 11}, {"damage", 12}};
+
+std::string NextCommandWord() {
+    ParseArguments(kArgumentWord | kArgumentNone, 0);
+    return g_commandWord;
+}
+
+void ActivityCompleteCommand() {
+    if (!g_consoleCommandRunning) return;
+    const std::string kind = NextCommandWord(), outcome = NextCommandWord(), reasonWord = NextCommandWord();
+    const char* const usage = "rfg_activity_complete transporter|collateral [won|failed] [died|time|left_vehicle|vehicle_destroyed|"
+                              "escaped|left_area|ammo|hostages|building|damage]\n";
+    ActivityResults results{};
+    results.size = sizeof(ActivityResults);
+    const bool transporter = _stricmp(kind.c_str(), "transporter") == 0 || _stricmp(kind.c_str(), "express") == 0;
+    const bool collateral = _stricmp(kind.c_str(), "collateral") == 0 || _stricmp(kind.c_str(), "shotgun") == 0;
+    const bool failed = _stricmp(outcome.c_str(), "failed") == 0 || _stricmp(outcome.c_str(), "fail") == 0;
+    if ((!transporter && !collateral) || (!failed && !outcome.empty() && _stricmp(outcome.c_str(), "won") != 0 &&
+                                          _stricmp(outcome.c_str(), "success") != 0)) {
+        ConsolePrint(usage);
+        return;
+    }
+    if (!FindDocument(kActivityCompleteDocument)) {
+        ConsolePrint("Guerrilla's activity-complete screen needs the HUD's map ([GuerrillaHud] Map=1)\n");
+        return;
+    }
+    results.success = failed ? 0 : 1;
+    if (transporter) {
+        // guerrilla_express_load_info's test numbers (30, 100, 25.23, 46.75), as seconds: pro, target, best, yours.
+        results.mode = 4;
+        const float numbers[] = {30000.0f, 100000.0f, 25230.0f, 46750.0f};
+        for (int i = 0; i < 4; ++i) results.numbers[i] = numbers[i];
+        results.reason = 4;  // ACTIVITY_FAIL_OUT_OF_TIME
+    } else {
+        // riding_shotgun_load_info's test numbers: goal, soldiers, structures, vehicles, score, deaths, total.
+        results.mode = 1;
+        const float numbers[] = {15.5f, 1.25f, 10.8f, 3.53f, 14.0f, 0.85f, 16.7f};
+        for (int i = 0; i < 7; ++i) results.numbers[i] = numbers[i];
+        results.reason = 12;  // ACTIVITY_FAIL_DAMAGE
+    }
+    if (!reasonWord.empty()) {
+        results.reason = -1;
+        for (const FailureReasonWord& one : kFailureReasonWords)
+            if (_stricmp(reasonWord.c_str(), one.word) == 0) results.reason = one.reason;
+        if (results.reason < 0) {
+            ConsolePrint(usage);
+            return;
+        }
+    }
+    if (!failed) results.reason = 0;
+    if (!AskActivityComplete(results, true, "the console's rfg_activity_complete")) {
+        ConsolePrint("Guerrilla's activity-complete screen is up already\n");
+        return;
+    }
+    ConsolePrint("Guerrilla's activity-complete screen: %s %s (close the console; once it has counted up, Enter goes on%s)\n",
+                 transporter ? "Transporter" : "Collateral Damage", failed ? "failed" : "won",
+                 failed || transporter ? ", Esc too" : "");
+}
+
 void AddCampaignScreenCommands() {
     static bool added = false;
     if (added) return;
     added = true;
     RegisterCommand(g_liberatedCommand, nullptr, "rfg_liberated", "Shows Guerrilla's district-liberated screen for your district (to see it; nothing changes)", 3,
                     &LiberatedCommand);
+    RegisterCommand(g_activityCompleteCommand, nullptr, "rfg_activity_complete",
+                    "Shows Guerrilla's activity-complete screen with sample numbers (to see it; nothing changes): rfg_activity_complete "
+                    "transporter|collateral [won|failed] [reason]",
+                    3, &ActivityCompleteCommand);
 }
 
 // rfg_liberation() -> open, version, step, busy, district, label, control_most, missions, hint_key, hint_text,
@@ -4537,11 +4856,95 @@ int __cdecl LuaActivityWeapon(lua_State* L) {
     return 2;
 }
 
-// rfg_screen_input(on): Guerrilla's rfg_enable_button_input, from the activity screen's script (off while its
-//   animation plays).
+// rfg_screen_input(on): Guerrilla's rfg_enable_button_input, from the screen's script (off while its animation
+//   plays): the activity-complete screen's while it's open (its hints come up with the keys), else the activity
+//   screen's.
 int __cdecl LuaScreenInput(lua_State* L) {
     using namespace rfa::game;
-    g_activity.input = lua_toboolean(L, 1) != 0;
+    const bool on = lua_toboolean(L, 1) != 0;
+    if (g_activityComplete.open) {
+        if (g_activityComplete.input != on) ++g_activityComplete.version;
+        g_activityComplete.input = on;
+        return 0;
+    }
+    g_activity.input = on;
+    return 0;
+}
+
+// rfg_activity_complete() -> open, version, mode, complete, title, failure, hint_1_image, hint_1_text, hint_2_image,
+//   hint_2_text, hide_overall
+//   Guerrilla's activity-complete screen: whether it's open; a number that changes as it opens and as the keys come
+//   in; then ActivityComplete's values as process_activity_information gave them: the screen's number (4 Transporter,
+//   5 Collateral Damage), complete, Guerrilla's tags for the title, the failure (nil for none) and the hints' texts, the
+//   hints' PC key pictures (nil until the keys are let in; the second's nil when it isn't offered), hide_overall.
+int __cdecl LuaActivityComplete(lua_State* L) {
+    using namespace rfa::game;
+    const ActivityCompleteScreen& s = g_activityComplete;
+    lua_pushboolean(L, s.open);
+    lua_pushnumber(L, s.version);
+    lua_pushnumber(L, s.ac);
+    lua_pushboolean(L, s.success);
+    lua_pushstring(L, s.title);
+    if (s.failure) lua_pushstring(L, s.failure);
+    else lua_pushnil(L);
+    if (s.input) lua_pushstring(L, kEnterKeyPicture);
+    else lua_pushnil(L);
+    lua_pushstring(L, s.success ? "MENU_CONTINUE" : "MENU_RETRY");
+    if (s.input && ActivityCompleteSecondHint(s)) lua_pushstring(L, kEscKeyPicture);
+    else lua_pushnil(L);
+    lua_pushstring(L, ActivityCompleteRetriesWon(s) ? "MENU_RETRY" : "MENU_EXIT");
+    lua_pushboolean(L, false);  // Collateral Damage's only in some of Guerrilla's languages, not English
+    return 11;
+}
+
+// A Transporter's time (ms) as process_activity_tallys wrote it: "%i:%.02i.%.02i", the minutes, seconds and hundredths
+// (rounded, fl_round).
+std::string TransporterTime(float ms) {
+    const int seconds = static_cast<int>(ms / 1000.0f);
+    const int hundredths = static_cast<int>(static_cast<float>(static_cast<int>(ms) % 1000) / 10.0f + 0.5f);
+    char text[32];
+    sprintf_s(text, "%i:%.02i.%.02i", seconds / 60, seconds % 60, hundredths);
+    return text;
+}
+
+// rfg_activity_complete_tallys() -> goal, soldiers, structures, vehicles, score, deaths, total
+//   ActivityTallys as process_activity_tallys wrote it: Collateral Damage's goal, then each tally's numbers in turn
+//   (Transporter's times from the second), counted up: a tally its script started counts from 0 to its numbers in
+//   1.5 s while the keys are still out; once they're in, every number is shown as it is. "" for none.
+int __cdecl LuaActivityCompleteTallys(lua_State* L) {
+    using namespace rfa::game;
+    const ActivityCompleteScreen& s = g_activityComplete;
+    std::string texts[7];
+    char text[32];
+    int at = 0;
+    if (s.goalShown) {
+        sprintf_s(text, "%.2f", s.goal);
+        texts[at++] = text;
+    } else if (s.ac == kAcTransporter) {
+        at = 1;
+    }
+    for (const ActivityCompleteTally& tally : s.tallies)
+        for (int i = 0; i < tally.count && at < 7; ++i) {
+            float shown = 0.0f;
+            if (s.input) shown = tally.target[i];
+            else if (tally.progress >= 0.0f) shown = tally.target[i] * tally.progress / kAcTallySeconds;
+            if (s.ac == kAcTransporter) {
+                texts[at++] = TransporterTime(shown);
+            } else {
+                sprintf_s(text, "%.2f", shown);
+                texts[at++] = text;
+            }
+        }
+    for (const std::string& one : texts) lua_pushstring(L, one.c_str());
+    return 7;
+}
+
+// rfg_activity_complete_tally(n): Guerrilla's rfg_start_activity_complete, from the screen's script as each block fades
+//   in: tally n (1 to 3) starts counting up (_start_tally RM 0x846880; 0, its mission-complete screen's, starts nothing).
+int __cdecl LuaActivityCompleteTally(lua_State* L) {
+    using namespace rfa::game;
+    const int index = static_cast<int>(lua_tonumber(L, 1)) - 1;
+    if (g_activityComplete.open && index >= 0 && index < 3) g_activityComplete.tallies[index].progress = 0.0f;
     return 0;
 }
 
@@ -5155,9 +5558,31 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
     rfa::game::lua_register(L, "rfg_activity", LuaActivity);
     rfa::game::lua_register(L, "rfg_activity_weapon", LuaActivityWeapon);
     rfa::game::lua_register(L, "rfg_screen_input", LuaScreenInput);
+    rfa::game::lua_register(L, "rfg_activity_complete", LuaActivityComplete);
+    rfa::game::lua_register(L, "rfg_activity_complete_tallys", LuaActivityCompleteTallys);
+    rfa::game::lua_register(L, "rfg_activity_complete_tally", LuaActivityCompleteTally);
     rfa::game::lua_register(L, "rfg_guerrilla_text", LuaGuerrillaText);
     rfa::game::lua_register(L, "rfg_map_rings", LuaMapRings);
     rfa::game::lua_register(L, "rfg_map_ring", LuaMapRing);
+}
+
+// Guerrilla's activity-complete screen, for guerrilla_campaign as one of the two kinds it shows ends (Guerrilla's
+// activities called hud_ui_activity_complete_start then; see "Guerrilla's activity-complete screen"):
+//   GuerrillaHud_ActivityComplete(&results) -> 1 taken (it opens at the next HUD update the game isn't paused), 0 not
+//   (one is up or waiting, a mode it doesn't show, or results of another size); results: guerrilla_hud's
+//   ActivityResults, 44 bytes (size, Guerrilla's activity mode, success, the game log's reason, seven numbers).
+// The player's choice comes back through the campaign's own GuerrillaCampaign_ActivityCompleteChoose(choice), if it
+// has one: 1 the first hint, 2 the second.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaHud_ActivityComplete(const void* results) {
+    if (!results) return 0;
+    const int size = *static_cast<const int*>(results);
+    if (size != static_cast<int>(sizeof(ActivityResults))) {
+        rfa::Log("GuerrillaHud_ActivityComplete: results of %d bytes, not %u; not shown", size, static_cast<unsigned>(sizeof(ActivityResults)));
+        return 0;
+    }
+    ActivityResults copy{};
+    memcpy(&copy, results, sizeof(copy));
+    return AskActivityComplete(copy, false, "the campaign") ? 1 : 0;
 }
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -5196,8 +5621,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         Document cabinet{"rfg_ui_safehouse_weapons"};  // Guerrilla's weapon cabinet, drawn only while it's open
         cabinet.whileCabinet = true;
         g_documents.push_back(cabinet);
-        // The campaign's: an activity's corner panel (with the HUD), the district-liberated screen and an activity's
-        // briefing and results (only while they're open).
+        // The campaign's: an activity's corner panel (with the HUD), the district-liberated screen, an activity's
+        // briefing and results, and Guerrilla's activity-complete screen (only while they're open).
         if (!FindDocument("rfg_ui_hud_missions")) g_documents.push_back({"rfg_ui_hud_missions"});
         Document liberation{"rfg_ui_district_liberated"};
         liberation.whileLiberation = true;
@@ -5205,6 +5630,9 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         Document demolitions{"rfg_ui_demolitions"};
         demolitions.whileActivity = true;
         g_documents.push_back(demolitions);
+        Document activityComplete{kActivityCompleteDocument};  // Guerrilla's activity-complete screen
+        activityComplete.whileActivityComplete = true;
+        g_documents.push_back(activityComplete);
         Document handbook{"rfg_ui_handbook"};  // Guerrilla's handbook, loaded only while it's open (see Wanted)
         handbook.whileHandbook = true;
         g_documents.push_back(handbook);

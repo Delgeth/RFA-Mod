@@ -381,7 +381,7 @@ static class Parts
             files.AddRange(Directory.EnumerateFiles(cache, "gw_*.fxo_pc_dx11"));
         }
         foreach (string table in new[] { "gameplay_properties.xtbl", "lod_properties.xtbl", "glass.xtbl", "vfx.xtbl", "effects.xtbl",
-                                         "level_objects.xtbl", "explosions.xtbl", "explosions_armageddon_cuts.xtbl", GuerrillaMaterialEvents.FileName, "clouds.bin", "stars.bin", "corona.bin", GuerrillaWorld.StampFile,
+                                         "level_objects.xtbl", "explosions.xtbl", "explosions_armageddon_cuts.xtbl", GuerrillaMaterialEvents.FileName, GuerrillaWheelEffects.FileName, GuerrillaGusts.FileName, "clouds.bin", "stars.bin", "corona.bin", GuerrillaWorld.StampFile,
                                          GuerrillaSquads.PlacedList })
             files.Add(Path.Combine(setup.WorldFolder, table));
         if (Directory.Exists(setup.WorldFolder))

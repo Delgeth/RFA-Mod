@@ -159,6 +159,14 @@ function rfg_enable_button_input(enable)
 	end
 end
 
+-- Its activity-complete screen starting each tally's count (rfg_start_activity_complete(1 to 3), as each block fades
+-- in: the numbers count up from 0, hud_ui_activity_complete_start_tally): the mod counts them, if it has it.
+function rfg_start_activity_complete(tally)
+	if _GetAnyGlobalSilent("rfg_activity_complete_tally") ~= nil then
+		rfg_activity_complete_tally(tally)
+	end
+end
+
 -- Its control and morale colours (its rfg_ui_globals), where Armageddon's own don't have them.
 if not pcall(function() return COLOR_CONTROL end) then
 	COLOR_CONTROL = { R = 0.58, G = 0.05, B = 0 }

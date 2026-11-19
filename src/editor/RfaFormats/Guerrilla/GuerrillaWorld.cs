@@ -77,8 +77,11 @@ public static class GuerrillaWorld
     /// mouse turn speed.
     /// 9 (v0.6.5-beta): the shape cutters, guard posts, props and NPC voices, the EDF's reinforcement
     /// places, the squads' progression weapons, and the demolitions masters' managed layers.
+    /// 10 (v0.6.6-beta): sound fades in Wwise's own curve units, compressed (ADPCM) sound banks, Guerrilla's
+    /// ground heights for the cars, the placed effects, wheel dust and gusts, the 475 m view distance,
+    /// the carried propane tank's explosion, and the map icons.
     /// </summary>
-    public const int Format = 9;
+    public const int Format = 10;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
@@ -94,7 +97,7 @@ public static class GuerrillaWorld
     const float MaxPit = 60;    // no ground more than this below where its hollow spills
     const float MaxStep = 25f;  // nor more than this below a neighbouring sample, 1 m away: only the deep shafts' walls, not Guerrilla's own cliffs and retaining walls
     const float BoxBottom = -500, BoxTop = 1500;   // the environment boxes' heights
-    const float BoxFogNear = 100000;               // where the boxes' own fog would start (their far clip is 1,500 m)
+    const float BoxFogNear = 100000;               // where the boxes' own fog would start (past any far clip)
     // The most chunk files (c- and g-files) one container is given. The game reads a container's
     // CPU-side files through a 20 MB pool ("Pregame_split_pool"), asking a little more than their
     // sizes; its own containers hold at most 19 MB of them. Guerrilla's busiest zone, all in one
@@ -582,11 +585,13 @@ public static class GuerrillaWorld
         var vehicleEffects = GuerrillaArsenal.VehicleEffects(rfgTables, misc);
         // The effects' sounds (an explosion's bang, a hit's knock, a breaking piece, a fire's burning): Guerrilla's
         // cues as events in banks of Armageddon's kind (rfge_<Guerrilla's bank>), which the effects name.
-        var effectSounds = new GuerrillaSoundBanks(rfgCache, rfgTables, EffectSoundPart, EffectSoundBankPrefix);
+        var effectSounds = new GuerrillaSoundBanks(rfgCache, rfgTables, EffectSoundPart, EffectSoundBankPrefix) { Adpcm = GuerrillaSoundBanks.WorldSoundsAdpcm };
         var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"),
                                                        [.. dustEffects, .. vehicleEffects.Effects, .. GuerrillaWeapons.Effects(rfgTables),
                                                         .. GuerrillaMaterialEvents.Effects(rfgTables), .. GuerrillaFootsteps.Effects(rfgTables),
-                                                        .. GuerrillaKiosks.Effects(rfgTables), .. GuerrillaActions.PropEffects(rfgTables)],
+                                                        .. GuerrillaKiosks.Effects(rfgTables), .. GuerrillaActions.PropEffects(rfgTables),
+                                                        .. GuerrillaWheelEffects.Effects(rfgTables), .. GuerrillaPlacedEffects.Effects(guerrillaObjects.Values),
+                                                        .. GuerrillaGusts.Effects(rfgTables)],
                                                        DlcExplosions(game), [.. vehicleEffects.Explosions, .. GuerrillaWeapons.Explosions(rfgTables)],
                                                        (cue, explosion) => effectSounds.EffectSound(cue, explosion) is { } sound
                                                            ? new GuerrillaEffectTables.Sound(sound.Event, sound.HeardTo) : null,
@@ -601,7 +606,12 @@ public static class GuerrillaWorld
         File.WriteAllBytes(Path.Combine(modFolder, "effects.xtbl"), effectTables.Effects);
         // What Guerrilla's pieces play as they break, fall and groan (see GuerrillaMaterialEvents): the mod's file.
         var builtEffects = XtblFile.FromBytes(effectTables.Effects).Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var builtVisuals = XtblFile.FromBytes(effectTables.Visuals).Entries.Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         log("Material events: " + GuerrillaMaterialEvents.Write(rfgTables, builtEffects, modFolder));
+        // What Guerrilla's wheels kick up on each ground (see GuerrillaWheelEffects): the mod's file.
+        log("Wheel effects: " + GuerrillaWheelEffects.Write(rfgTables, builtEffects, modFolder));
+        // The dust's gusts on each ground (see GuerrillaGusts): the mod's file.
+        log("Gusts: " + GuerrillaGusts.Write(rfgTables, builtEffects, modFolder));
         // Guerrilla's people's footsteps (see GuerrillaFootsteps): their entries in the mod's footsteps.xtbl.
         log(GuerrillaFootsteps.Write(rfgTables, misc, modFolder, builtEffects));
         File.WriteAllBytes(Path.Combine(modFolder, "level_objects.xtbl"), effectTables.LevelObjects);
@@ -1011,6 +1021,7 @@ public static class GuerrillaWorld
         var vehiclePlaceProblems = new List<string>();
         var roadsMoved = new List<string>();  // roads whose own position was moved into their zone's square
         int laddersPlaced = 0, laddersLeftOut = 0, laddersInZone = 0;  // Guerrilla's ladders, each on its building (GuerrillaLadders)
+        int placedEffects = 0, placedEffectsLeftOut = 0;  // Guerrilla's placed effects (GuerrillaPlacedEffects)
         int hingesPlaced = 0, hingesLeftOut = 0, hingesWithMotors = 0;  // Guerrilla's hinges, on the objects they join (GuerrillaConstraints)
         int cuttersPlaced = 0, cuttersLeftOut = 0, cuttersInZone = 0;  // Guerrilla's shape cutters, its pre-made damage (GuerrillaShapeCutters)
         var turbineLines = new List<string>();  // its wind turbines' objects, for guerrilla_world (GuerrillaConstraints.TurbineList)
@@ -1042,8 +1053,8 @@ public static class GuerrillaWorld
             string blendName = $"rfg{col:00}{row:00}_a00", colourName = $"rfg{col:00}{row:00}cmb";
             string guerrillaZone = $"terr01_{col:00}_{row:00}";
             byte[] guerrillaTerrain = RfgFile(col, row, guerrillaZone + ".cterrain_pc") ?? throw new InvalidDataException($"no {guerrillaZone}.cterrain_pc");
-            var (terrainFile, terrainData, farLowered) = ZoneTerrain(h, corner, look, barriers[(col, row)], zone, blendName, colourName, guerrillaTerrain,
-                RfgFile(col, row, guerrillaZone + ".gterrain_pc", 1) ?? throw new InvalidDataException($"no {guerrillaZone}.gterrain_pc"));
+            var (terrainFile, terrainData, farLowered, roadSamples) = ZoneTerrain(h, corner, look, barriers[(col, row)], zone, blendName, colourName, guerrillaTerrain,
+                RfgFile(col, row, guerrillaZone + ".gterrain_pc", 1) ?? throw new InvalidDataException($"no {guerrillaZone}.gterrain_pc"), roadSurfaces[(col, row)]);
             // The blend map uncompressed with one level, data not colour; the colour map DXT1 with its
             // levels down to 4 × 4: as the game's own ground maps are kept.
             byte[] blendData = TextureCodec.Encode(TextureFormat.Argb8888, blend);
@@ -1115,6 +1126,11 @@ public static class GuerrillaWorld
                 laddersPlaced += ladders.Count;
                 laddersLeftOut += laddersLeft;
                 laddersInZone = Math.Max(laddersInZone, ladders.Count);
+                // Guerrilla's placed effects (the EDF's force fields, the Mohole's smoke and ash; see GuerrillaPlacedEffects).
+                var effectsHere = GuerrillaPlacedEffects.Convert(rfgLadderZone, taken, builtEffects, builtVisuals, out int effectsLeft);
+                foreach (var effect in effectsHere) zoneFile.Insert(zoneFile.Objects.Count, effect);
+                placedEffects += effectsHere.Count;
+                placedEffectsLeftOut += effectsLeft;
                 // Guerrilla's hinges (the turbines' blades with their motors, the cranes' parts), each on the objects
                 // it joins placed above (see GuerrillaConstraints).
                 var turbinesHere = new List<GuerrillaConstraints.Turbine>();
@@ -1259,7 +1275,8 @@ public static class GuerrillaWorld
                 Pack($"0h_c{col * 3 + n % 3:00}{(15 - row) * 3 + n / 3:00}", zoneLayer: false,
                      [($"{zone}_{n}.ctmesh_pc", subzones[n].Header), ($"{zone}_{n}.gtmesh_pc", subzones[n].Data), .. sharedParts[n]]);
             log($"{zone}{(isStart ? " (start)" : "")}: ground {h.Min():0} to {h.Max():0} m, {rocks.Count} rocks, {propsIn[(col, row)].Count} destructible objects ({links.Length / ZoneFile.DestructionLinkSize} links), {files.Sum(f => (long)f.Data.Length) / 1024:N0} KB of files in the zone's container, " +
-                $"{(OwnCliffs(look) ? $"its {look.Cliffs.Count} cliff materials" : "3 cliff materials from its ground")}, Guerrilla's far meshes ({farLowered} vertices lowered under our ground)");
+                $"{(OwnCliffs(look) ? $"its {look.Cliffs.Count} cliff materials" : "3 cliff materials from its ground")}, Guerrilla's far meshes ({farLowered} vertices lowered under our ground), " +
+                $"{roadSamples:N0} road samples walked on at Guerrilla's own heights");
             // What was made for this zone alone isn't needed again.
             heights.Remove((col, row));
             looks.Remove((col, row));
@@ -1297,6 +1314,8 @@ public static class GuerrillaWorld
             "makes their items and weapons)" + (pickupsLeft.Count > 0 ? $"; not yet: {string.Join(", ", pickupsLeft.Select(p => $"{p.Key} {p.Value}"))}" : ""));
         log($"Ladders: {laddersPlaced} of Guerrilla's placed, each on its building (the most in one zone {laddersInZone}; the game holds " +
             $"{GuerrillaLadders.MostLadders} at once)" + (laddersLeftOut > 0 ? $"; {laddersLeftOut} left out, their building not placed" : ""));
+        log($"Placed effects: {placedEffects} of Guerrilla's placed (its object_effects: the EDF's force fields, the Mohole's smoke and ash)" +
+            (placedEffectsLeftOut > 0 ? $"; {placedEffectsLeftOut} left out, their effect not in the world's tables" : ""));
         log($"Shape cutters: {cuttersPlaced} of Guerrilla's placed (its pre-made damage, cut as each zone streams in), each on the building it cuts " +
             $"(the most in one zone {cuttersInZone}; the game holds {GuerrillaShapeCutters.MostShapeCutters} at once)" +
             (cuttersLeftOut > 0 ? $"; {cuttersLeftOut} left out, their building not placed" : ""));
@@ -1558,20 +1577,36 @@ public static class GuerrillaWorld
     /// heights. Nothing of another level's terrain file is used. Returns the terrain file, its
     /// .gterrain_pc and how many far vertices were lowered.
     /// </summary>
-    static (byte[] Terrain, byte[] Data, int FarLowered) ZoneTerrain(float[] heights, Vector2 corner, Look look, IReadOnlyList<ChunkShape> barriers,
-                                                                     string zone, string blendName, string colourName, byte[] guerrillaTerrain, byte[] guerrillaData)
+    static (byte[] Terrain, byte[] Data, int FarLowered, int RoadSamples) ZoneTerrain(float[] heights, Vector2 corner, Look look, IReadOnlyList<ChunkShape> barriers,
+                                                                     string zone, string blendName, string colourName, byte[] guerrillaTerrain, byte[] guerrillaData,
+                                                                     float[]? roadSurface)
     {
         var t = new TerrainFile { HasGround = true };
         string Tga(string name) => name + ".tga";
 
         // The ground's collision: a height field of 512 × 512 samples a metre apart (the zone's 511 m),
-        // each height as a 16-bit sample of 1/32 m from -1,000 m (as the game's own).
+        // as Guerrilla's own: each height a 16-bit sample of 1/64 m (Guerrilla's step, which keeps its
+        // heights exactly; from -512 m, so -512 to +512 m, the world spans about -120 to 150 m), and
+        // each square cut from (x + 1, z) to (x, z + 1) as Guerrilla's collision cuts them (its field
+        // doesn't flip) and our drawn ground cuts them away from the roads.
         const int FieldSamples = 512;
-        const float SampleOffset = -1000, SampleScale = 1 / 32f;
+        const float SampleOffset = -512, SampleScale = 1 / 64f;
         float[] field = GuerrillaGround.FieldHeights(heights, FieldSamples, Layout);
+        // Under Guerrilla's road decals, its own collision's heights (its height field, on the same grid):
+        // our samples take the decals' surface there, which lies a few cm off what Guerrilla's cars drive
+        // on (up to 28 cm). A zone without a height field (the scenery around the map) keeps the decals'.
+        int roadSamples = 0;
+        if (roadSurface?.Length == field.Length && GuerrillaTerrain.HeightField(guerrillaTerrain) is { Samples: FieldSamples, Step: 1 } own)
+            for (int i = 0; i < field.Length; i++)
+                if (!float.IsNaN(roadSurface[i]))
+                {
+                    field[i] = own.Heights[i];
+                    roadSamples++;
+                }
         var samples = field.Select(h => (ushort)Math.Clamp(MathF.Round((h - SampleOffset) / SampleScale), 0, ushort.MaxValue)).ToArray();
         float fieldStep = ZoneWidth / (FieldSamples - 1);
-        t.HeightField = TerrainHeightField.Section(FieldSamples, FieldSamples, fieldStep, 1 / fieldStep, ZoneWidth, ZoneWidth, SampleOffset, SampleScale, samples);
+        t.HeightField = TerrainHeightField.Section(FieldSamples, FieldSamples, fieldStep, 1 / fieldStep, ZoneWidth, ZoneWidth, SampleOffset, SampleScale, samples,
+                                                   flipped: false);
         float low = samples.Min() * SampleScale + SampleOffset, high = samples.Max() * SampleScale + SampleOffset;
         t.SubzoneSlots = new byte[9 * 4];
 
@@ -1688,7 +1723,7 @@ public static class GuerrillaWorld
         t.TextureNames = TerrainFile.NameList(listed).Bytes;
         t.TextureNameCount = listed.Count;
         t.Id = (NameHashes.PropertyHash(zone) & 0xFFFF0000) | 0x20;
-        return (t.Write(), farData, farLowered);
+        return (t.Write(), farData, farLowered, roadSamples);
 
     }
 
@@ -1697,8 +1732,9 @@ public static class GuerrillaWorld
     /// schema's default, which affects nothing until its affects_ flag is set, then what the world needs
     /// (the game's own world zones set these groups in their boxes too):
     ///   the box: the whole zone, every height (BoxBottom to BoxTop, half a metre past its edges)
-    ///   visibility: the far clip 1,500 m (the open world's view; the default is 475) and the rocks'
-    ///     detail kept to 200 m (the default 125)
+    ///   visibility: the far clip 475 m (Guerrilla's camera's, also the schema's default: zones and buildings
+    ///     load out of sight; the guerrilla_world mod draws farther with its FarClip=) and the rocks' detail
+    ///     kept to 200 m (the default 125)
     ///   fog: on, starting far past the far clip (Armageddon's fog is the box's, by distance; the
     ///     guerrilla_world mod draws Guerrilla's height fog instead)
     ///   HDR: on, bloom 0.2 over a height of 1 (the defaults 0.5 and 3): the bloom the world's picture was
@@ -1717,7 +1753,7 @@ public static class GuerrillaWorld
         void Flag(string name, bool on) => box.Property(name)!.SetValue([on ? (byte)1 : (byte)0]);
         box.Property("bb")!.SetValue([.. new[] { -half, BoxBottom, -half, half, BoxTop, half }.SelectMany(BitConverter.GetBytes)]);
         Flag("affects_visibility", true);
-        Number("far_clip", 1500);
+        Number("far_clip", 475);
         Number("stitch_lod_distance", 200);
         Flag("affects_fog", true);
         Number("fog_near", BoxFogNear);

@@ -415,9 +415,16 @@ public sealed class WwiseBankWriter
 
     /// <summary>
     /// The bank's media are Wwise ADPCM (a quarter of the uncompressed sound's bytes) and its sounds name that
-    /// codec. Not for a looping wave yet (its loop would have to lie on blocks of 64 samples).
+    /// codec; but a looping sound's wave whose loop isn't on ADPCM's blocks of 64 samples stays uncompressed, so its
+    /// loop stays exact (see <see cref="Medium"/>). Each sound names its own codec, so a bank may hold both.
     /// </summary>
     public bool Adpcm { get; init; }
+
+    /// <summary>For an ADPCM bank: the waves of its looping sounds, and how many of them stayed uncompressed (their loop off the blocks).</summary>
+    public (int Loops, int KeptPcm) AdpcmLoops { get; private set; }
+
+    // The media written uncompressed in an ADPCM bank (their sounds name the PCM codec), and those made for loops.
+    readonly HashSet<uint> pcmMedia = [], loopMedia = [];
 
     /// <summary>For an ADPCM bank: how close its media decode to the waves they were made of (dB), the worst and the sum, and how many.</summary>
     public (double Worst, double Sum, int Count) AdpcmCheck { get; private set; } = (double.MaxValue, 0, 0);
@@ -481,8 +488,26 @@ public sealed class WwiseBankWriter
     /// <summary>What a curve changes: volume (dB), pitch (cents), low-pass (0-100).</summary>
     public enum Property { Volume = 0, Pitch = 2, LowPass = 3 }
 
-    /// <summary>A curve: a game parameter's value (x) → a property (y), straight lines between the points.</summary>
+    /// <summary>A curve: a game parameter's value (x) → a property (y: dB for volume), straight lines between the points.</summary>
     public sealed record Curve(uint Parameter, Property Property, IReadOnlyList<(float X, float Y)> Points);
+
+    /// <summary>
+    /// A volume curve's point as this Wwise stores it. A curve in its "dB" scaling (2) doesn't hold dB: Wwise
+    /// interpolates the stored values in straight lines and then turns the result into dB through a table (the
+    /// pointer at 0x34FB968, 333 entries over ±96.3, read in game 2026-11-19; the conversion in 0xE8EAF0), which is
+    /// exactly dB = 20·log10(1 + y / 96.3) below 0 and −20·log10(1 − y / 96.3) above. So y is the gain less 1, times
+    /// 96.3, and Wwise interpolates in gain, as Guerrilla's own rolloff does. Points written in dB came out at about a
+    /// tenth (−15 dB played as −1.5 dB) until the last one, at −96.3, silenced the sound: every fade of ours stayed
+    /// nearly at full volume and then cut off at its far end (the kiosk "at full blast" at 40 m; sounds stopping
+    /// at the edge of their range instead of fading). Armageddon's own volume curves (two points, 0 and −96.3) mean
+    /// the same in this domain.
+    /// </summary>
+    public static float VolumeCurveValue(float db)
+    {
+        if (db <= Silent) return Silent;
+        double gain = Math.Pow(10, db / 20.0);
+        return (float)(db <= 0 ? -Silent * (gain - 1) : -Silent * (1 - 1 / gain));
+    }
 
     /// <summary>
     /// A sound's or container's settings: its volume (dB) and pitch (cents), its curves, how many may play at once
@@ -550,13 +575,25 @@ public sealed class WwiseBankWriter
     /// <summary>Whether an object or event of this id is in the bank already.</summary>
     public bool Has(uint id) => taken.Contains(id);
 
-    /// <summary>A wave as a medium (once), by its id.</summary>
-    public uint Medium(GuerrillaSounds.Wave wave)
+    /// <summary>
+    /// A wave as a medium (once), by its id; <paramref name="loops"/> for a sound that plays it for ever. In an ADPCM
+    /// bank: a one-shot's wave is ADPCM without its loop; a loop's is ADPCM with its loop if that lies on blocks of
+    /// 64 samples (its start, and its end, the wave's: Guerrilla's waves loop to their end), else uncompressed with
+    /// its loop exact, as the ADPCM source would take a loop off the blocks to the block before (a click at the seam).
+    /// </summary>
+    public uint Medium(GuerrillaSounds.Wave wave, bool loops = false)
     {
-        uint id = Id($"{(Adpcm ? "rfg_media_adpcm" : "rfg_media")}:{wave.Bank}:{wave.Index}");
+        int frames = wave.Samples.Length / Math.Max(1, wave.Channels);
+        bool onBlocks = frames % WwiseAdpcm.BlockSamples == 0 && (!wave.Loops || wave.LoopStart % WwiseAdpcm.BlockSamples == 0);
+        bool pcm = !Adpcm || (loops && !onBlocks);
+        string kind = pcm ? "rfg_media" : loops ? "rfg_media_adpcm_loop" : "rfg_media_adpcm";
+        uint id = Id($"{kind}:{wave.Bank}:{wave.Index}");
         if (!media.ContainsKey(id))
         {
-            media[id] = Adpcm ? AdpcmWem(wave) : PcmWem(wave);
+            media[id] = pcm ? PcmWem(wave) : AdpcmWem(wave, loops);
+            if (pcm && Adpcm) pcmMedia.Add(id);
+            if (loops) loopMedia.Add(id);
+            if (Adpcm && loops) AdpcmLoops = (AdpcmLoops.Loops + 1, AdpcmLoops.KeptPcm + (pcm ? 1 : 0));
             MediaBytes = (MediaBytes.Pcm + wave.Samples.Length * 2L, MediaBytes.Written + media[id].Length);
         }
         return id;
@@ -565,24 +602,38 @@ public sealed class WwiseBankWriter
     /// <summary>
     /// A Wwise ADPCM .wem as Armageddon's parser takes it (0xEC00F0 the chunks, 0xEBEB30 the ADPCM source's reading
     /// of the format: 24 bytes, tag 2, the channels, rate and block align, the channels' mask at +20; the length is
-    /// the data's × 64 / the block align): RIFF/WAVE, fmt, a 4-byte JUNK as the PCM ones have, data.
+    /// the data's × 64 / the block align): RIFF/WAVE, fmt, for a loop its smpl as the PCM ones have, a 4-byte JUNK,
+    /// data.
+    /// The ADPCM source loops on whole blocks (0xEBEC46: the loop's first byte is (start >> 6) blocks into the data,
+    /// its end (end + 1 >> 6) blocks; it refuses a loop that ends before it starts or past the data). Each block opens
+    /// with its own first sample and step, so a jump to one is seamless. <see cref="Medium"/> sends only loops on the
+    /// blocks here (Guerrilla's own waves are MS-ADPCM in blocks of 64 samples, the vehicles' loops whole and on them).
     /// </summary>
-    byte[] AdpcmWem(GuerrillaSounds.Wave wave)
+    byte[] AdpcmWem(GuerrillaSounds.Wave wave, bool loops)
     {
-        // (A wave's own loop isn't written: Guerrilla's music waves all name their whole length as one, which only
-        // gives their exact length; a sound that is to loop is refused where it is made, see Sound.)
         int channels = wave.Channels, align = WwiseAdpcm.BlockBytes * channels;
+        int frames = wave.Samples.Length / Math.Max(1, channels);
         byte[] data = WwiseAdpcm.Encode(wave.Samples, channels);
         double close = WwiseAdpcm.SignalToError(wave.Samples, WwiseAdpcm.Decode(data, channels));
         AdpcmCheck = (Math.Min(AdpcmCheck.Worst, close), AdpcmCheck.Sum + close, AdpcmCheck.Count + 1);
+        // The wave's own loop, to its end (without one, a looping sound plays the whole wave again).
+        bool loop = loops && wave.Loops && frames > 1;
+        int loopStart = loop ? Math.Clamp(wave.LoopStart, 0, frames - 1) : 0, loopEnd = frames - 1;
         var w = new List<byte>();
         void U32(int v) => w.AddRange(BitConverter.GetBytes(v));
         void U16(int v) => w.AddRange(BitConverter.GetBytes((ushort)v));
-        w.AddRange(Encoding.ASCII.GetBytes("RIFF")); U32(4 + 8 + 24 + 8 + 4 + 8 + data.Length);
+        w.AddRange(Encoding.ASCII.GetBytes("RIFF")); U32(4 + 8 + 24 + (loop ? 8 + 60 : 0) + 8 + 4 + 8 + data.Length);
         w.AddRange(Encoding.ASCII.GetBytes("WAVE"));
         w.AddRange(Encoding.ASCII.GetBytes("fmt ")); U32(24);
         U16(2); U16(channels); U32(wave.Rate); U32(wave.Rate * align / WwiseAdpcm.BlockSamples); U16(align); U16(4);
         U16(6); U16(WwiseAdpcm.BlockSamples); U32(channels == 1 ? 4 : channels == 2 ? 3 : (1 << channels) - 1);
+        if (loop)
+        {
+            // As PcmWem's: one loop, forward, its start and its end (inclusive), for ever.
+            w.AddRange(Encoding.ASCII.GetBytes("smpl")); U32(60);
+            foreach (int v in new[] { 0, 0, 0, 60, 0, 0, 0, 1, 0 }) U32(v);
+            foreach (int v in new[] { 0, 0, loopStart, loopEnd, 0, 0 }) U32(v);
+        }
         w.AddRange(Encoding.ASCII.GetBytes("JUNK")); U32(4); U32(0);
         w.AddRange(Encoding.ASCII.GetBytes("data")); U32(data.Length);
         w.AddRange(data);
@@ -620,14 +671,16 @@ public sealed class WwiseBankWriter
     {
         uint id = ObjectId("sound:" + key);
         if (taken.Contains(id)) return id;
-        if (Adpcm && loops) throw new NotSupportedException($"{name}: a looping sound in an ADPCM bank (not written yet)");
         var w = new Writer();
-        w.U32(Adpcm ? AdpcmPlugin : PcmPlugin);
+        // An ADPCM loop needs its medium made for one (Medium with loops): its loop points, or PCM.
+        if (Adpcm && loops && !loopMedia.Contains(medium))
+            throw new InvalidDataException($"{name}: the looping sound {key} plays a medium made for a one-shot (Medium needs loops: true)");
+        w.U32(Adpcm && !pcmMedia.Contains(medium) ? AdpcmPlugin : PcmPlugin);
         w.U32(1);          // streamed
         w.U32(medium);     // the source
         w.U32(medium);     // its file
         w.U8(0);
-        NodeBase(w, settings, parent, output);
+        NodeBase(w, id, settings, parent, output);
         w.S16(loops ? (short)0 : (short)1);
         w.S16(0);
         w.S16(0);
@@ -641,7 +694,7 @@ public sealed class WwiseBankWriter
         uint id = ObjectId("random:" + key);
         if (taken.Contains(id)) return id;
         var w = new Writer();
-        NodeBase(w, settings, parent, output);
+        NodeBase(w, id, settings, parent, output);
         w.S16(1);                                   // plays once
         w.F32(0); w.F32(0); w.F32(0);               // no transition
         w.U16(children.Count > 1 ? 1 : 0);          // not the same one twice running
@@ -666,7 +719,7 @@ public sealed class WwiseBankWriter
         uint id = ObjectId("mixer:" + key);
         if (taken.Contains(id)) return id;
         var w = new Writer();
-        NodeBase(w, settings, 0, output);
+        NodeBase(w, id, settings, 0, output);
         w.U32((uint)children.Count);
         foreach (uint c in children) w.U32(c);
         Add(objects, 7, id, w);
@@ -683,7 +736,7 @@ public sealed class WwiseBankWriter
         uint id = ObjectId("sequence:" + key);
         if (taken.Contains(id)) return id;
         var w = new Writer();
-        NodeBase(w, settings, parent, output);
+        NodeBase(w, id, settings, parent, output);
         w.S16(1);                                   // plays once
         w.F32(0); w.F32(0); w.F32(0);               // no transition
         w.U16(0);                                   // (a random container's "not the same one again")
@@ -709,7 +762,7 @@ public sealed class WwiseBankWriter
         uint id = ObjectId("retriggered:" + key);
         if (taken.Contains(id)) return id;
         var w = new Writer();
-        NodeBase(w, settings, parent, output);
+        NodeBase(w, id, settings, parent, output);
         w.S16(0);                                   // for ever
         w.F32(intervalMs); w.F32(0); w.F32(0);      // the time between two, never varied
         w.U16(Math.Min(3, children.Count - 1));     // not one of the last few again
@@ -729,7 +782,7 @@ public sealed class WwiseBankWriter
         uint id = ObjectId("layer:" + key);
         if (taken.Contains(id)) return id;
         var w = new Writer();
-        NodeBase(w, settings, parent, output);
+        NodeBase(w, id, settings, parent, output);
         w.U32((uint)children.Count);
         foreach (uint c in children) w.U32(c);
         w.U32(0);  // no crossfade groups: each child's own curves do it
@@ -764,7 +817,7 @@ public sealed class WwiseBankWriter
         if (taken.Contains(id)) return id;
         var children = choices.Where(c => c.Child != null).Select(c => c.Child!.Value).Distinct().ToList();
         var w = new Writer();
-        NodeBase(w, settings, parent, output);
+        NodeBase(w, id, settings, parent, output);
         w.U32(0);                                   // a switch (1: a state)
         w.U32(group);
         w.U32(defaultValue);                        // what plays while the switch isn't set on the game object (0: nothing)
@@ -857,7 +910,7 @@ public sealed class WwiseBankWriter
 
     // The settings every sound and container has (Armageddon's layout). A 3D one out to one of this bank's
     // attenuations also gets that attenuation's fade as a curve on the game's distance (see GameDistance).
-    void NodeBase(Writer w, Settings s, uint parent, Output? output)
+    void NodeBase(Writer w, uint id, Settings s, uint parent, Output? output)
     {
         if (output is { ThreeD: true } && distanceFades.TryGetValue(output.Attenuation, out var fade))
             s = new Settings
@@ -896,10 +949,14 @@ public sealed class WwiseBankWriter
             w.U32(0); w.U8(0xFF);
             w.U32(c.Parameter);
             w.U32((uint)c.Property);
-            w.U32(Id($"rfg_curve:{parent}:{c.Parameter}:{c.Property}:{n++}:{c.Points.Count}:{(c.Points.Count > 0 ? c.Points[0].Y : 0)}"));
+            // Each curve's own id, from its node's (unique in every bank) and its place: Armageddon's are all different.
+            // (It was made from the node's parent, 0 for every node out to a bus: 726 of our 781 fades on the game's
+            // distance had one id over 24 different fades, 2026-11-19; whether this Wwise keeps one curve an id is not
+            // known, and it shouldn't have to matter.)
+            w.U32(Id($"rfg_curve:{id:X8}:{c.Parameter}:{c.Property}:{n++}"));
             w.U8(c.Property == Property.Volume ? (byte)2 : (byte)0);
             w.U16(c.Points.Count);
-            foreach (var (x, y) in c.Points) { w.F32(x); w.F32(y); w.U32(4); }
+            foreach (var (x, y) in c.Points) { w.F32(x); w.F32(c.Property == Property.Volume ? VolumeCurveValue(y) : y); w.U32(4); }
         }
     }
 

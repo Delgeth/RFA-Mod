@@ -153,6 +153,48 @@ public static class GuerrillaTerrain
     }
 
     /// <summary>
+    /// The zone's own collision height field, what Guerrilla's cars and people stand on: the Havok 5.5
+    /// packfile in the file's MCKH section, its hkpSampledHeightFieldShape (the samples across at +0x10
+    /// and +0x14, the step at +0x20, the samples' array at +0x60, found through the packfile's local
+    /// fixups, the triangles' flip at +0x6C), each sample a signed 16-bit number of 1/64 m, row by row
+    /// along z from the zone's lowest corner. Null where the zone has none (the scenery around the
+    /// playable map) or it doesn't read as that.
+    /// </summary>
+    public static (float[] Heights, int Samples, float Step, bool Flipped)? HeightField(byte[] terrain)
+    {
+        int section = -1;
+        for (int i = 0; i + 20 <= terrain.Length; i++)
+            if (terrain[i] == 'M' && terrain[i + 1] == 'C' && terrain[i + 2] == 'K' && terrain[i + 3] == 'H' && BitConverter.ToUInt32(terrain, i + 16) == 0x57E0E057)
+            {
+                section = i;
+                break;
+            }
+        if (section < 0) return null;
+        int I(int at) => BitConverter.ToInt32(terrain, at);
+        int pack = section + 16, sections = I(pack + 0x14), names = -1, data = -1;
+        for (int s = 0; s < sections; s++)
+        {
+            int h = pack + 0x40 + s * 0x30;
+            string name = CString(terrain, h);
+            if (name == "__classnames__") names = pack + I(h + 20);
+            if (name == "__data__") data = h;
+        }
+        if (names < 0 || data < 0) return null;
+        int start = pack + I(data + 20), local = start + I(data + 24), virtuals = start + I(data + 32), exports = start + I(data + 36);
+        int shape = -1;
+        for (int v = virtuals; v + 12 <= exports && (uint)I(v) != uint.MaxValue; v += 12)
+            if (CString(terrain, names + I(v + 8)) == "hkpSampledHeightFieldShape") shape = I(v);
+        if (shape < 0) return null;
+        int at = start + shape, across = I(at + 0x10), along = I(at + 0x14), samplesAt = -1;
+        for (int l = local; l + 8 <= virtuals && (uint)I(l) != uint.MaxValue; l += 8)
+            if (I(l) == shape + 0x60) samplesAt = start + I(l + 4);
+        if (across != along || across < 2 || samplesAt < 0 || samplesAt + across * along * 2 > terrain.Length) return null;
+        var heights = new float[across * along];
+        for (int k = 0; k < heights.Length; k++) heights[k] = BitConverter.ToInt16(terrain, samplesAt + k * 2) / 64f;
+        return (heights, across, BitConverter.ToSingle(terrain, at + 0x20), terrain[at + 0x6C] != 0);
+    }
+
+    /// <summary>
     /// The zone's undergrowth (its grass and rocks: see <see cref="TerrainFile.UndergrowthLength"/>), as
     /// Armageddon's terrain files would keep it, or null if it has none: the section after the layer
     /// map, from a multiple of 4, its run-time words cleared (each layer's models pointer at +4, each

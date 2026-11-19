@@ -99,7 +99,9 @@ public sealed class TerrainHeightField
     ///   +0x0F0 hkpCompressedSampledHeightFieldShape (0x80): the samples across, the height centre,
     ///          type 1; int-to-float scale (step, 1, step, 0); float-to-int scale (its inverse, 1, the
     ///          same, 0); the floor-corrected offset (−step/128, 0, −step/128, −0); the extents (x, the
-    ///          height range, z, 0); the samples' array; the triangles flipped (1); the samples' offset
+    ///          height range, z, 0); the samples' array; whether the triangles flip
+    ///          (<paramref name="flipped"/>: 1 cuts each square from (x, z) to (x + 1, z + 1), as the
+    ///          game's own zones; 0 from (x + 1, z) to (x, z + 1), as Guerrilla's); the samples' offset
     ///          and scale
     ///   +0x170 the samples (u16 each)
     /// then the pointer tables (local: the list's children, the samples; global: each object's child;
@@ -109,7 +111,7 @@ public sealed class TerrainHeightField
     /// not one worked out from the other (ours: 511 m, 1 and 1).
     /// </summary>
     public static byte[] Section(int xSamples, int zSamples, float step, float inverseStep, float extentX, float extentZ,
-                                 float offset, float scale, IReadOnlyList<ushort> samples)
+                                 float offset, float scale, IReadOnlyList<ushort> samples, bool flipped = true)
     {
         if (samples.Count != xSamples * zSamples) throw new ArgumentException($"{samples.Count} samples for a {xSamples} × {zSamples} field");
         int low = samples.Min(s => (int)s), high = samples.Max(s => (int)s);
@@ -150,7 +152,7 @@ public sealed class TerrainHeightField
         F(0x120, inverseStep); F(0x124, 1); F(0x128, inverseStep);
         F(0x130, -step / 128); F(0x138, -step / 128); I(0x13C, 0x80000000);
         F(0x140, extentX); F(0x144, range); F(0x148, extentZ);
-        I(0x154, (uint)samples.Count); I(0x158, 0x80000000u | (uint)samples.Count); d[0x15C] = 1;
+        I(0x154, (uint)samples.Count); I(0x158, 0x80000000u | (uint)samples.Count); d[0x15C] = (byte)(flipped ? 1 : 0);
         F(0x160, offset); F(0x164, scale);
         for (int i = 0; i < samples.Count; i++) BitConverter.TryWriteBytes(d.AsSpan(0x170 + i * 2), samples[i]);
         var data = new List<byte>(d);
