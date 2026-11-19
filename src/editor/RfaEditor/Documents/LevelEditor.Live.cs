@@ -531,19 +531,23 @@ public partial class LevelEditor
             }
             foreach (ZoneObject obj in made.OrderBy(Depth))
             {
+                // Pickups and turrets the game only puts down as the level loads: not made now (they showed nothing,
+                // and an item the game couldn't finish making, such as a cloth item, was left half-made and brought
+                // the game down a moment later, a pure virtual call as it deleted it). Shown after a reload (below).
+                if (ShownAfterReload.Contains(obj.ClassHash)) continue;
                 // A spawn node's squad, vehicle or exo held in the spawn resources in force first (editor_reserve):
                 // the game spawns it once they have streamed in.
                 lines.AddRange(LiveReserveLines(obj));
                 lines.Add(gameLink.CreateCommand(obj.Handle, obj.ToBlock()));
             }
         }
-        if (lines.Count == 0 && removed.Count == 0) return;
+        if (lines.Count == 0 && removed.Count == 0 && made.Count == 0) return;
         if (lines.Count > 0 && !gameLink.TrySend(lines)) return;  // the game hasn't taken the last ones yet: next time
         foreach (ZoneObject obj in moved) liveSent[obj.Handle] = obj.Placement;
         foreach (ZoneObject obj in made)
         {
             liveSent[obj.Handle] = obj.Placement;
-            if (liveCreates++ < 20) context.Log($"Live: {Label(obj)} made in the game" +
+            if (!ShownAfterReload.Contains(obj.ClassHash) && liveCreates++ < 20) context.Log($"Live: {Label(obj)} made in the game" +
                                                 (SpawnsLive.Contains(obj.ClassHash) ? ", and its squad, vehicle or exo spawned there." : "."));
             // Pickups and turrets are put down by the game as the level loads: they show once it is loaded again.
             if (ShownAfterReload.Contains(obj.ClassHash))
