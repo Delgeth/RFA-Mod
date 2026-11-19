@@ -11,6 +11,7 @@
 //   graphics        Graphics in the in-game menus: the ported world's     [GuerrillaWorld]
 //                   picture settings, saved as you change them
 //   streaming       a fix for a race in the game's zone stream-out         (no settings)
+//   ruin_ai         enemies that fight in Ruin levels (editor-made ones)  [Ruin]
 //                   (two worker threads; a crash when zones stream out)
 // Each works as it did when it was a DLL of its own: its settings section in rfa_mods.ini, its own
 // switch under [Mods] (borderless=, console=, fov=, video_settings=, spawner=, limits=, graphics=, streaming=; 0 = off, on when missing) and
@@ -54,6 +55,7 @@ bool g_fovRunning = false;
 bool g_spawnerRunning = false;
 bool g_limitsRunning = false;
 bool g_graphicsRunning = false;
+bool g_ruinAiRunning = false;
 
 }  // namespace
 
@@ -66,6 +68,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_limitsRunning = StartPart(L"limits", limits::Init);
     g_graphicsRunning = StartPart(L"graphics", graphics::Init);
     StartPart(L"streaming", streaming::Init);
+    g_ruinAiRunning = StartPart(L"ruin_ai", ruin_ai::Init);
     StartPart(L"rfa_live_analysis", live_analysis::Init);
 }
 
@@ -75,9 +78,10 @@ extern "C" __declspec(dllexport) int __cdecl RFAQol_QueueConsoleCommand(const ch
     return g_consoleRunning && console::QueueCommand(line) ? 1 : 0;
 }
 
-// The game's menus changed a setting: only fov listens.
+// The game's menus changed a setting: fov and ruin_ai listen.
 extern "C" __declspec(dllexport) void __cdecl RFAMod_SettingChanged(const char* section, const char* key) {
     if (g_fovRunning) fov::SettingChanged(section, key);
+    if (g_ruinAiRunning) ruin_ai::SettingChanged(section, key);
 }
 
 // The in-game menus (rfa_menu.h): the spawner's, the limits' and the graphics'.

@@ -77,6 +77,10 @@ local Rfa_experimentals = {
 		section = "GuerrillaWorld", key = "Brightness", default = 5},
 	{type = TYPE_SLIDER, label = "Clock speed", min = 0, max = 120, step = 4, current_value = 48,
 		section = "GuerrillaWorld", key = "ClockSpeed", default = 48},
+	-- Ruin levels made with the editor can have squads; the game turns enemies' hostility off in Ruin
+	-- (rfa_qol's ruin_ai), so they only fight with this on. It changes at once.
+	{type = TYPE_TOGGLE, label = "Enemies fight in Ruin", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 2,
+		section = "Ruin", key = "HostileAI", default = 0},
 }
 -- [RFA] Options > Main Menu: how the main menu is laid out ([MainMenu] in rfa_mods.ini; ui_main_menu_pc.lua
 -- reads them each time it opens).
