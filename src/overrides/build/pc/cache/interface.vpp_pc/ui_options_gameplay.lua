@@ -81,6 +81,11 @@ local Rfa_experimentals = {
 	-- (rfa_qol's ruin_ai), so they only fight with this on. It changes at once.
 	{type = TYPE_TOGGLE, label = "Enemies fight in Ruin", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 2,
 		section = "Ruin", key = "HostileAI", default = 0},
+	-- RFA-Mod's MCP servers (live_analysis_mcp.exe and the editor's RfaEditorMcp.exe, for an AI assistant):
+	-- [Mcp] Enabled, off by default. rfa_qol opens or closes the game's live analysis pipe at once; the servers
+	-- themselves read it as they start, so the program that runs them needs starting again after a change.
+	{type = TYPE_TOGGLE, label = "MCP servers", options = {"MENU_ENABLED", "MENU_DISABLED"}, current_value = 2,
+		section = "Mcp", key = "Enabled", default = 0},
 }
 -- [RFA] Options > Main Menu: how the main menu is laid out ([MainMenu] in rfa_mods.ini; ui_main_menu_pc.lua
 -- reads them each time it opens).

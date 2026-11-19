@@ -61,4 +61,6 @@ void SettingChanged(const char* section, const char* key);
 // Live analysis mod: named pipe interface for external debugging/profiling tools.
 namespace live_analysis {
 void Init();
+// Closes the pipe (Options > Experimentals > MCP servers turned off while the game runs); Init opens it again.
+void Shutdown();
 }
