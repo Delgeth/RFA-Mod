@@ -453,6 +453,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     {
         MarkUnsaved();
         if (selected == null) return;
+        scene?.Remodel(selected);  // a squad, vehicle set, item type... changed: its model too
         scene?.Place(selected);
         ShowSelection();
         ShowObjectTitle();  // its name may be the property changed
@@ -1490,6 +1491,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         }
         else if (change.Object != null)
         {
+            scene?.Remodel(change.Object);  // (an undone property may have named another squad, vehicle...)
             scene?.Place(change.Object);
             foreach (ZoneObject other in change.Others ?? []) scene?.Place(other);
             LinksChanged();
