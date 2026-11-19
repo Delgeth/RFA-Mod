@@ -1463,11 +1463,45 @@ void AfterCarriedThrow(BYTE* player) {
     rfa::Log("Thrown: his hands were empty after the throw; %s %s", RecordName(record), taken ? "equipped" : "not equipped (the game refused; trying again)");
 }
 
+// Setting a carried thing down (Guerrilla's player_set_down_non_inventory, RM 0xABE780: when he equips another
+// weapon, human_equip_inventory_item, or swaps, player_do_weapon_swap). Guerrilla plays no animation: it stops the
+// equip (ANIM_ALIAS_EQUIP) if it plays, takes the item out of his hands (player_remove_item_from_hands) and puts it
+// 0.3 m before where it is, along his facing, as it lies (its function +0x30 with true): a world object again,
+// falling and rolling as any. Armageddon's set-down (0x8BA7C0, cdecl: the human; from the controls 0x4E1478, the
+// equip 0x85D287 and the swap 0x8BEC11/0x8BECDF) plays a put-down animation (the "pickup" the user saw when
+// changing to an empty slot) and leaves the thing placed where it floats. For the player with one of Guerrilla's
+// non-inventory weapons in his hands (its propane tank) the mod does Guerrilla's: the game's own let-go of a carried
+// weapon (its launch, 0x7323C0, as it lets a non-inventory weapon fly: out of his hands and the inventory, his last
+// weapon back) at that place, with no speed and not placed, so it drops where he stood.
+constexpr DWORD kSetDown = 0x8BA7C0;
+constexpr size_t kSetDownPrologue = 6;  // push ebp / mov ebp,esp / sub esp,38h
+using SetDownFn = bool(__cdecl*)(BYTE* human);
+SetDownFn g_setDown;
+constexpr float kSetDownAhead = 0.3f;  // Guerrilla's: 0.3 x his facing
+
+bool __cdecl SetDown(BYTE* human) {
+    BYTE* player = LocalPlayer();
+    BYTE* record = human && human == player ? RecordEquipped(player, nullptr, 0) : nullptr;
+    BYTE* weapon = record ? ObjectFromHandle(kWorld, nullptr, *reinterpret_cast<const DWORD*>(record + kInventoryInfo)) : nullptr;
+    BYTE* info = weapon ? *reinterpret_cast<BYTE**>(weapon + kWeaponInfo) : nullptr;
+    if (!info || !(info[kWeaponFlagsB] & kNonInventory) || !IsGuerrillaGun(info) || !g_launchThrown) return g_setDown(human);
+    const float* at = reinterpret_cast<const float*>(weapon + 0x4);
+    const float* facing = reinterpret_cast<const float*>(player + kForward);
+    const float place[3] = {at[0] + facing[0] * kSetDownAhead, at[1] + facing[1] * kSetDownAhead, at[2] + facing[2] * kSetDownAhead};
+    const float still[3] = {0.0f, 0.0f, 0.0f};
+    g_launchThrown(weapon, nullptr, place, reinterpret_cast<const float*>(weapon + 0x10), still, false);
+    rfa::Log("Thrown: %s set down as Guerrilla's (no animation; in his hands now: %s)", WeaponName(info), RecordName(RecordEquipped(player, nullptr, 0)));
+    return true;
+}
+
 void ThrownCarried() {
     g_launchThrown = reinterpret_cast<LaunchThrownFn>(
         rfa::HookFunction(kLaunchThrown, kLaunchThrownPrologue, reinterpret_cast<void*>(&LaunchThrown)));
     if (!g_launchThrown) rfa::Log("Thrown: could not wrap the weapons' launch; a thrown tank stays in the hands");
     else rfa::Log("Thrown: a carried weapon (Guerrilla's propane tank) is thrown as its projectile and leaves the hands");
+    g_setDown = reinterpret_cast<SetDownFn>(rfa::HookFunction(kSetDown, kSetDownPrologue, reinterpret_cast<void*>(&SetDown)));
+    if (!g_setDown) rfa::Log("Thrown: could not wrap the set-down; a carried tank is put down Armageddon's way");
+    else rfa::Log("Thrown: a carried tank set down (another weapon, a swap) leaves his hands as Guerrilla's: no animation, it drops");
 }
 
 // ---- Materials the game draws red (see the top)

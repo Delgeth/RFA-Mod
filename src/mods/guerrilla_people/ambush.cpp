@@ -27,12 +27,26 @@
 //     the player is more than 400 m from the region's box (check_abort_conditions RM 0xA19E80, ABORT_AMBUSH_DIST_SQR
 //     160,000) it is aborted and its squads leave (request_despawn_all_members: each member taken away once out of
 //     view); with none left the region can fire again, the next time the player comes in.
-// Not here yet: the 27 riding nodes (piece 6, with guerrilla_vehicles' chase) and the Marauder-EDF skirmishes
-// (find_skirmish_squads, check_teams), the ambush's voice lines (maybe_play_ambush_voice_line), and the members' alert
-// of the player (ai_perception::alert_enemy on each; the attack orders name the player instead).
+// Riding and skirmishes (step 3 of the people's rest, 2026-11-15):
+//   - the 27 riding nodes (squad_vehicle on, vehicle_type Guerrilla's Default Marauder group, "rfg_Default Marauder" as
+//     the world build names it) are placed and fired as the others; Armageddon's own squad spawn seats them (the
+//     node's vehicle_type read by 0x80C7D0 → 0x757340 into the squad's +0x104, then 0x80D410 → 0x80AC90 fills the
+//     seats, as Guerrilla's spawn_squad_members → object_squad::spawn_vehicle RM 0xA6E620). Once a crew sits in its
+//     vehicle (a member's +0x1160) it is handed to guerrilla_vehicles' chase (GuerrillaVehicles_Chase: Guerrilla's
+//     chase_target in a vehicle, the gunner firing), and given back (GuerrillaVehicles_Release) before an abort takes
+//     it away; the vehicle goes with its crew, out of view;
+//   - skirmishes: Guerrilla's check_teams (RM 0xA67190) marks a region whose squads are of more than one team, and
+//     find_skirmish_squads (RM 0xA3CC90) keeps one squad of each (EDF, Marauder, guerrilla). Every update its
+//     update_squad_orders (RM 0xA919D0) sends a Marauder squad at the EDF squad, else the guerrilla one; an EDF squad
+//     at the Marauders, else the guerrillas; a guerrilla squad at the EDF, else the Marauders: ATTACK on that squad's
+//     first member, else on the player. Here the same each update, given with Armageddon's own re-ordering of a node's
+//     squad (0x800D00, as the script's af_orders: thiscall on the node, the target, the orders) when the target changes.
+// Not here yet: the ambush's voice lines (maybe_play_ambush_voice_line) and the members' alert of the player
+// (ai_perception::alert_enemy on each; the attack orders name the player instead).
 #define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "ambush.h"
+#include "voices.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -48,7 +62,7 @@
 namespace {
 
 // ---- The game's (Armageddon's publicbeta build)
-constexpr DWORD kPosition = 0x04, kHandle = 0x68, kNpcAi = 0x174C, kAiSquad = 0x7D4;
+constexpr DWORD kPosition = 0x04, kHandle = 0x68, kNpcAi = 0x174C, kAiSquad = 0x7D4, kTeam = 0x13B4, kInVehicle = 0x1160;
 constexpr DWORD kNone = 0xFFFFFFFF;
 void* const kWorld = reinterpret_cast<void*>(0x1870630);
 auto& g_localPlayer = *reinterpret_cast<BYTE**>(0x2271490);
@@ -79,6 +93,17 @@ NodeOwnOrdersFn g_nodeOwnOrders = nullptr;
 NodeOrdersFn g_nodeOrders = nullptr;
 constexpr int kAttackOrders = 3;
 constexpr DWORD kOrdersType = 0x00, kOrdersPlace = 0x08, kOrdersObject = 0x14;
+// A node's squad given new orders on an object (the script's af_orders 0x94E470 → 0x800D00: thiscall on the node, the
+// target object (not null), the orders 1..0x24; ret 8).
+using NodeSetOrdersFn = void(__fastcall*)(BYTE* node, void*, BYTE* target, int orders);
+auto const NodeSetOrders = reinterpret_cast<NodeSetOrdersFn>(0x800D00);
+// guerrilla_vehicles' chase (crews.cpp), found by name; null without that mod (the crew then sits, as Armageddon's AI has it).
+using ChaseFn = bool(__cdecl*)(DWORD vehicle, DWORD target);
+using ReleaseFn = void(__cdecl*)(DWORD vehicle);
+ChaseFn g_chase = nullptr;
+ReleaseFn g_release = nullptr;
+bool g_lookedForVehicles = false;
+constexpr int kGuerrillaTeam = 0, kEdfTeam = 1, kMarauderTeam = 3;
 int GameTime() { return *reinterpret_cast<const int*>(0x1121300); }   // ms; it stops while the game is paused
 int GameHour() { return *reinterpret_cast<const BYTE*>(0x12F76D4); }
 
@@ -93,15 +118,17 @@ struct Region {
     bool enabled = true, guerrillas = false, marauders = false;
     float day = 0, night = 0;
     int fewest = 1, mostSquads = 1;
-    std::vector<DWORD> nodes;     // its squad nodes on foot, as placed
-    std::vector<DWORD> squads;    // the squads it made, while fired
+    std::vector<DWORD> nodes;     // its squad nodes, as placed
+    std::vector<bool> rides;      // each node's squad rides (squad_vehicle)
+    struct Squad { DWORD handle = kNone, node = kNone; bool riding = false, handed = false, shouted = false; DWORD vehicle = kNone, target = kNone; };
+    std::vector<Squad> squads;    // the squads it made, while fired
     bool known = false, inside = false, fired = false, aborting = false;
     int nextUpdate = 0;
 };
 std::vector<Region> g_regions;
 std::unordered_set<DWORD> g_heldNodes;
 const BYTE* g_firing = nullptr;  // the node being fired now (its spawn passes the hold; its orders become the attack)
-int g_lastClock = 0, g_fired = 0, g_rolledOut = 0, g_aborted = 0, g_squadsMade = 0;
+int g_lastClock = 0, g_fired = 0, g_rolledOut = 0, g_aborted = 0, g_squadsMade = 0, g_handed = 0, g_skirmishOrders = 0;
 using RunningFn = int(__cdecl*)(int* activityMode, int* mission);
 RunningFn g_campaignRunning = nullptr;
 bool g_lookedForCampaign = false;
@@ -181,21 +208,26 @@ void ReadRegions() {
         }
         else if (kind == "node") {
             DWORD region = kNone, node = kNone;
-            std::string squad;
+            std::string squad, riding;
             in >> std::hex >> region >> node >> std::dec >> squad;
             auto at = byHandle.find(region);
             if (!in || at == byHandle.end()) continue;
+            in >> riding;
             Region& r = g_regions[at->second];
             r.nodes.push_back(node);
+            r.rides.push_back(riding == "riding");
             g_heldNodes.insert(node);
             if (_strnicmp(squad.c_str(), "marauder", 8) == 0) r.marauders = true;
             if (squad.find("_gsq_") != std::string::npos || _strnicmp(squad.c_str(), "guerilla", 8) == 0) r.guerrillas = true;
         }
     }
-    int nodes = 0, off = 0;
-    for (const Region& r : g_regions) nodes += static_cast<int>(r.nodes.size()), off += r.enabled ? 0 : 1;
-    rfa::Log("Ambushes: %d of Guerrilla's Marauder ambush regions read (%d switched off), %d squad nodes on foot held until their region fires",
-             static_cast<int>(g_regions.size()), off, nodes);
+    int nodes = 0, off = 0, riding = 0;
+    for (const Region& r : g_regions) {
+        nodes += static_cast<int>(r.nodes.size()), off += r.enabled ? 0 : 1;
+        for (bool rides : r.rides) riding += rides ? 1 : 0;
+    }
+    rfa::Log("Ambushes: %d of Guerrilla's Marauder ambush regions read (%d switched off), %d squad nodes (%d of them riding) held until their region fires",
+             static_cast<int>(g_regions.size()), off, nodes, riding);
 }
 
 // The attack: as the node being fired gets its orders, they are Guerrilla's ambush orders, the player attacked.
@@ -235,7 +267,12 @@ void Fire(Region& r, float chance, bool night) {
         const DWORD squad = NodeSpawn(node, nullptr, kNone, 0);
         g_firing = nullptr;
         if (squad == kNone) continue;
-        r.squads.push_back(squad);
+        Region::Squad fired;
+        fired.handle = squad;
+        fired.node = r.nodes[order[k]];
+        fired.riding = r.rides[order[k]];
+        fired.target = HandleOf(g_localPlayer);  // the node's orders: Attack on the player
+        r.squads.push_back(fired);
         ++made;
     }
     ++g_fired;
@@ -258,26 +295,84 @@ void Update(Region& r, bool abortAll) {
         RFA_LOG_FIRST(32, "Ambushes: region 0x%08X aborted (%s); its squads leave once out of view", r.handle,
                       abortAll ? "an activity or mission runs" : "the player is past 400 m from its box");
     }
-    // Each squad's people still about (and, when aborting, those out of view taken away).
-    std::unordered_map<DWORD, int> left;
-    for (DWORD s : r.squads) left[s] = 0;
+    if (!g_lookedForVehicles) {
+        g_lookedForVehicles = true;
+        if (HMODULE vehicles = GetModuleHandleW(L"guerrilla_vehicles.dll")) {
+            g_chase = reinterpret_cast<ChaseFn>(GetProcAddress(vehicles, "GuerrillaVehicles_Chase"));
+            g_release = reinterpret_cast<ReleaseFn>(GetProcAddress(vehicles, "GuerrillaVehicles_Release"));
+        }
+        if (!g_chase) rfa::Log("Ambushes: guerrilla_vehicles' chase isn't there; a riding ambush's crew sits in its vehicle");
+    }
+    // Each squad's people still about (and, when aborting, those out of view taken away), its first one, its team, its vehicle.
+    struct About { int left = 0; BYTE* first = nullptr; int team = -1; DWORD vehicle = kNone; };
+    std::unordered_map<DWORD, About> about;
+    for (const Region::Squad& s : r.squads) about[s.handle] = About{};
     const int people = NpcCount(kWorld, nullptr);
     for (int i = 0; i < people; ++i) {
         BYTE* human = NpcAt(kWorld, nullptr, i);
         if (!human || GoneOrDead(human)) continue;
-        auto squad = left.find(SquadOf(human));
-        if (squad == left.end()) continue;
+        auto squad = about.find(SquadOf(human));
+        if (squad == about.end()) continue;
+        const DWORD vehicle = *reinterpret_cast<const DWORD*>(human + kInVehicle);
         if (r.aborting) {
             const float* at = PlaceOf(human);
             const float head[3] = {at[0], at[1] + 1.0f, at[2]};
             if (!InView(head, 1.0f)) {
+                if (vehicle != kNone && g_release) g_release(vehicle);
                 RemoveObject(kWorld, nullptr, HandleOf(human), 0);
+                const bool players = vehicle != kNone && *reinterpret_cast<const DWORD*>(g_localPlayer + kInVehicle) == vehicle;
+                if (vehicle != kNone && !players && WorldObject(kWorld, nullptr, vehicle)) RemoveObject(kWorld, nullptr, vehicle, 0);  // its vehicle goes with it
                 continue;
             }
         }
-        ++squad->second;
+        About& a = squad->second;
+        if (++a.left == 1) a.first = human, a.team = *reinterpret_cast<const int*>(human + kTeam);
+        if (vehicle != kNone) a.vehicle = vehicle;
     }
-    r.squads.erase(std::remove_if(r.squads.begin(), r.squads.end(), [&](DWORD s) { return left[s] == 0; }), r.squads.end());
+    if (!r.aborting) {
+        // Guerrilla's maybe_play_ambush_voice_line (RM 0xA66EA0): a member of each squad shouts as it comes (voc_ambush).
+        for (Region::Squad& s : r.squads)
+            if (!s.shouted && about[s.handle].first) {
+                s.shouted = true;
+                VoiceSay(about[s.handle].first, "voc_ambush");
+            }
+        // A riding crew, once seated, goes after the player (guerrilla_vehicles' chase).
+        for (Region::Squad& s : r.squads) {
+            const About& a = about[s.handle];
+            if (!s.riding || s.handed || a.vehicle == kNone || !g_chase) continue;
+            if (g_chase(a.vehicle, HandleOf(g_localPlayer))) {
+                s.handed = true;
+                s.vehicle = a.vehicle;
+                ++g_handed;
+                RFA_LOG_FIRST(32, "Ambushes: region 0x%08X's riding squad 0x%08X (vehicle 0x%08X) goes after the player (guerrilla_vehicles' chase)", r.handle, s.handle,
+                              a.vehicle);
+            }
+        }
+        // Guerrilla's update_squad_orders: each squad at another team's squad of the region, else at the player.
+        auto FirstOf = [&](int team) -> BYTE* {
+            for (const Region::Squad& s : r.squads)
+                if (const About& a = about[s.handle]; a.left > 0 && a.team == team) return a.first;
+            return nullptr;
+        };
+        for (Region::Squad& s : r.squads) {
+            const About& a = about[s.handle];
+            if (a.left == 0) continue;
+            BYTE* target = nullptr;
+            if (a.team == kMarauderTeam) target = FirstOf(kEdfTeam) ? FirstOf(kEdfTeam) : FirstOf(kGuerrillaTeam);
+            else if (a.team == kEdfTeam) target = FirstOf(kMarauderTeam) ? FirstOf(kMarauderTeam) : FirstOf(kGuerrillaTeam);
+            else if (a.team == kGuerrillaTeam) target = FirstOf(kEdfTeam) ? FirstOf(kEdfTeam) : FirstOf(kMarauderTeam);
+            if (!target) target = g_localPlayer;
+            if (HandleOf(target) == s.target) continue;
+            BYTE* node = WorldObject(kWorld, nullptr, s.node);
+            if (!node) continue;
+            NodeSetOrders(node, nullptr, target, kAttackOrders);
+            s.target = HandleOf(target);
+            ++g_skirmishOrders;
+            RFA_LOG_FIRST(32, "Ambushes: region 0x%08X's squad 0x%08X (team %d) attacks %s 0x%08X, as Guerrilla's update_squad_orders", r.handle, s.handle, a.team,
+                          target == g_localPlayer ? "the player" : "another team's squad, its member", s.target);
+        }
+    }
+    r.squads.erase(std::remove_if(r.squads.begin(), r.squads.end(), [&](const Region::Squad& s) { return about[s.handle].left == 0; }), r.squads.end());
     if (r.squads.empty()) {
         r.fired = r.aborting = false;
         RFA_LOG_FIRST(64, "Ambushes: region 0x%08X over (its squads dead or gone); it can fire again the next time the player comes in", r.handle);

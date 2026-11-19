@@ -162,10 +162,44 @@ public static class GuerrillaDistricts
     /// made, as one a container, and the shared civilians), and one a district group (the start's EDF and
     /// Marauders, and the group's civilians). Each lists one character a container (<paramref name="containerOf"/>).
     /// </summary>
+    /// <summary>
+    /// The batches a district's civilians rotate in (step 4c of the people, 2026-11-15; the user: "Batches"). Guerrilla
+    /// swaps one streamed civilian of the group for another each time the player has gone 80 m (rotate_character_usage
+    /// RM 0xB5E730), its squads taking their members from whoever is streamed in (srm_pick_loaded_human_info); ours name
+    /// theirs, so a district keeps <see cref="CivilianSlots"/> − <see cref="RotatingCivilians"/> civilians its squads use
+    /// (any radio operator, the group's Isaiah, among them) and the other <see cref="RotatingCivilians"/> slots go round
+    /// the rest of the group in up to <see cref="MostVersions"/> versions of its resource (rfg_dust, rfg_dust_r2,
+    /// rfg_dust_r3), which guerrilla_people switches between through the game's own change of spawn resource.
+    /// </summary>
+    public const int RotatingCivilians = 4, MostVersions = 3;
+    public const string VersionSuffix = "_r";
+
+    /// <summary>A group's civilians kept in every version (its squads'), and each version's rotating batch (one, the base's, when it has no more than fit).</summary>
+    public static (List<string> Kept, List<List<string>> Batches) Rotation(IReadOnlyList<string> group, IReadOnlySet<string> made, int room)
+    {
+        var have = group.Where(made.Contains).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (have.Count <= room) return (have, [[]]);
+        int keep = Math.Max(0, room - RotatingCivilians);
+        var kept = have.Where(c => c.StartsWith("Isaiah", StringComparison.OrdinalIgnoreCase)).Take(keep).ToList();
+        foreach (string c in Civilians(have.Except(kept, StringComparer.OrdinalIgnoreCase).ToList(), made, keep - kept.Count)) kept.Add(c);
+        var rest = have.Except(kept, StringComparer.OrdinalIgnoreCase).ToList();
+        int size = room - kept.Count;
+        var batches = new List<List<string>>();
+        for (int v = 0; v < MostVersions && v * size < rest.Count; v++)
+            batches.Add([.. Enumerable.Range(0, size).Select(i => rest[(v * size + i) % rest.Count]).Distinct(StringComparer.OrdinalIgnoreCase)]);
+        return (kept, batches);
+    }
+
     public static Dictionary<string, List<string>> Resources(IReadOnlyDictionary<string, List<string>> groups, IEnumerable<string> districtGroups,
                                                              IReadOnlySet<string> made, IReadOnlyDictionary<string, string> containerOf,
-                                                             Func<string, string?> teamOf)
+                                                             Func<string, string?> teamOf) => Resources(groups, districtGroups, made, containerOf, teamOf, out _);
+
+    /// <summary>The same, with each rotating district resource's kept civilians (<paramref name="kept"/>, by the base's name).</summary>
+    public static Dictionary<string, List<string>> Resources(IReadOnlyDictionary<string, List<string>> groups, IEnumerable<string> districtGroups,
+                                                             IReadOnlySet<string> made, IReadOnlyDictionary<string, string> containerOf,
+                                                             Func<string, string?> teamOf, out Dictionary<string, List<string>> kept)
     {
+        kept = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var resources = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var soldiers = made.Where(c => teamOf(c) is { } t && (t.Equals("EDF", StringComparison.OrdinalIgnoreCase) || t.Equals("Marauder", StringComparison.OrdinalIgnoreCase)));
         var shared = SharedCivilians.Where(made.Contains).ToList();
@@ -174,7 +208,14 @@ public static class GuerrillaDistricts
         var core = DistrictEdf.Concat(DistrictMarauders).Where(made.Contains).ToList();
         foreach (string group in districtGroups)
             if (groups.TryGetValue(group, out var list))
-                resources[ResourceOf(group)] = GuerrillaSquads.ResourceCharacters(core.Concat(Civilians(list, made, Slots - core.Count)), containerOf);
+            {
+                var (keptHere, batches) = Rotation(list, made, Slots - core.Count);
+                string resource = ResourceOf(group);
+                for (int v = 0; v < batches.Count; v++)
+                    resources[v == 0 ? resource : $"{resource}{VersionSuffix}{v + 1}"] =
+                        GuerrillaSquads.ResourceCharacters(core.Concat(keptHere).Concat(batches[v]), containerOf);
+                if (batches.Count > 1) kept[resource] = keptHere;
+            }
         return resources;
     }
 
@@ -203,12 +244,32 @@ public static class GuerrillaDistricts
     /// characters that can crew a vehicle there (<see cref="Crew"/>), a line each, tab-separated: resource, team,
     /// the characters by commas. A zone names its resource (spawn_resource_data).
     /// </summary>
-    public static List<string> CrewLines(IReadOnlyDictionary<string, List<string>> resources, Func<string, string?> teamOf)
+    public static List<string> CrewLines(IReadOnlyDictionary<string, List<string>> resources, Func<string, string?> teamOf,
+                                         IReadOnlyDictionary<string, List<string>>? kept = null)
     {
-        var lines = new List<string> { "# resource\tteam\tcharacters (Guerrilla's people the resource streams in; GuerrillaBuilder.exe's people writes this)" };
+        var lines = new List<string>
+        {
+            "# resource\tteam\tcharacters (Guerrilla's people the resource streams in; GuerrillaBuilder.exe's people writes this)",
+            "# a rotating district's Guerilla line lists the civilians all its versions stream; its Walkers lines (each version's) list them all",
+        };
         foreach (string resource in resources.Keys.Order(StringComparer.OrdinalIgnoreCase))
+        {
+            int at = resource.LastIndexOf(VersionSuffix, StringComparison.OrdinalIgnoreCase);
+            string baseName = at > 0 && int.TryParse(resource[(at + VersionSuffix.Length)..], out _) ? resource[..at] : resource;
+            bool rotates = kept != null && kept.TryGetValue(baseName, out _);
             foreach (string team in new[] { "EDF", "Marauder", "Guerilla" })
-                if (Crew(resources, resource, team, teamOf) is { Count: > 0 } crew) lines.Add($"{resource}\t{team}\t{string.Join(",", crew)}");
+            {
+                if (Crew(resources, resource, team, teamOf) is not { Count: > 0 } crew) continue;
+                if (rotates && team == "Guerilla")
+                {
+                    lines.Add($"{resource}\tWalkers\t{string.Join(",", crew)}");
+                    if (resource != baseName) continue;
+                    crew = [.. crew.Where(c => kept![baseName].Contains(c, StringComparer.OrdinalIgnoreCase))];
+                }
+                else if (resource != baseName) continue;  // a version: only its walkers differ
+                lines.Add($"{resource}\t{team}\t{string.Join(",", crew)}");
+            }
+        }
         return lines;
     }
 }

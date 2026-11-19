@@ -184,6 +184,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -1225,66 +1226,126 @@ void ReportSpawnPools() {
 
 namespace {
 
-// ---- A road route that never ends
+// ---- A road route that goes round
 // A vehicle that drives along roads (ai_vehicle_travel_to_a_point_do_frame 0x4B18E0 → pathfind_to 0x4B20E0 → 0x706690
-// → 0x707F60) gets its route from the road stage (0x5C87B0). Its search fills a map of road points (0x13CB39C; a
-// point's slot through its road's +0xA8 table, nodes of 0x14 bytes: +8 the next road's handle, +0xC its point), and a
-// walk (0x5C9D81-0x5CA926) follows the map from the start until it meets the destination (the walk's [ebp-0x54] road
-// object and [ebp-8] point), with no other way out. On 2026-11-13 (16:39 and 17:29, Parker at night, traffic) the
-// walk went round a loop in the map and the game stopped there for good, its main thread busy (the user's stack: the
-// map's look-up 0x47BAB0 called from the walk, our traffic's travel_to below). Which road points made the loop isn't
-// known yet; the log says. A walk past 200,000 steps (more than all the points loaded) is going round: its next step
-// is pointed at its destination (a copy of the node, the destination's handle and point in it), so the game's own
-// test ends the walk. [GuerrillaVehicles] RouteLoopGuard=0 turns it off.
+// → 0x707F60) gets its route from the road stage (0x5C87B0, cdecl, 0x24 bytes of arguments at every call; 0 when there
+// is no route, its own failure: 0x5C9734 → 0x5CBEB6). Its search fills a map of road points (0x13CB39C; a point's slot
+// through its road's +0xA8 table, nodes of 0x14 bytes: +8 the next road's handle, +0xC its point), and a walk
+// (0x5C9D81-0x5CA926) follows the map from the start until it meets the destination, with no other way out. On
+// 2026-11-13/14 (Parker, traffic) the map held a loop: road 0x7A020007 point 0 (the start of a road whose own previous
+// road is 0x7A020004) led to point 34, the last, of 0x6A010032 (a road in the next zone with no previous road), and on
+// round to 0x7A020007 point 0, while the route was bound for 0x7A020007 point 3; the game stopped there for good. A
+// walk that comes back to a point it has passed is going round: the route is given up as the stage gives up a route it
+// can't find (the walk's look-up raises our own exception, which the stage's wrapper turns into its 0). Ending the walk
+// at its destination instead (the first guard) left a route the walk couldn't finish (0x5C9DE2 read a missing node).
+// The log names the road points that went round. [GuerrillaVehicles] RouteLoopGuard=0 turns it off.
+constexpr DWORD kRoadStage = 0x5C87B0;         // cdecl, nine words; 0: no route
 constexpr DWORD kRouteMapFind = 0x47BAB0;      // thiscall (map, key*): a road point's node; key: the road object, its point (word +4)
 constexpr DWORD kRouteWalkReturn = 0x5C9DD6;   // where the walk calls it
 constexpr DWORD kWalkKey = 0x2E0;              // the key is the walk's [ebp-0x2E0]
 constexpr DWORD kDestinationRoad = 0x54, kDestinationPoint = 0x8;
-constexpr DWORD kNodeRoadHandle = 8, kNodePoint = 0xC, kNodeSize = 0x14;
-constexpr int kMostRouteSteps = 200000;
+constexpr DWORD kNodeRoadHandle = 8, kNodePoint = 0xC;
+constexpr DWORD kRouteGoesRound = 0xE0524F55;  // our exception: the walk came back to a point it passed
+using RoadStageFn = int(__cdecl*)(DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD, DWORD);
 using RouteMapFindFn = BYTE*(__fastcall*)(void* map, void* unused, BYTE* key);
+RoadStageFn g_roadStage;
 RouteMapFindFn g_routeMapFind;
 auto const HandleOf = reinterpret_cast<DWORD(__fastcall*)(BYTE* object, void* unused)>(0x424850);
-BYTE g_routeEnd[kNodeSize];
-DWORD g_walkFrame, g_lastRouteStep;
-int g_routeSteps;
+std::unordered_set<unsigned long long> g_routePassed;  // this walk's points (the road object and the point)
+int g_routesGivenUp = 0;
 
 BYTE* __fastcall RouteMapFind(void* map, void* unused, BYTE* key) {
     BYTE* node = g_routeMapFind(map, unused, key);
-    if (reinterpret_cast<DWORD>(_ReturnAddress()) != kRouteWalkReturn || !node || !key) return node;
+    if (reinterpret_cast<DWORD>(_ReturnAddress()) != kRouteWalkReturn || !key) return node;
+    BYTE* road = *reinterpret_cast<BYTE**>(key);
+    const WORD point = *reinterpret_cast<const WORD*>(key + 4);
+    const unsigned long long at = (static_cast<unsigned long long>(reinterpret_cast<DWORD>(road)) << 16) | point;
+    if (node && g_routePassed.insert(at).second) return node;
     const DWORD frame = reinterpret_cast<DWORD>(key) + kWalkKey;  // the walk's ebp
-    const DWORD tick = GetTickCount();
-    if (frame != g_walkFrame || tick - g_lastRouteStep > 50) {
-        g_walkFrame = frame;
-        g_routeSteps = 0;
-    }
-    g_lastRouteStep = tick;
-    if (++g_routeSteps < kMostRouteSteps) return node;
     BYTE* destination = *reinterpret_cast<BYTE**>(frame - kDestinationRoad);
-    if (!destination) return node;
-    const WORD point = *reinterpret_cast<const WORD*>(frame - kDestinationPoint);
-    BYTE* at = *reinterpret_cast<BYTE**>(key);
-    memcpy(g_routeEnd, node, kNodeSize);
-    *reinterpret_cast<DWORD*>(g_routeEnd + kNodeRoadHandle) = HandleOf(destination, nullptr);
-    *reinterpret_cast<WORD*>(g_routeEnd + kNodePoint) = point;
-    RFA_LOG_FIRST(20, "Roads: a route went round a loop (%d steps; at road 0x%08lX point %u, its next road 0x%08lX point %u; bound for road 0x%08lX "
-                      "point %u): ended at its destination",
-                  g_routeSteps, at ? HandleOf(at, nullptr) : 0UL, static_cast<unsigned>(*reinterpret_cast<const WORD*>(key + 4)),
-                  *reinterpret_cast<const DWORD*>(node + kNodeRoadHandle), static_cast<unsigned>(*reinterpret_cast<const WORD*>(node + kNodePoint)),
-                  HandleOf(destination, nullptr), static_cast<unsigned>(point));
-    g_routeSteps = 0;
-    return g_routeEnd;
+    ++g_routesGivenUp;
+    RFA_LOG_FIRST(20, "Roads: a route %s at road 0x%08lX point %u (next road 0x%08lX point %u), %zu points in, bound for road 0x%08lX point %u: "
+                      "given up as a route that can't be found (%d so far)",
+                  node ? "went round" : "lost its way", road ? HandleOf(road, nullptr) : 0UL, static_cast<unsigned>(point),
+                  node ? *reinterpret_cast<const DWORD*>(node + kNodeRoadHandle) : 0UL,
+                  node ? static_cast<unsigned>(*reinterpret_cast<const WORD*>(node + kNodePoint)) : 0U, g_routePassed.size(),
+                  destination ? HandleOf(destination, nullptr) : 0UL, static_cast<unsigned>(*reinterpret_cast<const WORD*>(frame - kDestinationPoint)),
+                  g_routesGivenUp);
+    RaiseException(kRouteGoesRound, 0, 0, nullptr);
+    return node;
+}
+
+// What the stage does on its way out (0x5CBEAB), done after a route is given up: its search is a session on the route
+// map (0x5ED940 begins one: +0 "in session", +0x1C the Common_mempool's mark before, +0x20 the mark after its own
+// buffer). Ending it (0x5EDA70) asserts "MP_MARK( Common_mempool ) == post_alloc_mark" (anything the stage took from
+// 0x26AF908 since is back), then gives the mempool back to the mark before (0xCB6A80) and clears +0. Left in session,
+// the next search stopped on "!in_session" (2026-11-14 21:42:40, an int 3 at 0x5ED964). So the mempool goes back to
+// the session's own mark, then the game ends the session itself.
+constexpr DWORD kRouteMap = 0x13CB39C, kCommonMempool = 0x26AF908, kSessionPostAllocMark = 0x20;
+auto const EndRouteSession = reinterpret_cast<void(__fastcall*)(void* map, void* unused)>(0x5EDA70);
+auto const MempoolBackTo = reinterpret_cast<void(__fastcall*)(void* pool, void* unused, DWORD mark, DWORD a, DWORD b)>(0xCB6A80);
+
+void EndGivenUpRoute() {
+    BYTE* map = reinterpret_cast<BYTE*>(kRouteMap);
+    if (!map[0]) return;  // not in session
+    MempoolBackTo(reinterpret_cast<void*>(kCommonMempool), nullptr, *reinterpret_cast<const DWORD*>(map + kSessionPostAllocMark), 0, 0);
+    EndRouteSession(map, nullptr);
+}
+
+int __cdecl RoadStage(DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f, DWORD g, DWORD h, DWORD i) {
+    g_routePassed.clear();
+    __try {
+        return g_roadStage(a, b, c, d, e, f, g, h, i);
+    } __except (GetExceptionCode() == kRouteGoesRound ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        EndGivenUpRoute();
+        return 0;  // no route, as the stage's own failure
+    }
 }
 
 void StartRouteLoopGuard() {
     if (!rfa::IniInt(L"GuerrillaVehicles", L"RouteLoopGuard", 1)) return;
-    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08};  // push ebp / mov ebp,esp / sub esp,8
-    if (memcmp(reinterpret_cast<const void*>(kRouteMapFind), opening, sizeof(opening)) != 0) {
-        rfa::Log("Roads: the route map's look-up (0x%08lX) isn't as expected; a route that goes round a loop isn't ended", kRouteMapFind);
+    const BYTE findOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08};                         // push ebp / mov ebp,esp / sub esp,8
+    const BYTE stageOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x88, 0x06, 0x00, 0x00};       // push ebp / mov ebp,esp / sub esp,688h
+    if (memcmp(reinterpret_cast<const void*>(kRouteMapFind), findOpening, sizeof(findOpening)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kRoadStage), stageOpening, sizeof(stageOpening)) != 0) {
+        rfa::Log("Roads: the road stage (0x%08lX) or its map's look-up (0x%08lX) isn't as expected; a route that goes round isn't given up",
+                 kRoadStage, kRouteMapFind);
         return;
     }
-    g_routeMapFind = reinterpret_cast<RouteMapFindFn>(rfa::HookFunction(kRouteMapFind, sizeof(opening), reinterpret_cast<void*>(&RouteMapFind)));
-    if (g_routeMapFind) rfa::Log("Roads: a road route that goes round a loop (past %d steps) is ended at its destination", kMostRouteSteps);
+    g_roadStage = reinterpret_cast<RoadStageFn>(rfa::HookFunction(kRoadStage, sizeof(stageOpening), reinterpret_cast<void*>(&RoadStage)));
+    if (!g_roadStage) return;
+    g_routeMapFind = reinterpret_cast<RouteMapFindFn>(rfa::HookFunction(kRouteMapFind, sizeof(findOpening), reinterpret_cast<void*>(&RouteMapFind)));
+    if (g_routeMapFind) rfa::Log("Roads: a road route that comes back to a point it has passed is given up, as one that can't be found");
+}
+
+// ---- A car taken apart with someone still at its wheel
+// When a vehicle is removed (0x602E30) its interaction lets its riders go (+0x4138: 0x64C190 → 0x64CE20 → 0x64D890 →
+// 0x6505D0), and a driver let go resets the car's handling for the AI (automobile_reset_handling_for_ai 0x5F2CF0,
+// cdecl (car, two flags)). That reads the car's handling block (0x5F7590 on car +0x50F8: the block while its byte
+// +0xE8 is 1, else null) without a check. In a save's load the car's handling is already gone by then, and the game
+// read 0+4 (2026-11-13 14:46, thread 24988, 0x5F2D16; the 21:22 freeze went the same way). Armageddon's own cars
+// rarely have an NPC at the wheel when they're removed; Guerrilla's traffic and crews always do. A car with no
+// handling block has nothing to reset, so for one the reset is skipped (logged).
+constexpr DWORD kResetHandlingForAi = 0x5F2CF0, kHandlingBlock = 0x50F8;
+using ResetHandlingFn = void(__cdecl*)(BYTE* car, DWORD forAi, DWORD keep);
+ResetHandlingFn g_resetHandling;
+auto const HandlingBlock = reinterpret_cast<BYTE*(__fastcall*)(BYTE* block, void* unused)>(0x5F7590);
+
+void __cdecl ResetHandlingForAi(BYTE* car, DWORD forAi, DWORD keep) {
+    if (car && !HandlingBlock(car + kHandlingBlock, nullptr)) {
+        RFA_LOG_FIRST(10, "Vehicles: a car's handling wasn't reset for the AI: it has none any more (it's being taken apart, its driver let go)");
+        return;
+    }
+    g_resetHandling(car, forAi, keep);
+}
+
+void StartHandlingResetGuard() {
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28};  // push ebp / mov ebp,esp / sub esp,28h
+    if (memcmp(reinterpret_cast<const void*>(kResetHandlingForAi), opening, sizeof(opening)) != 0) {
+        rfa::Log("Vehicles: the AI handling reset (0x%08lX) isn't as expected; a car taken apart with a driver may still stop the game", kResetHandlingForAi);
+        return;
+    }
+    g_resetHandling = reinterpret_cast<ResetHandlingFn>(rfa::HookFunction(kResetHandlingForAi, sizeof(opening), reinterpret_cast<void*>(&ResetHandlingForAi)));
 }
 
 // ---- Room for Guerrilla's walkers' blend trees (see the top)
@@ -1685,6 +1746,32 @@ constexpr DWORD kDeformationEnabled = 0x142A484;  // vehicle_deformation_enabled
 // vehicle loader's (0x622110) and the impact code's (0x60F590).
 constexpr DWORD kDeformationReads[] = {0x5FB9E6, 0x6221CC, 0x61052D};
 
+// A vehicle's dent instance (the user's run of 2026-11-14 11:35: the game ended at 12:09:03 at Dust, 34 cars about).
+// Each vehicle whose class has a morph target is given a dent instance as it is set up (0x5FFAC0 at 0x601405, and
+// 0xA420D0 at 0xA42BEB): rl_dynamic_morph_instance::create (0xC2ABE0, from a pool of 32 at 0x27A6E78, its size `push
+// 20h` at 0x767821; Guerrilla's is 32 too, game_render_system_init RM 0x7CF3BD), then its init (0xD34A10: thiscall, 1
+// and the morph container) and the mesh instance's set (its vtable +0x98, 0xD39810, which takes null). Guerrilla makes
+// one only when the car is first dented (rl_skin_instance::activate_morph, RM 0x550DE0) and, when the pool is empty,
+// returns false: that car isn't dented. Armageddon makes one for every such car and doesn't check, so with dents on
+// and more than 32 such cars about, the 33rd's init wrote through null (0xD34A1D, to 0x8). Here the init on no
+// instance does nothing, as Guerrilla's activate_morph when create fails: the mesh instance's morph slot (+0x150)
+// stays empty, as Armageddon's own vehicles' always is, and that car shows no dents.
+constexpr DWORD kMorphInit = 0xD34A10;
+constexpr size_t kMorphInitPrologue = 7;  // push ebp / mov ebp,esp / push ecx / mov [ebp-4],ecx
+using MorphInitFn = void(__fastcall*)(void* instance, void*, int count, void* container);
+MorphInitFn g_morphInit = nullptr;
+int g_morphPoolEmpty = 0;
+
+void __fastcall MorphInit(void* instance, void*, int count, void* container) {
+    if (!instance) {
+        ++g_morphPoolEmpty;
+        RFA_LOG_FIRST(8, "Dents: all 32 of the vehicles' dent instances (Guerrilla's number) are taken; this vehicle is made without one and shows no "
+                         "dents, as Guerrilla's when its pool is empty (%d so far)", g_morphPoolEmpty);
+        return;
+    }
+    g_morphInit(instance, nullptr, count, container);
+}
+
 void TurnOnDents() {
     for (DWORD at : kDeformationReads) {
         if (rfa::CodeValue(at) != kDeformationEnabled) {
@@ -1694,6 +1781,8 @@ void TurnOnDents() {
     }
     *reinterpret_cast<bool*>(kDeformationEnabled) = true;
     rfa::Log("Dents: vehicle_deformation_enabled on (Guerrilla's vehicles dent where they're hit)");
+    g_morphInit = reinterpret_cast<MorphInitFn>(rfa::HookFunction(kMorphInit, kMorphInitPrologue, reinterpret_cast<void*>(&MorphInit)));
+    if (!g_morphInit) rfa::Log("Dents: could not hook the dent instance's set-up; more than 32 dentable vehicles at once still end the game");
 }
 
 // ---- Room for the vehicle interactions
@@ -1932,6 +2021,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     if (!g_buildVehicleList) rfa::Log("Vehicles: could not hook the vehicle list's building; the game keeps its %d", kGameMaxVehicles);
     MakeRoomForVehiclesInTheWorld();
     StartRouteLoopGuard();
+    StartHandlingResetGuard();
     RegisterBiggerTypes();
     MoreInteractionRoom();
     MoreSpawnGroups();

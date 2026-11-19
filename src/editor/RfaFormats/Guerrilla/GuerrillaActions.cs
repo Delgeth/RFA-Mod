@@ -17,7 +17,29 @@ namespace RfaFormats.Guerrilla;
 public static class GuerrillaActions
 {
     public const string File = "action_nodes.txt";
-    const string TypeTable = "action_node_types.xtbl";
+    const string TypeTable = "action_node_types.xtbl", PropTable = "ambient_prop_info.xtbl";
+
+    /// <summary>
+    /// Guerrilla's ambient props (ambient_prop_info.xtbl, 18 entries, each also an items_3d.xtbl entry of the same name):
+    /// the items its people hold at an action node. The weapons part builds their items (GuerrillaWeapons'
+    /// AmbientPropItems), the world part their effects (<see cref="PropEffects"/>), and the people part's
+    /// action_nodes.txt says which type holds which and when (its "prop" lines, for guerrilla_people's props.cpp).
+    /// </summary>
+    static IEnumerable<XtblElement> Props(Packfile guerrillaTables) =>
+        guerrillaTables.Find(PropTable) is { } entry ? XtblFile.FromBytes(guerrillaTables.Read(entry)).Entries : [];
+
+    /// <summary>The effects Guerrilla's ambient props play (always_on_effect's perm_effect_type, anim_effect_list's anim_effect_type).</summary>
+    public static IEnumerable<string> PropEffects(Packfile guerrillaTables)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in Props(guerrillaTables))
+        {
+            if (p.Element("always_on_effect")?.ValueOf("perm_effect_type")?.Trim() is { Length: > 0 } perm) names.Add(perm);
+            foreach (var e in p.Element("anim_effect_list")?.Elements ?? [])
+                if (e.ValueOf("anim_effect_type")?.Trim() is { Length: > 0 } effect) names.Add(effect);
+        }
+        return names;
+    }
     static readonly CultureInfo C = CultureInfo.InvariantCulture;
 
     public static string Write(string guerrillaCache, Packfile guerrillaTables, string peopleFolder)
@@ -77,7 +99,10 @@ public static class GuerrillaActions
             "# type<TAB>name<TAB>rest s<TAB>state<TAB>least s<TAB>most s<TAB>entry clip<TAB>exit clip[<TAB>idle clip<TAB>least s<TAB>most s]...  (- for none)",
             "# node<TAB>squad node handle<TAB>type<TAB>spot x y z<TAB>facing x z",
             "# ped<TAB>action node handle<TAB>type<TAB>spot x y z<TAB>facing x z  (a node the walkers use)",
+            "# prop<TAB>type<TAB>its prop (an item)<TAB>the wearer's point<TAB>the item's point<TAB>entry|after<TAB>exit|complete<TAB>always-on effect<TAB>its point[<TAB>action<TAB>effect<TAB>point]...",
         };
+        var props = Props(guerrillaTables).GroupBy(XtblFile.EntryName, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        int withProp = 0;
         foreach (string name in used)
         {
             var info = types[name];
@@ -88,13 +113,33 @@ public static class GuerrillaActions
                 if (idle.ValueOf("state_action")?.Trim() is { Length: > 0 } action)
                     fields.AddRange([action, F(Float(idle.ValueOf("action_cooldown_min"))), F(Float(idle.ValueOf("action_cooldown_max")))]);
             lines.Add(string.Join('\t', fields));
+            // Its people's everyday lines (node_flags allow_ambient_lines: Guerrilla's play_ambient_voice_lines).
+            if ((info.Element("node_flags")?.Elements ?? []).Any(f => f.Value.Trim().Equals("allow_ambient_lines", StringComparison.OrdinalIgnoreCase)))
+                lines.Add($"lines\t{name}");
+            // Its prop (ambinet_prop_info, sic): when it's made and taken, and what ambient_prop_info.xtbl says of it.
+            var propInfo = info.Element("ambinet_prop_info");
+            if (propInfo?.ValueOf("ambient_prop_type")?.Trim() is { Length: > 0 } propName && props.TryGetValue(propName, out var prop))
+            {
+                bool after = (propInfo.ValueOf("prop_creation_time")?.Trim() ?? "").StartsWith("After", StringComparison.OrdinalIgnoreCase);
+                bool complete = (propInfo.ValueOf("prop_removal_time")?.Trim() ?? "").StartsWith("Node", StringComparison.OrdinalIgnoreCase);
+                var always = prop.Element("always_on_effect");
+                var propFields = new List<string> { "prop", name, XtblFile.EntryName(prop), Text(prop.ValueOf("human_attach_point")), Text(prop.ValueOf("obj_attach_point")),
+                                                    after ? "after" : "entry", complete ? "complete" : "exit",
+                                                    Text(always?.ValueOf("perm_effect_type")), Text(always?.ValueOf("perm_effect_attach_name")) };
+                foreach (var e in prop.Element("anim_effect_list")?.Elements ?? [])
+                    if (e.ValueOf("anim_action_name")?.Trim() is { Length: > 0 } action && e.ValueOf("anim_effect_type")?.Trim() is { Length: > 0 } effect)
+                        propFields.AddRange([action, effect, Text(e.ValueOf("anim_effect_attach_name"))]);
+                lines.Add(string.Join('\t', propFields));
+                withProp++;
+            }
         }
         lines.AddRange(nodeLines);
         lines.AddRange(pedLines);
         Directory.CreateDirectory(peopleFolder);
         System.IO.File.WriteAllLines(Path.Combine(peopleFolder, File), lines);
         var busiest = pedsByZone.OrderByDescending(z => z.Value).Take(8).Select(z => $"{z.Key.Replace("terr01_", "")} {z.Value}");
-        return $"Action nodes: {nodeLines.Count} squad nodes under Guerrilla's action nodes and {pedLines.Count} nodes the walkers use, {used.Count} of its types, " +
+        return $"Action nodes: {nodeLines.Count} squad nodes under Guerrilla's action nodes and {pedLines.Count} nodes the walkers use, {used.Count} of its types " +
+               $"({withProp} holding one of Guerrilla's ambient props), " +
                $"written to {File} (guerrilla_people takes their people to them){(noType > 0 ? $"; {noType} under a node whose type has no state" : "")}; " +
                $"the walkers' nodes by zone, the most: {string.Join(", ", busiest)}";
     }

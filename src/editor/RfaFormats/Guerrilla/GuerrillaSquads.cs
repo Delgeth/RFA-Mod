@@ -124,7 +124,7 @@ public static class GuerrillaSquads
         // each district group the zones name; each lists one character a container (the others come with it).
         var groups = GuerrillaDistricts.Groups(guerrillaTables);
         var districtGroups = GuerrillaDistricts.DistrictGroups(GuerrillaDistricts.AmbientGroups(guerrillaTables).Values);
-        var resourceLists = GuerrillaDistricts.Resources(groups, districtGroups, characters, containerOf, teamOf);
+        var resourceLists = GuerrillaDistricts.Resources(groups, districtGroups, characters, containerOf, teamOf, out var keptCivilians);
         bool Civilian(string character) => teamOf(character) is { } t && t.Equals(GuerrillaTeam, StringComparison.OrdinalIgnoreCase);
         // A group's civilians, for its squads: those its resource lists (rfg_Default's: the shared ones).
         var civiliansOf = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
@@ -132,7 +132,11 @@ public static class GuerrillaSquads
             ["default"] = [.. resourceLists[DefaultResourceName].Where(Civilian)],
         };
         foreach (string group in districtGroups)
-            if (resourceLists.TryGetValue(GuerrillaDistricts.ResourceOf(group), out var listedHere)) civiliansOf[group] = [.. listedHere.Where(Civilian)];
+            if (resourceLists.TryGetValue(GuerrillaDistricts.ResourceOf(group), out var listedHere))
+                // A rotating district's squads take the civilians all its versions stream (GuerrillaDistricts.Rotation).
+                civiliansOf[group] = keptCivilians.TryGetValue(GuerrillaDistricts.ResourceOf(group), out var keptHere)
+                    ? [.. listedHere.Where(c => Civilian(c) && keptHere.Contains(c, StringComparer.OrdinalIgnoreCase))]
+                    : [.. listedHere.Where(Civilian)];
 
         // The guerrilla squads' loadouts: Guerrilla's progression's (Jayde's, whose looks the group gives), those ported.
         var guerrillaLoadouts = new List<(string Character, string Loadout, double Weight)>();

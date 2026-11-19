@@ -576,7 +576,7 @@ public static class GuerrillaWorld
         var effectTables = GuerrillaEffectTables.Build(misc, rfgTables, placedProps, file => rfgFiles.HasEffectFile(file + ".cefct_pc"),
                                                        [.. dustEffects, .. vehicleEffects.Effects, .. GuerrillaWeapons.Effects(rfgTables),
                                                         .. GuerrillaMaterialEvents.Effects(rfgTables), .. GuerrillaFootsteps.Effects(rfgTables),
-                                                        .. GuerrillaKiosks.Effects(rfgTables)],
+                                                        .. GuerrillaKiosks.Effects(rfgTables), .. GuerrillaActions.PropEffects(rfgTables)],
                                                        DlcExplosions(game), [.. vehicleEffects.Explosions, .. GuerrillaWeapons.Explosions(rfgTables)],
                                                        (cue, explosion) => effectSounds.EffectSound(cue, explosion) is { } sound
                                                            ? new GuerrillaEffectTables.Sound(sound.Event, sound.HeardTo) : null,
@@ -912,8 +912,13 @@ public static class GuerrillaWorld
         uint patrolClass = NameHashes.ClassHash("object_patrol"), squadNodeClass = NameHashes.ClassHash("object_squad_spawn_node");
         var patrolPeople = patrolsIn.ToDictionary(p => p.Key, p => p.Value.Sum(handle =>
             guerrillaObjects[p.Key].Values.FirstOrDefault(o => o.ClassHash == squadNodeClass && o.Parent == handle) is { } node ? Members(node.Text("squad_def") ?? "") : 0));
-        var standingIn = GuerrillaPopulation.CapPeople(guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.StandingSquads(z.Value, peopleSquads, SquadsOf(z.Key))),
-                                                       patrolPeople, Members, out int standingLeftOut);
+        var standingAll = guerrillaObjects.ToDictionary(z => z.Key, z => GuerrillaPopulation.StandingSquads(z.Value, peopleSquads, SquadsOf(z.Key)));
+        var standingIn = GuerrillaPopulation.CapPeople(standingAll, patrolPeople, Members, out int standingLeftOut,
+                                                       (z, handle) => GuerrillaPopulation.StandingRank(guerrillaObjects[z], handle));
+        int RankCount(Dictionary<(int, int), List<(uint Handle, string Squad)>> lists, int rank) =>
+            lists.Sum(z => z.Value.Count(s => GuerrillaPopulation.StandingRank(guerrillaObjects[z.Key], s.Handle) == rank));
+        log($"People: the cap keeps squads under action nodes first ({RankCount(standingIn, 2)} of {RankCount(standingAll, 2)}), then guard posts' " +
+            $"({RankCount(standingIn, 1)} of {RankCount(standingAll, 1)}), then the rest ({RankCount(standingIn, 0)} of {RankCount(standingAll, 0)})");
         log($"People: {standingIn.Values.Sum(s => s.Count)} of Guerrilla's squads standing where it puts them ({standingIn.Values.Sum(s => s.Sum(x => Members(x.Squad)))} people)" +
             (standingLeftOut > 0 ? $"; {standingLeftOut} left out to keep {GuerrillaPopulation.MostPeople} people at most within each 3 x 3 block of zones" : "") +
             $"; squads: {string.Join(", ", peopleSquads.Order())}");
@@ -927,6 +932,11 @@ public static class GuerrillaWorld
         var storyCharacter = XtblFile.FromBytes(rfgTables.Read(rfgTables.Find(GuerrillaSquads.SquadTable)!)).Entries
             .Where(e => e.ValueOf("special_npc")?.Trim() is { Length: > 0 })
             .ToDictionary(XtblFile.EntryName, e => e.ValueOf("special_npc")!.Trim(), StringComparer.OrdinalIgnoreCase);
+        var guardLines = new List<string>
+        {
+            "; Guerrilla's guard posts for guerrilla_people's guards.cpp (its guard post AI), written by the world build.",
+            "; guard <the post's bounding box as placed> <the guard node's place x y z> <its facing x z> <its scan angle left, right (degrees)> <its group_id>",
+        };
         var storyLines = new List<string>
         {
             "; Guerrilla's story people at the safehouses for guerrilla_people's story.cpp, written by the world build.",
@@ -951,8 +961,8 @@ public static class GuerrillaWorld
             foreach (var (_, list) in standingIn)
                 foreach (var (_, squad) in list) placedSquads.Add(squad);
             foreach (var (_, regions) in ambushIn)
-                foreach (var (_, onFoot, _) in regions)
-                    foreach (var (_, squad) in onFoot) placedSquads.Add(squad);
+                foreach (var (_, onFoot, riding) in regions)
+                    foreach (var (_, squad) in onFoot.Concat(riding)) placedSquads.Add(squad);
             foreach (var (_, nodes) in storyIn)
                 foreach (var node in nodes) placedSquads.Add(node.Squad);
             Directory.CreateDirectory(modFolder);
@@ -973,6 +983,7 @@ public static class GuerrillaWorld
         var roadsMoved = new List<string>();  // roads whose own position was moved into their zone's square
         int laddersPlaced = 0, laddersLeftOut = 0, laddersInZone = 0;  // Guerrilla's ladders, each on its building (GuerrillaLadders)
         int hingesPlaced = 0, hingesLeftOut = 0, hingesWithMotors = 0;  // Guerrilla's hinges, on the objects they join (GuerrillaConstraints)
+        int cuttersPlaced = 0, cuttersLeftOut = 0, cuttersInZone = 0;  // Guerrilla's shape cutters, its pre-made damage (GuerrillaShapeCutters)
         var turbineLines = new List<string>();  // its wind turbines' objects, for guerrilla_world (GuerrillaConstraints.TurbineList)
         int roadsPlaced = 0, spotsPlaced = 0;
         // Guerrilla's pickups (its ammo boxes, weapon lockers, propane tanks, singularity bombs; see GuerrillaPickups),
@@ -1084,12 +1095,19 @@ public static class GuerrillaWorld
                 hingesPlaced += hinges.Count;
                 hingesLeftOut += hingesLeft;
                 hingesWithMotors += hingeMotors;
+                // Guerrilla's shape cutters (its pre-made damage: the Mohole's broken pipes), each on the building it
+                // cuts placed above (see GuerrillaShapeCutters).
+                var cutters = GuerrillaShapeCutters.Convert(rfgLadderZone, zoneFile.Objects, taken, out int cuttersLeft);
+                foreach (var cutter in cutters) zoneFile.Insert(zoneFile.Objects.Count, cutter);
+                cuttersPlaced += cutters.Count;
+                cuttersLeftOut += cuttersLeft;
+                cuttersInZone = Math.Max(cuttersInZone, cutters.Count);
             }
             // Guerrilla's patrols with their squads and route navpoints, its standing squads, and its pedestrian network.
             var patrolsHere = patrolsIn.GetValueOrDefault((col, row)) ?? [];
             var ambushHere = ambushIn.GetValueOrDefault((col, row)) ?? [];
             var storyHere = storyIn.GetValueOrDefault((col, row)) ?? [];
-            var standingHere = (standingIn.GetValueOrDefault((col, row)) ?? []).Concat(ambushHere.SelectMany(r => r.OnFoot))
+            var standingHere = (standingIn.GetValueOrDefault((col, row)) ?? []).Concat(ambushHere.SelectMany(r => r.OnFoot.Concat(r.Riding)))
                 .Concat(storyHere.Select(n => (n.Handle, n.Squad))).ToList();
             int pedestriansHere = guerrillaObjects.TryGetValue((col, row), out var rfgHere) ? GuerrillaPopulation.Pedestrians(rfgHere).Count : 0;
             pedestriansPlaced += pedestriansHere;
@@ -1123,7 +1141,6 @@ public static class GuerrillaWorld
                 transitionCells.AddRange(nodalCount.Cells.Select(c => $"{c.Navpoint:X8} {c.Cell:X16}"));
                 foreach (var (region, onFoot, riding) in ambushHere)
                 {
-                    ambushRiding += riding;
                     if (GuerrillaPopulation.AmbushRegionLine(region) is not { } regionLine) continue;
                     ambushLines.Add(regionLine);
                     ambushRegionsWritten++;
@@ -1133,7 +1150,14 @@ public static class GuerrillaWorld
                             ambushLines.Add($"node {region.Handle:X8} {placed:X8} {squad}");
                             ambushNodesPlaced++;
                         }
+                    foreach (var (handle, squad) in riding)  // seated in their vehicle by the game's squad spawn (squad_vehicle, vehicle_type)
+                        if (nodalCount.Handles.TryGetValue(handle, out uint placed))
+                        {
+                            ambushLines.Add($"node {region.Handle:X8} {placed:X8} {squad} riding");
+                            ambushRiding++;
+                        }
                 }
+                guardLines.AddRange(GuerrillaPopulation.GuardPostLines(rfgZone, nodalCount.Handles));
                 var storyCulture = System.Globalization.CultureInfo.InvariantCulture;
                 foreach (var node in storyHere)
                     if (nodalCount.Handles.TryGetValue(node.Handle, out uint placedStory) &&
@@ -1208,7 +1232,8 @@ public static class GuerrillaWorld
             navigation.Remove((col, row));
         }
         log($"People: {pedestriansPlaced} of Guerrilla's pedestrian navpoints placed (its pedestrian network, for the ambient people); " +
-            $"{guardPostsPlaced} guard posts' boxes with their squads' nodes under them (guerrilla_people leashes each squad to its box)");
+            $"{guardPostsPlaced} guard posts' boxes with their squads' nodes under them, {guardLines.Count(l => l.StartsWith("guard "))} of their guard nodes " +
+            "written to guard_posts.txt (guerrilla_people's guard post AI)");
         log($"People: {nodalPlaced} of Guerrilla's node network's navpoints placed (paths on walls, transitions, stairs, ladders, doors: the ways between " +
             $"the nav mesh's pieces), {nodalOnMovers} of them on the building or other mover they belong to, {nodalLeftOut} left out (their mover isn't " +
             $"placed); {guardAnchorsMoved} guard posts' boxes anchored on a guard node (the leash's way back)");
@@ -1222,10 +1247,11 @@ public static class GuerrillaWorld
         File.WriteAllLines(Path.Combine(modFolder, "transition_cells.txt"), transitionCells);
         File.WriteAllLines(Path.Combine(modFolder, "ambush_regions.txt"), ambushLines);
         File.WriteAllLines(Path.Combine(modFolder, "story_nodes.txt"), storyLines);
+        File.WriteAllLines(Path.Combine(modFolder, "guard_posts.txt"), guardLines);
         log($"People: {storyNodesPlaced} of Guerrilla's story people's squad nodes at the safehouses placed and written to story_nodes.txt " +
             $"({storyLines.Count(l => l.StartsWith("special "))} special NPCs', {storyLines.Count(l => l.StartsWith("vip "))} VIPs'; held for guerrilla_people's story.cpp)");
         log($"People: {ambushRegionsWritten} of Guerrilla's Marauder ambush regions written to ambush_regions.txt, {ambushNodesPlaced} of their squad nodes on foot " +
-            $"placed (held until their region fires: guerrilla_people's ambush.cpp), {ambushRiding} riding ones not yet");
+            $"placed (held until their region fires: guerrilla_people's ambush.cpp), and {ambushRiding} riding ones (seated in their vehicles)");
         log($"People: {transitionCells.Count} transitions' and pedestrians' cells written to transition_cells.txt (guerrilla_people gives each its cell once its zone's mesh is in)");
         log($"Vehicles' places: {roadsPlaced} of Guerrilla's roads (each in its zone and its persistent zone), {spotsPlaced} parked vehicles' spots " +
             $"(their groups {GuerrillaVehiclePlaces.GroupPrefix}<Guerrilla's name>, which building the vehicles writes)" +
@@ -1235,6 +1261,9 @@ public static class GuerrillaWorld
             "makes their items and weapons)" + (pickupsLeft.Count > 0 ? $"; not yet: {string.Join(", ", pickupsLeft.Select(p => $"{p.Key} {p.Value}"))}" : ""));
         log($"Ladders: {laddersPlaced} of Guerrilla's placed, each on its building (the most in one zone {laddersInZone}; the game holds " +
             $"{GuerrillaLadders.MostLadders} at once)" + (laddersLeftOut > 0 ? $"; {laddersLeftOut} left out, their building not placed" : ""));
+        log($"Shape cutters: {cuttersPlaced} of Guerrilla's placed (its pre-made damage, cut as each zone streams in), each on the building it cuts " +
+            $"(the most in one zone {cuttersInZone}; the game holds {GuerrillaShapeCutters.MostShapeCutters} at once)" +
+            (cuttersLeftOut > 0 ? $"; {cuttersLeftOut} left out, their building not placed" : ""));
         log($"Hinges: {hingesPlaced} of Guerrilla's placed on the objects they join, {hingesWithMotors} turned by a motor (the wind turbines' blades, the " +
             $"mining machine's)" + (hingesLeftOut > 0 ? $"; {hingesLeftOut} left out, an object they join not placed" : ""));
         File.WriteAllLines(Path.Combine(modFolder, GuerrillaConstraints.TurbineList), turbineLines);
@@ -1242,6 +1271,7 @@ public static class GuerrillaWorld
         log($"Buildings: {buildingLines.Count} movers written to {GuerrillaBuildingList.FileName} (chunk, importance, team, destroyed share and place, " +
             $"for Guerrilla's minimap); {buildingLines.Count(l => l.Split(' ')[4] is "2" or "3")} of medium or high importance");
         foreach (string line in kiosks.Write(modFolder, rfgCache, game, overrides)) log("Kiosks: " + line);
+        foreach (string line in GuerrillaVoiceBanks.Write(rfgTables, rfgCache, game, overrides, modFolder)) log("Voices: " + line);
         log($"Wind turbines: {turbineLines.Count} written to {GuerrillaConstraints.TurbineList}, their blades each turned to its own angle " +
             $"(guerrilla_world plays Guerrilla's turbine code on them)" +
             (turbineLines.Count(l => l.Split(' ')[3] == "FFFFFFFF") is int noMotor and > 0 ? $"; {noMotor} without their motor placed" : ""));

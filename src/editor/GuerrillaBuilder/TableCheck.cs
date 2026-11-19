@@ -95,6 +95,14 @@ static class TableCheck
             }
         }
         if (!SquadsCheck(setup, archives, log)) bad++;
+        // The sound banks the game will list, Armageddon's and ours, against the most its bank list holds.
+        string worldFolder = Path.Combine(setup.ModFolder, "mods", "guerrilla_world");
+        int banks = GuerrillaSoundBanks.BankRows(setup.Game, worldFolder);
+        log.Line($"Sound bank check: {banks} of the {GuerrillaSoundBanks.GameBankLimit} sound banks Armageddon can list are used " +
+                 (banks <= GuerrillaSoundBanks.GameBankLimit
+                     ? $"({GuerrillaSoundBanks.GameBankLimit - banks} left)"
+                     : $"({banks - GuerrillaSoundBanks.GameBankLimit} too many: the game would load no sound at all; {GuerrillaSoundBanks.BankTable} in mods\\guerrilla_world\\)"));
+        if (banks > GuerrillaSoundBanks.GameBankLimit) bad++;
         log.Line(bad == 0
             ? $"Table check: none of the {checkedTables} tables lacks a field the game requires" + (doubtful > 0 ? $"; {doubtful} have values to look into (above)" : "")
             : $"Table check: {bad} of {checkedTables} tables have entries the game stops on at start-up (above)" + (doubtful > 0 ? $"; {doubtful} have values to look into" : ""));

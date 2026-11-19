@@ -111,6 +111,18 @@ public static class GuerrillaWeapons
         "multi_object_backpack_rhino", "multi_object_backpack_tremor",
     ];
 
+    /// <summary>
+    /// Guerrilla's ambient props (ambient_prop_info.xtbl's 18, each an items_3d entry of the same name): what its people
+    /// hold at an action node (the smokers' cigarettes, Samanya's welding torch, the VIPs' binoculars, ...), which
+    /// guerrilla_people's props.cpp makes and hangs in their hands (GuerrillaActions writes which type holds which).
+    /// Built as the backpacks' models are: their items with their own containers, preloaded, with no pickup.
+    /// </summary>
+    public static readonly string[] AmbientPropItems =
+    [
+        "beam", "beer_bottle_a", "beer_bottle_b", "bar_glass", "sledgehammer", "clipboard", "cigarette", "amb_rock", "jackhammer", "nano_forge",
+        "amb_spraybottle", "amb_box", "amb_welding_torch", "binoculars", "amb_broom", "amb_data_pad", "wiring_kit", "amb_file_folder",
+    ];
+
     /// <summary>Guerrilla's weapons its world places (GuerrillaPickups): its propane tanks and its singularity bombs' caches.</summary>
     public static readonly string[] PickupWeapons = ["propane_tank", "singularity_bomb"];
 
@@ -421,6 +433,8 @@ public static class GuerrillaWeapons
         if (BuildBackpackModels)
             foreach (string name in BackpackItems)
                 foreach (string line in b.BackpackItem(name)) yield return line;
+        foreach (string name in AmbientPropItems)
+            foreach (string line in b.AmbientPropItem(name)) yield return line;
         // The turrets' parts and their guns drawn as the top, as the vehicles part's turrets name them.
         foreach (string line in b.TurretItems(modFolder)) yield return line;
         // The backpacks' camera shakes (BackpackMedia), which guerrilla_gear plays: into camera_shake.xtbl before it is written.
@@ -1734,6 +1748,21 @@ public static class GuerrillaWeapons
         /// weapon's ammo type its Ammo_Pickup_Tiers: Guerrilla's same numbers (see AmmoType); it stays there, as
         /// Guerrilla's (no_pickup_delete).
         /// </summary>
+        /// <summary>An ambient prop (see <see cref="AmbientPropItems"/>): its item, with no pickup, preloaded (an item the guns have made already stays as it is).</summary>
+        public IEnumerable<string> AmbientPropItem(string name)
+        {
+            bool before = itemsDone.ContainsKey(name);
+            var notes = new List<string>();
+            string? ours = Item(name, notes);
+            foreach (string note in notes) yield return $"{name}: {note}";
+            if (ours == null) { yield return $"{name}: left out"; yield break; }
+            if (before) { Built.Add($"{name} as {ours} (an ambient prop; the item already made)"); yield break; }
+            var entry = items.Entries.First(e => XtblFile.EntryName(e).Equals(ours, StringComparison.OrdinalIgnoreCase));
+            entry.Element("Touch_Script")?.Remove();
+            GuerrillaTableFit.Set(entry, "streaming_category", "General (preloaded)");
+            Built.Add($"{name} as {ours} (an ambient prop)");
+        }
+
         /// <summary>A backpack's model (see <see cref="BackpackItems"/>): its item, with no pickup.</summary>
         public IEnumerable<string> BackpackItem(string name)
         {

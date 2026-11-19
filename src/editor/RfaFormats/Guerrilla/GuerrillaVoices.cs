@@ -32,6 +32,7 @@ public sealed class GuerrillaVoices
 
     readonly Packfile voices;
     readonly Dictionary<uint, int> cueOfLine = [];
+    readonly Dictionary<uint, int> variationsOfLine = [];
     readonly List<(uint SoundBankCrc, float Volume, int Index, int Rank, int DistanceIndex)> cues = [];
     readonly Dictionary<uint, string> soundBankNames = [];
     readonly Dictionary<string, (byte[] Data, string[] WaveBanks)> soundBanks = new(StringComparer.OrdinalIgnoreCase);
@@ -43,7 +44,12 @@ public sealed class GuerrillaVoices
         this.voices = voices;
         if (Encoding.ASCII.GetString(lines, 0, 4) != "0JXo") throw new InvalidDataException($"{persona}'s rfgvp_pc isn't a persona's line list");
         int count = BitConverter.ToInt32(lines, 0x48), at = BitConverter.ToInt32(lines, 0x54);
-        for (int i = 0; i < count; i++) cueOfLine[BitConverter.ToUInt32(lines, at + 12 * i)] = BitConverter.ToUInt16(lines, at + 12 * i + 4);
+        for (int i = 0; i < count; i++)
+        {
+            uint key = BitConverter.ToUInt32(lines, at + 12 * i);
+            cueOfLine[key] = BitConverter.ToUInt16(lines, at + 12 * i + 4);
+            variationsOfLine[key] = Math.Max(1, BitConverter.ToInt32(lines, at + 12 * i + 8));
+        }
         if (Encoding.ASCII.GetString(cueFile, 0, 8) != "VFDPPC  ") throw new InvalidDataException($"{persona}'s vfdvp_pc isn't a persona's cue list");
         int cueCount = BitConverter.ToUInt16(cueFile, 0x0A);
         for (int i = 0; i < cueCount; i++)
@@ -71,10 +77,27 @@ public sealed class GuerrillaVoices
         return new GuerrillaVoices(persona, Packfile.Open(voicesFile), container.Read(lines), container.Read(cueFile));
     }
 
-    /// <summary>The persona's line of this name, or null if it has none.</summary>
+    /// <summary>The persona's line of this name (its first variation), or null if it has none.</summary>
     public Line? Find(string lineName)
     {
         if (!cueOfLine.TryGetValue(GuerrillaSounds.Crc(lineName.ToLowerInvariant()), out int cue) || cue < 0 || cue >= cues.Count) return null;
+        return LineOfCue(lineName, cue);
+    }
+
+    /// <summary>
+    /// Every variation of the persona's line of this name, in Guerrilla's order (a line's record: its first cue and
+    /// how many follow it, +4 and +8; Guerrilla's get_next_valid_variation plays them in turn); empty if it has none.
+    /// </summary>
+    public IReadOnlyList<Line> Variations(string lineName)
+    {
+        uint key = GuerrillaSounds.Crc(lineName.ToLowerInvariant());
+        if (!cueOfLine.TryGetValue(key, out int first) || first < 0) return [];
+        int count = variationsOfLine.GetValueOrDefault(key, 1);
+        return [.. Enumerable.Range(first, count).Where(c => c < cues.Count).Select(c => LineOfCue(lineName, c))];
+    }
+
+    Line LineOfCue(string lineName, int cue)
+    {
         var (bankCrc, volume, index, rank, distance) = cues[cue];
         if (!soundBankNames.TryGetValue(bankCrc, out string? soundBank)) throw new InvalidDataException($"{lineName}: its sound bank isn't in voices_r.vpp_pc");
         var (data, banks) = SoundBank(soundBank);

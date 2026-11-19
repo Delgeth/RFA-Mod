@@ -408,8 +408,8 @@ public static class GuerrillaPeople
             string? TeamOf(string c) => entries.TryGetValue(c, out var e) ? e.ValueOf("Team")?.Trim() : null;
             var crewResources = GuerrillaDistricts.Resources(GuerrillaDistricts.Groups(guerrillaTables),
                                                              GuerrillaDistricts.DistrictGroups(GuerrillaDistricts.AmbientGroups(guerrillaTables).Values),
-                                                             ourPeople, containerNameOf, TeamOf);
-            var crewLines = GuerrillaDistricts.CrewLines(crewResources, TeamOf);
+                                                             ourPeople, containerNameOf, TeamOf, out var crewKept);
+            var crewLines = GuerrillaDistricts.CrewLines(crewResources, TeamOf, crewKept);
             Directory.CreateDirectory(peopleFolder);
             File.WriteAllLines(Path.Combine(peopleFolder, GuerrillaDistricts.CrewList), crewLines);
             yield return $"Crews: {crewLines.Count - 1} lines in {GuerrillaDistricts.CrewList} (each resource's people by team, for the vehicles' crews)";

@@ -31,6 +31,72 @@ bool CallModInit(void(__cdecl* init)()) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The log, written off the game's threads
+//
+// Every mod's lines (rfa_mod.h's rfa::Log hands them to RFALoader_Log) are queued, in order, and a
+// thread of the loader's own writes them to logs\rfa_mods.log every 20 ms, so no game thread waits on
+// the disk. On a busy hard drive a write held the game's frame for seconds (the user's 18:53 run,
+// 2026-11-15). A crash writes what is queued at once, and every line after it goes straight to the
+// file (the process may end before the writer runs again). At exit, what is left is written.
+constexpr DWORD kLogWriteEveryMs = 20;
+CRITICAL_SECTION g_logQueueLock;  // the queue
+CRITICAL_SECTION g_logWriteLock;  // the file: one batch at a time, in order
+std::string g_logQueue;
+HANDLE g_logFile = INVALID_HANDLE_VALUE;
+volatile LONG g_logDirect = 0;  // set by a crash: lines are written at once from then on
+INIT_ONCE g_logOnce = INIT_ONCE_STATIC_INIT;
+
+void WriteLogText(const std::string& text) {
+    DWORD written;
+    if (g_logFile != INVALID_HANDLE_VALUE && !text.empty())
+        WriteFile(g_logFile, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+}
+
+// Writes what is queued (the write lock keeps a batch still being written ahead of the next).
+void FlushLogQueue() {
+    EnterCriticalSection(&g_logWriteLock);
+    std::string text;
+    EnterCriticalSection(&g_logQueueLock);
+    text.swap(g_logQueue);
+    LeaveCriticalSection(&g_logQueueLock);
+    WriteLogText(text);
+    LeaveCriticalSection(&g_logWriteLock);
+}
+
+DWORD WINAPI LogWriter(void*) {
+    for (;;) {
+        Sleep(kLogWriteEveryMs);
+        FlushLogQueue();
+    }
+}
+
+BOOL CALLBACK StartLog(PINIT_ONCE, PVOID, PVOID*) {
+    InitializeCriticalSection(&g_logQueueLock);
+    InitializeCriticalSection(&g_logWriteLock);
+    CreateDirectoryW((rfa::RootDir() + L"\\logs").c_str(), nullptr);
+    g_logFile = CreateFileW(rfa::LogPath().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (HANDLE thread = CreateThread(nullptr, 0, LogWriter, nullptr, 0, nullptr)) CloseHandle(thread);
+    else InterlockedExchange(&g_logDirect, 1);  // no writer: every line written at once, as before
+    return TRUE;
+}
+
+// A crash: the queue written now, and every line after it straight to the file.
+void LogDirectFromNow() {
+    InitOnceExecuteOnce(&g_logOnce, StartLog, nullptr, nullptr);
+    InterlockedExchange(&g_logDirect, 1);
+    FlushLogQueue();
+}
+
+// The process is ending (DllMain): the other threads are gone, perhaps holding the locks, so what is
+// left is written without them.
+void WriteLogAtExit() {
+    std::string text;
+    text.swap(g_logQueue);
+    WriteLogText(text);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Crash reports
 
 using MiniDumpWriteDumpFn = decltype(&MiniDumpWriteDump);
@@ -149,6 +215,7 @@ DWORD WINAPI WriteCrashReport(LPVOID param) {
 
 LONG WINAPI CrashFilter(EXCEPTION_POINTERS* exception) {
     static LONG reported = 0;
+    LogDirectFromNow();
     if (InterlockedExchange(&reported, 1) == 0) {
         CrashJob job{exception, GetCurrentThreadId(), L""};
         if (HANDLE thread = CreateThread(nullptr, 0, WriteCrashReport, &job, 0, nullptr)) {
@@ -178,6 +245,7 @@ LONG CALLBACK NoteAccessViolation(EXCEPTION_POINTERS* exception) {
     // filter ever running: report it here, from a fresh thread, as this one has no stack left.
     static LONG overflowed = 0;
     if (rec->ExceptionCode == EXCEPTION_STACK_OVERFLOW && InterlockedExchange(&overflowed, 1) == 0) {
+        InterlockedExchange(&g_logDirect, 1);  // the writing is done on the report's fresh thread (no stack here)
         static CrashJob job;
         job = CrashJob{exception, GetCurrentThreadId(), L"-overflow"};
         if (HANDLE thread = CreateThread(nullptr, 0, WriteCrashReport, &job, 0, nullptr)) {
@@ -939,6 +1007,47 @@ void __cdecl ReadRuinMaps(void* table, int dlc) {
 
 constexpr DWORD kReadRuinMaps = 0x50E690;
 
+// Quitting a Ruin match from its pause menu (rf4_pause_menu_quit_game → 0x58D8C0) goes straight to the
+// main menu, and Ruin stays set up: its tables, its map list and its spawn resource reservation
+// (0x50E1D0 says so). Every other way out of Ruin leaves it first, through Ruin's exit (0x5613C0: Ruin's
+// leaving state, then the state it is given): Ruin's own menu (rf4_wrecking_crew_end_wrecking_crew), a
+// load that fails, the death menu, the console's wc_shutdown. So a level loaded next without passing
+// through Ruin (the console's `level`) loaded with Ruin's set-up still in place, and the player was gone by
+// its first frame: the sound listener read his position from nothing (0x541EAE) and the game crashed. The
+// loader's copy of the quit (cdecl, no arguments) does what the game's does, but leaves Ruin on the way
+// to the main menu, as those others do.
+constexpr DWORD kQuitToMainMenu = 0x58D8C0;
+inline const auto StopSoundsA = rfa::game::At<void(__cdecl*)(int, int)>(0xB8AB30);
+inline const auto StopSoundsB = rfa::game::At<void(__cdecl*)(int, int)>(0xB8ABF0);
+inline const auto PauseGame = rfa::game::At<void(__cdecl*)(int, int, int, int)>(0x520280);  // counted pauses
+inline const BYTE& g_multiplayer = *rfa::game::At<const BYTE*>(0x2685118);
+inline const auto LeaveMultiplayer = rfa::game::At<void(__cdecl*)(int)>(0x9E5F80);
+inline const auto OtherModeSetUp = rfa::game::At<bool(__cdecl*)()>(0x518A50);  // [0x12F5D6E]; its own exit is 0x561340
+inline const auto MarkOtherModeQuit = rfa::game::At<void(__cdecl*)(bool)>(0x519680);
+inline const auto SetGameState = rfa::game::At<void(__cdecl*)(int state, int)>(0x53FCD0);
+inline const auto RuinSetUp = rfa::game::At<bool(__cdecl*)()>(0x50E1D0);
+inline const auto LeaveRuin = rfa::game::At<void(__cdecl*)(int thenState)>(0x5613C0);
+constexpr int kMainMenuState = 0;
+
+void __cdecl QuitToMainMenu() {
+    StopSoundsA(1, 1);
+    StopSoundsB(1, 1);
+    PauseGame(1, 1, 0, 0);
+    if (g_multiplayer) LeaveMultiplayer(1);
+    if (OtherModeSetUp()) MarkOtherModeQuit(true);
+    if (RuinSetUp()) {
+        rfa::Log("Quitting to the main menu: leaving Ruin on the way, as its own menu does");
+        LeaveRuin(kMainMenuState);
+    } else {
+        SetGameState(kMainMenuState, 0);
+    }
+}
+
+void InstallRuinQuit() {
+    if (!rfa::ReplaceFunction(kQuitToMainMenu, reinterpret_cast<const void*>(&QuitToMainMenu)))
+        rfa::Log("Could not replace the quit to the main menu; quitting a Ruin match leaves Ruin set up");
+}
+
 // With LogLookups=1, the Ruin map list is logged too when a Ruin match begins
 // (rf4_wrecking_crew_begin_match → 0x50F400): the map chosen and every map's file name.
 constexpr DWORD kBeginRuinMatch = 0x50F400;
@@ -1159,6 +1268,7 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     InstallCrashReporter();
     if (rfa::game::IsSupportedBuild()) {
         InstallOverrides();
+        InstallRuinQuit();
         InstallLuaFunctions();
         InstallMenus(&g_mods);
     }
@@ -1204,7 +1314,24 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     return loaded;
 }
 
-BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
+// A line for logs\rfa_mods.log from any module (rfa_mod.h's rfa::Log): queued for the log's writer, or
+// written at once after a crash (see "The log, written off the game's threads").
+extern "C" __declspec(dllexport) void __cdecl RFALoader_Log(const char* line, unsigned length) {
+    InitOnceExecuteOnce(&g_logOnce, StartLog, nullptr, nullptr);
+    if (g_logDirect) {
+        EnterCriticalSection(&g_logWriteLock);
+        FlushLogQueue();
+        WriteLogText(std::string(line, length));
+        LeaveCriticalSection(&g_logWriteLock);
+        return;
+    }
+    EnterCriticalSection(&g_logQueueLock);
+    g_logQueue.append(line, length);
+    LeaveCriticalSection(&g_logQueueLock);
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(instance);
+    if (reason == DLL_PROCESS_DETACH && reserved) WriteLogAtExit();  // the process is ending
     return TRUE;
 }

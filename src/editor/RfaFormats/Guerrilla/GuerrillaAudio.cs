@@ -466,6 +466,15 @@ public sealed class WwiseBankWriter
     public static readonly uint Rpm = Id("RPM"), EngineLoad = Id("ENGINE_LOAD"), Speed = Id("SPEED"), Damage = Id("DAMAGE"),
                                 PlayerInVehicle = Id("RFG_PLAYER_IN_VEHICLE");
 
+    /// <summary>
+    /// The game parameter Armageddon's audiolib sets on every positioned sound object: its distance (m) from the nearest
+    /// listener, the camera (0xB81D00 → 0xB98F10 → SetRTPCValue, every 33 ms when it has changed by 0.05 m). In game,
+    /// Wwise pans our 3D sounds but leaves their distance alone, even on Armageddon's own attenuations. So a 3D sound's
+    /// fade with distance is a curve on this parameter (see <see cref="Attenuation"/>), as Guerrilla's audiolib works out
+    /// a sound's volume from its distance itself (audiolib_calc_scaled_value, RM 0x483AC0).
+    /// </summary>
+    public static readonly uint GameDistance = Id("game_distance");
+
     /// <summary>Wwise's silence, in dB (as Armageddon's curves fall to).</summary>
     public const float Silent = -96.3f;
 
@@ -580,7 +589,11 @@ public sealed class WwiseBankWriter
         return [.. w];
     }
 
-    /// <summary>An attenuation: volume (dB) against distance (m), no cone, low-pass or spread.</summary>
+    /// <summary>
+    /// A 3D sound's fade with distance: volume (dB) against distance (m). The attenuation object itself stays flat (0
+    /// dB over the same distances; no cone, low-pass or spread), and the fade is a curve on <see cref="GameDistance"/>
+    /// that every 3D sound out to it gets (<see cref="NodeBase"/>), so the two never count twice.
+    /// </summary>
     public uint Attenuation(string key, IReadOnlyList<(float Distance, float Db)> volume)
     {
         uint id = ObjectId("attenuation:" + key);
@@ -590,12 +603,17 @@ public sealed class WwiseBankWriter
         foreach (sbyte slot in new sbyte[] { 0, 0, 0, -1, -1 }) w.S8(slot);  // volume dry, wet (game, user): the curve; no low-pass, spread
         w.U8(1);
         w.U8(2);                                               // dB
-        w.U16(volume.Count);
-        foreach (var (x, y) in volume) { w.F32(x); w.F32(y); w.U32(4); }
+        float farthest = volume.Count > 0 ? volume[^1].Distance : 0f;
+        w.U16(2);
+        foreach (float x in new[] { 0f, farthest }) { w.F32(x); w.F32(0f); w.U32(4); }
         w.U16(0);                                              // no RTPCs
         Add(attenuations, 14, id, w);
+        distanceFades[id] = volume;
         return id;
     }
+
+    // Each attenuation's fade, by its id, for the 3D sounds out to it.
+    readonly Dictionary<uint, IReadOnlyList<(float Distance, float Db)>> distanceFades = [];
 
     /// <summary>A sound playing a medium, once or for ever (<paramref name="loops"/>), under <paramref name="parent"/> or (0) out to <paramref name="output"/>.</summary>
     public uint Sound(string key, uint medium, bool loops, Settings settings, uint parent = 0, Output? output = null)
@@ -628,6 +646,29 @@ public sealed class WwiseBankWriter
         w.F32(0); w.F32(0); w.F32(0);               // no transition
         w.U16(children.Count > 1 ? 1 : 0);          // not the same one twice running
         foreach (byte b in new byte[] { 0, 0, 0, 0, 1, 0, 0, 1 }) w.U8(b);  // no transition, normal random, random, ..., reset, ..., not continuous, global
+        w.U32((uint)children.Count);
+        foreach (uint c in children) w.U32(c);
+        w.U16(children.Count);
+        foreach (uint c in children) { w.U32(c); w.U8(50); }
+        Add(objects, 5, id, w);
+        return id;
+    }
+
+    /// <summary>
+    /// A sequence container in step mode: each time it plays, the next of its children (made with this one's id as their
+    /// parent: <see cref="ObjectId"/>("sequence:" + key)) in their order, back to the first after the last, the place
+    /// kept across every game object (global): Guerrilla's voice lines' variations, played in turn per persona.
+    /// </summary>
+    public uint Sequence(string key, IReadOnlyList<uint> children, Settings settings, uint parent = 0, Output? output = null)
+    {
+        uint id = ObjectId("sequence:" + key);
+        if (taken.Contains(id)) return id;
+        var w = new Writer();
+        NodeBase(w, settings, parent, output);
+        w.S16(1);                                   // plays once
+        w.F32(0); w.F32(0); w.F32(0);               // no transition
+        w.U16(0);                                   // (a random container's "not the same one again")
+        foreach (byte b in new byte[] { 0, 0, 1, 0, 0, 0, 0, 1 }) w.U8(b);  // no transition, ..., sequence, ..., not reset at each play, ..., step, global
         w.U32((uint)children.Count);
         foreach (uint c in children) w.U32(c);
         w.U16(children.Count);
@@ -795,9 +836,17 @@ public sealed class WwiseBankWriter
         return w;
     }
 
-    // The settings every sound and container has (Armageddon's layout).
-    static void NodeBase(Writer w, Settings s, uint parent, Output? output)
+    // The settings every sound and container has (Armageddon's layout). A 3D one out to one of this bank's
+    // attenuations also gets that attenuation's fade as a curve on the game's distance (see GameDistance).
+    void NodeBase(Writer w, Settings s, uint parent, Output? output)
     {
+        if (output is { ThreeD: true } && distanceFades.TryGetValue(output.Attenuation, out var fade))
+            s = new Settings
+            {
+                Volume = s.Volume, Pitch = s.Pitch, Curves = [.. s.Curves, new Curve(GameDistance, Property.Volume, fade)], MostAtOnce = s.MostAtOnce,
+                Priority = s.Priority, OwnPriority = s.OwnPriority, VirtualWhenQuiet = s.VirtualWhenQuiet, EndsWhenQuiet = s.EndsWhenQuiet,
+                RefusesWhenFull = s.RefusesWhenFull,
+            };
         w.U8(0); w.U8(0);                                        // no effects
         w.U32(parent == 0 ? output?.Bus ?? VehicleEffectsBus : 0);  // its bus, when it hangs from nothing
         w.U32(parent);

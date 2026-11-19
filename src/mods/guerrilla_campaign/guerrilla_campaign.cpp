@@ -58,6 +58,8 @@
 #include "district_sources.h"
 #include "converts.h"
 #include "guerrilla_squads.h"
+#include "alert_orders.h"
+#include "reinforcements.h"
 
 namespace campaign {
 namespace {
@@ -106,6 +108,8 @@ void __cdecl ScriptFrame() {
         district_sources::Enter();
         converts::Enter();
         guerrilla_squads::Enter();
+        alert_orders::Enter();
+        reinforcements::Enter();
         if (g_activities) activities::Enter();
     }
     g_playing = playing;
@@ -121,6 +125,8 @@ void __cdecl ScriptFrame() {
         district_sources::Frame();
         converts::Frame();
         guerrilla_squads::Frame();
+        alert_orders::Frame();
+        reinforcements::Frame();
         liberation::Update(seconds);
         if (g_activities) activities::Update(seconds);
     }
@@ -203,6 +209,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     district_sources::Init();
     converts::Init();
     guerrilla_squads::Init();
+    alert_orders::Init();
+    reinforcements::Init();
     g_activities = rfa::IniInt(L"GuerrillaCampaign", L"Activities", 0) != 0;
     if (g_activities) activities::Init();
     if (rfa::IniInt(L"GuerrillaCampaign", L"Scripts", 0) != 0) {

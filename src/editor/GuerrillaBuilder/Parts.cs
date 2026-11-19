@@ -400,6 +400,8 @@ static class Parts
         if (File.Exists(Path.Combine(setup.WorldFolder, GuerrillaMusic.TestList))) File.Delete(Path.Combine(setup.WorldFolder, GuerrillaMusic.TestList));
         // Its kiosks: the guerrilla_kiosks mod's tables and list.
         foreach (string line in GuerrillaKiosks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder)) yield return line;
+        // Its people's voices: the guerrilla_voices mod's table and the personas' banks.
+        foreach (string line in GuerrillaVoiceBanks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder)) yield return line;
     }
 
     /// <summary>

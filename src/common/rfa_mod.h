@@ -59,13 +59,21 @@ inline std::wstring IniString(const wchar_t* section, const wchar_t* key, const 
 
 inline std::wstring LogPath() { return RootDir() + L"\\logs\\rfa_mods.log"; }
 
-// Appends one line to logs\rfa_mods.log, starting with `module`. Every module appends to the same file.
-inline void LogAs(const char* module, const char* fmt, va_list ap) {
-    static HANDLE file = [] {
-        CreateDirectoryW((RootDir() + L"\\logs").c_str(), nullptr);
-        return CreateFileW(LogPath().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+// rfa_loader.dll's log (RFALoader_Log): it queues a line and a thread of its own writes it, so no game
+// thread waits on the disk. Null outside the game (the launcher) or with an older loader: the line is
+// then written by the caller.
+using LoaderLogFn = void(__cdecl*)(const char* line, unsigned length);
+inline LoaderLogFn LoaderLog() {
+    static const LoaderLogFn log = [] {
+        const HMODULE loader = GetModuleHandleW(L"rfa_loader.dll");
+        return loader ? reinterpret_cast<LoaderLogFn>(GetProcAddress(loader, "RFALoader_Log")) : nullptr;
     }();
+    return log;
+}
+
+// Appends one line to logs\rfa_mods.log, starting with `module`. Every module appends to the same file
+// (through the loader's queue in the game).
+inline void LogAs(const char* module, const char* fmt, va_list ap) {
     char line[2048];
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -73,8 +81,18 @@ inline void LogAs(const char* module, const char* fmt, va_list ap) {
                      t.wMilliseconds, module);
     vsnprintf(line + n, sizeof(line) - n - 2, fmt, ap);
     strcat_s(line, "\r\n");
-    DWORD written;
-    if (file != INVALID_HANDLE_VALUE) WriteFile(file, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
+    const unsigned length = static_cast<unsigned>(strlen(line));
+    if (const LoaderLogFn log = LoaderLog()) {
+        log(line, length);
+    } else {
+        static HANDLE file = [] {
+            CreateDirectoryW((RootDir() + L"\\logs").c_str(), nullptr);
+            return CreateFileW(LogPath().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        }();
+        DWORD written;
+        if (file != INVALID_HANDLE_VALUE) WriteFile(file, line, length, &written, nullptr);
+    }
     OutputDebugStringA(line);
 }
 

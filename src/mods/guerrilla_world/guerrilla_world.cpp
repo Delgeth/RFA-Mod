@@ -7804,11 +7804,13 @@ void MoreUnbatchedRenderableRoom() {
 // from the game's audio pool (0x26AF858, 0xF80000 bytes, of which 15,701,808 are still free once Wwise has
 // started), so the audio cache, made of what that pool has left, keeps its size. With Guerrilla's 31 banks'
 // objects in it the pool stood at 2,680-2,720 of 2,844 KB all through the run of 2026-11-11 01:20 (95%), which
-// ended with all sound gone. The user's OK for the sound limits was asked through the main session. The mod makes
-// the size 6 MB (the value checked first, and that the audio hasn't started): 3.2 MB more of the process's
-// memory. The log's "Wwise memory:" lines and F7 Limits show its use.
+// ended with all sound gone. The user's OK for the sound limits was asked through the main session. The mod made
+// the size 6 MB (the value checked first, and that the audio hasn't started), then 20 MB (2026-11-15, the user's
+// "Yes, raise it"): Guerrilla's people's voices are one bank loaded at boot, 5.4 MB of events, since Armageddon's
+// bank list holds 300 banks at most (see GuerrillaSoundBanks.GameBankLimit). 17.2 MB more of the process's memory
+// than the game's. The log's "Wwise memory:" lines and F7 Limits show its use.
 constexpr DWORD kSoundEngineMemoryValue = 0x536629;  // the value of the mov at 0x536626 (C7 45 AC, then it)
-constexpr DWORD kGameSoundEngineMemory = 0x2C8000, kSoundEngineMemory = 0x600000;
+constexpr DWORD kGameSoundEngineMemory = 0x2C8000, kSoundEngineMemory = 0x1400000;
 constexpr DWORD kSoundEngineMemoryInUse = 0x27454E0;  // where the audio set-up keeps the size once it has run
 
 void MoreSoundEngineRoom() {
@@ -8905,6 +8907,7 @@ GuerrillaValue g_guerrillaValues[] = {
 };
 
 bool g_anchorsSetting = true, g_materialsSetting = true, g_destructionLog = true;
+void ReadPropLog();  // PropLog= (below, with the props' log)
 bool g_buildingsWorld;     // our world, as last seen
 bool g_anchorsOurs;        // Guerrilla's anchors now
 bool g_materialsOurs;      // Guerrilla's values put in
@@ -8971,6 +8974,18 @@ bool CopyIfReadable(void* to, const void* from, size_t size) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// How much of a stopped thread's stack, from esp, can be copied (at most `most` bytes): the rest of the committed,
+// readable stretch it is in, asked of Windows. Copying past the stack's end faulted, and the fault went through the
+// loader's handler (which logs, and asks for the module) while the thread looked at was still stopped: if that thread
+// held a lock the handler needed, both waited (the user's 18:53 run, 2026-11-15, a 5.6 s frame).
+size_t StackBytes(DWORD esp, size_t most) {
+    MEMORY_BASIC_INFORMATION info;
+    const void* at = reinterpret_cast<const void*>(static_cast<uintptr_t>(esp));
+    if (!VirtualQuery(at, &info, sizeof(info)) || info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+    const size_t left = static_cast<const BYTE*>(info.BaseAddress) + info.RegionSize - static_cast<const BYTE*>(at);
+    return left < most ? left & ~static_cast<size_t>(3) : most;
 }
 
 // An address as the log shows it: the game's own as itself, else its module's name and offset (or the address).
@@ -9067,9 +9082,10 @@ void LogOtherThreads(DWORD mainThread, DWORD* stack, size_t stackSize) {
         bool got = false;
         if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
             got = GetThreadContext(thread, &context) != 0;
-            if (got)
-                for (copied = stackSize; copied >= 256; copied /= 2)
-                    if (CopyIfReadable(stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(context.Esp)), copied)) break;
+            if (got) {
+                copied = StackBytes(context.Esp, stackSize);
+                if (!CopyIfReadable(stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(context.Esp)), copied)) copied = 0;
+            }
             ResumeThread(thread);
         }
         CloseHandle(thread);
@@ -9127,9 +9143,10 @@ DWORD WINAPI Watchdog(void*) {
         size_t copied = 0;
         if (SuspendThread(thread) == static_cast<DWORD>(-1)) continue;
         const bool gotContext = GetThreadContext(thread, &context) != 0 && g_frameNumber == frame;
-        if (gotContext)
-            for (copied = sizeof(stack); copied >= 256; copied /= 2)
-                if (CopyIfReadable(stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(context.Esp)), copied)) break;
+        if (gotContext) {
+            copied = StackBytes(context.Esp, sizeof(stack));
+            if (!CopyIfReadable(stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(context.Esp)), copied)) copied = 0;
+        }
         ResumeThread(thread);
         ++looks;
         if (!gotContext) continue;
@@ -9446,6 +9463,7 @@ void BuildingsSync(const char* when) {
             g_anchorsSetting = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaAnchors", 1) != 0;
             g_materialsSetting = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaMaterials", 1) != 0;
             g_destructionLog = rfa::IniInt(L"GuerrillaWorld", L"DestructionLog", 1) != 0;
+            ReadPropLog();
         }
         const bool anchors = world && g_anchorsSetting && g_createWorldAnchor;
         if (anchors != g_anchorsOurs) {
@@ -9505,6 +9523,205 @@ DWORD __cdecl PieceDamaged(BYTE* mover, BYTE* state, DWORD damage, const float* 
              !anchored || after <= 0 ? "it gives way" : "it holds", after, position[0], position[1], position[2], distance,
              *reinterpret_cast<const int*>(player + 0x1168));
     return result;
+}
+
+// ---- Props near the player, logged (PropLog=1; a diagnosis for the user's 2026-11-15 test: a barrel gone when
+// hammered, barrels ending upside down when bumped) ------------------------------------------------------------------
+// A hit: the game's damage to a prop (general_mover::apply_damage, 0x8CEC80, vtable 0xFCE88C +0xA4; thiscall, ten
+// arguments: the damage, its kind, two vectors, the attacker, ...; Guerrilla's RM 0xA8ACF0). One line with its hit points
+// before and after (the level object's, at +0xB4 → +0x1C) and whether it is killed (vtable +0x10), and 0.3 s later one
+// with how fast it moves and how far it went, or that it is gone. A tip: every frame a slice of the world's props
+// (the world's list for their type, +0x68 + type × 12: the objects, room, count) is looked at; one within 4 m of the
+// player is remembered with which way its top faces; one line when its top has turned more than 120° from that.
+// Each line has its mass and balance point as Havok holds them: the body (0x778440 on its handle +0x4C) holds its
+// motion state (hkMotionState: the transform, whose translation is the object's position, then the swept transform:
+// centre of mass 0 and 1, rotations 0 and 1, centre of mass local; the motion's inertia and inverse mass come 0x80 after
+// the translation, its linear velocity 0x90 after). The translation's place is found once, by the object's position.
+constexpr DWORD kPropDamage = 0x8CEC80;
+constexpr size_t kPropDamagePrologue = 6;  // push ebp / mov ebp,esp / sub esp,74h
+constexpr DWORD kPropVtable = 0xFCE88C;
+constexpr DWORD kObjectPos = 0x04, kObjectOrient = 0x10, kObjectBody = 0x4C, kObjectTypeNumber = 0x7A, kObjectProps = 0xB4;
+constexpr DWORD kPropsHitpoints = 0x1C;
+constexpr DWORD kWorldTypeLists = 0x68;
+constexpr int kPropLines = 60, kPropsPerFrame = 256, kTrackedProps = 64;
+constexpr float kPropHitNear = 15.0f, kPropTipNear = 4.0f;
+using PropDamageFn = DWORD(__fastcall*)(BYTE* prop, void* unused, float damage, int kind, const float* a, const float* b, BYTE* attacker,
+                                         DWORD handle, float scale, int x, int y, int z);
+using IsKilledFn = bool(__fastcall*)(BYTE* object, void* unused);
+auto const PropBody = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);
+PropDamageFn g_propDamage;
+bool g_propLog = false;
+volatile LONG g_propLines;
+int g_propTranslation = -1;  // where in a body the motion state's translation is (found once)
+int g_propType = -1;         // the props' type number in the world's lists (found once)
+int g_propScan = 0;
+struct TrackedProp { DWORD handle; float up[3]; DWORD seen; bool told; };
+TrackedProp g_tracked[kTrackedProps];
+struct PropFollow { DWORD handle; DWORD due; float from[3]; };
+PropFollow g_follows[8];
+
+bool PropLineLeft() { return g_propLines < kPropLines; }
+
+// True when `size` bytes at `at` are committed, readable memory (asked of Windows, so nothing faults finding out).
+bool ReadableMemory(const void* at, size_t size) {
+    MEMORY_BASIC_INFORMATION info;
+    if (!at || !VirtualQuery(at, &info, sizeof(info)) || info.State != MEM_COMMIT) return false;
+    if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(info.Protect & readable)) return false;
+    return static_cast<const BYTE*>(at) + size <= static_cast<const BYTE*>(info.BaseAddress) + info.RegionSize;
+}
+
+// Its body's mass, local balance point and speed, as text; "no body" or "body layout not found" otherwise.
+std::string PropBodyText(BYTE* prop) {
+    char text[200];
+    BYTE* body = PropBody(*reinterpret_cast<const DWORD*>(prop + kObjectBody));
+    if (!body) return "no body";
+    const float* at = reinterpret_cast<const float*>(prop + kObjectPos);
+    if (g_propTranslation < 0) {
+        for (int o = 0x40; o < 0x300; o += 16) {
+            float v[3];
+            if (!CopyIfReadable(v, body + o, sizeof(v))) break;
+            if (fabsf(v[0] - at[0]) < 0.01f && fabsf(v[1] - at[1]) < 0.01f && fabsf(v[2] - at[2]) < 0.01f &&
+                (fabsf(at[0]) + fabsf(at[1]) + fabsf(at[2])) > 1.0f) {
+                g_propTranslation = o;
+                rfa::Log("Props: a body's motion state found (its translation at +0x%X)", o);
+                break;
+            }
+        }
+        if (g_propTranslation < 0) return "body layout not found";
+    }
+    float local[4], inertia[4], velocity[4];
+    if (!CopyIfReadable(local, body + g_propTranslation + 0x50, sizeof(local)) ||
+        !CopyIfReadable(inertia, body + g_propTranslation + 0x80, sizeof(inertia)) ||
+        !CopyIfReadable(velocity, body + g_propTranslation + 0x90, sizeof(velocity)))
+        return "body unreadable";
+    const float speed = sqrtf(velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]);
+    snprintf(text, sizeof(text), "mass %.1f kg, balance point (%.2f, %.2f, %.2f) from its origin, inverse inertia (%.4f, %.4f, %.4f), moving %.1f m/s",
+             inertia[3] > 0 ? 1.0f / inertia[3] : 0.0f, local[0], local[1], local[2], inertia[0], inertia[1], inertia[2], speed);
+    return text;
+}
+
+// Which way its top faces (its orientation's second row) and how high its box reaches.
+void PropUp(const BYTE* prop, float* up) {
+    const float* m = reinterpret_cast<const float*>(prop + kObjectOrient);
+    up[0] = m[3];
+    up[1] = m[4];
+    up[2] = m[5];
+}
+
+DWORD __fastcall PropDamaged(BYTE* prop, void* unused, float damage, int kind, const float* a, const float* b, BYTE* attacker, DWORD handle,
+                             float scale, int x, int y, int z) {
+    if (!g_propLog || !prop || !PropLineLeft())
+        return g_propDamage(prop, unused, damage, kind, a, b, attacker, handle, scale, x, y, z);
+    const BYTE* player = LocalPlayer();
+    const float* at = reinterpret_cast<const float*>(prop + kObjectPos);
+    const float* me = player ? reinterpret_cast<const float*>(player + kObjectPos) : nullptr;
+    const float dx = me ? at[0] - me[0] : 0, dz = me ? at[2] - me[2] : 0;
+    const bool close = me && dx * dx + dz * dz < kPropHitNear * kPropHitNear;
+    const BYTE* props = *reinterpret_cast<BYTE* const*>(prop + kObjectProps);
+    const int before = close && props ? *reinterpret_cast<const int*>(props + kPropsHitpoints) : 0;
+    const DWORD result = g_propDamage(prop, unused, damage, kind, a, b, attacker, handle, scale, x, y, z);
+    if (!close || !InOurWorld()) return result;
+    InterlockedIncrement(&g_propLines);
+    const DWORD self = *reinterpret_cast<const DWORD*>(prop + kObjectHandle);
+    const int after = props ? *reinterpret_cast<const int*>(props + kPropsHitpoints) : 0;
+    const bool killed = reinterpret_cast<IsKilledFn>((*reinterpret_cast<void***>(prop))[0x10 / 4])(prop, nullptr);
+    rfa::Log("Props: %08lX hit (damage %.0f, kind %d, by %s): hit points %d -> %d%s; %s; at (%.1f, %.1f, %.1f)", self, damage, kind,
+             attacker == player ? "the player" : (attacker ? "someone" : "nothing"), before, after, killed ? ", killed" : "",
+             PropBodyText(prop).c_str(), at[0], at[1], at[2]);
+    for (PropFollow& f : g_follows)
+        if (!f.handle) {
+            f = {self, GetTickCount() + 300, {at[0], at[1], at[2]}};
+            break;
+        }
+    return result;
+}
+
+// When one of our worlds loads: PropLog= (0, off, unless set).
+void ReadPropLog() {
+    g_propLog = rfa::IniInt(L"GuerrillaWorld", L"PropLog", 0) != 0 && g_propDamage;
+    if (g_propLog) rfa::Log("Props: hits and tips of the props near the player are logged (PropLog=1, at most %d lines)", kPropLines);
+}
+
+// Each frame with PropLog=1 in our worlds: the hits' follow-ups, then a slice of the props for tips.
+void PropLogUpdate() {
+    if (!g_propLog || !PropLineLeft()) return;
+    const BYTE* player = LocalPlayer();
+    if (!player) return;
+    const DWORD now = GetTickCount();
+    for (PropFollow& f : g_follows) {
+        if (!f.handle || static_cast<LONG>(now - f.due) < 0) continue;
+        BYTE* prop = ObjectInWorld(reinterpret_cast<void*>(kWorld), nullptr, f.handle);
+        if (!prop) rfa::Log("Props: %08lX 0.3 s after its hit: gone from the world", f.handle);
+        else {
+            const float* at = reinterpret_cast<const float*>(prop + kObjectPos);
+            const float dx = at[0] - f.from[0], dy = at[1] - f.from[1], dz = at[2] - f.from[2];
+            rfa::Log("Props: %08lX 0.3 s after its hit: moved %.1f m (up %.1f); %s", f.handle, sqrtf(dx * dx + dy * dy + dz * dz), dy,
+                     PropBodyText(prop).c_str());
+        }
+        InterlockedIncrement(&g_propLines);
+        f.handle = 0;
+    }
+    const BYTE* world = reinterpret_cast<const BYTE*>(kWorld);
+    // Which list is the props' is found once, with the level loaded: not every list holds objects (the 18:22 and
+    // 18:51 runs faulted reading one's entries as objects as the world loaded), so each list, and each entry before it
+    // is read as an object, is checked to be readable memory, and the object found must say it is of that type (+0x7A).
+    if (g_propType < 0) {
+        if (*reinterpret_cast<const BYTE*>(kLevelLoaded) == 0) return;
+        for (int t = 0; t < 64 && g_propType < 0; ++t) {
+            const BYTE* entry = world + kWorldTypeLists + t * 12;
+            BYTE* const* list = *reinterpret_cast<BYTE* const* const*>(entry);
+            const int room = *reinterpret_cast<const int*>(entry + 4), count = *reinterpret_cast<const int*>(entry + 8);
+            if (!list || count <= 0 || count > room || room > 65536 || !ReadableMemory(list, count * sizeof(BYTE*))) continue;
+            for (int i = 0; i < count && i < 64; ++i) {
+                BYTE* object = list[i];
+                if (!object || !ReadableMemory(object, kObjectTypeNumber + 1) || *reinterpret_cast<const DWORD*>(object) != kPropVtable) continue;
+                if (object[kObjectTypeNumber] != t) continue;
+                g_propType = t;
+                rfa::Log("Props: the world's props are its type %d objects (%d now)", t, count);
+                break;
+            }
+        }
+        if (g_propType < 0) {
+            g_propType = -2;  // not found: no tips are looked for, and the search isn't made again
+            rfa::Log("Props: the world's list of props wasn't found; only hits are logged");
+        }
+    }
+    if (g_propType < 0) return;
+    BYTE* const* list = *reinterpret_cast<BYTE* const* const*>(world + kWorldTypeLists + g_propType * 12);
+    const int count = *reinterpret_cast<const int*>(world + kWorldTypeLists + g_propType * 12 + 8);
+    if (!list || count <= 0) return;
+    const float* me = reinterpret_cast<const float*>(player + kObjectPos);
+    for (int n = 0; n < kPropsPerFrame && n < count; ++n) {
+        g_propScan = (g_propScan + 1) % count;
+        BYTE* prop = list[g_propScan];
+        if (!prop || *reinterpret_cast<const DWORD*>(prop) != kPropVtable) continue;
+        const float* at = reinterpret_cast<const float*>(prop + kObjectPos);
+        const float dx = at[0] - me[0], dz = at[2] - me[2];
+        const DWORD handle = *reinterpret_cast<const DWORD*>(prop + kObjectHandle);
+        TrackedProp* slot = nullptr;
+        TrackedProp* spare = nullptr;
+        for (TrackedProp& t : g_tracked) {
+            if (t.handle == handle) slot = &t;
+            else if (!spare && (!t.handle || now - t.seen > 20000)) spare = &t;
+        }
+        float up[3];
+        PropUp(prop, up);
+        if (!slot) {
+            if (dx * dx + dz * dz > kPropTipNear * kPropTipNear || !spare) continue;
+            *spare = {handle, {up[0], up[1], up[2]}, now, false};
+            continue;
+        }
+        slot->seen = now;
+        const float turned = up[0] * slot->up[0] + up[1] * slot->up[1] + up[2] * slot->up[2];
+        if (slot->told || turned > -0.5f) continue;  // turned less than 120 degrees
+        slot->told = true;
+        InterlockedIncrement(&g_propLines);
+        rfa::Log("Props: %08lX turned over (its top now faces (%.2f, %.2f, %.2f), was (%.2f, %.2f, %.2f)); %s; at (%.1f, %.1f, %.1f)", handle,
+                 up[0], up[1], up[2], slot->up[0], slot->up[1], slot->up[2], PropBodyText(prop).c_str(), at[0], at[1], at[2]);
+        if (!PropLineLeft()) return;
+    }
 }
 
 void __fastcall CreateWorldAnchor(void* shape, void* unused, void* mover, BYTE* state) {
@@ -9603,6 +9820,7 @@ void BuildingsUpdate() {
         return;
     }
     if (g_destructionLog) TimeFrame();
+    PropLogUpdate();
     const bool pool = rfa::CodeValue(kDynamicLinkCheckAt) == kDynamicLinksTaken;
     const int links = pool ? *reinterpret_cast<const int*>(kDynamicLinksTaken) : -1;
     if (links > g_dynamicLinksMost) g_dynamicLinksMost = links;
@@ -9702,6 +9920,11 @@ void InstallBuildings() {
             g_pieceDamage = reinterpret_cast<PieceDamageFn>(
                 rfa::HookFunction(kPieceDamage, kPieceDamagePrologue, reinterpret_cast<void*>(&PieceDamaged)));
         if (!g_pieceDamage) rfa::Log("Buildings: could not wrap the game's damage to a piece (its code isn't as expected); hits on anchored pieces aren't logged");
+        const BYTE propOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x74};
+        if (memcmp(reinterpret_cast<const void*>(kPropDamage), propOpening, sizeof(propOpening)) == 0 &&
+            *reinterpret_cast<const DWORD*>(kPropVtable + 0xA4) == kPropDamage)
+            g_propDamage = reinterpret_cast<PropDamageFn>(rfa::HookFunction(kPropDamage, kPropDamagePrologue, reinterpret_cast<void*>(&PropDamaged)));
+        if (!g_propDamage) rfa::Log("Props: could not wrap the game's damage to a prop (its code isn't as expected); PropLog= does nothing");
     }
     if (memcmp(reinterpret_cast<const void*>(kResetLinkStrengths), resetOpening, sizeof(resetOpening)) == 0)
         g_resetLinkStrengths = reinterpret_cast<ResetLinkStrengthsFn>(

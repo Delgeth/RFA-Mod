@@ -85,6 +85,9 @@ int TechLevel();
 void SetTechLevel(int level);
 void SetEdfProgression(int level);
 void SetMarauderProgression(int level);
+// edf_progression_level_internal (RM 0x78C140): the player's district's min_progression_edf (0-7) or the global
+// level, whichever is higher; the global one where the player is in no district.
+int EdfProgressionLevel();
 
 // ---- Salvage, Guerrilla's money.
 int Salvage();

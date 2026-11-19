@@ -77,6 +77,8 @@
 #include "ambush.h"
 #include "story.h"
 #include "actions.h"
+#include "guards.h"
+#include "voices.h"
 #include <intrin.h>
 #include <malloc.h>
 #include <algorithm>
@@ -87,6 +89,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <iterator>
 #include <string>
@@ -576,6 +579,8 @@ int SpawnPointsUnder(void* node) {
 // anchor's bounding box (type 4; the squad's leash 0x810990(type, anchor), which only scripts use, sf_update_leash
 // 0x94E2DF; the check 0x810710 keeps it inside the anchor's oriented box). Only in our worlds, and only for a node whose
 // parent (object +0x6C) is a bounding box.
+// Since 2026-11-15 a post the world build lists (guard_posts.txt) gets Guerrilla's guard post AI instead (guards.cpp:
+// its members at the post's guard nodes); the leash is left only for a world built before that list.
 constexpr DWORD kNodeSpawn = 0x800040;
 constexpr size_t kNodeSpawnPrologue = 9;  // push ebp / mov ebp,esp / sub esp,0ECh
 constexpr DWORD kObjectParent = 0x6C;     // an object's parent's handle (Guerrilla's object::parent, +0x70 there)
@@ -603,10 +608,12 @@ DWORD __fastcall NodeSpawn(BYTE* node, void* edx, DWORD a, DWORD b) {
     BYTE* parent = WorldObject(world, nullptr, boxHandle);
     BYTE* squad = WorldObject(world, nullptr, squadHandle);
     if (!parent || !squad || !AsBoundingBox(world, nullptr, parent)) return squadHandle;
+    if (GuardsPostSpawned(ObjectHandle(node, nullptr), boxHandle, squadHandle)) return squadHandle;  // Guerrilla's guard post AI (guards.cpp)
+    // A world built before guard_posts.txt: the box leash, as before the guard post AI.
     SetLeash(squad, nullptr, kBoxLeash, boxHandle);
     if (g_leashesLogged < 64) {
         ++g_leashesLogged;
-        rfa::Log("Squads: node 0x%08X's squad 0x%08X leashed to its guard post's box 0x%08X (Guerrilla's guard area; a stand-in until its guard post AI is ported)",
+        rfa::Log("Squads: node 0x%08X's squad 0x%08X leashed to its guard post's box 0x%08X (no guard_posts.txt: the world was built before the guard post AI)",
                  ObjectHandle(node, nullptr), squadHandle, boxHandle);
     }
     return squadHandle;
@@ -719,6 +726,15 @@ void* AskTheGame(BYTE* human, const float* start, const float* goal, DWORD pathA
 
 void* __cdecl HumanPath(BYTE* human, const float* start, const float* goal, DWORD pathA, DWORD pathB, DWORD flagsLow, DWORD flagsHigh, bool flag) {
     if (!human || !goal || !InOurWorld()) return g_humanPath(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+    // A guard at its post (guards.cpp) goes only to its post's guard nodes, as Guerrilla's guard_at_post_action.
+    if (const int guard = GuardsGoalAllowed(ObjectHandle(human, nullptr), goal); guard >= 0) {
+        if (guard) return AskTheGame(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
+        ++g_pathsTurnedDown;
+        if (g_pathsTurnedDown <= 16 || g_pathsTurnedDown % 200 == 0)
+            rfa::Log("Guard posts: a guard 0x%08X asked for a way to (%.1f, %.1f, %.1f), not to one of its post's guard nodes; none given, it fights from its post "
+                     "(%d so far)", ObjectHandle(human, nullptr), goal[0], goal[1], goal[2], g_pathsTurnedDown);
+        return nullptr;
+    }
     BYTE* squad = SquadOfNpc(human);
     if (!squad || *reinterpret_cast<const int*>(squad + kSquadLeashType) != kBoxLeash)
         return AskTheGame(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
@@ -1318,7 +1334,8 @@ void RunFallsWatch() {
     }
 }
 
-void __cdecl LeftTheWorld(BYTE* object) {
+// What went under the world, as the game reports and removes it (on the main thread).
+void LeftTheWorldNow(BYTE* object) {
     if (object && InOurWorld() && static_cast<signed char>(object[kObjectType]) == 0) {
         const float* at = reinterpret_cast<const float*>(object + kObjectPlace);
         float ground = 0;
@@ -1335,6 +1352,51 @@ void __cdecl LeftTheWorld(BYTE* object) {
                       PlayerDistance(at));
     }
     g_leftTheWorld(object);
+}
+
+// The 21:22 freeze (the user's run of 2026-11-13 21:15): a Marauder
+// heavy walker, the player on its turret, fell into the box under the zone. The box's callback (0x78D660) runs inside a
+// Havok job, so 0x78D2E0 deleted the walker (the world's delete 0x6D5450) on a job thread; taking it apart used a pool
+// another thread owns, the game's assert ("Concurrency bug, another thread using this object pool.", 0xC99A60, int 3)
+// stopped that thread while it held Havok's constraint lock ([obj+0xBC], 0xAC2450), and the main thread and six workers
+// waited on it for good. So a call on any thread but the main one is queued by handle (once) and returns; the main
+// thread's next frame (GameplayFrame) looks each one up and, if it is still there, reports and removes it as the game
+// would. The player isn't affected: the callback puts the player back on the ground in its own branch (0x78D6B5), which
+// never reaches 0x78D2E0. Guerrilla's box (RM 0x83BE10) defers its delete too, though only in multiplayer (RM 0x995550).
+DWORD g_mainThread = 0;            // the game's main thread, from its first gameplay frame
+std::mutex g_leftLock;
+std::vector<DWORD> g_leftQueue;    // handles of what went under the world on another thread
+int g_leftDeferred = 0;
+
+void __cdecl LeftTheWorld(BYTE* object) {
+    if (object && g_mainThread && GetCurrentThreadId() != g_mainThread) {
+        const DWORD handle = ObjectHandle(object, nullptr);
+        if (handle != kNoHandle) {
+            std::lock_guard<std::mutex> hold(g_leftLock);
+            if (std::find(g_leftQueue.begin(), g_leftQueue.end(), handle) == g_leftQueue.end()) g_leftQueue.push_back(handle);
+            return;
+        }
+    }
+    LeftTheWorldNow(object);
+}
+
+// Each frame on the main thread: what went under the world on another thread since the last one.
+void RunLeftTheWorld() {
+    std::vector<DWORD> handles;
+    {
+        std::lock_guard<std::mutex> hold(g_leftLock);
+        if (g_leftQueue.empty()) return;
+        handles.swap(g_leftQueue);
+    }
+    void* world = reinterpret_cast<void*>(kWorld);
+    for (const DWORD handle : handles) {
+        BYTE* object = WorldObject(world, nullptr, handle);
+        if (!object) continue;  // gone already
+        ++g_leftDeferred;
+        RFA_LOG_FIRST(32, "Falls: object 0x%08X (type %d) went into the box under the zone on a physics job's thread; removed on the main thread's frame, "
+                          "whose thread owns the game's pools (%d so far)", handle, static_cast<signed char>(object[kObjectType]), g_leftDeferred);
+        LeftTheWorldNow(object);
+    }
 }
 
 // ---- People back from far off (the run of 2026-11-12 03:04: three "fell out of the world", each first seen walking
@@ -1661,7 +1723,9 @@ void* WorldResource(void* resource, const void* caller) {
 }
 
 int __cdecl SetLevelResource(void* resource, int again) {
-    return g_setLevelResource(WorldResource(resource, _ReturnAddress()), again);
+    void* given = WorldResource(resource, _ReturnAddress());
+    if (InOurWorld()) given = AmbientResourceFor(given);  // a rotating district's version in force (ambient.cpp, step 4c)
+    return g_setLevelResource(given, again);
 }
 
 int __cdecl ApplyLevelResource(void* resource) {
@@ -1829,7 +1893,10 @@ void GiveConvertsTheirSet() {
     converts.swap(g_newConverts);
     ReleaseSRWLockExclusive(&g_newConvertsLock);
     for (DWORD handle : converts)
-        if (BYTE* npc = WorldObject(reinterpret_cast<void*>(kWorld), nullptr, handle)) MaybeGuerrillaMan(npc, "joins the guerrillas");
+        if (BYTE* npc = WorldObject(reinterpret_cast<void*>(kWorld), nullptr, handle)) {
+            MaybeGuerrillaMan(npc, "joins the guerrillas");
+            VoiceSay(npc, "com_ally_combat_join");  // Guerrilla's maybe_play_join_player_voice_line (RM 0x5E4220)
+        }
 }
 
 // The world's player is Guerrilla's whatever the start zone gives: the game takes the Player_Override of the spawn
@@ -2105,7 +2172,9 @@ void RunSpawnResourceChanges() {
 }
 
 void __cdecl GameplayFrame() {
+    g_mainThread = GetCurrentThreadId();
     g_gameplayFrame();
+    RunLeftTheWorld();
     RunSpawnResourceChanges();
     RunFallsWatch();
     GiveConvertsTheirSet();
@@ -2113,6 +2182,8 @@ void __cdecl GameplayFrame() {
     AmbushFrame(InOurWorld());   // Guerrilla's Marauder ambushes (ambush.cpp)
     StoryFrame(InOurWorld());    // Guerrilla's story people at the safehouses (story.cpp)
     ActionsFrame(InOurWorld());  // Guerrilla's action nodes for the people under them (actions.cpp)
+    GuardsFrame(InOurWorld());   // Guerrilla's guard posts (guards.cpp)
+    VoicesFrame(InOurWorld());   // Guerrilla's pain, death, spotting and grenade lines (voices.cpp)
     const DWORD now = GetTickCount();
     if (now - g_lastCheck < 1000) return;
     g_lastCheck = now;
@@ -2169,6 +2240,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     StartAmbushes();
     StartStory();
     StartActions();
+    StartGuards();
+    StartVoices();
     if (!g_skeletons.empty()) {
         g_readCharacters = reinterpret_cast<ReadCharactersFn>(rfa::HookFunction(kReadCharacters, kReadCharactersPrologue, reinterpret_cast<void*>(&ReadCharacters)));
         if (g_readCharacters) rfa::Log("Skeletons: %u of Guerrilla's people's own to load before the character table", static_cast<unsigned>(g_skeletons.size()));
@@ -2391,6 +2464,7 @@ extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_DisableSafehouseVi
 }
 
 extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_ReleaseLeash(DWORD squadHandle) {
+    GuardsReleaseSquad(squadHandle);  // its members leave their guard nodes (guards.cpp)
     BYTE* squad = squadHandle == kNoHandle ? nullptr : WorldObject(reinterpret_cast<void*>(kWorld), nullptr, squadHandle);
     if (!squad) return;
     const int type = *reinterpret_cast<const int*>(squad + kSquadLeashType);

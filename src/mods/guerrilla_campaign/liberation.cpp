@@ -621,6 +621,11 @@ void SetEdfProgression(int level) {
     g_edfProgression = level;
     save::SetInt("progression", "edf", level);
 }
+int EdfProgressionLevel() {
+    const District* district = GetDistrict(PlayerDistrict());
+    if (!district || district->minEdfProgression < 0 || district->minEdfProgression >= 8) return g_edfProgression;
+    return district->minEdfProgression > g_edfProgression ? district->minEdfProgression : g_edfProgression;
+}
 void SetMarauderProgression(int level) {
     g_marauderProgression = level;
     save::SetInt("progression", "marauder", level);

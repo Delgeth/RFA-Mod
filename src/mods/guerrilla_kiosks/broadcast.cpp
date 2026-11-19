@@ -303,8 +303,8 @@ void CheckSound(const BYTE* kiosk) {
         return;
     }
     rfa::Log("Broadcast sound: camera %.1f m from the kiosk; the sound object %.1f m from the kiosk, %u place(s), its listener %.1f m away as the "
-             "game measured it (audiolib's listener %.1f m from the camera); Guerrilla's curve gives the music %.1f dB here (the newsreader is "
-             "on Armageddon's fire curve for the test: silent past 25 m)",
+             "game measured it, given to Wwise as game_distance (audiolib's listener %.1f m from the camera); Guerrilla's curve gives the "
+             "newsreader %.1f dB here",
              camera, Distance(reinterpret_cast<const float*>(object + 0x24), PlaceOf(kiosk)), static_cast<unsigned>(object[0x8B]),
              *reinterpret_cast<const float*>(object + 0x0C), Distance(g_listenerPosition, g_cameraPosition), GuerrillaKioskDb(camera));
     // The listener's front and top as audiolib gives them to Wwise: Wwise needs them of length 1 and at right angles.
@@ -457,12 +457,7 @@ void Update(float seconds) {
         SetActive(false, kiosk ? "the kiosk was destroyed" : "the kiosk is gone");
         return;
     }
-    // A test (2026-11-13): the sound object's orientation (+0x30) is (0, 0, 0) unless a move gives one, and Wwise gets
-    // it with the position every frame. In game the sound pans but never fades, even on Armageddon's own curve; a
-    // zero orientation is the one input of ours Wwise has never had valid. A sound without a cone sounds the same
-    // whichever way it faces, so any unit vector does.
-    static const float kFacing[3] = {0.0f, 0.0f, 1.0f};
-    MoveSoundObject(g_soundObject, PlaceOf(kiosk), kFacing);
+    MoveSoundObject(g_soundObject, PlaceOf(kiosk), nullptr);
     CheckSound(kiosk);
     // Two seconds into each line: whether Wwise is still playing it. The newsreader's lines are the first of
     // Guerrilla's voices in Wwise's ADPCM (each 5 s or longer), so "still playing" means the game decodes that codec.

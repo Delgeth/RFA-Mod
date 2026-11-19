@@ -85,8 +85,8 @@ public static class GuerrillaPopulation
     /// A squad node's guard post: the bounding box it hangs under in Guerrilla when the box also holds guard nodes (the
     /// squad guards that area, standing at the guard nodes: Guerrilla's go_to_guard_post / guard_at_post AI), or null.
     /// Armageddon deleted the guard AI (its object_guard_node is editor-only), so the box is placed with the node under it
-    /// and guerrilla_people leashes the squad to it as it spawns (Armageddon's leash to an anchor's bounding box), until
-    /// Guerrilla's guard post AI is ported. Without it the squad, under Standard orders, hunts the player down walks the
+    /// and its guard nodes are written to guard_posts.txt (<see cref="GuardPostLines"/>) for guerrilla_people's port of
+    /// Guerrilla's guard post AI (guards.cpp: the members at the guard nodes, fighting from them). Without it the squad, under Standard orders, hunts the player down walks the
     /// pathfinder won't take ("Failed pathfind", the user's Round 2: the EDF post over the Dust safehouse).
     /// </summary>
     public static GuerrillaZoneObject? GuardBoxOf(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, GuerrillaZoneObject node)
@@ -98,6 +98,29 @@ public static class GuerrillaPopulation
     }
 
     /// <summary>
+    /// The guard posts placed in a zone, for guerrilla_people's guard post AI (Guerrilla's go_to_guard_post /
+    /// guard_at_post): for each placed box (<see cref="GuardBoxOf"/>, by the handles <paramref name="placed"/> gives) a line
+    /// "guard &lt;box as placed&gt; x y z fx fz left right group" per guard node under it: its place and facing (OP's
+    /// position and third row), its scan angles to the left and right (angle_left, angle_right, degrees) and group_id.
+    /// </summary>
+    public static IEnumerable<string> GuardPostLines(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlyDictionary<uint, uint> placed)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        foreach (var (rfgHandle, handle) in placed)
+        {
+            if (!zone.TryGetValue(rfgHandle, out var box) || box.ClassHash != Box) continue;
+            for (uint h = box.Child; h != None && zone.TryGetValue(h, out var child); h = child.Sibling)
+            {
+                if (child.ClassHash != GuardNode || child.Value("OP") is not { Length: >= 48 } op) continue;
+                float F(byte[] b, int i) => BitConverter.ToSingle(b, i * 4);
+                float Angle(string name) => child.Value(name) is { Length: 4 } v ? BitConverter.ToSingle(v) : 45;
+                int group = child.Value("group_id") is { Length: 4 } g ? BitConverter.ToInt32(g) : 0;
+                yield return string.Create(culture, $"guard {handle:X8} {F(op, 0):R} {F(op, 1):R} {F(op, 2):R} {F(op, 9):R} {F(op, 11):R} {Angle("angle_left"):R} {Angle("angle_right"):R} {group}");
+            }
+        }
+    }
+
+    /// <summary>
     /// A guard post's box with its anchor on one of its guard nodes: Guerrilla's OP and bb with the place moved to the
     /// guard node and the extent shifted by as much in the box's own axes, so the box covers the same space; or null
     /// (no OP or bb, or no guard node). Armageddon's leash walks a member who is outside the box back to the anchor's
@@ -106,7 +129,7 @@ public static class GuerrillaPopulation
     /// ground, where a guard was seen 1.4 m under the ground (2026-11-11 21:27:26) and another fell out of the world
     /// (21:28:03). Guerrilla's guards go to the guard nodes instead (go_to_guard_post_action), the places they stand
     /// on: the anchor takes the one on the floor (within 1.5 m of it) nearest the box's middle, or the nearest of all.
-    /// Still the stand-in until the guard post AI is ported.
+    /// Used by the leash only in a world built before guard_posts.txt; the guard post AI walks the guards to their nodes.
     /// </summary>
     static (byte[] Op, byte[] Bb)? GuardAnchor(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, GuerrillaZoneObject box)
     {
@@ -145,11 +168,13 @@ public static class GuerrillaPopulation
     /// <summary>
     /// A zone's Marauder ambush regions (marauder_ambush_region, a class Armageddon dropped; Guerrilla's 61 in 25 zones from
     /// 04_08 to 12_10 hold 136 of its 160 Marauder squad nodes): each region and its squad nodes on foot (squad_vehicle off;
-    /// by handle, with the squad <paramref name="squadFor"/> names, one of <paramref name="squads"/>), and how many of its
-    /// nodes ride (27 in all, for later). The world build places the nodes on foot with no parent and writes the regions for
-    /// guerrilla_people (ambush.cpp), which spawns them as Guerrilla's ambush_region_do_frame does.
+    /// by handle, with the squad <paramref name="squadFor"/> names, one of <paramref name="squads"/>), and those that ride
+    /// (squad_vehicle on: 27, their vehicle_type Guerrilla's Default Marauder group, which the conversion names "rfg_" + it,
+    /// so Armageddon's own squad spawn seats them in Guerrilla's Mar_Raider_1 / Mar_Jetter_1). The world build places both
+    /// with no parent and writes the regions for guerrilla_people (ambush.cpp), which spawns them as Guerrilla's
+    /// ambush_region_do_frame does.
     /// </summary>
-    public static List<(GuerrillaZoneObject Region, List<(uint Handle, string Squad)> OnFoot, int Riding)> AmbushRegions(
+    public static List<(GuerrillaZoneObject Region, List<(uint Handle, string Squad)> OnFoot, List<(uint Handle, string Squad)> Riding)> AmbushRegions(
         IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads, Func<string, string> squadFor) =>
         [.. zone.Values.Where(o => o.ClassHash == AmbushRegion).Select(region =>
         {
@@ -157,7 +182,9 @@ public static class GuerrillaPopulation
             bool Rides(GuerrillaZoneObject n) => n.Value("squad_vehicle")?.Any(b => b != 0) == true;
             List<(uint, string)> onFoot = [.. nodes.Where(n => !Rides(n)).Select(n => (n.Handle, Squad: squadFor(n.Text("squad_def") ?? "")))
                                                    .Where(n => squads.Contains(n.Squad))];
-            return (region, onFoot, nodes.Count(Rides));
+            List<(uint, string)> riding = [.. nodes.Where(Rides).Select(n => (n.Handle, Squad: squadFor(n.Text("squad_def") ?? "")))
+                                                   .Where(n => squads.Contains(n.Squad))];
+            return (region, onFoot, riding);
         })];
 
     /// <summary>
@@ -181,10 +208,23 @@ public static class GuerrillaPopulation
     static readonly uint AmbushRegion = NameHashes.ClassHash("marauder_ambush_region");
     const uint AmbushMinSpawns = 0xAD234E6C, AmbushMaxSpawns = 0xB8A89A9E;  // MAR_PROP_MIN_SPAWNS, MAR_PROP_MAX_SPAWNS (RM serialize 0xAA9B40: +0xD8, +0xDC)
 
+    /// <summary>
+    /// A standing squad node's place in the cap (<see cref="CapPeople"/>, the higher kept the longer): 2 under an action
+    /// node (its people use the node: actions.cpp), 1 under a guard post's box (guards.cpp), 0 the rest (under a building
+    /// or nothing). The order the town's life asks for (the main session, 2026-11-15: "action-node squads first within
+    /// the cap"); Guerrilla keeps them all, with no such cap.
+    /// </summary>
+    public static int StandingRank(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, uint handle) =>
+        zone.TryGetValue(handle, out var node) && node.Parent != None && zone.TryGetValue(node.Parent, out var parent)
+            ? parent.ClassHash == ActionNode ? 2 : parent.ClassHash == Box && GuardBoxOf(zone, node) != null ? 1 : 0
+            : 0;
+
+    /// <summary>A zone's standing squads (see above), the highest <see cref="StandingRank"/> first.</summary>
     public static List<(uint Handle, string Squad)> StandingSquads(IReadOnlyDictionary<uint, GuerrillaZoneObject> zone, IReadOnlySet<string> squads,
                                                                   Func<string, string> squadFor) =>
         [.. zone.Values.Where(o => o.ClassHash == SquadNode && StoryKind(o) == null)
                        .Where(o => o.Parent == None || zone.TryGetValue(o.Parent, out var p) && (p.ClassHash == Building || p.ClassHash == Box || p.ClassHash == ActionNode))
+                       .OrderByDescending(o => StandingRank(zone, o.Handle))
                        .Select(o => (o.Handle, Squad: squadFor(o.Text("squad_def") ?? "")))
                        .Where(s => squads.Contains(s.Squad))];
 
@@ -224,11 +264,13 @@ public static class GuerrillaPopulation
 
     /// <summary>
     /// The standing squads each zone keeps (<see cref="StandingSquads"/>): every 3 × 3 block of zones holds at most
-    /// <see cref="MostPeople"/> people with its patrols' (<paramref name="patrolPeople"/>, a zone's), the busiest
-    /// zones giving up their last squads first; <paramref name="leftOut"/> counts the squads left out.
+    /// <see cref="MostPeople"/> people with its patrols' (<paramref name="patrolPeople"/>, a zone's): an over-full block
+    /// gives up its lowest-ranked squad first (<paramref name="rank"/>, a zone and a node's handle: <see cref="StandingRank"/>;
+    /// each zone's list is in that order, the highest first), then the busiest zone's last; <paramref name="leftOut"/>
+    /// counts the squads left out.
     /// </summary>
     public static Dictionary<(int, int), List<(uint Handle, string Squad)>> CapPeople(Dictionary<(int, int), List<(uint Handle, string Squad)>> standing,
-        IReadOnlyDictionary<(int, int), int> patrolPeople, Func<string, int> members, out int leftOut)
+        IReadOnlyDictionary<(int, int), int> patrolPeople, Func<string, int> members, out int leftOut, Func<(int, int), uint, int>? rank = null)
     {
         var kept = standing.ToDictionary(p => p.Key, p => p.Value.ToList());
         int Here((int, int) z) => (kept.TryGetValue(z, out var l) ? l.Sum(s => members(s.Squad)) : 0) + patrolPeople.GetValueOrDefault(z);
@@ -238,7 +280,8 @@ public static class GuerrillaPopulation
         {
             var worst = kept.Keys.Select(z => (Zone: z, Count: Block(z).Sum(Here))).OrderByDescending(x => x.Count).FirstOrDefault();
             if (worst.Count <= MostPeople) break;
-            var busiest = Block(worst.Zone).Where(z => kept.TryGetValue(z, out var l) && l.Count > 0).OrderByDescending(Here).FirstOrDefault();
+            var busiest = Block(worst.Zone).Where(z => kept.TryGetValue(z, out var l) && l.Count > 0)
+                .OrderBy(z => rank?.Invoke(z, kept[z][^1].Handle) ?? 0).ThenByDescending(Here).FirstOrDefault();
             if (!kept.ContainsKey(busiest) || kept[busiest].Count == 0) break;  // only patrols left there
             kept[busiest].RemoveAt(kept[busiest].Count - 1);
             leftOut++;

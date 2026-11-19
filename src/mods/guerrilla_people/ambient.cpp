@@ -50,7 +50,9 @@
 #include "rfa_mod.h"
 #include "ambient.h"
 #include "actions.h"
+#include "voices.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -80,6 +82,7 @@ using WorldAtFn = BYTE*(__fastcall*)(void* world, void*, int index);
 using ByHandleFn = BYTE*(__fastcall*)(void* world, void*, DWORD handle);
 auto const Player = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
 auto const NpcCount = reinterpret_cast<WorldCountFn>(0x424480);       // world::get_num_objects<npc>
+auto const NpcAt = reinterpret_cast<WorldAtFn>(0x4244D0);
 auto const NavpointCount = reinterpret_cast<WorldCountFn>(0x43AC80);  // world::get_num_objects<navpoint>
 auto const NavpointAt = reinterpret_cast<WorldAtFn>(0x43ACD0);
 // world::object_from_handle, any object (0x424350, which the first build used, answers only objects of type 2,
@@ -129,6 +132,36 @@ constexpr char kVehicleBelief = 14;  // flee_to_safety_goal leaves a vehicle to 
 constexpr int kNoPath = 6, kStartOffMesh = 7, kDestinationOffMesh = 8;
 int GameTime() { return *reinterpret_cast<const int*>(0x1121300); }   // ms; it stops while the game is paused
 int GameHour() { return *reinterpret_cast<const BYTE*>(0x12F76D4); }
+int GameMinute() { return *reinterpret_cast<const BYTE*>(0x12F76D5); }  // the game clock 0x12F76D0: date, hour, minute, second
+
+// ---- Guerrilla's ambient behaviours (step 4b of the people's rest, 2026-11-15) [RM, A]
+// Guerrilla's ambient_spawn_behavior.xtbl groups (Refinery Supervisor, Refinery Miner, Dust Drunk, Dust Worker, Dust
+// Ambient), each of up to 20 behaviours: an animation set variant (Animation_Override, by
+// vanim_get_animation_set_variant_from_name: drunk, tired, oppressed, confident, ...; miner, supervisor and depressed
+// aren't variants, so give none), an ambient prop (Ambient_Prop), a chance, the hours (Day_Start..Day_End), a morale
+// range, MaleFemaleRatio (stored + 1). A person made with an ambient behaviour id takes one in human::serialize (RM
+// 0xADB1BE): the hour with its minutes, the district's morale over its most, a roll of 0..100; the first behaviour
+// whose hours and morale take the hour and morale, and whose chance × (1 + ratio for a woman, 1 - ratio for a man,
+// human_info's female flag) is over the roll, else the roll less its chance; then its variant set
+// (vanim_set_base_animation_set_variant) and its prop the person's (+0xC88), made by amb_prop_create. The id is the
+// zone's ambient_spawn_info's default_ambient_behavior (all of Guerrilla's 41 are Dust Ambient), or an
+// object_ambient_behavior_region's group within its radius (4: three in Parker, one in 07_12, Dust Drunk and Dust
+// Worker). Armageddon kept it all (its loader 0x7522F0, the human's ambient_behavior property, its pick in 0x8605E0:
+// the variant 0x98C310 on the human's animation +0x760 → +4 with +0xB8 |= 0x4000, the prop at +0x1338, made by
+// amb_prop_create 0x750F10; it ships Guerrilla's ambient_prop_info.xtbl itself, 0x750E40), but a walker made by
+// drop_human's create isn't given one, so here the pick is made as Guerrilla's as each walker is made (ambient.txt's
+// behaviour, default, region and female lines, from the people build) and applied with Armageddon's own steps.
+auto const VariantNamed = reinterpret_cast<int(__cdecl*)(const char* name)>(0x98C530);         // vanim_get_animation_set_variant_from_name
+auto const SetBaseVariant = reinterpret_cast<void(__cdecl*)(void* animate, int variant)>(0x98C310);  // vanim_set_base_animation_set_variant
+auto const AmbientPropNamed = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x7510F0);    // amb_prop_info_find
+auto const MakeAmbientProp = reinterpret_cast<bool(__cdecl*)(BYTE* info, BYTE* human)>(0x750F10);  // amb_prop_create
+constexpr DWORD kHumanAnimationOwner = 0x760, kHumanStateFlags = 0xB8, kAmbientPropInfo = 0x1338;
+constexpr DWORD kVariantSet = 0x4000;
+struct Behavior {
+    std::string variant, prop;
+    float chance = 0, start = 0, end = 24, moraleLeast = 0, moraleMost = 1, ratio = 0;
+};
+struct BehaviorRegion { float place[3]{}; float radius = 0; std::string group; };
 
 // ---- Guerrilla's numbers
 constexpr int kCaps[4][4] = {{0, 10, 20, 30}, {0, 8, 10, 20}, {0, 6, 8, 10}, {0, 6, 6, 8}};  // [alert][density], 0x1335CF8
@@ -151,10 +184,15 @@ struct Zone {
     std::string resource, entry;
 };
 struct Files {
+    std::vector<std::pair<std::string, std::vector<Behavior>>> behaviors;  // each group's
+    std::vector<std::pair<std::pair<int, int>, std::string>> defaults;     // a zone's group
+    std::vector<BehaviorRegion> behaviorRegions;
+    std::vector<std::string> women;
     float zoneWidth = 511.0f;
     int columnAtZero = 8, rowAtZero = 7;
     std::vector<Zone> zones;
     std::vector<std::pair<std::string, std::vector<std::string>>> civilians;  // resource → its civilians (crews.txt's "Guerilla")
+    std::vector<std::pair<std::string, std::vector<std::string>>> walkers;    // a rotating district's version → its civilians (crews.txt's "Walkers")
 };
 Files g_files;
 bool g_on = false;
@@ -176,6 +214,26 @@ void ReadFiles() {
         std::istringstream in(line);
         std::string kind;
         in >> kind;
+        if (kind == "behavior" || kind == "default" || kind == "region" || kind == "female") {
+            const auto f = Split(line, '\t');
+            auto Number = [](const std::string& t) { return static_cast<float>(std::atof(t.c_str())); };
+            if (kind == "behavior" && f.size() >= 10) {
+                Behavior b{f[2] == "-" ? "" : f[2], f[3] == "-" ? "" : f[3], Number(f[4]), Number(f[5]), Number(f[6]), Number(f[7]), Number(f[8]), Number(f[9])};
+                auto group = std::find_if(g_files.behaviors.begin(), g_files.behaviors.end(), [&](const auto& g) { return g.first == f[1]; });
+                if (group == g_files.behaviors.end()) group = g_files.behaviors.insert(g_files.behaviors.end(), {f[1], {}});
+                group->second.push_back(b);
+            }
+            else if (kind == "default" && f.size() >= 4) g_files.defaults.push_back({{std::atoi(f[1].c_str()), std::atoi(f[2].c_str())}, f[3]});
+            else if (kind == "region" && f.size() >= 6) {
+                BehaviorRegion r;
+                r.place[0] = Number(f[1]), r.place[1] = Number(f[2]), r.place[2] = Number(f[3]);
+                r.radius = Number(f[4]);
+                r.group = f[5];
+                g_files.behaviorRegions.push_back(r);
+            }
+            else if (kind == "female" && f.size() >= 2) g_files.women.push_back(f[1]);
+            continue;
+        }
         if (kind == "grid") in >> g_files.zoneWidth >> g_files.columnAtZero >> g_files.rowAtZero;
         else if (kind == "zone") {
             Zone zone{};
@@ -193,6 +251,7 @@ void ReadFiles() {
         if (line.empty() || line[0] == '#') continue;
         const auto fields = Split(line, '\t');
         if (fields.size() == 3 && _stricmp(fields[1].c_str(), "Guerilla") == 0) g_files.civilians.push_back({fields[0], Split(fields[2], ',')});
+        if (fields.size() == 3 && _stricmp(fields[1].c_str(), "Walkers") == 0) g_files.walkers.push_back({fields[0], Split(fields[2], ',')});
     }
 }
 
@@ -204,7 +263,196 @@ const Zone* ZoneAt(const V3& where) {
     return nullptr;
 }
 
+// The district's morale over its most, as Guerrilla's pick reads it (gfm_get_district_morale / _max): guerrilla_campaign's
+// GuerrillaCampaign_District for the player's district; a half without it (Guerrilla's groups all take 0..1).
+struct DistrictInfo {
+    const char* name;
+    int index;
+    float control, controlMax, controlBefore;
+    float morale, moraleMax, moraleBefore;
+    float effectiveMorale;
+    int liberated;
+    int controlChangedAt, moraleChangedAt;
+    unsigned changes;
+};
+float DistrictMorale() {
+    using DistrictFn = int(__cdecl*)(int which, DistrictInfo* info);
+    static DistrictFn district = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        if (HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll")) district = reinterpret_cast<DistrictFn>(GetProcAddress(campaign, "GuerrillaCampaign_District"));
+    }
+    DistrictInfo info{};
+    if (!district || !district(-1, &info) || info.moraleMax <= 0) return 0.5f;
+    return info.morale / info.moraleMax;
+}
+
+int g_behaviorsGiven = 0, g_behaviorPropsMade = 0;
+
+// ---- The districts' civilians in batches (step 4c, 2026-11-15; the user: "Batches") [RM, A]
+// Guerrilla streams 9 civilian types of a district's group at once and swaps one for another of the group each time the
+// player has gone 80 m (rotate_character_usage RM 0xB5E730), its slot clean-up letting the unused go. Armageddon lets
+// a character type go only through its own change of spawn resource (0x7628B0 sets the resource and state 1; the state
+// machine 0x762730, which guerrilla_people runs each frame in our worlds, lets go of what the new one doesn't list and
+// loads the rest). So the people build writes up to 3 versions of a district's resource (rfg_dust, rfg_dust_r2,
+// rfg_dust_r3: the same EDF, Marauders and 5 civilians its squads use, and 4 others of the group each,
+// GuerrillaDistricts.Rotation), and here the version in force moves on, as Guerrilla's 80 m a swap would have swapped
+// the 4: once the player has gone 300 m since the last change and 90 s have passed, at alert green or yellow, when no
+// person of a civilian type going out is in view within 100 m (it would vanish). The game asking for the district's
+// resource (its zone's) gets the version in force (AmbientResourceFor, from guerrilla_people's hook on 0x7628B0).
+auto const FindSpawnResource = reinterpret_cast<void*(__cdecl*)(const char* name)>(0x75EC70);
+auto const SetLevelResourceThroughHook = reinterpret_cast<int(__cdecl*)(void* resource, int again)>(0x7628B0);
+const int* const kResourceState = reinterpret_cast<const int*>(0x19734CC);
+constexpr int kResourceInForce = 4;
+constexpr DWORD kHumanCharacter = 0x4FC;  // a human: its character entry
+constexpr float kRotateDistance = 300.0f, kGoingOutSeen = 100.0f;
+constexpr int kRotateLeast = 90000, kRotateCheckEvery = 2000;
+struct Rotating { std::string base; int versions = 1, at = 0, lastSwitch = 0; V3 lastPlace{}; bool placed = false; };
+std::vector<Rotating> g_rotating;
+std::string g_currentBase;  // the rotating district whose resource the game last asked for
+int g_nextRotateCheck = 0, g_rotations = 0, g_rotationsHeld = 0;
+
+std::string VersionName(const Rotating& r, int v) { return v == 0 ? r.base : r.base + "_r" + std::to_string(v + 1); }
+
+Rotating* RotatingFor(const std::string& name) {
+    for (Rotating& r : g_rotating)
+        if (_stricmp(r.base.c_str(), name.c_str()) == 0) return &r;
+    return nullptr;
+}
+
+const std::vector<std::string>* WalkersOf(const std::string& version) {
+    for (const auto& [name, people] : g_files.walkers)
+        if (_stricmp(name.c_str(), version.c_str()) == 0) return &people;
+    return nullptr;
+}
+
+// The rotating districts: a base resource with a Walkers line and its versions after it (_r2, _r3) in crews.txt.
+void FindRotating() {
+    for (const auto& [name, people] : g_files.walkers) {
+        if (name.size() > 3 && name.compare(name.size() - 3, 2, "_r") == 0 && std::isdigit(static_cast<unsigned char>(name.back()))) continue;  // a version
+        Rotating r;
+        r.base = name;
+        while (r.versions < 3 && WalkersOf(VersionName(r, r.versions))) ++r.versions;
+        if (r.versions > 1) g_rotating.push_back(r);
+    }
+}
+
+// Every 2 s in our worlds: the district in force moves on to its next version when Guerrilla's walk of the player would
+// have swapped its rotating civilians, and none of those going out is in view near the player.
+void RotateFrame(const V3& player, int now, int alert) {
+    if (g_rotating.empty() || now < g_nextRotateCheck) return;
+    g_nextRotateCheck = now + kRotateCheckEvery;
+    Rotating* r = RotatingFor(g_currentBase);
+    if (!r || *kResourceState != kResourceInForce) return;
+    if (!r->placed) {
+        r->placed = true;
+        r->lastPlace = player;
+        r->lastSwitch = now;
+        return;
+    }
+    const float moved = Distance(player, r->lastPlace);
+    if (moved < kRotateDistance || now - r->lastSwitch < kRotateLeast || alert > 1) return;
+    const int next = (r->at + 1) % r->versions;
+    const auto* in = WalkersOf(VersionName(*r, next));
+    const auto* out = WalkersOf(VersionName(*r, r->at));
+    void* resource = FindSpawnResource(VersionName(*r, next).c_str());
+    if (!in || !out || !resource) return;
+    std::vector<std::string> goingOut, comingIn;
+    for (const std::string& c : *out)
+        if (std::none_of(in->begin(), in->end(), [&](const std::string& k) { return _stricmp(k.c_str(), c.c_str()) == 0; })) goingOut.push_back(c);
+    for (const std::string& c : *in)
+        if (std::none_of(out->begin(), out->end(), [&](const std::string& k) { return _stricmp(k.c_str(), c.c_str()) == 0; })) comingIn.push_back(c);
+    std::vector<BYTE*> outInfos;
+    for (const std::string& c : goingOut)
+        if (BYTE* info = HumanInfo(c.c_str())) outInfos.push_back(info);
+    const int people = NpcCount(kWorld, nullptr);
+    for (int i = 0; i < people; ++i) {
+        BYTE* human = NpcAt(kWorld, nullptr, i);
+        if (!human || GoneOrDead(human)) continue;
+        const BYTE* character = *reinterpret_cast<BYTE* const*>(human + kHumanCharacter);
+        if (std::find(outInfos.begin(), outInfos.end(), character) == outInfos.end()) continue;
+        const V3 place = Pos(human);
+        const V3 head{place.x, place.y + 1.0f, place.z};
+        if (Distance(place, player) <= kGoingOutSeen && InView(&head.x, 1.0f)) {
+            ++g_rotationsHeld;
+            RFA_LOG_FIRST(8, "Walkers: %s's civilians stay as they are for now: a %s going out is in view nearby", r->base.c_str(),
+                          goingOut.empty() ? "person" : goingOut.front().c_str());
+            return;
+        }
+    }
+    auto Join = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (const std::string& c : v) s += (s.empty() ? "" : ", ") + c;
+        return s.empty() ? std::string("none") : s;
+    };
+    SetLevelResourceThroughHook(resource, 0);
+    r->at = next;
+    r->lastSwitch = now;
+    r->lastPlace = player;
+    ++g_rotations;
+    rfa::Log("Walkers: %s's civilians change to version %d of %d (%s), after %.0f m: in %s; out %s (%d changes so far)", r->base.c_str(), next + 1, r->versions,
+             VersionName(*r, next).c_str(), moved, Join(comingIn).c_str(), Join(goingOut).c_str(), g_rotations);
+}
+
+// Guerrilla's pick of an ambient behaviour for a walker just made (see the top), applied with Armageddon's own steps.
+void GiveBehavior(BYTE* human, const std::string& character, const V3& place, const Zone& zone) {
+    const std::string* group = nullptr;
+    for (const BehaviorRegion& r : g_files.behaviorRegions) {
+        const float dx = place.x - r.place[0], dy = place.y - r.place[1], dz = place.z - r.place[2];
+        if (dx * dx + dy * dy + dz * dz <= r.radius * r.radius) {
+            group = &r.group;
+            break;
+        }
+    }
+    if (!group)
+        for (const auto& [at, name] : g_files.defaults)
+            if (at.first == zone.col && at.second == zone.row) {
+                group = &name;
+                break;
+            }
+    if (!group) return;
+    auto found = std::find_if(g_files.behaviors.begin(), g_files.behaviors.end(), [&](const auto& g) { return _stricmp(g.first.c_str(), group->c_str()) == 0; });
+    if (found == g_files.behaviors.end()) return;
+    const float hour = static_cast<float>(GameHour()) + static_cast<float>(GameMinute()) / 60.0f;
+    const float morale = DistrictMorale();
+    const bool woman = std::any_of(g_files.women.begin(), g_files.women.end(), [&](const std::string& w) { return _stricmp(w.c_str(), character.c_str()) == 0; });
+    float roll = Random() * 100.0f;
+    for (const Behavior& b : found->second) {
+        if (hour < b.start || hour > b.end || morale < b.moraleLeast || morale > b.moraleMost) continue;
+        const float factor = woman ? 1.0f + b.ratio : 1.0f - b.ratio;
+        if (b.chance * factor <= roll) {
+            roll -= b.chance;
+            continue;
+        }
+        bool variantSet = false, propMade = false;
+        if (!b.variant.empty()) {
+            const int variant = VariantNamed(b.variant.c_str());
+            BYTE* owner = *reinterpret_cast<BYTE**>(human + kHumanAnimationOwner);
+            void* animate = owner ? *reinterpret_cast<void**>(owner + 4) : nullptr;
+            if (variant >= 0 && animate) {
+                SetBaseVariant(animate, variant);
+                *reinterpret_cast<DWORD*>(human + kHumanStateFlags) |= kVariantSet;
+                variantSet = true;
+            }
+        }
+        if (!b.prop.empty())
+            if (BYTE* info = AmbientPropNamed(b.prop.c_str())) {
+                *reinterpret_cast<BYTE**>(human + kAmbientPropInfo) = info;
+                propMade = MakeAmbientProp(info, human);
+                if (propMade) ++g_behaviorPropsMade;
+            }
+        ++g_behaviorsGiven;
+        RFA_LOG_FIRST(24, "Walkers: %s takes Guerrilla's ambient behaviour of %s: %s%s%s%s (at %.1f h, morale %.2f)", character.c_str(), group->c_str(),
+                      b.variant.empty() ? "no variant" : b.variant.c_str(), variantSet ? "" : b.variant.empty() ? "" : " (not a variant)",
+                      b.prop.empty() ? "" : propMade ? ", holding " : ", without ", b.prop.c_str(), hour, morale);
+        return;
+    }
+}
+
 const std::vector<std::string>* CiviliansOf(const std::string& resource) {
+    if (const Rotating* r = RotatingFor(resource))  // a rotating district: the version in force's (or its base's) civilians
+        if (const auto* walkers = WalkersOf(VersionName(*r, _stricmp(g_currentBase.c_str(), r->base.c_str()) == 0 ? r->at : 0))) return walkers;
     const std::vector<std::string>* fallback = nullptr;
     for (const auto& [name, people] : g_files.civilians) {
         if (people.empty()) continue;
@@ -277,6 +525,7 @@ struct Walker {
     // comes at it (looked at again every 200-300 ms), and the gawk timer pair (ai_system::gawk_timer).
     bool incoming = false, gawking = false, fetal = false;
     int nextNodeLook = 0;  // when it next looks for an action node to use (3b)
+    int nextGreet = 0;     // when it next may greet the player
     int nextHazardLook = 0, gawkWindow = -1, gawkLength = -1;
 };
 std::vector<Walker> g_walkers;
@@ -561,6 +810,7 @@ constexpr int kHazardLookLeast = 200, kHazardLookMost = 300;
 constexpr int kGawkWindowLeast = 30000, kGawkWindowMost = 45000, kGawkLengthLeast = 5000, kGawkLengthMost = 15000;
 constexpr float kGawkDistance = 20.0f, kGawkingDistance = 25.0f;
 constexpr int kNodeFirstLook = 5000, kNodeLookEvery = 2000, kNodeAgainLeast = 30000, kNodeAgainMost = 60000;
+constexpr float kGreetDistance = 8.0f;
 auto const VehicleSubtype = reinterpret_cast<int(__fastcall*)(BYTE* vehicle, void*)>(0x423530);
 auto const HavokBody = reinterpret_cast<BYTE*(__cdecl*)(DWORD handle)>(0x778440);
 auto const BodyVelocity = reinterpret_cast<void(__cdecl*)(BYTE* body, V3* out)>(0x776770);
@@ -752,6 +1002,8 @@ void Walk(Walker& w, BYTE* human, int now) {
             w.fleeing = true;
             w.nextFleeLook = 0;
             ++g_fled;
+            // Guerrilla's flee_to_safety_goal: a guerrilla's com_ally_combat_flee, anyone else's voc_panic (flee_action).
+            VoiceSay(human, *reinterpret_cast<const int*>(human + kTeam) == 0 ? "com_ally_combat_flee" : "voc_panic");
             RFA_LOG_FIRST(20, "Walkers: NPC 0x%08X flees from a danger at (%.1f, %.1f, %.1f) (Guerrilla's flee_to_safety_goal; belief kind %d)",
                           w.human, w.danger.x, w.danger.y, w.danger.z, static_cast<int>(static_cast<char>(belief[kBeliefType])));
         }
@@ -771,6 +1023,12 @@ void Walk(Walker& w, BYTE* human, int now) {
     // (100) is above wandering's (80); how soon a person may use one again isn't read yet: here a first look 5-15 s
     // after it's made, then 30-60 s after each use, every 2 s between.
     if (ActionsWalkerBusy(w.human)) return;
+    // A walker near the player greets him (Guerrilla's greet_player_action: amb_pc_greet_morale_*, by the district's
+    // morale; guerrilla_voices keeps its cooldowns and chance).
+    if (BYTE* player = Player(); player && now >= w.nextGreet && !w.leaving && g_alertNow <= 1 && Distance(Pos(human), Pos(player)) < kGreetDistance) {
+        w.nextGreet = now + 3000;
+        VoiceSay(human, VoiceGreetLine());
+    }
     if (w.nextNodeLook == 0) w.nextNodeLook = now + kNodeFirstLook + std::rand() % kNodeFirstLook * 2;
     if (!w.leaving && g_alertNow <= 1 && now >= w.nextNodeLook) {
         w.nextNodeLook = now + kNodeLookEvery;
@@ -956,6 +1214,7 @@ void SpawnStep(const V3& at, const V3& forward, int now) {
         }
         w.team = *reinterpret_cast<const int*>(human + kTeam);
         *reinterpret_cast<int*>(human + kManagement) = kAmbient;
+        GiveBehavior(human, name, place, *zone);  // Guerrilla's ambient behaviour (its variant and prop)
         g_walkers.push_back(w);
         ++g_made;
         RFA_LOG_FIRST(10, "Walkers: %s walks from navpoint 0x%08X at (%.1f, %.1f, %.1f), %.0f m away, in zone %02d_%02d (%s: %s by %s, alert %s, cap %d); %d out",
@@ -973,6 +1232,10 @@ void StartAmbient() {
         return;
     }
     ReadFiles();
+    FindRotating();
+    if (!g_rotating.empty())
+        rfa::Log("Walkers: %u districts' civilians change in batches as the player goes about (their resources' versions, Guerrilla's rotate_character_usage)",
+                 static_cast<unsigned>(g_rotating.size()));
     if (g_files.zones.empty()) {
         rfa::Log("Walkers: no mods\\guerrilla_people\\ambient.txt (build the people); no one walks");
         return;
@@ -1003,6 +1266,7 @@ void AmbientFrame(bool ours) {
     g_lastClock = now;
     const V3 at = Pos(player);
     g_alertNow = AlertLevel();
+    RotateFrame(at, now, g_alertNow);
     for (auto w = g_walkers.begin(); w != g_walkers.end();) {
         BYTE* human = HumanByHandle(kWorld, nullptr, w->human);
         if (!human || GoneOrDead(human)) {
@@ -1064,4 +1328,18 @@ void AmbientLeaveToGame(unsigned long person) {
 const char* AmbientZoneResource(float x, float z) {
     const Zone* zone = ZoneAt(V3{x, 0, z});
     return zone && !zone->resource.empty() ? zone->resource.c_str() : nullptr;
+}
+
+// The resource the game is given in place of the one it asks for: a rotating district's version in force (see
+// RotateFrame); anything else as asked.
+void* AmbientResourceFor(void* resource) {
+    if (!resource || g_rotating.empty()) return resource;
+    const char* name = *static_cast<const char* const*>(resource);  // an entry starts with its name
+    if (!name) return resource;
+    Rotating* r = RotatingFor(name);
+    if (!r) return resource;
+    g_currentBase = r->base;
+    if (r->at == 0) return resource;
+    void* version = FindSpawnResource(VersionName(*r, r->at).c_str());
+    return version ? version : resource;
 }

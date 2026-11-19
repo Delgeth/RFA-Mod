@@ -21,11 +21,17 @@
 // (RM 0x67D420: an ambient person at alert green or yellow, not despawning, takes the nearest free node within 30 m,
 // find_nearest_action_node RM 0x637D10, its fitness 100 above its wandering's 80): the same walk, spot and clips;
 // after the exit it walks on, and the node rests for its type's cooldown_period. A walker looks again a minute later.
-// Not here yet: the props (3c: ambient_prop_info), the nodes' other flags (allow_edf, allow_guerrilla, ...: the squad
+// 3c (2026-11-15): the type's ambient prop (props.cpp): made during or after the entry clip (prop_creation_time), its
+// always-on effect with it, an effect while an action of its anim_effect_list plays (for about 2.5 s: Guerrilla's
+// runs between the clip's tags), and taken away at the exit clip or when the node is done (prop_removal_time), or when
+// the person is given back or goes. Guerrilla keeps a prop that isn't delete_on_exit and drops it later
+// (drop_ambient_prop_action); here it is taken away then. Not here yet: the nodes' other flags (allow_edf, allow_guerrilla, ...: the squad
 // under a node is the one Guerrilla put there), and a type's other states (its first).
 
 #include "rfa_mod.h"
 #include "actions.h"
+#include "props.h"
+#include "voices.h"
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -75,7 +81,10 @@ struct Type {
     float rest = 0, least = 0, most = 0;
     std::vector<Idle> idles;
     int stateIndex = -2, entryIndex = -1, exitIndex = -1;  // -2: not looked up yet
+    int prop = -1;  // its ambient prop (g_props), or -1
+    bool ambientLines = false;  // node_flags allow_ambient_lines: its people say Guerrilla's everyday lines
 };
+std::vector<PropKind> g_props;
 struct Node { int type = -1; V3 spot{}; float fx = 0, fz = 1; bool taken = false; int restUntil = 0; };
 std::vector<Type> g_types;
 std::unordered_map<DWORD, Node> g_nodes;  // by the squad node's handle
@@ -92,11 +101,17 @@ struct Actor {
     int until = 0;
     std::vector<int> nextIdle;
     bool overridden = false;
+    unsigned long prop = 0;                  // the prop in its hand (props.cpp), or 0
+    int propAt = 0;                          // when to make it (after the entry clip), or 0
+    int permEffect = -1, actionEffect = -1;  // its effects playing
+    int actionEffectUntil = 0;
+    int nextLine = 0;  // when it next says an everyday line (play_ambient_voice_lines: every 5-15 s)
 };
+constexpr int kAfterEntry = 1500, kActionEffectTime = 2500;
 std::unordered_map<DWORD, Actor> g_actors;  // by the person's handle
 std::unordered_set<DWORD> g_converted;
 int g_lastClock = 0, g_nextScan = 0, g_nextReport = 0;
-int g_taken = 0, g_started = 0, g_dangers = 0, g_noWay = 0, g_pedTaken = 0;
+int g_taken = 0, g_started = 0, g_dangers = 0, g_noWay = 0, g_pedTaken = 0, g_propsHeld = 0;
 
 DWORD HandleOf(const BYTE* o) { return *reinterpret_cast<const DWORD*>(o + kHandle); }
 V3 Pos(const BYTE* o) { return *reinterpret_cast<const V3*>(o + kPosition); }
@@ -131,6 +146,25 @@ void ReadNodes() {
             typeIndex[t.name] = static_cast<int>(g_types.size());
             g_types.push_back(t);
         }
+        else if (f[0] == "lines" && f.size() >= 2) {
+            if (auto type = typeIndex.find(f[1]); type != typeIndex.end()) g_types[type->second].ambientLines = true;
+        }
+        else if (f[0] == "prop" && f.size() >= 9) {
+            auto type = typeIndex.find(f[1]);
+            if (type == typeIndex.end()) continue;
+            auto Field = [](const std::string& v) { return v == "-" ? std::string() : v; };
+            PropKind k;
+            k.item = f[2];
+            k.humanPoint = Field(f[3]);
+            k.itemPoint = Field(f[4]);
+            k.duringEntry = f[5] != "after";
+            k.atExit = f[6] != "complete";
+            k.permEffect = Field(f[7]);
+            k.permPoint = Field(f[8]);
+            for (size_t i = 9; i + 2 < f.size(); i += 3) k.actionEffects.push_back({f[i], f[i + 1], Field(f[i + 2])});
+            g_types[type->second].prop = static_cast<int>(g_props.size());
+            g_props.push_back(k);
+        }
         else if ((f[0] == "node" || f[0] == "ped") && f.size() >= 8) {
             auto type = typeIndex.find(f[2]);
             if (type == typeIndex.end()) continue;
@@ -143,8 +177,9 @@ void ReadNodes() {
             else g_nodes[std::stoul(f[1], nullptr, 16)] = n;
         }
     }
-    rfa::Log("Actions: %d of Guerrilla's squad nodes under action nodes and %d nodes the walkers use read (%d types); their people go to them and do them, as Guerrilla's",
-             static_cast<int>(g_nodes.size()), static_cast<int>(g_pedNodes.size()), static_cast<int>(g_types.size()));
+    rfa::Log("Actions: %d of Guerrilla's squad nodes under action nodes and %d nodes the walkers use read (%d types, %d with a prop); their people go to them and "
+             "do them, as Guerrilla's",
+             static_cast<int>(g_nodes.size()), static_cast<int>(g_pedNodes.size()), static_cast<int>(g_types.size()), static_cast<int>(g_props.size()));
 }
 
 // A type's states and clips by name, once; false when its state isn't in the game's list.
@@ -167,7 +202,28 @@ void SitOut(BYTE* human) {
     if (BYTE* ai = *reinterpret_cast<BYTE**>(human + kNpcAi)) ai[kYield] |= 2;
 }
 
+// The prop in its hand, made (with its always-on effect), and taken away (with its effects).
+void PutOnProp(BYTE* human, Actor& a, const Type& t) {
+    a.propAt = 0;
+    if (t.prop < 0 || a.prop) return;
+    const PropKind& k = g_props[t.prop];
+    a.prop = PropPutOn(human, k);
+    if (!a.prop) return;
+    ++g_propsHeld;
+    if (!k.permEffect.empty()) a.permEffect = PropPlayEffect(a.prop, k.permEffect, k.permPoint);
+}
+
+void TakeOffProp(Actor& a) {
+    PropStopEffect(a.actionEffect);
+    PropStopEffect(a.permEffect);
+    a.actionEffect = a.permEffect = -1;
+    PropTakeOff(a.prop);
+    a.prop = 0;
+    a.propAt = 0;
+}
+
 void Release(BYTE* human, Actor& a, int now, int back, const char* why) {
+    TakeOffProp(a);
     if (a.overridden) {
         SetStateOverride(human, -1);
         SetStance(human, kStanding);
@@ -229,6 +285,10 @@ void Step(BYTE* human, Actor& a, int now) {
             SetStateOverride(human, t.stateIndex);
             Play(human, t.stateIndex, t.entryIndex);
             a.overridden = true;
+            if (t.prop >= 0) {
+                if (g_props[t.prop].duringEntry) PutOnProp(human, a, t);
+                else a.propAt = now + kAfterEntry;
+            }
             a.phase = kHolding;
             a.until = t.most >= kForGood ? INT_MAX : now + Rand(t.least, t.most);
             a.nextIdle.assign(t.idles.size(), 0);
@@ -239,13 +299,43 @@ void Step(BYTE* human, Actor& a, int now) {
             return;
         }
         case kHolding:
+            if (a.propAt && now >= a.propAt) PutOnProp(human, a, t);
+            // Guerrilla's play_ambient_voice_lines (RM 0x68F320): every 5-15 s, the player within 15 m greeted, else
+            // a line to oneself, by the district's morale.
+            if (t.ambientLines && now >= a.nextLine) {
+                if (a.nextLine != 0) {
+                    BYTE* player = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0)();
+                    const V3 here = Pos(human);
+                    const V3 there = player ? Pos(player) : here;
+                    const float dx = here.x - there.x, dy = here.y - there.y, dz = here.z - there.z;
+                    VoiceSay(human, player && dx * dx + dy * dy + dz * dz < 15.0f * 15.0f ? VoiceGreetLine() : VoiceTalkToSelfLine());
+                }
+                a.nextLine = now + 5000 + std::rand() % 10001;
+            }
+            if (a.actionEffect >= 0 && now >= a.actionEffectUntil) {
+                PropStopEffect(a.actionEffect);
+                a.actionEffect = -1;
+            }
             for (size_t k = 0; k < t.idles.size(); ++k)
                 if (now >= a.nextIdle[k]) {
                     if (t.idles[k].index >= 0) Play(human, t.stateIndex, t.idles[k].index);
                     a.nextIdle[k] = now + Rand(t.idles[k].least, t.idles[k].most);
+                    if (a.prop && t.prop >= 0)
+                        for (const PropKind::ActionEffect& e : g_props[t.prop].actionEffects)
+                            if (_stricmp(e.action.c_str(), t.idles[k].action.c_str()) == 0) {
+                                PropStopEffect(a.actionEffect);
+                                a.actionEffect = PropPlayEffect(a.prop, e.effect, e.point);
+                                a.actionEffectUntil = now + kActionEffectTime;
+                                break;
+                            }
                     break;
                 }
             if (now >= a.until) {
+                if (t.prop >= 0 && g_props[t.prop].atExit) TakeOffProp(a);
+                else {
+                    PropStopEffect(a.actionEffect);
+                    a.actionEffect = -1;
+                }
                 Play(human, t.stateIndex, t.exitIndex);
                 a.phase = kExiting;
                 a.until = now + kExitTime;
@@ -253,6 +343,7 @@ void Step(BYTE* human, Actor& a, int now) {
             return;
         case kExiting:
             if (now < a.until) return;
+            TakeOffProp(a);
             SetStateOverride(human, -1);
             SetStance(human, kStanding);
             a.overridden = false;
@@ -280,6 +371,7 @@ void ActionsFrame(bool ours) {
     if (g_nodes.empty()) return;
     const int now = GameTime();
     if (!ours || now < g_lastClock) {  // another world, or the level started over
+        for (auto& [handle, a] : g_actors) TakeOffProp(a);
         g_actors.clear();
         g_lastClock = now;
         return;
@@ -305,14 +397,24 @@ void ActionsFrame(bool ours) {
             ++g_taken;
             RFA_LOG_FIRST(16, "Actions: NPC 0x%08X (spawned from squad node 0x%08X) goes to its %s spot", handle, node, g_types[g_nodes[node].type].name.c_str());
         }
-        for (auto it = g_actors.begin(); it != g_actors.end();) it = it->second.pedNode >= 0 || about.count(it->first) ? std::next(it) : g_actors.erase(it);
+        for (auto it = g_actors.begin(); it != g_actors.end();) {
+            if (it->second.pedNode >= 0 || about.count(it->first)) {
+                ++it;
+                continue;
+            }
+            TakeOffProp(it->second);
+            it = g_actors.erase(it);
+        }
     }
     for (auto& [handle, a] : g_actors) {
         BYTE* human = WorldObject(kWorld, nullptr, handle);
         if (human && !GoneOrDead(human)) Step(human, a, now);
-        else if (a.pedNode >= 0) {  // a walker gone (out of view, or dead): its node free
-            g_pedNodes[a.pedNode].taken = false;
-            a.done = true;
+        else {
+            TakeOffProp(a);
+            if (a.pedNode >= 0) {  // a walker gone (out of view, or dead): its node free
+                g_pedNodes[a.pedNode].taken = false;
+                a.done = true;
+            }
         }
     }
     for (auto it = g_actors.begin(); it != g_actors.end();) it = it->second.done ? g_actors.erase(it) : std::next(it);
@@ -320,8 +422,8 @@ void ActionsFrame(bool ours) {
         g_nextReport = now + 60000;
         if (g_taken > 0 || g_pedTaken > 0)
             rfa::Log("Actions: %d people at Guerrilla's action nodes now; %d taken, %d walkers took a node, %d actions started, %d handed back for danger or a fight, "
-                     "%d with no way to their spot",
-                     static_cast<int>(g_actors.size()), g_taken, g_pedTaken, g_started, g_dangers, g_noWay);
+                     "%d with no way to their spot, %d props held",
+                     static_cast<int>(g_actors.size()), g_taken, g_pedTaken, g_started, g_dangers, g_noWay, g_propsHeld);
     }
 }
 
@@ -362,6 +464,7 @@ void ActionsWalkerStop(unsigned long human) {
         SetStateOverride(person, -1);
         SetStance(person, kStanding);
     }
+    TakeOffProp(a);
     g_pedNodes[a.pedNode].taken = false;
     g_actors.erase(it);
 }

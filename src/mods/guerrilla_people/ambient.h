@@ -9,3 +9,5 @@ void AmbientFrame(bool ours);
 void AmbientLeaveToGame(unsigned long person);
 // The spawn resource of the zone at (x, z) (ambient.txt, "rfg_dust", ...), or null where there's none.
 const char* AmbientZoneResource(float x, float z);
+// The spawn resource the game is given for the one it asks for (a rotating district's version in force, step 4c).
+void* AmbientResourceFor(void* resource);

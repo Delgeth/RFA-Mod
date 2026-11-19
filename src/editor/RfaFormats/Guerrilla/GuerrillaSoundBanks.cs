@@ -163,6 +163,12 @@ public sealed class GuerrillaSoundBanks
     /// <summary>This part's banks hold Wwise ADPCM (see <see cref="WwiseBankWriter.Adpcm"/>).</summary>
     public bool Adpcm { get; init; }
 
+    /// <summary>
+    /// The game loads this part's banks as it starts (audio_banks load_at_boot True, the default). False: they are
+    /// listed only, and a mod loads each when it needs it (the people's voices: guerrilla_voices, by the bank's id).
+    /// </summary>
+    public bool LoadAtBoot { get; init; } = true;
+
     /// <summary>The banks made so far (for a part's own log: their media's sizes, an ADPCM bank's check).</summary>
     public IEnumerable<WwiseBankWriter> Banks => banks.Values;
 
@@ -816,7 +822,7 @@ public sealed class GuerrillaSoundBanks
         if (builtSets.Count > 0) lines.Add($"attack-loop-release sets, played as Guerrilla plays them: {string.Join("; ", builtSets)}");
         if (builtFar.Count > 0) lines.Add($"far versions played beside the near cue: {string.Join("; ", builtFar)}");
         Directory.CreateDirectory(modFolder);
-        WriteTable(game, modFolder, listed.Banks, banks.Keys);
+        WriteTable(game, modFolder, listed.Banks, banks.Keys, LoadAtBoot);
         WriteStopPairs(game, overrides, listed.Pairs, stopPairs);
         lines.Add(WriteBusLimit(game, overrides));
         File.WriteAllLines(ListFile(modFolder, part), [.. banks.Keys.Order().Select(b => "bank " + b), .. stopPairs.Select(p => $"pair {p.Key} {p.Value}")]);
@@ -853,7 +859,7 @@ public sealed class GuerrillaSoundBanks
     /// loaded at boot, as Armageddon's vehicles bank). The game stops on a row whose id isn't its name's
     /// hash ("name_id == bank_id"), so the id is always that.
     /// </summary>
-    static void WriteTable(string game, string modFolder, ISet<string> old, IEnumerable<string> banks)
+    static void WriteTable(string game, string modFolder, ISet<string> old, IEnumerable<string> banks, bool loadAtBoot)
     {
         string path = Path.Combine(modFolder, BankTable);
         var table = File.Exists(path) ? XtblFile.FromBytes(File.ReadAllBytes(path)) : GameTable(game) ?? throw new InvalidDataException($"no {BankTable} in Armageddon's misc.vpp_pc");
@@ -865,7 +871,7 @@ public sealed class GuerrillaSoundBanks
             row.AddElement("Name", bank);
             row.AddElement("wwise_id", WwiseBankWriter.Id(bank).ToString());
             row.AddElement("streaming", "True");
-            row.AddElement("load_at_boot", "True");
+            row.AddElement("load_at_boot", loadAtBoot ? "True" : "False");
             row.AddElement("ram_bank_xbox2", "False");
             row.AddElement("ram_bank_ps3", "False");
             row.AddElement("ram_bank_pc", "False");
@@ -875,7 +881,32 @@ public sealed class GuerrillaSoundBanks
             row.AddElement("voice", "False");
             table.Table!.AddElement(row);
         }
+        // (How many it lists against GameBankLimit is the table check's: a part writing before another has taken its old
+        // rows away may pass the limit for a moment.)
         File.WriteAllBytes(path, table.ToBytes());
+    }
+
+    /// <summary>
+    /// The most banks Armageddon can list. Its bank list is one object made as the game starts (0xB93C30, a static
+    /// constructor: <c>push 12Ch</c> at 0xB93C8B → 0xB94250): a hash map of 300 buckets and 300 records inside it
+    /// (0xB92F60: the bucket a name's hash modulo 300, records from +0x4B8), so the number can't be raised. The patch's
+    /// rows are listed first; past the last record the game's own audio_banks.xtbl fails ("AUDIOLIB:SOUNDBANK:Failed to
+    /// parse audio_banks.xtbl", "Audiolib Soundbanks Init Failed!!") and no sound at all loads.
+    /// </summary>
+    public const int GameBankLimit = 300;
+
+    /// <summary>
+    /// How many rows the game would list: Armageddon's audio_banks.xtbl and the patch (as written so far in
+    /// <paramref name="modFolder"/>, else the game's own), leaving out those whose names start with <paramref name="exceptPrefix"/>.
+    /// </summary>
+    public static int BankRows(string game, string modFolder, string exceptPrefix = "\0")
+    {
+        var misc = Packfile.Open(Path.Combine(game, "build", "pc", "cache", "misc.vpp_pc"));
+        int Count(XtblFile? table) =>
+            table?.Entries.Count(e => !XtblFile.EntryName(e).StartsWith(exceptPrefix, StringComparison.OrdinalIgnoreCase)) ?? 0;
+        string patch = Path.Combine(modFolder, BankTable);
+        return Count(misc.Find("audio_banks.xtbl") is { } main ? XtblFile.FromBytes(misc.Read(main)) : null) +
+               Count(File.Exists(patch) ? XtblFile.FromBytes(File.ReadAllBytes(patch)) : GameTable(game));
     }
 
     static XtblFile? GameTable(string game)

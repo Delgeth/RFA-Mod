@@ -251,18 +251,30 @@ bool LooksLikeError(const std::string& text) {
     return false;
 }
 
+// ---- The console's files, off the game's thread
+// The game's frame never waits on the disk for the console. A thread of the console's own does all of
+// its file work every 15 ms: it writes console.log, reads back what the mods wrote to rfa_mods.log
+// (the lines the console shows), and watches the editor's link folder (bin\link\to_game.txt, read and
+// deleted). The frame only takes what that thread has queued. The user's 18:53 run (2026-11-15) had a
+// 5.6 s frame with the main thread in WriteFile on console.log, and 1 s stalls, on a busy 5400 rpm drive.
+constexpr DWORD kFilesEveryMs = 15;
+constexpr size_t kMostQueuedModLines = 20000;  // when the console stops taking them, the oldest go
+std::mutex g_filesLock;
+std::vector<std::string> g_consoleLogQueue;  // lines for console.log
+std::vector<std::string> g_modLines;         // whole lines read from rfa_mods.log, for the console
+volatile ULONGLONG g_modLinesWantedAt = 0;   // when the console last took them (read only while it does)
+struct EditorBatch {
+    std::vector<std::string> lines;
+    ULONGLONG ageSeconds;  // how long ago the editor wrote them
+};
+std::vector<EditorBatch> g_editorBatches;
+void StartConsoleFiles();
+
 void WriteToLog(const std::string& text) {
-    static HANDLE file = [] {
-        if (!g_settings.logToFile) return INVALID_HANDLE_VALUE;
-        CreateDirectoryW((rfa::RootDir() + L"\\logs").c_str(), nullptr);
-        return CreateFileW((rfa::RootDir() + L"\\logs\\console.log").c_str(), GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    }();
-    if (file == INVALID_HANDLE_VALUE) return;
-    const std::string line = text + "\r\n";
-    DWORD written;
-    WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    if (!g_settings.logToFile) return;
+    StartConsoleFiles();
+    std::lock_guard<std::mutex> lock(g_filesLock);
+    g_consoleLogQueue.push_back(text + "\r\n");
 }
 
 void AddLine(std::string text, Kind kind, bool fromConsole = true) {
@@ -396,7 +408,8 @@ void AddModLine(std::string line) {
     if (!line.empty()) AddLine(line, Kind::Mod, false);
 }
 
-void ReadModLog() {
+// On the console's files thread: what the mods wrote to rfa_mods.log since the last look, as whole lines.
+void ReadModLogLines(std::vector<std::string>& lines) {
     if (g_modLog == INVALID_HANDLE_VALUE) {
         g_modLog = CreateFileW(rfa::LogPath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -419,10 +432,22 @@ void ReadModLog() {
         g_modLogRead += read;
         g_modLogRest.append(buffer, read);
         for (size_t newline; (newline = g_modLogRest.find('\n')) != std::string::npos;) {
-            AddModLine(g_modLogRest.substr(0, newline));
+            lines.push_back(g_modLogRest.substr(0, newline));
             g_modLogRest.erase(0, newline + 1);
         }
     }
+}
+
+// On the game's thread: the mods' lines the files thread has read, into the console.
+void ReadModLog() {
+    StartConsoleFiles();
+    g_modLinesWantedAt = GetTickCount64();
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(g_filesLock);
+        lines.swap(g_modLines);
+    }
+    for (std::string& line : lines) AddModLine(std::move(line));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1502,7 +1527,7 @@ constexpr wchar_t kSharedName[] = L"Local\\RFAModEditorLink";
 constexpr uint32_t kSharedMagic = 0x4C414652;  // "RFAL"
 
 SharedView* g_shared = nullptr;
-bool g_linkFolderThere = false;  // bin\link is there (the editor's link is set up)
+volatile bool g_linkFolderThere = false;  // bin\link is there (the editor's link is set up; set by the console's files thread)
 DWORD g_lastPicked = 0;
 ULONGLONG g_lastCheck = 0;
 
@@ -1550,7 +1575,8 @@ bool RunEditorEdit(const std::string& line);  // the editor's live edits (below)
 // run only while it isn't: from the frame hook when it isn't, and right after 0x76AA50 unlocks it.
 bool RenderLocked() { return *reinterpret_cast<volatile BYTE*>(0x2E7A6A9) != 0; }
 
-void RunEditorCommands() {
+// On the console's files thread: the editor's commands file, if it is there, read and deleted.
+void ReadEditorCommands(std::vector<EditorBatch>& batches) {
     const std::wstring path = LinkFolder() + L"\\to_game.txt";
     WIN32_FILE_ATTRIBUTE_DATA info;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return;
@@ -1561,30 +1587,97 @@ void RunEditorCommands() {
     now.HighPart = nowTime.dwHighDateTime;
     written.LowPart = info.ftLastWriteTime.dwLowDateTime;
     written.HighPart = info.ftLastWriteTime.dwHighDateTime;
-    const ULONGLONG ageSeconds = now.QuadPart > written.QuadPart ? (now.QuadPart - written.QuadPart) / 10000000 : 0;
+    EditorBatch batch;
+    batch.ageSeconds = now.QuadPart > written.QuadPart ? (now.QuadPart - written.QuadPart) / 10000000 : 0;
 
     FILE* file = nullptr;
     if (_wfopen_s(&file, path.c_str(), L"r") != 0 || !file) return;  // try again next time
-    std::vector<std::string> lines;
     char buffer[1024];
-    while (fgets(buffer, sizeof(buffer), file)) lines.push_back(Trim(buffer));
+    while (fgets(buffer, sizeof(buffer), file)) batch.lines.push_back(Trim(buffer));
     fclose(file);
     DeleteFileW(path.c_str());
+    batches.push_back(std::move(batch));
+}
 
-    if (ageSeconds > kOldCommandsSeconds) {
-        rfa::Log("Editor link: skipped commands the editor sent %u seconds ago", static_cast<unsigned>(ageSeconds));
-        return;
+// On the game's thread, with the renderer unlocked: the commands the files thread has read, run in order.
+void RunEditorCommands() {
+    std::vector<EditorBatch> batches;
+    {
+        std::lock_guard<std::mutex> lock(g_filesLock);
+        if (g_editorBatches.empty()) return;
+        batches.swap(g_editorBatches);
     }
-    for (const std::string& line : lines) {
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (RunEditorEdit(line)) continue;
-        if (line.size() > kMaxCommandLength) {
-            rfa::Log("Editor link: a command longer than %u characters was skipped", static_cast<unsigned>(kMaxCommandLength));
+    for (const EditorBatch& batch : batches) {
+        if (batch.ageSeconds > kOldCommandsSeconds) {
+            rfa::Log("Editor link: skipped commands the editor sent %u seconds ago", static_cast<unsigned>(batch.ageSeconds));
             continue;
         }
-        rfa::Log("Editor link: %s", line.c_str());
-        RunConsoleCommand("%s", line.c_str());
+        for (const std::string& line : batch.lines) {
+            if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+            if (RunEditorEdit(line)) continue;
+            if (line.size() > kMaxCommandLength) {
+                rfa::Log("Editor link: a command longer than %u characters was skipped", static_cast<unsigned>(kMaxCommandLength));
+                continue;
+            }
+            rfa::Log("Editor link: %s", line.c_str());
+            RunConsoleCommand("%s", line.c_str());
+        }
     }
+}
+
+// The console's files thread (see "The console's files, off the game's thread"): every 15 ms, console.log
+// written, rfa_mods.log read while the console takes its lines, and the editor's link folder watched.
+DWORD WINAPI ConsoleFiles(void*) {
+    HANDLE consoleLog = INVALID_HANDLE_VALUE;
+    if (g_settings.logToFile) {
+        CreateDirectoryW((rfa::RootDir() + L"\\logs").c_str(), nullptr);
+        consoleLog = CreateFileW((rfa::RootDir() + L"\\logs\\console.log").c_str(), GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                 nullptr);
+    }
+    int linkFolderChecks = 0;
+    for (std::vector<std::string> toWrite, modLines; ; Sleep(kFilesEveryMs)) {
+        {
+            std::lock_guard<std::mutex> lock(g_filesLock);
+            toWrite.swap(g_consoleLogQueue);
+        }
+        if (consoleLog != INVALID_HANDLE_VALUE && !toWrite.empty()) {
+            std::string text;
+            for (const std::string& line : toWrite) text += line;
+            DWORD written;
+            WriteFile(consoleLog, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+        }
+        toWrite.clear();
+        if (GetTickCount64() - g_modLinesWantedAt < 2000) {
+            ReadModLogLines(modLines);
+            if (!modLines.empty()) {
+                std::lock_guard<std::mutex> lock(g_filesLock);
+                for (std::string& line : modLines) g_modLines.push_back(std::move(line));
+                if (g_modLines.size() > kMostQueuedModLines)
+                    g_modLines.erase(g_modLines.begin(), g_modLines.begin() + (g_modLines.size() - kMostQueuedModLines));
+            }
+            modLines.clear();
+        }
+        if (linkFolderChecks-- <= 0) {  // about once a second
+            g_linkFolderThere = GetFileAttributesW(LinkFolder().c_str()) != INVALID_FILE_ATTRIBUTES;
+            linkFolderChecks = 60;
+        }
+        if (g_linkFolderThere) {
+            std::vector<EditorBatch> batches;
+            ReadEditorCommands(batches);
+            if (!batches.empty()) {
+                std::lock_guard<std::mutex> lock(g_filesLock);
+                for (EditorBatch& batch : batches) g_editorBatches.push_back(std::move(batch));
+            }
+        }
+    }
+}
+
+void StartConsoleFiles() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        if (HANDLE thread = CreateThread(nullptr, 0, ConsoleFiles, nullptr, 0, nullptr)) CloseHandle(thread);
+    });
 }
 
 // Where objects are now, for the editor's "props as in the game". Clutter (general_mover: debris,
@@ -3086,12 +3179,9 @@ void __cdecl FrameUpdate() {
     g_frameUpdate();
     ShowEditor();
     if (g_drawsConsole && g_settings.gameLog) ReadReports();
-    // The editor's commands are looked for every frame (Live sends them as you drag), the rest ten times a second.
-    static int linkFolderChecks = 0;
-    if (linkFolderChecks-- <= 0) {
-        g_linkFolderThere = GetFileAttributesW(LinkFolder().c_str()) != INVALID_FILE_ATTRIBUTES;
-        linkFolderChecks = 60;
-    }
+    // The editor's commands are taken every frame (Live sends them as you drag), the rest ten times a second;
+    // the console's files thread looks for them and for the link folder (see ConsoleFiles).
+    StartConsoleFiles();
     const bool linkFolderThere = g_linkFolderThere;
     if (linkFolderThere && !RenderLocked()) RunEditorCommands();
     if (!g_chunksLoading.empty()) WatchEditorChunks();
