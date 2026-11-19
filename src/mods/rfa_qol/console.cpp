@@ -1675,7 +1675,111 @@ constexpr DWORD ClassHash(const char* name) {
     return hash;
 }
 
-void SpawnFromNode(DWORD handle, DWORD classHash) {
+// What a live-made node spawns has to be in the spawn resource in force (a Ruin or multiplayer level's: the pools'
+// state 0x19734CC is then 4), or the node spawns nothing; the editor puts it in the level's spawn_resource.xtbl entry,
+// but the game reads that at start-up. So before a node's editor_create the editor sends what it needs:
+//   editor_reserve character <character.xtbl name>   (an exo as the character it is made of: 0x761D70 holds an
+//                                                      exo by its entry's +8, its character)
+//   editor_reserve vehicle <vehicles.xtbl name>
+// and each is held as the level's own resource holds its people and vehicles (0x7657A0: 0x761D20 / 0x761DC0, cdecl:
+// category 8, categories 3, the character's info (0x88D170 by name) or the vehicle's entry (the vehicle list
+// 0x148BD08, 0x880 bytes an entry, its table name at +0)). A node whose spawn fails while one of them is still
+// streaming in (0x762230 / 0x764ED0 for a character, 0x762290 for a vehicle) waits for it, 30 seconds at most, and
+// tries again. With no resource in force (the campaign) the game loads what a node spawns itself.
+auto const HumanInfoByName = reinterpret_cast<BYTE*(__cdecl*)(const char* name)>(0x88D170);
+auto const CharacterIn = reinterpret_cast<bool(__cdecl*)(BYTE* info)>(0x762230);
+auto const CharacterComing = reinterpret_cast<bool(__cdecl*)(BYTE* info)>(0x764ED0);
+auto const HoldCharacterInResource = reinterpret_cast<bool(__cdecl*)(int category, int categories, BYTE* info)>(0x761D20);
+auto const VehicleIn = reinterpret_cast<bool(__cdecl*)(BYTE* vehicle)>(0x762290);
+auto const HoldVehicleInResource = reinterpret_cast<bool(__cdecl*)(int category, int categories, BYTE* vehicle)>(0x761DC0);
+constexpr int kResourceCategory = 8, kResourceCategories = 3;
+constexpr DWORD kResourceVehicles = 0x148BD08, kResourceVehicleSize = 0x880;
+const volatile int& g_resourcePools = *reinterpret_cast<const volatile int*>(0x19734CC);  // 0 none in force, 1-3 changing, 4 in force
+constexpr ULONGLONG kSpawnWaitMs = 30000;
+
+struct Streaming {
+    BYTE* info;
+    bool vehicle;
+    std::string name;
+    ULONGLONG since;
+};
+std::vector<Streaming> g_streaming;  // held for a live-made node, not streamed in yet
+struct WaitingNode {
+    DWORD handle, classHash;
+    ULONGLONG since;
+};
+std::vector<WaitingNode> g_waitingNodes;
+
+bool StreamedIn(const Streaming& s) { return s.vehicle ? VehicleIn(s.info) : CharacterIn(s.info); }
+
+BYTE* ResourceVehicle(const char* name) {
+    BYTE* entries = *reinterpret_cast<BYTE* const*>(kResourceVehicles);
+    const int count = entries ? *reinterpret_cast<const int*>(kResourceVehicles + 8) : 0;
+    for (int i = 0; i < count; ++i) {
+        BYTE* entry = entries + i * kResourceVehicleSize;
+        const char* tableName = *reinterpret_cast<const char* const*>(entry);
+        if (tableName && _stricmp(tableName, name) == 0) return entry;
+    }
+    return nullptr;
+}
+
+void EditorReserve(const std::string& line) {
+    const bool vehicle = line.rfind("editor_reserve vehicle ", 0) == 0;
+    if (!vehicle && line.rfind("editor_reserve character ", 0) != 0) {
+        rfa::Log("Editor link: editor_reserve needs character or vehicle and a name");
+        return;
+    }
+    std::string name = line.substr(vehicle ? 23 : 25);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\r')) name.pop_back();
+    if (name.empty()) return;
+    if (g_resourcePools == 0) return;  // no resource in force: the game loads what a node spawns itself
+    if (g_resourcePools != 4) {
+        rfa::Log("Editor link: %s not held yet; this level's spawn resource is still changing (state %d)", name.c_str(), static_cast<int>(g_resourcePools));
+        return;
+    }
+    BYTE* info = vehicle ? ResourceVehicle(name.c_str()) : HumanInfoByName(name.c_str());
+    if (!info) {
+        rfa::Log("Editor link: the game has no %s %s", vehicle ? "vehicle" : "character", name.c_str());
+        return;
+    }
+    Streaming s{info, vehicle, name, GetTickCount64()};
+    if (StreamedIn(s)) return;
+    const bool held = vehicle ? HoldVehicleInResource(kResourceCategory, kResourceCategories, info)
+                              : CharacterComing(info) || HoldCharacterInResource(kResourceCategory, kResourceCategories, info);
+    if (!held) {
+        rfa::Log("Editor link: no room for %s %s in this level's spawn resource", vehicle ? "vehicle" : "character", name.c_str());
+        return;
+    }
+    rfa::Log("Editor link: %s %s held in this level's spawn resource; a node needing it spawns once it has streamed in",
+             vehicle ? "vehicle" : "character", name.c_str());
+    for (const Streaming& had : g_streaming)
+        if (had.info == info) return;
+    g_streaming.push_back(s);
+}
+
+bool SpawnFromNode(DWORD handle, DWORD classHash, bool lastTry);
+
+// Ten times a second: what was held and has streamed in is let be; a waiting node tries again once nothing it may
+// need is still on its way (or after 30 seconds).
+void ContinueWaitingNodes() {
+    if (g_streaming.empty() && g_waitingNodes.empty()) return;
+    const ULONGLONG now = GetTickCount64();
+    g_streaming.erase(std::remove_if(g_streaming.begin(), g_streaming.end(), [&](const Streaming& s) {
+        if (StreamedIn(s)) return true;
+        if (now - s.since < kSpawnWaitMs) return false;
+        rfa::Log("Editor link: %s hasn't streamed in after %llu seconds; given up", s.name.c_str(), kSpawnWaitMs / 1000);
+        return true;
+    }), g_streaming.end());
+    if (!g_streaming.empty()) return;
+    std::vector<WaitingNode> nodes;
+    nodes.swap(g_waitingNodes);
+    for (const WaitingNode& n : nodes)
+        if (FindObject(reinterpret_cast<void*>(kObjectList), nullptr, n.handle)) SpawnFromNode(n.handle, n.classHash, true);
+}
+
+// Spawns a live-made node's squad, vehicle or exo; true if it did (or the object isn't such a node). One that
+// can't while what it may need is still streaming in waits for it (unless this is its last try).
+bool SpawnFromNode(DWORD handle, DWORD classHash, bool lastTry) {
     void* world = reinterpret_cast<void*>(kObjectList);
     const char* what = nullptr;
     DWORD spawned = 0xFFFFFFFF;
@@ -1689,14 +1793,20 @@ void SpawnFromNode(DWORD handle, DWORD classHash) {
         what = "vehicle";
         if (BYTE* node = FindVehicleNode(world, nullptr, handle)) spawned = SpawnVehicleFromNode(node, nullptr, -1);
     }
-    if (!what) return;
+    if (!what) return true;
     if (spawned == 0xFFFFFFFF) {
+        if (!lastTry && !g_streaming.empty()) {
+            g_waitingNodes.push_back({handle, classHash, GetTickCount64()});
+            rfa::Log("Editor link: node 0x%08X waits for its %s's people or vehicle to stream in", static_cast<unsigned>(handle), what);
+            return false;
+        }
         rfa::Log("Editor link: node 0x%08X couldn't spawn its %s (not in its spawn resources, or the game has no room)", static_cast<unsigned>(handle), what);
-        return;
+        return false;
     }
     NoteSpawned();
     g_nodeSpawned[handle] = spawned;
     rfa::Log("Editor link: node 0x%08X spawned its %s (0x%08X)", static_cast<unsigned>(handle), what, static_cast<unsigned>(spawned));
+    return true;
 }
 
 void MakeEditorObject(DWORD handle) {
@@ -1734,7 +1844,7 @@ void MakeEditorObject(DWORD handle) {
     MakeFromStubs(world, nullptr, 1, stubs, blocks);
     const bool made = stubs[0] && FindObject(world, nullptr, handle);
     rfa::Log(made ? "Editor link: made object 0x%08X" : "Editor link: the game couldn't make object 0x%08X from its block", static_cast<unsigned>(handle));
-    if (made) SpawnFromNode(handle, *reinterpret_cast<DWORD*>(block));
+    if (made) SpawnFromNode(handle, *reinterpret_cast<DWORD*>(block), false);
 }
 
 // editor_reload: the level is loaded again (the console's reload_level), and the player then put
@@ -2901,6 +3011,10 @@ bool RunEditorEdit(const std::string& line) {
         else rfa::Log("Editor link: this loader can't look through the overrides again (an older rfa_loader.dll)");
         return true;
     }
+    if (line.rfind("editor_reserve ", 0) == 0) {
+        EditorReserve(line);
+        return true;
+    }
     if (line.rfind("editor_create ", 0) == 0) {
         MakeEditorObject(static_cast<DWORD>(strtoul(line.c_str() + 14, nullptr, 0)));
         return true;
@@ -3146,6 +3260,7 @@ void __cdecl FrameUpdate() {
     if (g_drawsConsole && g_settings.modLog) ReadModLog();
     if (!linkFolderThere) return;  // the editor's link isn't set up
     ContinueEditorReload();
+    ContinueWaitingNodes();
     AnswerWhereWanted();
     AnswerLightingWanted();
 }

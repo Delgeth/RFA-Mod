@@ -1454,6 +1454,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         MarkUnsaved();
         UpdateUndoButtons();
         LinksChanged();  // a property naming another object may have changed, or the object moved
+        KeepSpawnResourcesStocked();  // a spawn node added, or its squad, vehicle set or exo changed
     }
 
     void Undo()

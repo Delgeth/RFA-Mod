@@ -529,7 +529,13 @@ public partial class LevelEditor
                     at = made.FirstOrDefault(m => m.Handle == at.Parent);
                 return depth;
             }
-            foreach (ZoneObject obj in made.OrderBy(Depth)) lines.Add(gameLink.CreateCommand(obj.Handle, obj.ToBlock()));
+            foreach (ZoneObject obj in made.OrderBy(Depth))
+            {
+                // A spawn node's squad, vehicle or exo held in the spawn resources in force first (editor_reserve):
+                // the game spawns it once they have streamed in.
+                lines.AddRange(LiveReserveLines(obj));
+                lines.Add(gameLink.CreateCommand(obj.Handle, obj.ToBlock()));
+            }
         }
         if (lines.Count == 0 && removed.Count == 0) return;
         if (lines.Count > 0 && !gameLink.TrySend(lines)) return;  // the game hasn't taken the last ones yet: next time
