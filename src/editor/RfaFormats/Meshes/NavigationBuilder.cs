@@ -51,6 +51,53 @@ public static class NavigationBuilder
         return new NavigationFile(0, people, peopleTree, vehicles, vehiclesTree);
     }
 
+    const int MinPieceCells = 16;  // (with 2 m squares, 32 m² of ground)
+    const int MostPieces = 250;    // (islands are numbered in a byte)
+
+    /// <summary>The cells in the pieces (joined across their edges) of at least <paramref name="minCells"/> cells, the
+    /// <paramref name="most"/> biggest; the biggest piece alone if none is that big. The vertices are those they use.</summary>
+    static (List<ushort[]> Corners, Vector3[] Vertices) KeepBigPieces(List<ushort[]> corners, List<Vector3> vertices, int minCells, int most)
+    {
+        var byEdge = new Dictionary<(int, int), int>();
+        var piece = new int[corners.Count];
+        var parent = Enumerable.Range(0, corners.Count).ToArray();
+        int Find(int x)
+        {
+            while (parent[x] != x) x = parent[x] = parent[parent[x]];
+            return x;
+        }
+        for (int cell = 0; cell < corners.Count; cell++)
+            for (int k = 0; k < 3; k++)
+            {
+                int p = corners[cell][k], q = corners[cell][(k + 1) % 3];
+                var key = (Math.Min(p, q), Math.Max(p, q));
+                if (byEdge.Remove(key, out int other)) parent[Find(cell)] = Find(other);
+                else byEdge[key] = cell;
+            }
+        for (int cell = 0; cell < corners.Count; cell++) piece[cell] = Find(cell);
+        var sizes = piece.GroupBy(p => p).Select(g => (Piece: g.Key, Cells: g.Count())).OrderByDescending(g => g.Cells).ToList();
+        var keep = sizes.Where(g => g.Cells >= minCells).Take(most).Select(g => g.Piece).ToHashSet();
+        if (keep.Count == 0) keep.Add(sizes[0].Piece);
+
+        var remap = new Dictionary<ushort, ushort>();
+        var usedVertices = new List<Vector3>();
+        var keptCorners = new List<ushort[]>();
+        for (int cell = 0; cell < corners.Count; cell++)
+        {
+            if (!keep.Contains(piece[cell])) continue;
+            keptCorners.Add(corners[cell].Select(v =>
+            {
+                if (!remap.TryGetValue(v, out ushort at))
+                {
+                    remap[v] = at = (ushort)usedVertices.Count;
+                    usedVertices.Add(vertices[v]);
+                }
+                return at;
+            }).ToArray());
+        }
+        return (keptCorners, usedVertices.ToArray());
+    }
+
     static (NavigationLayer Layer, byte[] Tree) Grid(Func<float, float, float> height, Vector2 centre, float half, Vector2 zoneCorner, float zoneWidth, byte place,
                                                      float step, bool vehicles, float steepest)
     {
@@ -96,7 +143,10 @@ public static class NavigationBuilder
                 corners.Add([a, d, c]);
             }
         if (corners.Count == 0) throw new InvalidOperationException("there is no ground flat enough to walk on");
-        var vertices = kept.ToArray();
+        // Bits of ground walkable on their own (a few squares between steep ones) are left out: each piece is
+        // an island, a cell keeps its island's number in a byte, and the AI can't reach them anyway.
+        Vector3[] vertices;
+        (corners, vertices) = KeepBigPieces(corners, kept, MinPieceCells, MostPieces);
 
         // Each cell joined to the one across each of its edges.
         var across = new Dictionary<(int, int), (int Cell, int Edge)>();
