@@ -4,13 +4,11 @@
 //
 // The game's own Ruin levels have no enemies, and Ruin mode switches the AI's hostility off where it
 // asks "is this Ruin?" (ruin_is_ruin_mode's own test, 0x50E1D0, a byte at 0x12F3A73):
-//   0x8CBAC0  whether one character is hostile to another: in Ruin always "no", before the teams
-//             are looked at (its call at 0x8CBAD5);
 //   0x734EF0  an AI's awareness of a target: always "not aware" in Ruin (0x734F42);
 //   0x874E60  a character's reaction to being hit: skipped in Ruin (0x874E71);
 //   0x85E0C0  the damage a hit does: none in Ruin for one kind of hit (0x85E166).
 // A level made with the editor can have squads (squad spawn nodes), and they then walk about but never
-// fight: you are never their enemy. With the setting on, those four calls ask our function instead,
+// fight: you are never their enemy. With the setting on, those three calls ask our function instead,
 // which answers "not Ruin" while Ruin's enemies are wanted and the game's own answer otherwise; every
 // other Ruin rule (the score, the timer, the menus) still sees Ruin.
 #define RFA_MOD_NAME "ruin_ai"
@@ -21,7 +19,9 @@ namespace ruin_ai {
 namespace {
 
 constexpr DWORD kRuinMode = 0x50E1D0;
-constexpr DWORD kCalls[] = {0x8CBAD5, 0x734F42, 0x874E71, 0x85E166};
+constexpr DWORD kCalls[] = {0x734F42, 0x874E71, 0x85E166};
+// (0x8CBAC0's Ruin test, at 0x8CBAD5, was one of them at first: it isn't the AI's hostility after all but
+// a check of something unlocked by levels of a value (0x8CB620's states 0-4), likely upgrades; left as it is.)
 
 auto const RuinMode = reinterpret_cast<bool(__cdecl*)()>(kRuinMode);
 
@@ -29,7 +29,7 @@ bool g_hostile = false;
 
 void ReadSetting() { g_hostile = rfa::IniInt(L"Ruin", L"HostileAI", 0) != 0; }
 
-// What the four calls ask now: Ruin, unless its enemies are to fight.
+// What the three calls ask now: Ruin, unless its enemies are to fight.
 bool __cdecl RuinModeForAi() { return g_hostile ? false : RuinMode(); }
 
 }  // namespace
