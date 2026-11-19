@@ -1,7 +1,14 @@
 -- Override of ui_main_menu_pc.lua from <game>\build\pc\cache\interface.vpp_pc (the main menu on
 -- PC). rfa_loader.dll gives the game this file instead of its own copy.
 --
--- Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
+-- Groups the top menu by game: Red Faction: Armageddon (Continue, New Game, New Game+, Load Game, the
+-- downloadable content, Infestation and Ruin) and Red Faction: Guerrilla (the Guerrilla world, and its
+-- builder), then Level editor, Options, Extras and Quit; Options > Main Menu sets how ([MainMenu] in
+-- rfa_mods.ini: the layout by game or the game's classic one, Continue at the top, which entries show,
+-- the descriptions, the decorations, opening where you left off, the style: Classic or Modern, a flat,
+-- sharp look in one accent colour, see rfa_modern_style). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
+-- with the editor's New level, through the loader's rfa_open_level_editor, rfa_custom_levels and
+-- rfa_delete_custom_level). Adds Options > Experimentals: the Gameplay screen opened with Rfa_options_page set to
 -- "experimentals", which makes it show RFA-Mod's own settings (see ui_options_gameplay.lua). Every
 -- line we added or changed is marked [RFA]; everything else is the game's original script. Only the
 -- [RFA] lines are this project's (GNU GPL version 3 or later, see LICENSE); the rest belongs to the
@@ -22,6 +29,13 @@ local WRECKING_CREW_ID			= 7
 local QUIT_GAME_ID				= 8
 local NEW_GAME_PLUS_ID			= 9
 local DLC_ID					= 10
+local LEVEL_EDITOR_ID			= 11 -- [RFA]
+local CAMPAIGN_ID				= 12 -- [RFA] Red Faction: Armageddon
+local GUERRILLA_ID				= 13 -- [RFA] Red Faction: Guerrilla
+
+-- Red Faction: Guerrilla sub-menu -- [RFA]
+local GUERRILLA_WORLD_ID		= 601 -- [RFA]
+local GUERRILLA_BUILD_ID		= 602 -- [RFA]
 
 -- MP sub-menu
 local MULTI_ONLINE_ID			= 101
@@ -34,12 +48,17 @@ local OPTIONS_GAMEPLAY_ID		= 202
 local OPTIONS_AUDIO_ID			= 203
 local OPTIONS_VIDEO_ID			= 204
 local OPTIONS_EXPERIMENTALS_ID	= 205 -- [RFA]
+local OPTIONS_MAIN_MENU_ID		= 206 -- [RFA]
 
 -- DLC sub-menu
 local DLC_OUTFITS_ID			= 301
 local DLC_DLC04_MISSIONS_ID		= 302
 local DLC_SHOW_STORE_ID			= 303
 
+
+-- Level editor sub-menu -- [RFA]
+local LEVEL_CREATE_ID			= 501 -- [RFA]
+local LEVEL_DELETE_ID			= 502 -- [RFA]
 
 -- Extras sub-menu
 local EXTRAS_PLAYER_STATS_ID	= 401
@@ -52,6 +71,9 @@ local MULTIPLAYER_TIER			= 2
 local OPTIONS_TIER				= 3
 local DLC_TIER					= 4
 local EXTRAS_TIER				= 5
+local LEVEL_EDITOR_TIER			= 6 -- [RFA]
+local CAMPAIGN_TIER				= 7 -- [RFA] Red Faction: Armageddon
+local GUERRILLA_TIER			= 8 -- [RFA] Red Faction: Guerrilla
 
 -- Demo Mode
 local DEMO_MODE = false
@@ -90,9 +112,29 @@ local MENU_DATA = {
 		{label = "MENU_DOWNLOADABLE_CONTENT",	id = DLC_ID},
 	},
 
-	MAIN_GENERAL = {		-- Other stuff at top level
+	MAIN_CAMPAIGN = { -- [RFA] the games, each with its own sub-menu
+		{label = "RED FACTION: ARMAGEDDON",	id = CAMPAIGN_ID}, -- [RFA]
+	}, -- [RFA]
+
+	MAIN_GUERRILLA = { -- [RFA]
+		{label = "RED FACTION: GUERRILLA",	id = GUERRILLA_ID}, -- [RFA]
+	}, -- [RFA]
+
+	MAIN_LEVEL_EDITOR = { -- [RFA]
+		{label = "LEVEL EDITOR",		id = LEVEL_EDITOR_ID}, -- [RFA]
+	}, -- [RFA]
+
+	ARMAGEDDON_MODES = { -- [RFA] Armageddon's modes, under Red Faction: Armageddon (they were at the top)
 		{label = "MENU_INFESTATION",	id = MULTIPLAYER_ID},
 		{label = "MENU_RUIN_MODE",		id = WRECKING_CREW_ID},
+	}, -- [RFA]
+
+	GUERRILLA_SUB_MENU = { -- [RFA]
+		{label = "GUERRILLA WORLD",			id = GUERRILLA_WORLD_ID}, -- [RFA]
+		{label = "BUILD GUERRILLA WORLD",	id = GUERRILLA_BUILD_ID}, -- [RFA]
+	}, -- [RFA]
+
+	MAIN_GENERAL = {		-- Other stuff at top level ([RFA] Infestation, Ruin and Level editor have their own lists)
 		{label = "MENU_OPTIONS_UC",	id = OPTIONS_ID},
 		{label = "MENU_EXTRAS_UC",		id = EXTRAS_ID},
 		{label = "MENU_QUIT_DESKTOP",	id = QUIT_GAME_ID},
@@ -123,8 +165,14 @@ local MENU_DATA = {
 		{label = "MENU_AUDIO_UC",			id = OPTIONS_AUDIO_ID},
 		{label = "MENU_VIDEO_UC",			id = OPTIONS_VIDEO_ID},
 		{label = "EXPERIMENTALS",			id = OPTIONS_EXPERIMENTALS_ID}, -- [RFA]
+		{label = "MAIN MENU",				id = OPTIONS_MAIN_MENU_ID}, -- [RFA]
 	},
 	
+	LEVEL_EDITOR_SUB_MENU = { -- [RFA]
+		{label = "CREATE LEVEL",			id = LEVEL_CREATE_ID}, -- [RFA]
+		{label = "DELETE CUSTOM LEVEL",		id = LEVEL_DELETE_ID}, -- [RFA]
+	}, -- [RFA]
+
 	EXTRAS_SUB_MENU = {
 		{label = "MENU_PLAYER_STATS",	id = EXTRAS_PLAYER_STATS_ID},
 		{label = "MENU_CUTSCENES",		id = EXTRAS_CUTSCENES_ID},
@@ -153,6 +201,105 @@ local Hint_bar, List, Sub_list
 local Tween_done = true
 
 local Next_screen = nil
+
+-- [RFA] Options > Main Menu > Style: Modern. The same elements as the game's menu, restyled from here
+-- [RFA] (ui_main_menu.vint_doc, vdo_menu_list, vdo_menu_button): the scrolling numbers, tech graphics and
+-- [RFA] the dotted bars behind the list go; the panel behind it turns into a dark, see-through slab; the
+-- [RFA] buttons lose their boxes and the little text beside them; the list is sharp (no blur) and the
+-- [RFA] highlighted entry is in the accent colour, without its glow; the title bar takes the accent too.
+local RFA_ACCENTS = { -- [RFA] Options > Main Menu > Accent, in its order
+	{R = 0.30, G = 0.72, B = 1.00}, -- blue
+	{R = 1.00, G = 0.55, B = 0.15}, -- orange
+	{R = 0.92, G = 0.22, B = 0.22}, -- red
+	{R = 0.35, G = 0.90, B = 0.55}, -- green
+	{R = 0.80, G = 0.45, B = 1.00}, -- violet
+	{R = 1.00, G = 1.00, B = 1.00}, -- white
+} -- [RFA]
+local Rfa_modern = false -- [RFA]
+local Rfa_accent = RFA_ACCENTS[1] -- [RFA]
+
+local function rfa_hide(name) -- [RFA]
+	local object = vint_object_find(name) -- [RFA]
+	if object ~= 0 then vint_set_property(object, "visible", false) end -- [RFA]
+end -- [RFA]
+
+local function rfa_modern_list(list) -- [RFA] a menu list (and its buttons, made again by each draw_items)
+	if not Rfa_modern or list == nil or list.handle == nil then return end -- [RFA]
+	local group = Vdo_base_object:new("list_group", list.handle) -- [RFA]
+	group:set_property("blur", 0) -- [RFA]
+	group:set_property("alpha", 0.85) -- [RFA]
+	Vdo_base_object:new("menu_list_button_text_2", list.handle):set_property("alpha", 0) -- [RFA] the glow
+	Vdo_base_object:new("menu_list_button_text", list.handle):set_color(Rfa_accent.R, Rfa_accent.G, Rfa_accent.B) -- [RFA]
+	Vdo_base_object:new("button_highlight", list.handle):set_color(Rfa_accent.R, Rfa_accent.G, Rfa_accent.B) -- [RFA]
+	if list.list_data ~= nil then -- [RFA]
+		for i, button in pairs(list.list_data.buttons) do -- [RFA]
+			Vdo_base_object:new("background", button.handle):set_property("alpha", 0) -- [RFA]
+			Vdo_base_object:new("techno_text", button.handle):set_property("alpha", 0) -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+-- [RFA] The UI pack's pictures (RFA-Mod's rfa_ui_modern, which the editor makes): the highlight's ends and middle
+-- [RFA] (a bar down its left, a light band, a line along its bottom, the right end fading) and the panel's
+-- [RFA] corner rounded. Without the pack (not made yet, or made since the game started) the style does without.
+local RFA_UI_PACK = "rfa_ui_modern" -- [RFA]
+local function rfa_ui_pack_pictures() -- [RFA]
+	for i, list in ipairs({List, Sub_list}) do -- [RFA]
+		local highlight = list.highlight -- [RFA]
+		if highlight ~= nil and highlight.left ~= nil then -- [RFA]
+			highlight.left:set_property("image", "rfa_modern_hl_left") -- [RFA]
+			highlight.center:set_property("image", "rfa_modern_hl_center") -- [RFA]
+			highlight.right:set_property("image", "rfa_modern_hl_right") -- [RFA]
+			for j, part in ipairs({highlight.left, highlight.center, highlight.right}) do -- [RFA]
+				part:set_color(Rfa_accent.R, Rfa_accent.G, Rfa_accent.B) -- [RFA]
+			end -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+	local corner = vint_object_find("mask_corner") -- [RFA]
+	if corner ~= 0 then vint_set_property(corner, "image", "rfa_modern_corner") end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_ui_pack_wait() -- [RFA] while the pack's document loads (a few frames)
+	for i = 1, 600 do -- [RFA] (ten seconds at most)
+		if vint_document_find(RFA_UI_PACK) ~= 0 then -- [RFA]
+			rfa_ui_pack_pictures() -- [RFA]
+			return -- [RFA]
+		end -- [RFA]
+		thread_yield() -- [RFA]
+	end -- [RFA]
+	rfa_log("UI pack: rfa_ui_modern didn't load; the Modern style does without its pictures") -- [RFA]
+end -- [RFA]
+
+local function rfa_modern_style() -- [RFA] the menu's own elements; the lists restyle themselves as they draw
+	local style = rfa_get_setting("MainMenu", "Style", 0) -- [RFA]
+	local accent = rfa_get_setting("MainMenu", "Accent", 0) + 1 -- [RFA]
+	Rfa_modern = (style == 1) -- [RFA]
+	Rfa_accent = RFA_ACCENTS[accent] or RFA_ACCENTS[1] -- [RFA]
+	if not Rfa_modern then return end -- [RFA]
+	for i, name in ipairs({"techno_bits", "right_dags", "right_dags_1", "right_dags_1_1", "right_dags_1_2"}) do -- [RFA]
+		rfa_hide(name) -- [RFA]
+	end -- [RFA]
+	local panel = vint_object_find("menu_dag_group") -- [RFA]
+	if panel ~= 0 then vint_set_property(panel, "alpha", 0.6) end -- [RFA]
+	for i, name in ipairs({"mask_bg1", "mask_bg2", "mask_corner"}) do -- [RFA]
+		local object = vint_object_find(name) -- [RFA]
+		if object ~= 0 then vint_set_property(object, "tint", 0.03, 0.04, 0.06) end -- [RFA]
+	end -- [RFA]
+	for i, list in ipairs({List, Sub_list}) do -- [RFA] after each draw, its buttons too
+		local draw_items = list.draw_items -- [RFA]
+		list.draw_items = function(self, infos, current_option, width) -- [RFA]
+			draw_items(self, infos, current_option, width) -- [RFA]
+			rfa_modern_list(self) -- [RFA]
+		end -- [RFA]
+		rfa_modern_list(list) -- [RFA]
+	end -- [RFA]
+	Hint_bar:set_header("MENU_TITLE_UC", Rfa_accent) -- [RFA]
+	if vint_document_find(RFA_UI_PACK) ~= 0 then -- [RFA] the UI pack, loaded already
+		rfa_ui_pack_pictures() -- [RFA]
+	elseif rfa_load_ui_pack() then -- [RFA]
+		thread_new("ui_main_menu_rfa_ui_pack_wait") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
 
 function ui_main_menu_init()
 
@@ -254,9 +401,20 @@ function ui_main_menu_init()
 	Texticles.scrolling_text2:run_text(text2_string, 0.001, true, 3)
 	Texticles.scrolling_text3:run_text(text1_string, 0.01, true, 2)
 
+	-- [RFA] Options > Main Menu > Decorations off: the scrolling numbers and the tech module, meter and corner hidden
+	if rfa_get_setting("MainMenu", "Decorations", 1) == 0 then -- [RFA]
+		for i, name in ipairs({"scrolling_text1", "scrolling_text2", "scrolling_text3", "tech_module", "tech_meter", "tech_corner_1"}) do -- [RFA]
+			local object = vint_object_find(name) -- [RFA]
+			if object ~= 0 then vint_set_property(object, "visible", false) end -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+
 	vint_dataitem_add_subscription("main_menu_update", "update", "ui_main_menu_update")
 
-	ui_main_menu_update_top_menu_and_draw()
+	rfa_modern_style() -- [RFA] Options > Main Menu > Style
+	ui_main_menu_update_top_menu_and_draw(nil, true) -- [RFA] (true: the menu is opening)
+	ui_main_menu_rfa_back_from_create() -- [RFA] back from the Create level page: the editor making its level
+	ui_main_menu_rfa_failed_level_check() -- [RFA] back from a level that failed to load: say so
 end
 
 function ui_main_menu_cleanup()
@@ -300,6 +458,20 @@ function ui_main_menu_quit_game_return(return_value)
 	end
 end
 
+-- [RFA] Options > Main Menu's settings ([MainMenu] in rfa_mods.ini), read each time the menu is made.
+local Rfa_mm = {group = true, continue_at_top = true, guerrilla = true, level_editor = true, descriptions = true,
+	decorations = true, remember = true} -- [RFA]
+local function rfa_read_main_menu_settings() -- [RFA]
+	local function on(key) return rfa_get_setting("MainMenu", key, 1) ~= 0 end -- [RFA]
+	Rfa_mm.group = on("GroupByGame") -- [RFA]
+	Rfa_mm.continue_at_top = on("ContinueAtTop") -- [RFA]
+	Rfa_mm.guerrilla = on("ShowGuerrilla") -- [RFA]
+	Rfa_mm.level_editor = on("ShowLevelEditor") -- [RFA]
+	Rfa_mm.descriptions = on("Descriptions") -- [RFA]
+	Rfa_mm.decorations = on("Decorations") -- [RFA]
+	Rfa_mm.remember = on("Remember") -- [RFA]
+end -- [RFA]
+
 -- Constructs the top level menu menu based on init flags
 function ui_main_menu_construct_top_menu_from_flags()
 
@@ -318,11 +490,19 @@ function ui_main_menu_construct_top_menu_from_flags()
 		-- Use the ultra simple style menu
 		tack_on_data(MENU_DATA.MAIN_DEMO)
 	else
+		rfa_read_main_menu_settings() -- [RFA]
+		if Rfa_mm.continue_at_top or not Rfa_mm.group then -- [RFA]
 		-- Check for save games
 		if rf4_main_menu_has_save_games() then
 			tack_on_data(MENU_DATA.MAIN_CONTINUE)
 		end
+		end -- [RFA]
 
+		if Rfa_mm.group then -- [RFA] by game: Continue, New Game, New Game+, Load Game, the DLC, Infestation and
+			-- [RFA] Ruin under Red Faction: Armageddon (ui_main_menu_construct_campaign_sub_menu); the Guerrilla
+			-- [RFA] world under Red Faction: Guerrilla
+			tack_on_data(MENU_DATA.MAIN_CAMPAIGN) -- [RFA]
+		else -- [RFA] the game's classic top menu
 		tack_on_data(MENU_DATA.MAIN_NEW_GAME)
 
 		-- Check for New Game+
@@ -338,15 +518,33 @@ function ui_main_menu_construct_top_menu_from_flags()
 		--if rf4_dlc_is_character_unlock_available() or rf4_dlc_are_dlc04_missions_available() then
 			tack_on_data(MENU_DATA.MAIN_DLC)
 		--end
+		tack_on_data(MENU_DATA.ARMAGEDDON_MODES) -- [RFA] Infestation and Ruin, as the game had them
+		end -- [RFA]
+		if Rfa_mm.guerrilla then tack_on_data(MENU_DATA.MAIN_GUERRILLA) end -- [RFA]
+		if Rfa_mm.level_editor then tack_on_data(MENU_DATA.MAIN_LEVEL_EDITOR) end -- [RFA]
 
 		-- Everything else
 		tack_on_data(MENU_DATA.MAIN_GENERAL)
 	end
 end
 
-function ui_main_menu_update_top_menu_and_draw(saved_id)
+function ui_main_menu_update_top_menu_and_draw(saved_id, rfa_opening) -- [RFA] rfa_opening
 	-- Now construct the top level menu from the flags
 	ui_main_menu_construct_top_menu_from_flags()
+
+	-- [RFA] A sub-menu whose entry isn't on the top menu now (Options > Main Menu changed it), or Open where
+	-- [RFA] you left off turned off: start at the top.
+	local rfa_tier_entry = {[CAMPAIGN_TIER] = CAMPAIGN_ID, [GUERRILLA_TIER] = GUERRILLA_ID, [LEVEL_EDITOR_TIER] = LEVEL_EDITOR_ID} -- [RFA]
+	local rfa_entry = rfa_tier_entry[Global_last_main_menu_tier] -- [RFA]
+	if Global_last_main_menu_tier == MULTIPLAYER_TIER and Rfa_mm.group then rfa_entry = CAMPAIGN_ID end -- [RFA]
+	local rfa_entry_there = (rfa_entry == nil) -- [RFA]
+	for i, option in ipairs(Top_menu_data) do -- [RFA]
+		if option.id == rfa_entry then rfa_entry_there = true end -- [RFA]
+	end -- [RFA]
+	if not rfa_entry_there or (not Rfa_mm.remember and rfa_opening and Global_last_main_menu_tier ~= OPTIONS_TIER) then -- [RFA]
+		Global_last_main_menu_tier = MAIN_MENU_TIER -- [RFA]
+		Global_last_main_menu_option = 1 -- [RFA]
+	end -- [RFA]
 
 	if Global_last_main_menu_tier == MAIN_MENU_TIER then
 		if saved_id ~= nil then
@@ -385,6 +583,10 @@ function ui_main_menu_update_top_menu_and_draw(saved_id)
 		Global_last_main_menu_tier = MAIN_MENU_TIER
 		Global_last_main_menu_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
 	end
+	if Global_last_main_menu_tier == DLC_TIER and Rfa_mm.group then -- [RFA] by game, the DLC is under Armageddon
+		Global_last_main_menu_tier = CAMPAIGN_TIER -- [RFA]
+		Global_last_main_menu_option = 1 -- [RFA]
+	end -- [RFA]
 	ui_main_menu_change_tier(Global_last_main_menu_tier, Global_last_main_menu_option, true)
 end
 
@@ -399,6 +601,35 @@ function dlc_sub_menu_is_valid()
 	
 	return false
 end
+
+-- [RFA] Red Faction: Armageddon's sub-menu: what the top menu had for the story (Continue with saves, New Game, New Game+ when there is one,
+-- [RFA] Load Game when signed in), then the downloadable content: its outfits and missions and the store
+-- [RFA] when there are any (the DLC sub-menu's), else Downloadable Content (which opens the store); then Infestation and Ruin.
+function ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+	local sub_data = {} -- [RFA]
+	local function tack_on_data(data) -- [RFA]
+		for i, info in ipairs(data) do -- [RFA]
+			sub_data[#sub_data + 1] = info -- [RFA]
+		end -- [RFA]
+	end -- [RFA]
+	if rf4_main_menu_has_save_games() then -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_CONTINUE) -- [RFA]
+	end -- [RFA]
+	tack_on_data(MENU_DATA.MAIN_NEW_GAME) -- [RFA]
+	if rf4_main_menu_show_new_game_plus() then -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_NEW_GAME_PLUS) -- [RFA]
+	end -- [RFA]
+	if is_signed_into_profile() then -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_HAS_PROFILE) -- [RFA]
+	end -- [RFA]
+	if dlc_sub_menu_is_valid() then -- [RFA]
+		tack_on_data(ui_main_menu_construct_dlc_sub_menu()) -- [RFA]
+	else -- [RFA]
+		tack_on_data(MENU_DATA.MAIN_DLC) -- [RFA]
+	end -- [RFA]
+	tack_on_data(MENU_DATA.ARMAGEDDON_MODES) -- [RFA]
+	return sub_data -- [RFA]
+end -- [RFA]
 
 function ui_main_menu_construct_dlc_sub_menu()
 	local sub_data = {}
@@ -474,6 +705,10 @@ function ui_main_menu_nav_down(event, acceleration)
 end
 
 function ui_main_menu_set_screen_hint(new_tier)
+	if not Rfa_mm.descriptions then -- [RFA] Options > Main Menu > Descriptions off
+		Hint_bar:set_value("") -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
 	local current_id = List:get_id()
 	if new_tier == MULTIPLAYER_TIER then
 		current_id = MULTIPLAYER_ID
@@ -483,6 +718,12 @@ function ui_main_menu_set_screen_hint(new_tier)
 		current_id = DLC_ID
 	elseif new_tier == EXTRAS_TIER then
 		current_id = EXTRAS_ID
+	elseif new_tier == LEVEL_EDITOR_TIER then -- [RFA]
+		current_id = LEVEL_EDITOR_ID -- [RFA]
+	elseif new_tier == CAMPAIGN_TIER then -- [RFA]
+		current_id = CAMPAIGN_ID -- [RFA]
+	elseif new_tier == GUERRILLA_TIER then -- [RFA]
+		current_id = GUERRILLA_ID -- [RFA]
 	end
 	
 	-- Now for the huge-ass if/thens for each ID...
@@ -513,6 +754,15 @@ function ui_main_menu_set_screen_hint(new_tier)
 	elseif current_id == DLC_ID then
 		Hint_bar:set_value("MENU_DESC_DLC")
 	
+	elseif current_id == CAMPAIGN_ID then -- [RFA]
+		Hint_bar:set_value("Armageddon's story, its downloadable content, Infestation and Ruin") -- [RFA]
+
+	elseif current_id == GUERRILLA_ID then -- [RFA]
+		Hint_bar:set_value("Red Faction: Guerrilla's world, built from your own copy of Guerrilla") -- [RFA]
+
+	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
+		Hint_bar:set_value("Make your own Ruin levels in RFA-Mod's level editor, or delete the ones you made") -- [RFA]
+
 	elseif current_id == QUIT_GAME_ID then
 		Hint_bar:set_value("MENU_DESC_QUIT")
 	end
@@ -562,6 +812,32 @@ function ui_main_menu_button_a(event, acceleration)
 	elseif current_id == EXTRAS_ID then
 		ui_main_menu_change_tier(EXTRAS_TIER, 1)
 
+	elseif current_id == CAMPAIGN_ID then -- [RFA]
+		ui_main_menu_change_tier(CAMPAIGN_TIER, 1) -- [RFA]
+
+	elseif current_id == GUERRILLA_ID then -- [RFA]
+		ui_main_menu_change_tier(GUERRILLA_TIER, 1) -- [RFA]
+
+	elseif current_id == GUERRILLA_WORLD_ID then -- [RFA]
+		ui_main_menu_rfa_guerrilla_world() -- [RFA]
+
+	elseif current_id == GUERRILLA_BUILD_ID then -- [RFA]
+		ui_main_menu_rfa_guerrilla_build() -- [RFA]
+
+	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
+		ui_main_menu_change_tier(LEVEL_EDITOR_TIER, 1) -- [RFA]
+
+	elseif current_id == LEVEL_CREATE_ID then -- [RFA]
+		if _GetAnyGlobalSilent("rfa_new_level_check") ~= nil then -- [RFA] the menu's own page (ui_options_gameplay.lua's create_level)
+			rawset(_UGGlobals, "Rfa_options_page", "create_level") -- [RFA]
+			set_next_screen("ui_options_gameplay", LEVEL_EDITOR_TIER) -- [RFA]
+		else -- [RFA] an older loader: which mode, then the editor's own New level
+			ui_main_menu_rfa_create_level() -- [RFA]
+		end -- [RFA]
+
+	elseif current_id == LEVEL_DELETE_ID then -- [RFA]
+		ui_main_menu_rfa_delete_level(1) -- [RFA]
+
 	elseif current_id == NEW_GAME_ID then
 		-- Don't animate out, just start a new game
 		rf4_main_menu_new_game()
@@ -573,7 +849,7 @@ function ui_main_menu_button_a(event, acceleration)
 		rf4_main_menu_new_game_plus()
 
 	elseif current_id == LOAD_GAME_ID then
-		set_next_screen(NEXT_SCREEN_LOAD_GAME, MAIN_MENU_TIER)
+		set_next_screen(NEXT_SCREEN_LOAD_GAME, Rfa_mm.group and CAMPAIGN_TIER or MAIN_MENU_TIER) -- [RFA] (by game: under Armageddon)
 
 	elseif current_id == DLC_ID then
 	
@@ -590,7 +866,7 @@ function ui_main_menu_button_a(event, acceleration)
 		rf4_main_menu_show_dlc_store()
 		
 	elseif current_id == DLC_OUTFITS_ID then
-		set_next_screen("ui_dlc_outfits", DLC_TIER)
+		set_next_screen("ui_dlc_outfits", Rfa_mm.group and CAMPAIGN_TIER or DLC_TIER) -- [RFA] (by game: under Armageddon)
 
 	elseif current_id == QUIT_GAME_ID then
 		ui_main_menu_initiate_quit_game()
@@ -618,6 +894,10 @@ function ui_main_menu_button_a(event, acceleration)
 		rawset(_UGGlobals, "Rfa_options_page", "experimentals") -- [RFA]
 		set_next_screen("ui_options_gameplay", OPTIONS_TIER) -- [RFA]
 
+	elseif current_id == OPTIONS_MAIN_MENU_ID then -- [RFA]
+		rawset(_UGGlobals, "Rfa_options_page", "main_menu") -- [RFA]
+		set_next_screen("ui_options_gameplay", OPTIONS_TIER) -- [RFA]
+
 	elseif current_id == OPTIONS_AUDIO_ID then
 		set_next_screen("ui_options_audio", OPTIONS_TIER)
 
@@ -640,7 +920,11 @@ end
 
 function ui_main_menu_button_b(event, acceleration)
 	if Tween_done == true then
-		if Global_last_main_menu_tier ~= MAIN_MENU_TIER then
+		if Global_last_main_menu_tier == MULTIPLAYER_TIER and Rfa_mm.group then -- [RFA] Infestation's sub-menu: back to Armageddon's
+			local armageddon = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+			ui_main_menu_change_tier(CAMPAIGN_TIER, ui_main_menu_get_option_from_data(armageddon, MULTIPLAYER_ID)) -- [RFA]
+			play_ui_sound( "INT_BACK" ) -- [RFA]
+		elseif Global_last_main_menu_tier ~= MAIN_MENU_TIER then -- [RFA] (elseif)
 			ui_main_menu_change_tier(MAIN_MENU_TIER, 1)
 			play_ui_sound( "INT_BACK" )
 		else
@@ -698,6 +982,249 @@ function ui_main_menu_mouse_move(event, target_handle, mouse_x, mouse_y)
 	end
 end
 
+-- [RFA] Red Faction: Guerrilla > Guerrilla World: the console's level rfg_12_11 (rfa_qol's rfa_console_command
+-- [RFA] runs it at the next frame), once editor\\GuerrillaBuilder.exe has made the world (rfa_guerrilla_world_built);
+-- [RFA] Build Guerrilla World starts the builder (rfa_open_guerrilla_builder).
+function ui_main_menu_rfa_guerrilla_world() -- [RFA]
+	if not rfa_guerrilla_world_built() then -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla world isn't built yet: Build Guerrilla World makes it from your own copy of Red Faction: Guerrilla. Restart the game once it is built.") -- [RFA]
+	elseif rfa_console_command("level rfg_12_11") then -- [RFA]
+		Input_tracker:subscribe(false) -- [RFA] the level is loading
+		Mouse_input_tracker:subscribe(false) -- [RFA]
+	else -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla world needs RFA-Mod's console: console=1 under [Mods] in rfa_mods.ini.") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_guerrilla_build() -- [RFA]
+	if rfa_open_guerrilla_builder() then -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla builder is starting in its own window: click Build there, then restart the game.") -- [RFA]
+	else -- [RFA]
+		ui_main_menu_rfa_message("The Guerrilla builder couldn't be started: editor\\GuerrillaBuilder.exe wasn't found next to the mod. logs\\rfa_mods.log says more.") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+-- [RFA] Level editor > Create level and Delete custom level. The loader's functions (rfa_loader.dll)
+-- [RFA] start the editor, list the Ruin levels made with its New level, and have it delete one (with no
+-- [RFA] window; a thread waits for it). The game reads its map lists at start-up, so a deleted level
+-- [RFA] leaves Ruin's list once the game starts again.
+local Rfa_levels = {} -- [RFA] the levels listed in the popup
+local Rfa_level_page = 1 -- [RFA] its first level's place
+local Rfa_level_chosen = nil -- [RFA] the level to delete, once picked
+local RFA_LEVELS_SHOWN = 2 -- [RFA] how many a popup lists at once (a popup has at most 4 options: these, MORE... and Cancel)
+
+local function rfa_popup(message, callback, options) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	rf4_popup_create(message, callback, options, #options) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_popup_done(return_value) -- [RFA] a popup with only OK
+	Input_tracker:subscribe(true) -- [RFA]
+	Mouse_input_tracker:subscribe(true) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_message(message) -- [RFA] a message with OK
+	rfa_popup(message, "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+end -- [RFA]
+
+-- [RFA] The game's own processing screen (ui_popup_halt: PROCESSING, its rings turning; the loader's
+-- [RFA] rfa_processing_popup shows and hides it as the game does while it saves or loads), with our words in
+-- [RFA] its big line: a popup made from inside another's callback didn't show.
+-- [RFA] It stays until the wait is over: each frame of the wait asks the loader to hold it, and the loader
+-- [RFA] turns away the game's own calls to take it down meanwhile (as the editor docks the game...). Should it
+-- [RFA] go anyway, the next frame puts it back.
+local Rfa_processing_words = nil -- [RFA] its words, while a wait is on
+local Rfa_processing_frames = 0 -- [RFA] frames left to put them (the game sets its own as it opens)
+
+local function rfa_processing(words) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	Rfa_processing_words = words -- [RFA]
+	Rfa_processing_frames = 30 -- [RFA]
+	rfa_processing_popup(true) -- [RFA]
+end -- [RFA]
+
+local function rfa_processing_tick() -- [RFA] each frame of the wait
+	if Rfa_processing_words == nil then return end -- [RFA]
+	rfa_processing_popup(true) -- [RFA] back up if the game took it down (nothing if it is still ours)
+	if vint_document_find("ui_popup_halt") == 0 then -- [RFA] not there (yet, or again): words once it is
+		Rfa_processing_frames = 30 -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	if Rfa_processing_frames <= 0 then return end -- [RFA]
+	-- [RFA] Its big line, found in its own document: ui_popup_halt_set_new_data, called from here, looks for its
+	-- [RFA] objects in this one, doesn't find them and fails (which ended the wait, and with it the menu's input).
+	local halt = vint_document_find("ui_popup_halt") -- [RFA]
+	local word = vint_object_find("action_word", nil, halt) -- [RFA]
+	if word ~= nil and word ~= 0 then vint_set_property(word, "text_tag", Rfa_processing_words) end -- [RFA]
+	Rfa_processing_frames = Rfa_processing_frames - 1 -- [RFA]
+end -- [RFA]
+
+local function rfa_processing_wait_tick() -- [RFA] the wait's frame: nothing in it may end the wait (it gives the input back)
+	local ok, error_text = pcall(rfa_processing_tick) -- [RFA]
+	if not ok and rfa_log ~= nil then rfa_log("Main menu: the processing screen: " .. tostring(error_text)) end -- [RFA]
+end -- [RFA]
+
+local function rfa_processing_done() -- [RFA] hides it; the next popup a moment later, once it has gone
+	Rfa_processing_words = nil -- [RFA]
+	rfa_processing_popup(false) -- [RFA]
+	for i = 1, 30 do thread_yield() end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_indexing_wait() -- [RFA]
+	local ready = rfa_level_editor_ready() -- [RFA]
+	while ready == nil do -- [RFA]
+		rfa_processing_wait_tick() -- [RFA]
+		thread_yield() -- [RFA]
+		ready = rfa_level_editor_ready() -- [RFA]
+	end -- [RFA]
+	rfa_processing_done() -- [RFA]
+	if ready then -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA] New level is open in the editor
+	else -- [RFA]
+		rfa_popup("The level editor closed before it had read the game's files. logs\\editor.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+-- [RFA] Back from the Create level page (ui_options_gameplay.lua): it started the editor with everything chosen
+-- [RFA] (Rfa_create_wait true), or couldn't (a message): the processing screen until the editor has read the game's
+-- [RFA] files and made the level.
+function ui_main_menu_rfa_back_from_create() -- [RFA]
+	local wait = _GetAnyGlobalSilent("Rfa_create_wait") -- [RFA]
+	if wait == nil then return end -- [RFA]
+	rawset(_UGGlobals, "Rfa_create_wait", nil) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	if wait == true then -- [RFA]
+		thread_new("ui_main_menu_rfa_create_wait") -- [RFA]
+	else -- [RFA]
+		rawset(_UGGlobals, "Rfa_create_message", wait) -- [RFA]
+		thread_new("ui_main_menu_rfa_create_failed") -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+-- [RFA] A level that failed to load: the loader kept the game from closing and it came back here (rfa_failed_level
+-- [RFA] gives its name once, and whether it is a custom one).
+function ui_main_menu_rfa_failed_level_check() -- [RFA]
+	local failed = _GetAnyGlobalSilent("rfa_failed_level") -- [RFA] (an older loader has none)
+	if failed == nil then return end -- [RFA]
+	local name, custom = failed() -- [RFA]
+	if name == nil then return end -- [RFA]
+	local message -- [RFA]
+	if custom then -- [RFA]
+		message = "FAILED TO LOAD CUSTOM LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. A level deleted since the game started is still in its map list, and a level made since then needs the game restarted. logs\\rfa_mods.log says more." -- [RFA]
+	else -- [RFA]
+		message = "FAILED TO LOAD LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. logs\\rfa_mods.log says more." -- [RFA]
+	end -- [RFA]
+	rawset(_UGGlobals, "Rfa_failed_message", message) -- [RFA]
+	Input_tracker:subscribe(false) -- [RFA]
+	Mouse_input_tracker:subscribe(false) -- [RFA]
+	thread_new("ui_main_menu_rfa_failed_level_show") -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_failed_level_show() -- [RFA] once the menu has come in
+	for i = 1, 10 do thread_yield() end -- [RFA]
+	rfa_popup(_GetAnyGlobalSilent("Rfa_failed_message"), "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_wait() -- [RFA] once the menu has come in
+	for i = 1, 10 do thread_yield() end -- [RFA]
+	rfa_processing("MAKING THE LEVEL") -- [RFA] (the editor reads the game's files first: a minute or so)
+	ui_main_menu_rfa_indexing_wait() -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_failed() -- [RFA]
+	for i = 1, 10 do thread_yield() end -- [RFA]
+	rfa_popup(_GetAnyGlobalSilent("Rfa_create_message"), "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_level() -- [RFA] asks which mode the new level is for
+	if rfa_open_level_editor == nil then -- [RFA]
+		rfa_popup("The level editor needs RFA-Mod's loader (rfa_loader.dll).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	rfa_popup("Which mode is the new level for? The level editor opens on New level for it, with the mode's player starts, spawns and markers.", -- [RFA]
+		"ui_main_menu_rfa_create_mode", {"MENU_RUIN_MODE", "MENU_INFESTATION", "MENU_CANCEL"}) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_create_mode(return_value) -- [RFA]
+	local mode = nil -- [RFA]
+	if return_value == 1 then mode = "ruin" elseif return_value == 2 then mode = "infestation" end -- [RFA]
+	if mode == nil then -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA]
+	elseif rfa_open_level_editor(mode) then -- [RFA]
+		rfa_processing("INDEXING THE GAME'S FILES") -- [RFA] until the level editor has read them (a minute or so)
+		thread_new("ui_main_menu_rfa_indexing_wait") -- [RFA]
+	else -- [RFA]
+		rfa_popup("The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_level(first) -- [RFA] lists the levels from the first'th, a few at a time
+	if rfa_custom_levels == nil then -- [RFA]
+		rfa_popup("Deleting levels needs RFA-Mod's loader (rfa_loader.dll).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	Rfa_levels = {rfa_custom_levels()} -- [RFA]
+	if #Rfa_levels == 0 then -- [RFA]
+		rfa_popup("There are no custom Ruin levels: make one with Create level.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+		return -- [RFA]
+	end -- [RFA]
+	if first > #Rfa_levels then first = 1 end -- [RFA]
+	Rfa_level_page = first -- [RFA]
+	local last = first + RFA_LEVELS_SHOWN - 1 -- [RFA] (no math.min: the menus' Lua has no math)
+	if last > #Rfa_levels then last = #Rfa_levels end -- [RFA]
+	local options = {} -- [RFA]
+	for i = first, last do -- [RFA]
+		options[#options + 1] = Rfa_levels[i] -- [RFA]
+	end -- [RFA]
+	if #Rfa_levels > RFA_LEVELS_SHOWN then options[#options + 1] = "MORE..." end -- [RFA]
+	options[#options + 1] = "MENU_CANCEL" -- [RFA]
+	rfa_popup("Which custom Ruin level should be deleted?", "ui_main_menu_rfa_delete_picked", options) -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_picked(return_value) -- [RFA]
+	local shown = #Rfa_levels - Rfa_level_page + 1 -- [RFA]
+	if shown > RFA_LEVELS_SHOWN then shown = RFA_LEVELS_SHOWN end -- [RFA]
+	if return_value >= 1 and return_value <= shown then -- [RFA]
+		Rfa_level_chosen = Rfa_levels[Rfa_level_page + return_value - 1] -- [RFA]
+		rfa_popup("Delete " .. Rfa_level_chosen .. " for good? Its archive, its edits, its map list row, strings, pictures and spawn resources all go. This can't be undone.", -- [RFA]
+			"ui_main_menu_rfa_delete_confirmed", {"MENU_ACCEPT", "MENU_CANCEL"}) -- [RFA]
+	elseif return_value == shown + 1 and #Rfa_levels > RFA_LEVELS_SHOWN then -- [RFA] MORE...
+		ui_main_menu_rfa_delete_level(Rfa_level_page + RFA_LEVELS_SHOWN) -- [RFA]
+	else -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_confirmed(return_value) -- [RFA]
+	if return_value ~= 1 or Rfa_level_chosen == nil then -- [RFA]
+		ui_main_menu_rfa_popup_done() -- [RFA]
+	elseif rfa_delete_custom_level(Rfa_level_chosen) then -- [RFA]
+		rfa_processing("DELETING LEVEL") -- [RFA] until the editor is done
+		thread_new("ui_main_menu_rfa_delete_wait") -- [RFA]
+	else -- [RFA]
+		rfa_popup(Rfa_level_chosen .. " couldn't be deleted: logs\\rfa_mods.log says why.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+end -- [RFA]
+
+function ui_main_menu_rfa_delete_wait() -- [RFA] while the editor deletes the level (a few seconds)
+	local code = rfa_delete_custom_level_done() -- [RFA]
+	while code == nil do -- [RFA]
+		rfa_processing_wait_tick() -- [RFA]
+		thread_yield() -- [RFA]
+		code = rfa_delete_custom_level_done() -- [RFA]
+	end -- [RFA]
+	rfa_processing_done() -- [RFA]
+	if code == 0 then -- [RFA]
+		rfa_popup(Rfa_level_chosen .. " is deleted. Restart the game to take it off Ruin's map list (until then, don't pick it).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	else -- [RFA]
+		rfa_popup(Rfa_level_chosen .. " couldn't be deleted (the editor's logs\\editor.log says why).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
+	Rfa_level_chosen = nil -- [RFA]
+end -- [RFA]
+
 -- Note: current_option is ignored when returning from another tier to the main menu tier
 --
 function ui_main_menu_change_tier(new_tier, current_option, init_set)
@@ -712,7 +1239,7 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 	if new_tier == MAIN_MENU_TIER then
 		-- Get the selection pointing to the previous menu
 		if Global_last_main_menu_tier == MULTIPLAYER_TIER then
-			current_option = ui_main_menu_get_option_from_data(Top_menu_data, MULTIPLAYER_ID)
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, Rfa_mm.group and CAMPAIGN_ID or MULTIPLAYER_ID) -- [RFA] (by game: under Armageddon)
 			sub_data = MENU_DATA.MULTIPLAYER_SUB_MENU
 		elseif Global_last_main_menu_tier == OPTIONS_TIER then
 			current_option = ui_main_menu_get_option_from_data(Top_menu_data, OPTIONS_ID)
@@ -724,6 +1251,15 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 			else
 				sub_data = MENU_DATA.CREDITS_SUB_MENU
 			end			
+		elseif Global_last_main_menu_tier == LEVEL_EDITOR_TIER then -- [RFA]
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, LEVEL_EDITOR_ID) -- [RFA]
+			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
+		elseif Global_last_main_menu_tier == CAMPAIGN_TIER then -- [RFA]
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, CAMPAIGN_ID) -- [RFA]
+			sub_data = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+		elseif Global_last_main_menu_tier == GUERRILLA_TIER then -- [RFA]
+			current_option = ui_main_menu_get_option_from_data(Top_menu_data, GUERRILLA_ID) -- [RFA]
+			sub_data = MENU_DATA.GUERRILLA_SUB_MENU -- [RFA]
 		elseif Global_last_main_menu_tier == DLC_TIER then
 			if dlc_sub_menu_is_valid() then
 				current_option = ui_main_menu_get_option_from_data(Top_menu_data, DLC_ID)
@@ -775,6 +1311,12 @@ function ui_main_menu_change_tier(new_tier, current_option, init_set)
 			sub_data = MENU_DATA.MULTIPLAYER_SUB_MENU
 		elseif new_tier == OPTIONS_TIER then
 			sub_data = MENU_DATA.OPTIONS_SUB_MENU
+		elseif new_tier == LEVEL_EDITOR_TIER then -- [RFA]
+			sub_data = MENU_DATA.LEVEL_EDITOR_SUB_MENU -- [RFA]
+		elseif new_tier == CAMPAIGN_TIER then -- [RFA]
+			sub_data = ui_main_menu_construct_campaign_sub_menu() -- [RFA]
+		elseif new_tier == GUERRILLA_TIER then -- [RFA]
+			sub_data = MENU_DATA.GUERRILLA_SUB_MENU -- [RFA]
 		elseif new_tier == EXTRAS_TIER then
 			if is_signed_into_profile() then
 				sub_data = MENU_DATA.EXTRAS_SUB_MENU

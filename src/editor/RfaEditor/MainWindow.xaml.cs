@@ -44,6 +44,33 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         BuildTree();
         _ = BuildSearchIndexAsync();
         gamePanel = new GamePanel(context, PlaceGame);
+        BuildUiPack();
+    }
+
+    /// <summary>
+    /// RFA-Mod's UI pack (the main menu's Modern style's pictures, RfaFormats.Interface.UiPack), made if it isn't
+    /// there yet, is older, or was taken out of the interface's lists (by the Guerrilla HUD's Remove), in the background.
+    /// </summary>
+    void BuildUiPack()
+    {
+        string game = workspace.GameFolder, overrides = workspace.OverridesFolder;
+        Task.Run(() =>
+        {
+            try
+            {
+                if (RfaFormats.Interface.UiPack.Built(overrides)) return;
+                List<string> lines = RfaFormats.Interface.UiPack.Build(game, overrides);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    foreach (string line in lines) Log("UI pack: " + line);
+                    Log("UI pack: made. Restart the game to use it (Options > Main Menu > Style: Modern).");
+                }));
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                Dispatcher.BeginInvoke(new Action(() => Log("UI pack: couldn't be made: " + ex.Message)));
+            }
+        });
     }
 
     // ---- Log -----------------------------------------------------------------------------------
@@ -212,6 +239,11 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             searchIndex = [.. searchIndex, .. inContainers];
             context.Assets.SetIndex(searchIndex, textures);
             Log($"Ready: {searchIndex.Count:N0} files can be searched.");
+            WriteNewLevelChoices();
+            MakeLevelFromGameMenu();  // (its level made first, so the game's processing screen stays up while it is)
+            // The game's main menu (Level editor > Create level) shows a popup until then: it waits for this.
+            SignalGameMenuReady();
+            NewLevelFromGameMenu();
             if (SearchBox.Text.Length > 0) OnSearchChanged(SearchBox, null!);
         }
         catch (Exception ex)

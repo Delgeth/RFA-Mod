@@ -53,7 +53,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     readonly PerspectiveCamera sceneCamera = new(), gizmoCamera = new();
     readonly ModelVisual3D sceneContent = new(), selectionBox = new(), gizmoContent = new(), gridContent = new(), geometryContent = new(),
                            terrainContent = new(), decalContent = new(), foliageContent = new(), relatedContent = new(), neighbourContent = new(),
-                           linkContent = new(), pickedLinkContent = new();
+                           linkContent = new(), pickedLinkContent = new(), navMeshVisual = new();
     readonly Gizmo gizmo = new();
     readonly GameLink gameLink;
     double? gameFov;     // the running game's vertical field of view, while following it
@@ -105,7 +105,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     }
 
     // What the mouse is doing in the 3D view
-    enum Drag { None, Look, Slide, Circle, Handle, Sculpt }
+    enum Drag { None, Look, Slide, Circle, Handle, Sculpt, NavMesh }
     Drag drag;
     Point dragFrom;
     Point? pressedAt;
@@ -157,6 +157,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         SceneViewport.Children.Add(brushVisual);
         SceneViewport.Children.Add(magnetVisual);
         SceneViewport.Children.Add(helpersVisual);  // light and camera cones, invisible walls (LevelEditor.Helpers.cs)
+        SceneViewport.Children.Add(navMeshVisual);
+        SceneViewport.Children.Add(navMeshBrushVisual);
         SetTool(LevelTool.Move);
         CompositionTarget.Rendering += PadFrame;
         GamePanel.ControllerChanged += ShowControllerOwner;
@@ -245,7 +247,9 @@ public partial class LevelEditor : UserControl, IEditorDocument
         MoveTool.IsChecked = tool == LevelTool.Move;
         RotateTool.IsChecked = tool == LevelTool.Rotate;
         SculptTool.IsChecked = tool == LevelTool.Sculpt;
+        NavMeshTool.IsChecked = tool == LevelTool.NavMesh;
         SculptPanel.Visibility = tool == LevelTool.Sculpt ? Visibility.Visible : Visibility.Collapsed;
+        NavMeshPanel.Visibility = tool == LevelTool.NavMesh ? Visibility.Visible : Visibility.Collapsed;
         ShowBrush();
         ShowGizmo();
     }
@@ -253,6 +257,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     void OnToolClicked(object sender, RoutedEventArgs e)
     {
         if (sender == SculptTool) { ChooseSculpt(); return; }
+        if (sender == NavMeshTool) { EnsureNavMesh(); return; }
         SetTool(sender == SelectTool ? LevelTool.Select : sender == RotateTool ? LevelTool.Rotate : LevelTool.Move);
     }
 
@@ -280,6 +285,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         else if (e.Key == Key.W) SetTool(LevelTool.Move);
         else if (e.Key == Key.E) SetTool(LevelTool.Rotate);
         else if (e.Key == Key.T) ChooseSculpt();
+        else if (e.Key == Key.N) EnsureNavMesh();
         else if (e.Key == Key.M) ToggleMagnets();
         else if (e.Key == Key.OemOpenBrackets && tool == LevelTool.Sculpt) ResizeBrush(1 / 1.25);
         else if (e.Key == Key.OemCloseBrackets && tool == LevelTool.Sculpt) ResizeBrush(1.25);
@@ -1332,6 +1338,9 @@ public partial class LevelEditor : UserControl, IEditorDocument
         var needs = new List<string>();
         try
         {
+            // Snap to ground: adjust Y to the ground height at this X/Z position
+            float groundY = GroundHeight(at.X, at.Z);
+            at = new Vector3(at.X, groundY, at.Z);
             added = MakeChunkObjects(chunk, at, targetContainer, needs, out how);
         }
         catch (InvalidOperationException ex)
@@ -2307,6 +2316,11 @@ public partial class LevelEditor : UserControl, IEditorDocument
             brushAt = point;
             if (BeginStroke(fromPad: false)) drag = Drag.Sculpt;
         }
+        else if (e.ChangedButton == MouseButton.Left && tool == LevelTool.NavMesh && !Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
+        {
+            brushAt = point;
+            if (BeginNavMeshStroke()) drag = Drag.NavMesh;
+        }
         else if (e.ChangedButton == MouseButton.Left)
         {
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) drag = Drag.Circle;
@@ -2345,6 +2359,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
                 DragHandle(point);
                 break;
             case Drag.Sculpt:
+            case Drag.NavMesh:
                 brushAt = point;
                 break;
             default:
@@ -2352,6 +2367,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
                 {
                     brushAt = point;
                     ShowBrush();
+                    break;
+                }
+                if (tool == LevelTool.NavMesh)
+                {
+                    brushAt = point;
+                    ShowNavMeshBrush();
                     break;
                 }
                 Axis? hot = selected != null && Editable(selected) ? gizmo.HandleAt(GizmoViewport, point) : null;
@@ -2369,6 +2390,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
     {
         if (drag == Drag.Handle) EndHandleDrag();
         else if (drag == Drag.Sculpt) EndStroke();
+        else if (drag == Drag.NavMesh) EndNavMeshStroke();
         else if (e.ChangedButton == MouseButton.Left && pressedAt is Point down && (e.GetPosition(ViewArea) - down).Length < 4) PickAt(down);
         if (drag == Drag.Look) CompositionTarget.Rendering -= Fly;
         drag = Drag.None;
@@ -2611,6 +2633,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
             message += SaveBarriers();
             message += SaveGroundPaint();
             message += SaveLayerSwaps();
+            message += SaveNavMesh();
             batch.Dispose();
             foreach (TerrainSculpt sculpted in sculptZones) sculpted.Saved();
             chunksToAdd.Clear();

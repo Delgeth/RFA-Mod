@@ -124,8 +124,8 @@ public sealed record NavigationLayer(uint Version, Vector3[] Vertices, Navigatio
         for (int k = 0; k < 12; k++) words[k] = U(0x3C + k * 4);
         foreach (int k in PoolOffsetWords)
             if (words[k] != uint.MaxValue) words[k] -= (uint)pools;
-        return new NavigationLayer(U(4), [.. Enumerable.Range(0, vertexCount).Select(i => V(vertices + i * 12))], cellList, slots - cellCount,
-            [.. Enumerable.Range(0, edgeCount).Select(i => NavigationEdge.Read(d, edges + i * 8))], V(0x24), V(0x30), words, d[pools..]);
+        return new NavigationLayer(U(4), Enumerable.Range(0, vertexCount).Select(i => V(vertices + i * 12)).ToArray(), cellList, slots - cellCount,
+            Enumerable.Range(0, edgeCount).Select(i => NavigationEdge.Read(d, edges + i * 8)).ToArray(), V(0x24), V(0x30), words, d[pools..]);
     }
 
     public byte[] ToBytes()
@@ -182,7 +182,7 @@ public sealed record NavigationLayer(uint Version, Vector3[] Vertices, Navigatio
             w.Write(ushort.MaxValue);
             w.Write((ushort)0);
         }
-        if (!people) return ([0, uint.MaxValue, (uint)islands, 0, 0, uint.MaxValue, 0, uint.MaxValue, 0, 0, uint.MaxValue, 0x0000FFFF], output.ToArray());
+        if (!people) return ((uint[])[0, uint.MaxValue, (uint)islands, 0, 0, uint.MaxValue, 0, uint.MaxValue, 0, 0, uint.MaxValue, 0x0000FFFF], output.ToArray());
         for (int k = 0; k < cCount; k++)
         {
             w.Write(uint.MaxValue);
@@ -200,7 +200,54 @@ public sealed record NavigationLayer(uint Version, Vector3[] Vertices, Navigatio
             w.Write((ushort)((k + 1) % dCount));
         }
         uint islandsAt = a, cAt = (uint)(a + islands * island), dAt = (uint)(cAt + cCount * c);
-        return ([1, 0, (uint)islands, islandsAt, cCount, cAt, cCount, 0xFFFF0000, dCount, dCount, dAt, 0], output.ToArray());
+        return ((uint[])[1, 0, (uint)islands, islandsAt, cCount, cAt, cCount, 0xFFFF0000, dCount, dCount, dAt, 0], output.ToArray());
+    }
+
+    /// <summary>
+    /// The layer with the pools' island records made again for <paramref name="islands"/> islands
+    /// (the game looks up every cell's island in them: "Invalid island pathfind data found! Please
+    /// resave level to fix."). The records are the empty ones the game builds them from
+    /// (<see cref="PlainPools"/>), which the game fills in when the level loads, unless
+    /// <paramref name="keepRecords"/> is set: then the records there already are kept (their islands
+    /// haven't changed) and only the new ones are added empty. The other pools are kept as they are.
+    /// </summary>
+    public NavigationLayer WithIslands(int islands, byte place, bool keepRecords = false)
+    {
+        const int Record = 48;
+        var words = (uint[])PoolWords.Clone();
+        byte[] pools = Pools;
+        if (words[3] == uint.MaxValue) return this;   // no island records to make again: leave the pools alone
+        uint islandsAt = words[3];
+        uint cAt = words[5] == uint.MaxValue ? (uint)pools.Length : words[5];
+        uint dAt = words[10] == uint.MaxValue ? (uint)pools.Length : words[10];
+        if (islandsAt > cAt || cAt > dAt || dAt > pools.Length) return this;   // not the shape we know
+        int old = (int)((cAt - islandsAt) / Record);
+        var records = new MemoryStream();
+        var w = new BinaryWriter(records);
+        for (int k = 0; k < islands; k++)
+        {
+            if (keepRecords && k < old)
+            {
+                records.Write(pools, (int)islandsAt + k * Record, Record);
+                continue;
+            }
+            w.Write((byte)k);
+            w.Write(place);
+            w.Write(new byte[Record - 6]);
+            w.Write(ushort.MaxValue);
+            w.Write((ushort)0);
+        }
+        byte[] newRecords = records.ToArray();
+        int delta = newRecords.Length - (int)(cAt - islandsAt);
+        var output = new MemoryStream();
+        output.Write(pools, 0, (int)islandsAt);
+        output.Write(newRecords);
+        output.Write(pools, (int)cAt, (int)(dAt - cAt));
+        output.Write(pools, (int)dAt, (int)(pools.Length - dAt));
+        words[2] = (uint)islands;
+        if (words[5] != uint.MaxValue) words[5] = (uint)((int)cAt + delta);
+        if (words[10] != uint.MaxValue) words[10] = (uint)((int)dAt + delta);
+        return this with { PoolWords = words, Pools = output.ToArray() };
     }
 
     /// <summary>The cells' islands: each piece of cells joined across their edges, numbered by its lowest cell.</summary>
@@ -225,7 +272,7 @@ public sealed record NavigationLayer(uint Version, Vector3[] Vertices, Navigatio
             next++;
         }
         if (next > 256) throw new InvalidDataException($"a navigation layer has {next} islands; a cell keeps its island's number in a byte");
-        return [.. island.Select(i => (byte)i)];
+        return island.Select(i => (byte)i).ToArray();
     }
 
     /// <summary>
@@ -250,7 +297,7 @@ public sealed record NavigationLayer(uint Version, Vector3[] Vertices, Navigatio
         {
             if (piece[start] >= 0 || (cells[start].Flags & Off) != 0) continue;
             piece[start] = pieces;
-            var stack = new Stack<int>([start]);
+            var stack = new Stack<int>(new[] { start });
             while (stack.Count > 0)
                 foreach (int a in cells[stack.Pop()].Adjacent)
                     if (a >= 0 && piece[a] < 0 && (cells[a].Flags & Off) == 0)
@@ -292,8 +339,78 @@ public sealed record NavigationLayer(uint Version, Vector3[] Vertices, Navigatio
         var number = new Dictionary<int, int>();
         foreach (int p in piece) number.TryAdd(p, number.Count);
         if (number.Count > 256) throw new InvalidDataException($"a navigation layer has {number.Count} islands; a cell keeps its island's number in a byte");
-        return [.. piece.Select(p => (byte)number[p])];
+        return piece.Select(p => (byte)number[p]).ToArray();
     }
+
+    /// <summary>
+    /// The pieces of the cells no mission has switched off (flag 0x08 clear), joined across their
+    /// edges: each cell's piece, -1 for the switched-off ones (the game never counts those). The
+    /// game's flood: it walks the cells across their edges, skips the switched-off ones and crosses
+    /// the islands, so a piece may hold cells of several islands.
+    /// </summary>
+    public static int[] Pieces(IReadOnlyList<NavigationCell> cells)
+    {
+        const byte Off = 0x08;
+        var piece = new int[cells.Count];
+        Array.Fill(piece, -1);
+        int pieces = 0;
+        var stack = new Stack<int>();
+        for (int start = 0; start < cells.Count; start++)
+        {
+            if (piece[start] >= 0 || (cells[start].Flags & Off) != 0) continue;
+            piece[start] = pieces;
+            stack.Push(start);
+            while (stack.Count > 0)
+                foreach (int a in cells[stack.Pop()].Adjacent)
+                    if (a >= 0 && piece[a] < 0 && (cells[a].Flags & Off) == 0)
+                    {
+                        piece[a] = pieces;
+                        stack.Push(a);
+                    }
+            pieces++;
+        }
+        return piece;
+    }
+
+    /// <summary>
+    /// The game's floods over the cells no mission has switched off (flag 0x08 clear), as the game
+    /// makes them: over the cells in the file's order, it floods from each cell it finds that no
+    /// earlier flood has reached, and the flood (which walks the cells across their edges, skips the
+    /// switched-off ones and crosses the islands) covers one whole piece of joined cells. Each flood
+    /// is counted under the island number of the cell it started from (the cell's byte at +0x20), so
+    /// a piece is known by the island number of its first cell.
+    /// </summary>
+    public static IReadOnlyList<(int Piece, int First, byte Island)> Floods(IReadOnlyList<NavigationCell> cells)
+    {
+        int[] piece = Pieces(cells);
+        var first = new Dictionary<int, int>();
+        for (int i = 0; i < cells.Count; i++)
+            if (piece[i] >= 0 && !first.ContainsKey(piece[i])) first[piece[i]] = i;   // the flood's first cell
+        return first.OrderBy(kv => kv.Key)
+                    .Select(kv => (Piece: kv.Key, First: kv.Value, Island: cells[kv.Value].Island))
+                    .ToArray();
+    }
+
+    /// <summary>
+    /// The islands the game finds split when the level loads ("Isolated sub-islands found! This will
+    /// break pathfinding!"): the game counts the floods under each island's number, and an island
+    /// with more than one flood is in two pieces. Each such island's number and how many pieces it
+    /// has.
+    /// </summary>
+    public static IReadOnlyList<(byte Island, int Pieces)> IsolatedSubIslands(IReadOnlyList<NavigationCell> cells)
+    {
+        return Floods(cells).GroupBy(f => f.Island)
+                            .Where(g => g.Count() > 1)
+                            .OrderBy(g => g.Key)
+                            .Select(g => (Island: g.Key, Pieces: g.Count()))
+                            .ToArray();
+    }
+
+    /// <summary>Whether any island is in two pieces (the game checks only the people's layer).</summary>
+    public static bool HasIsolatedSubIslands(IReadOnlyList<NavigationCell> cells) => IsolatedSubIslands(cells).Count > 0;
+
+    /// <summary>How many islands are in two pieces.</summary>
+    public static int IsolatedSubIslandCount(IReadOnlyList<NavigationCell> cells) => IsolatedSubIslands(cells).Count;
 }
 
 /// <summary>

@@ -32,31 +32,67 @@ public static class NavigationBuilder
     /// <paramref name="place"/> in the world's grid (column × 16 + row: the single-zone levels' 0x88).
     /// Cells about <paramref name="step"/> m across.
     /// </summary>
-    public static NavigationFile FlatSquare(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place = 0x88, float step = 4)
+    public static NavigationFile FlatSquare(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place = 0x88, float step = 4) =>
+        FromGround((_, _) => height, centre, half, zoneCorner, zoneWidth, place, step);
+
+    /// <summary>
+    /// A navigation file over ground of any shape: a grid over the square (<paramref name="centre"/>,
+    /// <paramref name="half"/>) following <paramref name="height"/> (x, z → y), leaving out the squares
+    /// steeper than <paramref name="steepest"/> degrees for people (<paramref name="steepestForVehicles"/>
+    /// for vehicles: as the game's own meshes, people to about 42°, vehicles less), and those at the
+    /// bottom of a drop (all four corners at the lowest height of ground that otherwise stands well
+    /// above it: the 300 m drop round a new level's square). Islands are numbered by what joins.
+    /// </summary>
+    public static NavigationFile FromGround(Func<float, float, float> height, Vector2 centre, float half, Vector2 zoneCorner, float zoneWidth,
+                                            byte place = 0x88, float step = 4, float steepest = 42, float steepestForVehicles = 30)
     {
-        var (people, peopleTree) = Grid(centre, half, height, zoneCorner, zoneWidth, place, step, vehicles: false);
-        var (vehicles, vehiclesTree) = Grid(centre, half, height, zoneCorner, zoneWidth, place, step, vehicles: true);
+        var (people, peopleTree) = Grid(height, centre, half, zoneCorner, zoneWidth, place, step, vehicles: false, steepest);
+        var (vehicles, vehiclesTree) = Grid(height, centre, half, zoneCorner, zoneWidth, place, step, vehicles: true, steepestForVehicles);
         return new NavigationFile(0, people, peopleTree, vehicles, vehiclesTree);
     }
 
-    static (NavigationLayer Layer, byte[] Tree) Grid(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place, float step, bool vehicles)
+    static (NavigationLayer Layer, byte[] Tree) Grid(Func<float, float, float> height, Vector2 centre, float half, Vector2 zoneCorner, float zoneWidth, byte place,
+                                                     float step, bool vehicles, float steepest)
     {
         int n = Math.Clamp((int)MathF.Ceiling(2 * half / step), 1, 120);
         float s = 2 * half / n, x0 = centre.X - half, z0 = centre.Y - half;
-        var vertices = new Vector3[(n + 1) * (n + 1)];
+        var grid = new Vector3[(n + 1) * (n + 1)];
         for (int j = 0; j <= n; j++)
-            for (int i = 0; i <= n; i++) vertices[j * (n + 1) + i] = new Vector3(x0 + i * s, height, z0 + j * s);
-        ushort V(int i, int j) => (ushort)(j * (n + 1) + i);
+            for (int i = 0; i <= n; i++) grid[j * (n + 1) + i] = new Vector3(x0 + i * s, height(x0 + i * s, z0 + j * s), z0 + j * s);
+        float lowest = grid.Min(v => v.Y), highestGround = grid.Max(v => v.Y);
+        bool drop = highestGround - lowest > 50;
+        float slopeLimit = MathF.Tan(steepest * MathF.PI / 180);
 
-        // Two cells a square, wound as the game's: (v1 − v0) × (v2 − v0) across x and z negative.
+        // Two cells a square, wound as the game's: (v1 − v0) × (v2 − v0) across x and z negative; squares
+        // too steep, or at the bottom of a drop, left out. Only the vertices the cells use are kept.
+        var used = new Dictionary<int, ushort>();
+        var kept = new List<Vector3>();
+        ushort V(int i, int j)
+        {
+            int k = j * (n + 1) + i;
+            if (!used.TryGetValue(k, out ushort at))
+            {
+                if (kept.Count >= ushort.MaxValue) throw new InvalidOperationException("too many navigation vertices");
+                used[k] = at = (ushort)kept.Count;
+                kept.Add(grid[k]);
+            }
+            return at;
+        }
         var corners = new List<ushort[]>();
         for (int j = 0; j < n; j++)
             for (int i = 0; i < n; i++)
             {
+                Vector3 pa = grid[j * (n + 1) + i], pb = grid[j * (n + 1) + i + 1], pc = grid[(j + 1) * (n + 1) + i + 1], pd = grid[(j + 1) * (n + 1) + i];
+                float rise = MathF.Max(MathF.Max(MathF.Abs(pa.Y - pb.Y), MathF.Abs(pd.Y - pc.Y)), MathF.Max(MathF.Abs(pa.Y - pd.Y), MathF.Abs(pb.Y - pc.Y)));
+                if (rise > s * slopeLimit) continue;
+                if (drop && MathF.Max(MathF.Max(pa.Y, pb.Y), MathF.Max(pc.Y, pd.Y)) <= lowest + 0.5f) continue;
+                if (corners.Count + 2 > 0x7FFF) break;
                 ushort a = V(i, j), b = V(i + 1, j), c = V(i + 1, j + 1), d = V(i, j + 1);
                 corners.Add([a, c, b]);
                 corners.Add([a, d, c]);
             }
+        if (corners.Count == 0) throw new InvalidOperationException("there is no ground flat enough to walk on");
+        var vertices = kept.ToArray();
 
         // Each cell joined to the one across each of its edges.
         var across = new Dictionary<(int, int), (int Cell, int Edge)>();
@@ -82,16 +118,17 @@ public static class NavigationBuilder
             (MathF.Abs(p.Z - zoneCorner.Y) < Near && MathF.Abs(q.Z - zoneCorner.Y) < Near) ||
             (MathF.Abs(p.Z - zoneCorner.Y - zoneWidth) < Near && MathF.Abs(q.Z - zoneCorner.Y - zoneWidth) < Near);
         var outer = across.Values.Where(e => OnBorder(vertices[corners[e.Cell][e.Edge]], vertices[corners[e.Cell][(e.Edge + 1) % 3]]))
-                          .OrderBy(e => e.Cell).ThenBy(e => e.Edge)
-                          .Select(e => new NavigationEdge((ushort)e.Cell, (byte)e.Edge, 0, uint.MaxValue)).ToArray();
+                                  .OrderBy(e => e.Cell).ThenBy(e => e.Edge)
+                                  .Select(e => new NavigationEdge((ushort)e.Cell, (byte)e.Edge, 0, uint.MaxValue)).ToArray();
 
         byte flags = vehicles ? (byte)0x20 : (byte)0;
         var cells = corners.Select((v, i) => new NavigationCell(adjacent[i], 0, 0, v, 0xFFFF, 0, place, flags, 0, place)).ToArray();
-        byte[] islands = NavigationLayer.Islands(cells);
+        byte[] islands = NavigationLayer.SwitchedOnIslands(cells);
         cells = cells.Select((c, i) => c with { Island = islands[i] }).ToArray();
         var (words, pools) = NavigationLayer.PlainPools(islands.Max() + 1, place, people: !vehicles);
-        var min = new Vector3(x0, height, z0);
-        var max = new Vector3(x0 + 2 * half, height, z0 + 2 * half);
+        float yLow = vertices.Length > 0 ? vertices.Min(v => v.Y) : 0, yHigh = vertices.Length > 0 ? vertices.Max(v => v.Y) : 0;
+        var min = new Vector3(x0, yLow, z0);
+        var max = new Vector3(x0 + 2 * half, yHigh, z0 + 2 * half);
         var layer = new NavigationLayer(NavigationLayer.ArmageddonVersion, vertices, cells, 0, outer, min, max, words, pools);
 
         var boxes = corners.Select(v =>

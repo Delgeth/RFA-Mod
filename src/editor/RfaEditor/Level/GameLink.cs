@@ -18,7 +18,7 @@ namespace RfaEditor;
 ///     answers in bin\link\where_now.txt (see <see cref="AskWhere"/>).
 /// Positions are the game's world coordinates, the same as the zone files'.
 /// </summary>
-sealed class GameLink : IDisposable
+public sealed class GameLink : IDisposable
 {
     const string SharedName = @"Local\RFAModEditorLink";
     const uint SharedMagic = 0x4C414652;  // "RFAL"
@@ -226,4 +226,4 @@ sealed class GameLink : IDisposable
 /// What the game shows: the picked object's handle (if any), its camera's position, the way it
 /// looks and its vertical field of view, which frame that was, and when the game wrote it.
 /// </summary>
-sealed record GameView(uint? Picked, Vector3 Camera, Vector3 Forward, float? VerticalFov, uint Frame, DateTime Written);
+public sealed record GameView(uint? Picked, Vector3 Camera, Vector3 Forward, float? VerticalFov, uint Frame, DateTime Written);

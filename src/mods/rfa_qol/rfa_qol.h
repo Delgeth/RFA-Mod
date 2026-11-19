@@ -8,6 +8,13 @@ void Init();
 
 namespace console {
 void Init();
+
+// FrameUpdate callback registration for other mods
+using FrameUpdateCallback = void(__cdecl*)();
+void RegisterFrameUpdateCallback(FrameUpdateCallback callback);
+void UnregisterFrameUpdateCallback(FrameUpdateCallback callback);
+// Runs a console command at the start of the next frame (RFAQol_QueueConsoleCommand). False if it's too long.
+bool QueueCommand(const char* line);
 }
 
 namespace fov {
@@ -41,5 +48,10 @@ void Menu(const RFAMenu* menu);
 
 // A fix for a race in the game's zone stream-out (streaming.cpp). No settings.
 namespace streaming {
+void Init();
+}
+
+// Live analysis mod: named pipe interface for external debugging/profiling tools.
+namespace live_analysis {
 void Init();
 }

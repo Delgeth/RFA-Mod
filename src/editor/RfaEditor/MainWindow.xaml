@@ -20,6 +20,13 @@
                         <TextBlock Text="Overrides folder" />
                     </StackPanel>
                 </Button>
+                <Button DockPanel.Dock="Right" Click="OnMcpServers" Margin="0,0,8,0"
+                        ToolTip="The MCP servers Claude runs for this mod (editor and live analysis): close either or both">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{x:Static local:Icons.Close}" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,6,0" />
+                        <TextBlock Text="MCP servers" />
+                    </StackPanel>
+                </Button>
                 <Button DockPanel.Dock="Right" Click="OnOpenGameLevel" Margin="0,0,8,0"
                         ToolTip="Opens the zone the running game has loaded (the one its camera is in), in the level editor">
                     <StackPanel Orientation="Horizontal">

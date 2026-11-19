@@ -31,7 +31,7 @@ namespace RfaEditor;
 /// outside any archive's folder (the Guerrilla port's characters, vehicles, weapons, sounds and
 /// scripts), which the loader gives the game by name, and the mods' own data in mods\.
 /// </summary>
-sealed class Workspace
+public sealed class Workspace
 {
     readonly Dictionary<string, Packfile> archives = new(StringComparer.OrdinalIgnoreCase);
     (string Key, Packfile Container)? lastContainer;

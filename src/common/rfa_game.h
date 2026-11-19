@@ -55,6 +55,8 @@ T At(DWORD address) { return reinterpret_cast<T>(static_cast<UINT_PTR>(address))
 struct lua_State;
 using lua_CFunction = int(__cdecl*)(lua_State*);
 constexpr int LUA_GLOBALSINDEX = -10002;
+constexpr int LUA_REGISTRYINDEX = -10001;
+constexpr int LUA_MULTRET = -1;
 
 inline const auto lua_gettop = At<int(__cdecl*)(lua_State*)>(0xD904A0);
 inline const auto lua_type = At<int(__cdecl*)(lua_State*, int)>(0xD90910);        // as `type` reads it: -1 none, 0 nil, 1 boolean, 3 number, 4 string
@@ -67,6 +69,13 @@ inline const auto lua_pushstring = At<void(__cdecl*)(lua_State*, const char*)>(0
 inline const auto lua_pushcclosure = At<void(__cdecl*)(lua_State*, lua_CFunction, int)>(0xD91080);
 inline const auto lua_pushboolean = At<void(__cdecl*)(lua_State*, int)>(0xD911A0);         // as `rawequal` returns
 inline const auto lua_setfield = At<void(__cdecl*)(lua_State*, int, const char*)>(0xD91620);
+inline const auto luaL_loadbuffer = At<int(__cdecl*)(lua_State*, const char*, size_t, const char*)>(0xD95730);
+inline const auto lua_pcall = At<int(__cdecl*)(lua_State*, int, int, int)>(0xD90FC0);
+inline const auto lua_next = At<int(__cdecl*)(lua_State*, int)>(0xD913C0);
+inline const auto lua_getfield = At<void(__cdecl*)(lua_State*, int, const char*)>(0xD914F0);
+inline const auto lua_pop = At<void(__cdecl*)(lua_State*, int)>(0xD912D0);
+inline const auto lua_rawgeti = At<void(__cdecl*)(lua_State*, int, int)>(0xD915E0);
+inline const auto lua_settop = At<void(__cdecl*)(lua_State*, int)>(0xD91260);
 
 inline void lua_register(lua_State* L, const char* name, lua_CFunction fn) {
     lua_pushcclosure(L, fn, 0);

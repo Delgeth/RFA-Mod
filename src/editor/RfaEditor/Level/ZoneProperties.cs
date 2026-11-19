@@ -571,7 +571,39 @@ sealed class ZonePropertyRows
                     // Lists are links (obj_links, dynamic_links, a rig's children) or data Volition's tools packed (navpoint_data,
                     // logic_handler_buffer, path_road_data, ...): each has an editor.
                     if (name.Equals("navpoint_data", StringComparison.OrdinalIgnoreCase) && NavpointData.Read(property.Value) is { } navpoint)
-                        return NavpointEditor(property, navpoint);
+                    {
+                        // Find the schema's navpoint_type property for its enum choices
+                        SchemaProperty? navpointTypeProp = null;
+                        if (rows.schema?.Class(obj.ClassHash) is { } typeClass)
+                            navpointTypeProp = typeClass.Property(NameHashes.PropertyHash("navpoint_type"));
+                        navpointTypeProp ??= rows.schema?.Base?.Property(NameHashes.PropertyHash("navpoint_type"));
+                        return NavpointEditor(property, navpoint, navpointTypeProp);
+                    }
+                    // Road/spline editors for object_path_road and object_spline (from RFG PDB cross-decompilation)
+                    if (name.Equals("path_road_data", StringComparison.OrdinalIgnoreCase) && RoadData.FromBytes(property.Value) is { } roadData)
+                    {
+                        return RoadEditor(property, roadData);
+                    }
+                    if (name.Equals("object_spline_data", StringComparison.OrdinalIgnoreCase) && SplineData.FromBytes(property.Value) is { } splineData)
+                    {
+                        return SplineEditor(property, splineData);
+                    }
+                    // Specific link/logic editors (from RFG PDB cross-decompilation)
+                    if (name.Equals("obj_links", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Navpoint's links to other navpoints: array of handles
+                        return HandleListEditor(property, name);
+                    }
+                    if (name.Equals("patrol_start", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Patrol's first navpoint: single handle
+                        return HandleEditor(property);
+                    }
+                    if (name.Equals("logic_handler_buffer", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Logic handler's script buffer: custom editor showing extracted script text
+                        return LogicHandlerEditor(property);
+                    }
                     if (property.Size % 4 == 0 && (name.Contains("link", StringComparison.OrdinalIgnoreCase) || name.Contains("children", StringComparison.OrdinalIgnoreCase) ||
                                                    name.Contains("handle", StringComparison.OrdinalIgnoreCase)))
                         return HandleListEditor(property, name);
@@ -585,11 +617,12 @@ sealed class ZonePropertyRows
         /// A navpoint's packed settings (see <see cref="NavpointData"/>): its type, outer radius and speed limit, each as the
         /// schema names them; the bytes Volition's tools left are kept as they are.
         /// </summary>
-        FrameworkElement NavpointEditor(ZoneProperty property, NavpointData data)
+        FrameworkElement NavpointEditor(ZoneProperty property, NavpointData data, SchemaProperty? navpointTypeProperty = null)
         {
+            var types = NavpointData.GetTypes(navpointTypeProperty);
             var panel = new StackPanel();
-            var type = new ComboBox { ItemsSource = NavpointData.Types, SelectedIndex = data.Type, ToolTip = "navpoint_type: what the navpoint is to people and vehicles finding their way" };
-            if (data.Type < 0 || data.Type >= NavpointData.Types.Length) type.Text = data.TypeName;
+            var type = new ComboBox { ItemsSource = types, SelectedIndex = data.Type, ToolTip = "navpoint_type: what the navpoint is to people and vehicles finding their way" };
+            if (data.Type < 0 || data.Type >= types.Length) type.Text = data.GetTypeName(types);
             type.SelectionChanged += (_, _) =>
             {
                 if (type.SelectedIndex < 0) return;
@@ -612,6 +645,163 @@ sealed class ZonePropertyRows
                 Text = $"Version {data.Version}" + (data.Cell is { } cell ? $", on navigation cell {cell:X}" : "") + ". Its links: obj_links.",
                 Foreground = Theme.Brush("DimTextBrush"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
             });
+            return panel;
+        }
+
+        /// <summary>
+        /// A road's packed data (path_road_data): spline points and connections between them.
+        /// From RFG.exe cross-decompilation (road_spline_point, road_spline_connection, road_spline_data).
+        /// </summary>
+        FrameworkElement RoadEditor(ZoneProperty property, RoadData data)
+        {
+            var panel = new StackPanel();
+
+            // Road flags
+            var flagsPanel = new StackPanel();
+            var flags = new List<string>
+            {
+                "AmbientTraffic", "OneWay", "Special", "NoReinforcements", "GpsOnly"
+            };
+            var setFlags = new HashSet<string>();
+            if (data.Flags.HasFlag(RoadFlags.AmbientTraffic)) setFlags.Add("AmbientTraffic");
+            if (data.Flags.HasFlag(RoadFlags.OneWay)) setFlags.Add("OneWay");
+            if (data.Flags.HasFlag(RoadFlags.Special)) setFlags.Add("Special");
+            if (data.Flags.HasFlag(RoadFlags.NoReinforcements)) setFlags.Add("NoReinforcements");
+            if (data.Flags.HasFlag(RoadFlags.GpsOnly)) setFlags.Add("GpsOnly");
+
+            foreach (string flag in flags)
+            {
+                var check = new CheckBox
+                {
+                    Content = flag,
+                    IsChecked = setFlags.Contains(flag),
+                    Margin = new Thickness(0, 1, 10, 1),
+                };
+                check.Click += (_, _) =>
+                {
+                    if (check.IsChecked == true) setFlags.Add(flag); else setFlags.Remove(flag);
+                    data.Flags = RoadFlags.None;
+                    if (setFlags.Contains("AmbientTraffic")) data.Flags |= RoadFlags.AmbientTraffic;
+                    if (setFlags.Contains("OneWay")) data.Flags |= RoadFlags.OneWay;
+                    if (setFlags.Contains("Special")) data.Flags |= RoadFlags.Special;
+                    if (setFlags.Contains("NoReinforcements")) data.Flags |= RoadFlags.NoReinforcements;
+                    if (setFlags.Contains("GpsOnly")) data.Flags |= RoadFlags.GpsOnly;
+                    property.SetValue(data.SplineData.ToStructBytes()); // Trigger update
+                    Finished();
+                };
+                flagsPanel.Children.Add(check);
+            }
+            panel.Children.Add(new TextBlock { Text = "Road Flags:", Foreground = Theme.Brush("DimTextBrush"), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 4, 0, 2) });
+            panel.Children.Add(flagsPanel);
+
+            // Outer radius and speed limit
+            TextBox Number(string tip, float value, Action<float> set) => TextBoxEditor(value.ToString("0.###", CultureInfo.InvariantCulture), tip, text =>
+            {
+                if (!float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float number)) return "must be a number";
+                set(number);
+                property.SetValue(data.SplineData.ToStructBytes());
+                return null;
+            });
+
+            panel.Children.Add(Captioned("Outer radius", Number("outer_radius: radius for vehicle pathfinding (m)", data.OuterRadius, v => data.OuterRadius = v)));
+            panel.Children.Add(Captioned("Speed limit", Number("speed_limit: max speed on this road (m/s)", data.SpeedLimit, v => data.SpeedLimit = v)));
+
+            // Spline points count
+            panel.Children.Add(Captioned("Points", new TextBlock
+            {
+                Text = data.SplineData.NumPoints.ToString() + " points",
+                Foreground = Theme.Brush("DimTextBrush"),
+                FontSize = 11,
+            }));
+
+            panel.Children.Add(Captioned("Connections", new TextBlock
+            {
+                Text = data.SplineData.NumConnections.ToString() + " connections",
+                Foreground = Theme.Brush("DimTextBrush"),
+                FontSize = 11,
+            }));
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Point data (pos, handle, width) and connections stored in path_road_data. Edit individual points in the 3D view.",
+                Foreground = Theme.Brush("DimTextBrush"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 0),
+            });
+
+            return panel;
+        }
+
+        /// <summary>
+        /// A spline's packed data (object_spline_data): catmull-rom spline points for cameras, effects, etc.
+        /// From RFG.exe cross-decompilation.
+        /// </summary>
+        FrameworkElement SplineEditor(ZoneProperty property, SplineData data)
+        {
+            var panel = new StackPanel();
+
+            // Spline type
+            var types = Enum.GetNames(typeof(SplineData.SplineType));
+            var type = new ComboBox { ItemsSource = types, SelectedIndex = (int)data.Type, ToolTip = "spline_type: interpolation method" };
+            type.SelectionChanged += (_, _) =>
+            {
+                if (type.SelectedIndex < 0) return;
+                data.Type = (SplineData.SplineType)type.SelectedIndex;
+                property.SetValue(data.ToBytes());
+                Finished();
+            };
+            panel.Children.Add(new TextBlock { Text = "Spline type:", Foreground = Theme.Brush("DimTextBrush"), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 4, 0, 2) });
+            panel.Children.Add(type);
+
+            // Flags
+            var flagsPanel = new StackPanel();
+            var flagNames = Enum.GetNames(typeof(SplineData.SplineFlags)).Where(f => f != "None").ToList();
+            foreach (string flag in flagNames)
+            {
+                var check = new CheckBox
+                {
+                    Content = flag,
+                    IsChecked = data.Flags.HasFlag(Enum.Parse<SplineData.SplineFlags>(flag)),
+                    Margin = new Thickness(0, 1, 10, 1),
+                };
+                check.Click += (_, _) =>
+                {
+                    if (check.IsChecked == true) data.Flags |= Enum.Parse<SplineData.SplineFlags>(flag);
+                    else data.Flags &= ~Enum.Parse<SplineData.SplineFlags>(flag);
+                    property.SetValue(data.ToBytes());
+                    Finished();
+                };
+                flagsPanel.Children.Add(check);
+            }
+            panel.Children.Add(new TextBlock { Text = "Flags:", Foreground = Theme.Brush("DimTextBrush"), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 4, 0, 2) });
+            panel.Children.Add(flagsPanel);
+
+            // Speed and tension
+            TextBox Number(string tip, float value, Action<float> set) => TextBoxEditor(value.ToString("0.###", CultureInfo.InvariantCulture), tip, text =>
+            {
+                if (!float.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float number)) return "must be a number";
+                set(number);
+                property.SetValue(data.ToBytes());
+                return null;
+            });
+
+            panel.Children.Add(Captioned("Speed", Number("speed: movement speed along spline (m/s)", data.Speed, v => data.Speed = v)));
+            panel.Children.Add(Captioned("Tension", Number("tension: spline tension (0-1)", data.Tension, v => data.Tension = v)));
+
+            // Points count
+            panel.Children.Add(Captioned("Points", new TextBlock
+            {
+                Text = data.NumPoints.ToString() + " points",
+                Foreground = Theme.Brush("DimTextBrush"),
+                FontSize = 11,
+            }));
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Point positions and handles stored in object_spline_data. Edit in the 3D view.",
+                Foreground = Theme.Brush("DimTextBrush"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 0),
+            });
+
             return panel;
         }
 
@@ -693,6 +883,77 @@ sealed class ZonePropertyRows
             box.MaxHeight = 120;
             box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             return box;
+        }
+
+        /// <summary>
+        /// A logic handler's script buffer (logic_handler_buffer): shows extracted script text and allows editing.
+        /// From RFG.exe cross-decompilation - the buffer contains compiled script bytecode with embedded strings.
+        /// </summary>
+        FrameworkElement LogicHandlerEditor(ZoneProperty property)
+        {
+            byte[] value = property.Value;
+            var panel = new StackPanel();
+
+            // Extract readable strings from the buffer
+            string bufferText = System.Text.Encoding.Latin1.GetString(value);
+            var strings = System.Text.RegularExpressions.Regex.Matches(bufferText, "[ -~]{4,}")
+                .Select(m => m.Value)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+
+            // Show extracted strings
+            if (strings.Count > 0)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "Extracted strings from script buffer:",
+                    Foreground = Theme.Brush("DimTextBrush"),
+                    FontWeight = FontWeights.Bold,
+                    Margin = new Thickness(0, 0, 0, 4)
+                });
+                var stringsBox = new TextBox
+                {
+                    Text = string.Join("\n", strings.Take(50)),
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = 11,
+                    IsReadOnly = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    MaxHeight = 200,
+                    Background = Theme.Brush("BackgroundBrush"),
+                    BorderBrush = Theme.Brush("StrongBorderBrush"),
+                    BorderThickness = new Thickness(1)
+                };
+                panel.Children.Add(stringsBox);
+                panel.Children.Add(new TextBlock { Text = "", Height = 4 }); // spacer
+            }
+
+            // Hex editor for the raw buffer
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"Raw buffer ({value.Length} bytes, hex):",
+                Foreground = Theme.Brush("DimTextBrush"),
+                FontWeight = FontWeights.Bold,
+                Margin = new Thickness(0, 0, 0, 4)
+            });
+
+            TextBox hexBox = TextBoxEditor(Convert.ToHexString(value),
+                "The logic handler's compiled script buffer. Edit the hex directly; Volition's tools made this.",
+                entered =>
+                {
+                    string hex = new(entered.Where(Uri.IsHexDigit).ToArray());
+                    if (hex.Length % 2 != 0) return "an odd number of hex digits";
+                    if (hex.Length / 2 != value.Length) return $"buffer size must stay {value.Length} bytes";
+                    property.SetValue(Convert.FromHexString(hex));
+                    return null;
+                });
+            hexBox.FontFamily = new FontFamily("Consolas");
+            hexBox.TextWrapping = TextWrapping.Wrap;
+            hexBox.MaxHeight = 120;
+            hexBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            panel.Children.Add(hexBox);
+
+            return panel;
         }
 
         /// <summary>

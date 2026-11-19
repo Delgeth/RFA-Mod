@@ -72,7 +72,139 @@ public partial class MainWindow
 
     // ---- New level ---------------------------------------------------------------------------------
 
-    async void OnNewLevel(object sender, RoutedEventArgs e)
+    void OnNewLevel(object sender, RoutedEventArgs e) => ShowNewLevel(0);
+
+    /// <summary>
+    /// The mode New level opens for once the editor has read the game's files ("ruin" or "infestation"):
+    /// the game's main menu (Level editor > Create level) starts the editor with --new-level &lt;mode&gt;.
+    /// </summary>
+    internal string? NewLevelAtStart { get; set; }
+
+    /// <summary>
+    /// A level to make, all of it chosen in the game's main menu (Level editor > Create level, its own page): the menu
+    /// starts the editor with --new-level &lt;mode&gt; --name ... and the editor makes it once it has read the game's files,
+    /// with no dialog, and opens it.
+    /// </summary>
+    internal sealed record NewLevelRequest(NewLevel.Mode Mode, string Name, string DisplayName, bool NoGround, int Size,
+                                           string GroundTextures, string Sky, bool Replace);
+
+    internal NewLevelRequest? NewLevelMadeAtStart { get; set; }
+
+    /// <summary>
+    /// What the game's main menu asks for, from the arguments it starts the editor with (or sends an open one, see
+    /// <see cref="GameMenuPipe"/>): --new-level ruin|infestation opens New level for the mode; with --name (the Create
+    /// level page chose everything) the level is made with no dialog: --name &lt;file name&gt; --display &lt;name in the
+    /// menu&gt; --ground new|none --size &lt;metres&gt; --textures &lt;level&gt; --sky &lt;sky&gt; [--replace].
+    /// </summary>
+    internal static (string? Mode, NewLevelRequest? Request) MenuRequestFrom(string[] args)
+    {
+        string? Arg(string name)
+        {
+            int at = Array.FindIndex(args, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
+            return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+        }
+        int newLevel = Array.FindIndex(args, a => a.Equals("--new-level", StringComparison.OrdinalIgnoreCase));
+        string? mode = newLevel >= 0 ? (newLevel + 1 < args.Length ? args[newLevel + 1] : "ruin") : null;
+        if (mode == null || Arg("--name") is not { } levelName) return (mode, null);
+        var request = new NewLevelRequest(
+            mode.Equals("infestation", StringComparison.OrdinalIgnoreCase) ? NewLevel.Mode.Infestation : NewLevel.Mode.Ruin,
+            levelName.Trim().ToLowerInvariant(), (Arg("--display") ?? "").Trim(),
+            (Arg("--ground") ?? "new").Equals("none", StringComparison.OrdinalIgnoreCase),
+            int.TryParse(Arg("--size"), out int size) ? Math.Clamp(size, 16, 255) : 255,
+            (Arg("--textures") ?? "").Trim(), (Arg("--sky") ?? "").Trim(),
+            args.Any(a => a.Equals("--replace", StringComparison.OrdinalIgnoreCase)));
+        return (null, request);
+    }
+
+    /// <summary>
+    /// The game's main menu asked this editor, already open, for what it would have started a new one for (its
+    /// arguments, through <see cref="GameMenuPipe"/>): the game docked, and New level or the level it chose. With the
+    /// game's files read already, that happens now and the menu's processing screen ends; else once they are.
+    /// </summary>
+    internal void FromGameMenu(string[] args)
+    {
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        Topmost = true;  // over the game (it may be fullscreen), then back to normal
+        Topmost = false;
+        if (args.Any(a => a.Equals("--dock", StringComparison.OrdinalIgnoreCase))) ShowGameToDock();
+        var (mode, request) = MenuRequestFrom(args);
+        if (mode == null && request == null) return;
+        NewLevelAtStart = mode;
+        NewLevelMadeAtStart = request;
+        if (!context.Assets.IndexReady)
+        {
+            Log(request != null ? $"New level {request.Name} is made once the editor has read the game's files (a minute or so)."
+                                : "New level opens once the editor has read the game's files (a minute or so).");
+            return;
+        }
+        MakeLevelFromGameMenu();
+        SignalGameMenuReady();
+        NewLevelFromGameMenu();
+    }
+
+    /// <summary>Tells the game's main menu, waiting with its processing screen up, that the editor is ready (Local\RFAModEditorReady).</summary>
+    static void SignalGameMenuReady()
+    {
+        if (System.Threading.EventWaitHandle.TryOpenExisting(@"Local\RFAModEditorReady", out var ready))
+            using (ready) ready.Set();
+    }
+
+    /// <summary>Makes <see cref="NewLevelMadeAtStart"/>'s level, if the menu asked for one (once the files are read).</summary>
+    void MakeLevelFromGameMenu()
+    {
+        if (NewLevelMadeAtStart is not { } asked) return;
+        NewLevelMadeAtStart = null;
+        Log($"New level {asked.Name} for {asked.Mode}, as the game's menu asked.");
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        string start = asked.GroundTextures;
+        if (!asked.NoGround && start.Length == 0)
+            start = NewLevel.LevelsWithGround(workspace, context.Assets).FirstOrDefault() ?? "";
+        if (!asked.NoGround && start.Length == 0) { Log("New level: the game has no level with ground textures to paint the ground with."); return; }
+        if (!Regex.IsMatch(asked.Name, "^[a-z][a-z0-9_]{1,30}$")) { Log("New level: the file name has to be lower case letters, digits and _ (2 to 31, a letter first)."); return; }
+        bool exists = File.Exists(Path.Combine(workspace.OverridesFolder, $@"build\pc\cache\{asked.Name}.vpp_pc"));
+        if (exists && !asked.Replace) { Log($"New level: there is already a level {asked.Name}; the menu didn't say to make it again."); return; }
+        if (exists) foreach (var (key, _) in OpenTabs($@"level:build\pc\cache\{asked.Name}.vpp_pc")) CloseTab(key);
+        _ = MakeNewLevel(asked.Mode, start, asked.Name, asked.DisplayName.Length > 0 ? asked.DisplayName : asked.Name, null, exists, asked.NoGround,
+                         asked.Size, string.IsNullOrWhiteSpace(asked.Sky) ? NewLevel.DefaultSky : asked.Sky);
+    }
+
+    /// <summary>
+    /// What the main menu's Create level page offers (the game's levels with ground textures, its skies), written next to
+    /// the editor (new_level_choices.txt: texture=... and sky=... lines) each time it has read the game's files: the menu
+    /// can't read the archives itself.
+    /// </summary>
+    void WriteNewLevelChoices()
+    {
+        try
+        {
+            var lines = new List<string> { "# What the game's main menu offers in Level editor > Create level. The editor writes it." };
+            lines.AddRange(NewLevel.LevelsWithGround(workspace, context.Assets).Select(l => "texture=" + l));
+            lines.AddRange(NewLevel.Skies(workspace).Select(s => "sky=" + s));
+            File.WriteAllLines(Path.Combine(AppContext.BaseDirectory, "new_level_choices.txt"), lines);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            EditorLog.Write("The main menu's Create level choices couldn't be written: " + ex.Message);
+        }
+    }
+
+    /// <summary>Opens New level for <see cref="NewLevelAtStart"/>'s mode, if one was asked for (once the files are read).</summary>
+    void NewLevelFromGameMenu()
+    {
+        if (NewLevelAtStart is not { } asked) return;
+        NewLevelAtStart = null;
+        int modeIndex = asked.Equals("infestation", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        Log($"New level for {(modeIndex == 1 ? "Infestation" : "Ruin")}, as the game's menu asked.");
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        Topmost = true;  // over the game (it may be fullscreen), then back to normal
+        Topmost = false;
+        ShowNewLevel(modeIndex);
+    }
+
+    async void ShowNewLevel(int modeIndex)
     {
         if (!context.Assets.IndexReady)
         {
@@ -81,7 +213,7 @@ public partial class MainWindow
         }
         Window window = Dialog("New level");
         var form = new DialogForm(300);
-        var mode = new ComboBox { ItemsSource = new[] { "Ruin", "Infestation" }, SelectedIndex = 0 };
+        var mode = new ComboBox { ItemsSource = new[] { "Ruin", "Infestation" }, SelectedIndex = modeIndex };
         var groundLevels = NewLevel.LevelsWithGround(workspace, context.Assets);
         var template = new ComboBox { ItemsSource = groundLevels, SelectedIndex = groundLevels.Count > 0 ? 0 : -1 };
         var fileName = new TextBox { Text = "" };
@@ -145,12 +277,19 @@ public partial class MainWindow
             foreach (var (key, _) in OpenTabs($@"level:build\pc\cache\{name}.vpp_pc")) CloseTab(key);
             replace = true;
         }
+        string chosenSky = string.IsNullOrWhiteSpace(sky.Text) ? NewLevel.DefaultSky : sky.Text.Trim();
+        await MakeNewLevel(chosenMode, start, name, shown, picture.Text.Length > 0 ? picture.Text : null, replace, noGround,
+                           sizes[Math.Max(0, groundSize.SelectedIndex)], chosenSky);
+    }
+
+    /// <summary>Makes a new level and opens it (New level's dialog, or the game's menu): see <see cref="NewLevel.Make"/>.</summary>
+    async Task MakeNewLevel(NewLevel.Mode chosenMode, string start, string name, string shown, string? picture, bool replace, bool noGround,
+                            int size, string chosenSky)
+    {
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            string chosenSky = string.IsNullOrWhiteSpace(sky.Text) ? NewLevel.DefaultSky : sky.Text.Trim();
-            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, picture.Text.Length > 0 ? picture.Text : null, replace, noGround,
-                sizes[Math.Max(0, groundSize.SelectedIndex)], chosenSky);
+            List<string> report = new NewLevel(workspace, context.Assets).Make(chosenMode, start, name, shown, picture, replace, noGround, size, chosenSky);
             Log($"New level {name} ({chosenMode}):");
             foreach (string line in report) Log("  " + line);
             Log("  The game reads its map lists at start-up: restart it to see the level in the menu.");

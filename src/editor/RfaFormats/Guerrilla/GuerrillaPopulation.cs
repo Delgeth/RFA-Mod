@@ -327,10 +327,10 @@ public static class GuerrillaPopulation
         /// <summary>Pedestrian navpoints with no switched-on cell under them given the nearest (version 4), and those with none within 10 m.</summary>
         public int PedestriansOnNearestCell, PedestriansWithoutCell;
         /// <summary>Each object placed, by Guerrilla's handle: the handle it has in the zone (Guerrilla's unless taken).</summary>
-        public Dictionary<uint, uint> Handles;
+        public Dictionary<uint, uint> Handles = new();
         public float FarthestPedestrianCell;
         /// <summary>Each of these navpoints with its cell found (written as version 4 or not): its handle as placed, the cell's handle.</summary>
-        public List<(uint Navpoint, ulong Cell)> Cells;
+        public List<(uint Navpoint, ulong Cell)> Cells = new();
         public float FarthestCell;
     }
 

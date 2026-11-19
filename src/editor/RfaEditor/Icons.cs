@@ -53,6 +53,7 @@ public static class Icons
     public const string Settled = "";     // ArrowDownload20: props where the running game has them
     public const string Display = "";     // Desktop20: the Direct3D view
     public const string Sculpt = "";      // PaintBrush20: sculpt the ground
+    public const string NavMesh = "";     // Path20: navigation mesh editing
     public const string GameLight = "";   // WeatherSunny20: light the level as the game does
     public const string Magnets = "";     // PlugConnected20: moved objects join the models near them
     public const string Live = "";        // ArrowSync20: changes go to the running game as they are made
@@ -78,7 +79,7 @@ public static class Icons
 }
 
 /// <summary>A kind of file, by its extension: its name, icon and colour in the explorer.</summary>
-sealed record FileKind(string Name, string Icon, Brush Colour)
+public sealed record FileKind(string Name, string Icon, Brush Colour)
 {
     static readonly FileKind Table = new("table", Icons.Table, Brush("#6CC28A"));
     static readonly FileKind Texture = new("texture", Icons.Texture, Brush("#B48EF0"));

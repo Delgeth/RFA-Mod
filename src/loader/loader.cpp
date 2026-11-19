@@ -696,9 +696,17 @@ auto& g_luaErrorCallback = *reinterpret_cast<LuaErrorCallbackFn*>(0x34FA99C);
 auto const SetLuaErrorCallback = reinterpret_cast<void(__cdecl*)(LuaErrorCallbackFn)>(0xD935D0);
 LuaErrorCallbackFn g_gameLuaErrorCallback;
 
+// An error raised while the game's callback handles one (a menu script reading a global that isn't
+// there, say: the menus' strict globals raise again from inside it) came back here, over and over,
+// until the stack ran out and the game ended. An error inside that is now only logged.
+thread_local int g_inLuaError = 0;
+
 void __cdecl LogLuaError(lua_State* L, const char* message) {
     RFA_LOG_FIRST(100, "Lua error: %s", message ? message : "(no message)");
+    if (g_inLuaError) return;
+    ++g_inLuaError;
     if (g_gameLuaErrorCallback) g_gameLuaErrorCallback(L, message);
+    --g_inLuaError;
 }
 
 void WatchLuaErrors() {
@@ -1113,6 +1121,260 @@ void Widen(const char* text, wchar_t* out, int size) {
     if (!MultiByteToWideChar(CP_ACP, 0, text ? text : "", -1, out, size)) out[0] = L'\0';
 }
 
+// ---- The main menu's music (Options > Main Menu > Music: [MainMenu] Music= in rfa_mods.ini) -----------
+//
+// The main menu plays its music by setting the music mode "Main Menu and Loading" (game_music_modes.xtbl;
+// 0x53E2A0, the mode's name, 1, 1 or 0, 0) when it starts (0x590470, the push at 0x59059E) and when it is
+// shown again (0x590CB0, the push at 0x590CE5). Both pushes are pointed at the chosen mode's name instead:
+// any of the game's 36 modes (each mission's, quest's, Infestation's and Ruin's music, the credits'). The
+// loading screens keep the menu's own. The list is in the order Options > Main Menu > Music shows it.
+constexpr const char* kMusicModes[] = {
+    "Main Menu and Loading",
+    "Mission 1", "Mission 2", "Mission 3", "Mission 4", "Mission 5", "Mission 6", "Mission 7", "Mission 8",
+    "Mission 9", "Mission 12", "Mission 13", "Mission 14", "Mission 16", "Mission 16b", "Mission 17a",
+    "Mission 17b", "Mission 17c",
+    "Quest 01", "Quest 02", "Quest 03", "Quest 04", "Quest 06", "Quest 07", "Quest 08", "Quest 10",
+    "MP_Alpha", "MP_Bravo", "MP_Charlie", "MP_Delta", "MP_Echo", "MP_Foxtrot", "MP_Golf", "MP_Hotel",
+    "Ruin_Mode", "Credits",
+};
+constexpr int kMusicModeCount = static_cast<int>(sizeof(kMusicModes) / sizeof(kMusicModes[0]));
+constexpr DWORD kMenuMusicPushes[] = {0x59059E, 0x590CE5};  // push imm32 ("Main Menu and Loading", 0xF89A24)
+constexpr DWORD kMenuMusicName = 0xF89A24;
+auto const SetMusicMode = reinterpret_cast<void(__cdecl*)(const char*, bool, bool, int)>(0x53E2A0);
+auto const ActivateMusicTrigger = reinterpret_cast<int(__cdecl*)(const char*)>(0x53E7F0);
+int g_menuMusic = 0;
+
+// Points the main menu's pushes at the chosen mode's name. False if the code isn't as expected.
+bool SetMenuMusic(int index) {
+    if (index < 0 || index >= kMusicModeCount) index = 0;
+    const DWORD name = index == 0 ? kMenuMusicName : reinterpret_cast<DWORD>(kMusicModes[index]);
+    for (DWORD push : kMenuMusicPushes) {
+        const BYTE* code = reinterpret_cast<const BYTE*>(push);
+        if (code[0] != 0x68) {
+            rfa::Log("Main menu music: the code at 0x%08lX isn't the push it should be; the game's own music plays", push);
+            return false;
+        }
+        if (!rfa::PatchCode(reinterpret_cast<void*>(push + 1), &name, sizeof(name))) return false;
+    }
+    g_menuMusic = index;
+    return true;
+}
+
+void InstallMenuMusic() {
+    const int index = rfa::IniInt(L"MainMenu", L"Music", 0);
+    if (index != 0 && SetMenuMusic(index)) rfa::Log("Main menu music: %s's", kMusicModes[g_menuMusic]);
+}
+
+// Options > Main Menu changed the music: the menu plays it now (it is open behind the options screen).
+void MenuMusicChanged(int index) {
+    if (index == g_menuMusic || !SetMenuMusic(index)) return;
+    rfa::Log("Main menu music: %s's", kMusicModes[g_menuMusic]);
+    SetMusicMode(kMusicModes[g_menuMusic], true, true, 0);
+    if (g_menuMusic == 0) ActivateMusicTrigger("Main Menu");  // as the menu starts its own
+}
+
+// ---- RFA-Mod's UI pack (the main menu's Modern style's pictures: the editor's RfaFormats UiPack) ------------
+//
+// A document of pictures only, rfa_ui_modern, in overrides\build\pc\cache, listed in the interface's asset list
+// and project overrides. The game reads those lists once, as it starts: a document it doesn't know stops it
+// ("no SRID"), so it is loaded only if all of it was there when the game started.
+constexpr char kUiPackDocument[] = "rfa_ui_modern";
+bool g_uiPackThere = false;
+
+bool FileHolds(const std::wstring& path, const char* text) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    std::string bytes(GetFileSize(file, nullptr), '\0');
+    DWORD read = 0;
+    const bool ok = !bytes.empty() && ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+    CloseHandle(file);
+    return ok && bytes.find(text, 0) != std::string::npos;
+}
+
+void FindUiPack() {
+    const std::wstring cache = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\";
+    g_uiPackThere = GetFileAttributesW((cache + L"rfa_ui_modern.str2_pc").c_str()) != INVALID_FILE_ATTRIBUTES &&
+                    GetFileAttributesW((cache + L"rfa_ui_modern2.str2_pc").c_str()) != INVALID_FILE_ATTRIBUTES &&
+                    FileHolds(cache + L"interface.vpp_pc\\vint_doc_containers.asm_pc", "rfa_ui_modern2") &&
+                    FileHolds(cache + L"misc.vpp_pc\\rfg.vint_proj", "<doc_name>rfa_ui_modern</doc_name>");
+    rfa::Log(g_uiPackThere ? "UI pack: rfa_ui_modern is there (the main menu's Modern style uses its pictures)"
+                           : "UI pack: not there yet (the editor makes it; the main menu's Modern style does without its pictures)");
+}
+
+// Lua: rfa_load_ui_pack() -> true if the UI pack's document is being loaded (it is there), false if not. The menu
+// waits for vint_document_find to find it before it shows its pictures.
+int __cdecl LuaLoadUiPack(lua_State* L) {
+    if (g_uiPackThere) {
+        using LoadDocumentFn = unsigned short(__cdecl*)(const char*, int, float, int, int, int, int);
+        // As guerrilla_hud loads its documents while playing (the console's vint_doc_load does so too).
+        reinterpret_cast<LoadDocumentFn>(0x563990)(kUiPackDocument, 0, 0.0f, 0, 0, 0x80, 0);
+    }
+    rfa::game::lua_pushboolean(L, g_uiPackThere);
+    return 1;
+}
+
+// Lua: rfa_processing_popup(on) shows or hides the game's processing screen (ui_popup_halt), as the game does
+// while it loads or saves: 0x5A3FF0 (the kind: 4, PLEASE WAIT, its row in the table at 0x10FB838; not on
+// black) and 0x5A4060 (true: now, past the kind's least time on screen). The menu puts its own words on it.
+// The kind on screen is at 0x10FB830 (-1: none). The game takes the screen down from many places (some two
+// dozen callers of 0x5A4060) and a wait asks again each frame, so it is shown again only when it isn't ours.
+//
+// While a wait is on, the game isn't let take it down: HaltHideHook and HaltShowHook turn away its calls to hide
+// the screen or put another kind in its place (the menu's own hide goes past them). The hold lasts as long as
+// the wait asks each frame, and lapses two seconds after it stops asking, so a wait that dies can't leave the
+// screen up for good.
+using HaltShowFn = void(__cdecl*)(int kind, bool onBlack);
+using HaltHideFn = void(__cdecl*)(bool now);
+constexpr DWORD kHaltShow = 0x5A3FF0;
+constexpr size_t kHaltShowPrologue = 6;   // push ebp / mov ebp,esp / sub esp,8
+constexpr DWORD kHaltHide = 0x5A4060;
+constexpr size_t kHaltHidePrologue = 10;  // push ebp / mov ebp,esp / movzx eax,byte ptr [1363209h]
+constexpr int kHaltOurs = 4;              // MENU_PLEASE_WAIT
+HaltShowFn g_haltShow = reinterpret_cast<HaltShowFn>(kHaltShow);
+HaltHideFn g_haltHide = reinterpret_cast<HaltHideFn>(kHaltHide);
+ULONGLONG g_haltHeldUntil = 0;
+bool g_haltReleasing = false;
+
+bool HaltHeld() {
+    return !g_haltReleasing && GetTickCount64() < g_haltHeldUntil &&
+           *reinterpret_cast<volatile int*>(0x10FB830) == kHaltOurs;
+}
+
+void __cdecl HaltShowHook(int kind, bool onBlack) {
+    if (kind != kHaltOurs && kind != -1 && HaltHeld()) return;  // another kind in its place: not now
+    g_haltShow(kind, onBlack);
+}
+
+void __cdecl HaltHideHook(bool now) {
+    if (HaltHeld()) return;  // the game taking it down: not while the wait is on
+    g_haltHide(now);
+}
+
+void InstallProcessingHold() {
+    auto show = reinterpret_cast<HaltShowFn>(
+        rfa::HookFunction(kHaltShow, kHaltShowPrologue, reinterpret_cast<void*>(&HaltShowHook)));
+    auto hide = reinterpret_cast<HaltHideFn>(
+        rfa::HookFunction(kHaltHide, kHaltHidePrologue, reinterpret_cast<void*>(&HaltHideHook)));
+    if (show) g_haltShow = show;
+    if (hide) g_haltHide = hide;
+    if (!show || !hide)
+        rfa::Log("Could not hook the processing screen; the game may take it down while the menu waits (it is put back)");
+}
+
+// ---- A level that fails to load: back to the main menu, which says so --------------------------------------------
+//
+// The world load (0x6C8940, fastcall, ECX = the world; false when its territory, the level's archives, couldn't be
+// read: "Could not find territory %s", the name at world +0x2554) is watched. Its caller (gs_load_process 0x55E380)
+// then unloads and goes back to the main menu (Ruin: 0x5613C0(0)), but the game has been seen closing instead: it
+// leaves through its exit state (0x14, set with 0x53FCD0) when the window's close flag (0x293A88A, read by
+// 0xCB1150) is up. While it recovers from a failed load, neither is let through: the exit becomes the main menu and
+// the close flag reads as down. The main menu then shows a message (rfa_failed_level) and the recovery ends; it
+// also lapses after a minute.
+using WorldLoadFn = unsigned(__fastcall*)(void* world);
+using SetStateFn = void(__cdecl*)(int state, bool now);
+using QuitAskedFn = bool(__cdecl*)();
+constexpr DWORD kWorldLoad = 0x6C8940;
+constexpr size_t kWorldLoadPrologue = 9;   // push ebp / mov ebp,esp / sub esp,9Ch
+constexpr DWORD kSetState = 0x53FCD0;
+constexpr size_t kSetStatePrologue = 6;    // push ebp / mov ebp,esp / sub esp,10h
+constexpr DWORD kQuitAsked = 0xCB1150;
+constexpr size_t kQuitAskedPrologue = 8;   // push ebp / mov ebp,esp / mov al,byte ptr [293A88Ah]
+constexpr int kStateExit = 0x14, kStateFrontEnd = 0;
+WorldLoadFn g_worldLoad = nullptr;
+SetStateFn g_setState = nullptr;
+QuitAskedFn g_quitAsked = nullptr;
+SRWLOCK g_failedLock = SRWLOCK_INIT;
+std::string g_failedLevel;               // for the main menu's message, until it has shown it
+volatile ULONGLONG g_failedAt = 0;       // when it failed (0: not recovering)
+volatile bool g_failedCloseLogged = false;
+
+bool RecoveringFromFailedLoad() {
+    const ULONGLONG at = g_failedAt;
+    return at != 0 && GetTickCount64() - at < 60000;
+}
+
+unsigned __fastcall WorldLoadHook(void* world) {
+    auto bytes = static_cast<const char*>(world);
+    // (Not a load put off or called off: those return false too, with these set.)
+    const bool real = *reinterpret_cast<const int*>(bytes + 0x23F4) == 0 && !(static_cast<BYTE>(bytes[0x2514]) & 0x24);
+    const unsigned loaded = g_worldLoad(world);
+    if (real && !(loaded & 0xFF)) {
+        char name[128];
+        strncpy_s(name, bytes + 0x2554, _TRUNCATE);
+        AcquireSRWLockExclusive(&g_failedLock);
+        g_failedLevel = name;
+        ReleaseSRWLockExclusive(&g_failedLock);
+        g_failedCloseLogged = false;
+        g_failedAt = GetTickCount64();
+        rfa::Log("Level %s failed to load (its archive wasn't found, or its files couldn't be read): back to the main menu", name);
+    }
+    return loaded;
+}
+
+void __cdecl SetStateHook(int state, bool now) {
+    if (state == kStateExit && RecoveringFromFailedLoad()) {
+        rfa::Log("The game was about to close after the failed load: it goes to the main menu instead");
+        state = kStateFrontEnd;
+    }
+    g_setState(state, now);
+}
+
+bool __cdecl QuitAskedHook() {
+    const bool asked = g_quitAsked();
+    if (!asked || !RecoveringFromFailedLoad()) return asked;
+    *reinterpret_cast<volatile BYTE*>(0x293A88A) = 0;
+    if (!g_failedCloseLogged) {
+        g_failedCloseLogged = true;
+        rfa::Log("The game's window was told to close while it went back from the failed load: it stays open");
+    }
+    return false;
+}
+
+void InstallLoadFailure() {
+    g_worldLoad = reinterpret_cast<WorldLoadFn>(rfa::HookFunction(kWorldLoad, kWorldLoadPrologue, reinterpret_cast<void*>(&WorldLoadHook)));
+    if (!g_worldLoad) {
+        rfa::Log("Could not hook the world load; a level that fails to load may close the game");
+        return;
+    }
+    g_setState = reinterpret_cast<SetStateFn>(rfa::HookFunction(kSetState, kSetStatePrologue, reinterpret_cast<void*>(&SetStateHook)));
+    g_quitAsked = reinterpret_cast<QuitAskedFn>(rfa::HookFunction(kQuitAsked, kQuitAskedPrologue, reinterpret_cast<void*>(&QuitAskedHook)));
+    if (!g_setState || !g_quitAsked) rfa::Log("Could not hook the game's exit; a level that fails to load may still close the game");
+}
+
+// Lua: rfa_failed_level() -> the level that failed to load since the main menu last asked, and whether it is a custom
+// one (no archive of the game's), or nil. Asking ends the recovery (see above).
+int __cdecl LuaFailedLevel(lua_State* L) {
+    AcquireSRWLockExclusive(&g_failedLock);
+    const std::string name = g_failedLevel;
+    g_failedLevel.clear();
+    ReleaseSRWLockExclusive(&g_failedLock);
+    g_failedAt = 0;
+    if (name.empty()) {
+        rfa::game::lua_pushnil(L);
+        return 1;
+    }
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    const std::wstring archive = gameDir + L"\\build\\pc\\cache\\" + std::wstring(name.begin(), name.end()) + L".vpp_pc";
+    rfa::game::lua_pushstring(L, name.c_str());
+    rfa::game::lua_pushboolean(L, GetFileAttributesW(archive.c_str()) == INVALID_FILE_ATTRIBUTES);
+    return 2;
+}
+
+int __cdecl LuaProcessingPopup(lua_State* L) {
+    const bool on = rfa::game::lua_toboolean(L, 1) != 0;
+    if (on) {
+        g_haltHeldUntil = GetTickCount64() + 2000;
+        if (*reinterpret_cast<volatile int*>(0x10FB830) != kHaltOurs) g_haltShow(kHaltOurs, false);
+    } else {
+        g_haltHeldUntil = 0;
+        g_haltReleasing = true;
+        g_haltHide(true);
+        g_haltReleasing = false;
+    }
+    return 0;
+}
+
 // Lua: rfa_get_setting(section, key, default) -> number from rfa_mods.ini
 int __cdecl LuaGetSetting(lua_State* L) {
     using namespace rfa::game;
@@ -1138,6 +1400,7 @@ int __cdecl LuaSetSetting(lua_State* L) {
     if (rfa::IniInt(sectionW, keyW, value + 1) == value) return 0;  // unchanged
     WritePrivateProfileStringW(sectionW, keyW, std::to_wstring(value).c_str(), rfa::IniPath().c_str());
     rfa::Log("Menu changed [%s] %s=%d", section, key, value);
+    if (_stricmp(section, "MainMenu") == 0 && _stricmp(key, "Music") == 0) MenuMusicChanged(value);
     using SettingChangedFn = void(__cdecl*)(const char*, const char*);
     for (HMODULE mod : g_mods)
         if (auto changed = reinterpret_cast<SettingChangedFn>(GetProcAddress(mod, "RFAMod_SettingChanged")))
@@ -1152,6 +1415,363 @@ int __cdecl LuaLog(lua_State* L) {
     return 0;
 }
 
+// ---- The level editor, from the game's main menu (ui_main_menu_pc.lua's Level editor) ----------------
+//
+// rfa_open_level_editor([mode]) starts editor\RfaEditor.exe (with a mode, on New level for it); rfa_custom_levels() returns the names of the Ruin
+// levels made with the editor's New level (the rows of our wrecking_crew_maps.xtbl whose archive the game
+// folder hasn't); rfa_delete_custom_level(name) starts the editor with no window to delete one, all of it,
+// as its Delete level does, and rfa_delete_custom_level_done() says when that has finished: nil while it
+// runs, then the editor's exit code (0 deleted, 1 not a level of ours, 2 no game folder, 3 couldn't).
+
+// One of the mod's tools in editor\ (RfaEditor.exe, GuerrillaBuilder.exe), started with its folder as its own.
+bool StartTool(const wchar_t* name, const std::wstring& arguments, bool window, HANDLE* process) {
+    const std::wstring exe = rfa::RootDir() + L"\\editor\\" + name;
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        rfa::Log("Main menu: %ls isn't there (build the editor, or copy bin\\editor\\ next to the loader)", exe.c_str());
+        return false;
+    }
+    std::wstring command = L"\"" + exe + L"\"" + (arguments.empty() ? L"" : L" " + arguments);
+    STARTUPINFOW startup{sizeof(startup)};
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = window ? SW_SHOWNORMAL : SW_HIDE;
+    PROCESS_INFORMATION info{};
+    const std::wstring folder = rfa::RootDir() + L"\\editor";
+    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, window ? 0 : CREATE_NO_WINDOW, nullptr,
+                        folder.c_str(), &startup, &info)) {
+        rfa::Log("Main menu: %ls couldn't be started (error %lu)", exe.c_str(), GetLastError());
+        return false;
+    }
+    CloseHandle(info.hThread);
+    if (process) *process = info.hProcess;
+    else CloseHandle(info.hProcess);
+    return true;
+}
+
+bool StartEditor(const std::wstring& arguments, bool window, HANDLE* process) {
+    return StartTool(L"RfaEditor.exe", arguments, window, process);
+}
+
+// Lua: rfa_guerrilla_world_built() -> whether editor\GuerrillaBuilder.exe has made the Guerrilla world
+// (its archives, overrides\build\pc\cache\rfg_l0.vpp_pc and rfg_l1.vpp_pc)
+int __cdecl LuaGuerrillaWorldBuilt(lua_State* L) {
+    const std::wstring cache = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\";
+    const bool built = GetFileAttributesW((cache + L"rfg_l0.vpp_pc").c_str()) != INVALID_FILE_ATTRIBUTES ||
+                       GetFileAttributesW((cache + L"rfg_l1.vpp_pc").c_str()) != INVALID_FILE_ATTRIBUTES;
+    rfa::game::lua_pushboolean(L, built);
+    return 1;
+}
+
+// Lua: rfa_console_command(line) -> true if rfa_qol's console will run it (as typed) at the start of the next
+// frame: not from inside the menu's script, which a level load would take away under it.
+int __cdecl LuaConsoleCommand(lua_State* L) {
+    const char* line = rfa::game::lua_tolstring(L, 1, nullptr);
+    using QueueFn = int(__cdecl*)(const char*);
+    bool queued = false;
+    for (HMODULE mod : g_mods)
+        if (auto queue = reinterpret_cast<QueueFn>(GetProcAddress(mod, "RFAQol_QueueConsoleCommand")))
+            if (!queued) queued = queue(line) != 0;
+    if (!queued) rfa::Log("Main menu: \"%s\" couldn't be run: it needs rfa_qol's console (console=1 under [Mods])", line ? line : "");
+    rfa::game::lua_pushboolean(L, queued);
+    return 1;
+}
+
+// Lua: rfa_open_guerrilla_builder() -> true if editor\GuerrillaBuilder.exe was started
+int __cdecl LuaOpenGuerrillaBuilder(lua_State* L) {
+    const bool started = StartTool(L"GuerrillaBuilder.exe", L"", true, nullptr);
+    if (started) rfa::Log("Guerrilla builder started from the main menu");
+    rfa::game::lua_pushboolean(L, started);
+    return 1;
+}
+
+// The editor started from the menu, and the event it sets once it has read (indexed) the game's files
+// (Local\RFAModEditorReady: RfaEditor's MainWindow sets it after "Ready: ... files can be searched").
+HANDLE g_editorStarted = nullptr;
+HANDLE g_editorReady = nullptr;
+
+// Lua: rfa_level_editor_ready() -> nil while the editor started from the menu is reading the game's files,
+// true once it has, false if it closed first (or wasn't started).
+int __cdecl LuaLevelEditorReady(lua_State* L) {
+    if (g_editorReady && WaitForSingleObject(g_editorReady, 0) == WAIT_OBJECT_0) {
+        rfa::game::lua_pushboolean(L, 1);
+        return 1;
+    }
+    if (g_editorStarted && WaitForSingleObject(g_editorStarted, 0) == WAIT_TIMEOUT) {
+        rfa::game::lua_pushnil(L);
+        return 1;
+    }
+    rfa::game::lua_pushboolean(L, 0);
+    return 1;
+}
+
+// An editor that is open already is asked over its pipe (\\.\pipe\RFAModEditor, the editor's GameMenuPipe) instead of
+// starting another: one line, the arguments; it answers with its process id, which is watched as a started one is.
+bool SendToOpenEditor(const std::wstring& arguments, HANDLE* process) {
+    const wchar_t* name = L"\\\\.\\pipe\\RFAModEditor";
+    HANDLE pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY && WaitNamedPipeW(name, 2000))
+        pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) return false;  // no editor open
+    std::string line;
+    for (wchar_t c : arguments) line.push_back(static_cast<char>(c));  // (ASCII: the menu keeps to it)
+    line.push_back('\n');
+    DWORD written = 0, read = 0;
+    char answer[32] = {};
+    const bool sent = WriteFile(pipe, line.data(), static_cast<DWORD>(line.size()), &written, nullptr) && written == line.size() &&
+                      ReadFile(pipe, answer, sizeof(answer) - 1, &read, nullptr) && read > 0;
+    const DWORD error = sent ? 0 : GetLastError();
+    CloseHandle(pipe);
+    if (!sent) {
+        rfa::Log("Main menu: the open level editor didn't answer (error %lu); starting another", error);
+        return false;
+    }
+    const DWORD pid = strtoul(answer, nullptr, 10);
+    if (process) {
+        *process = pid ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+        if (!*process) *process = GetCurrentProcess();  // (can't watch it: taken as open, which it is)
+    }
+    rfa::Log("Main menu: the level editor was open already (pid %lu): it was asked instead of starting another", pid);
+    return true;
+}
+
+// Lua: rfa_open_level_editor([mode]) -> true if the editor was started (or the open one asked). With "ruin" or "infestation" it
+// opens New level for that mode, as a base, once it has read the game's files.
+// rfa_open_level_editor(mode, name, display, ground, size, textures, sky, replace): the Create level page chose it all
+// (ground "new" or "none", size in metres, textures a level of the game's or "" for the first, replace: make the
+// editor's level of that name again); the editor makes the level with no dialog once it has read the files, and opens it.
+int __cdecl LuaOpenLevelEditor(lua_State* L) {
+    using namespace rfa::game;
+    const int given = lua_gettop(L);
+    auto Text = [&](int at) -> std::string {
+        const char* text = given >= at ? lua_tolstring(L, at, nullptr) : nullptr;
+        return text ? text : "";
+    };
+    auto Wide = [](const std::string& text) { return std::wstring(text.begin(), text.end()); };  // (ASCII: the menu keeps to it)
+    auto Quoted = [&](const std::string& text) { return L"\"" + Wide(text) + L"\""; };
+    const std::string mode = Text(1), name = Text(2);
+    const bool known = _stricmp(mode.c_str(), "ruin") == 0 || _stricmp(mode.c_str(), "infestation") == 0;
+    // --dock: the editor docks this game in its Game panel.
+    std::wstring arguments = L"--dock";
+    if (known) arguments += L" --new-level " + Wide(mode);
+    // The Create level page chose everything: the editor makes the level with no dialog (see its App.xaml.cs).
+    const bool chosen = known && !name.empty();
+    if (chosen) {
+        const int size = given >= 5 ? static_cast<int>(lua_tonumber(L, 5)) : 255;
+        arguments += L" --name " + Quoted(name) + L" --display " + Quoted(Text(3)) +
+                     L" --ground " + (Text(4) == "none" ? L"none" : L"new") + L" --size " + std::to_wstring(size) +
+                     L" --textures " + Quoted(Text(6)) + L" --sky " + Quoted(Text(7));
+        if (given >= 8 && lua_toboolean(L, 8)) arguments += L" --replace";
+    }
+    if (!g_editorReady) g_editorReady = CreateEventW(nullptr, TRUE, FALSE, L"Local\\RFAModEditorReady");
+    if (g_editorReady) ResetEvent(g_editorReady);
+    if (g_editorStarted) CloseHandle(g_editorStarted);
+    g_editorStarted = nullptr;
+    const bool started = SendToOpenEditor(arguments, &g_editorStarted) || StartEditor(arguments, true, &g_editorStarted);
+    if (started && chosen) rfa::Log("Level editor started from the main menu to make %s, a new %s level", name.c_str(), mode.c_str());
+    else if (started) rfa::Log(known ? "Level editor started from the main menu, for a new %s level" : "Level editor started from the main menu%s",
+                               known ? mode.c_str() : "");
+    lua_pushboolean(L, started);
+    return 1;
+}
+
+// ---- Level editor > Create level, the menu's own page ------------------------------------------------------------
+
+// A file name New level takes: lower case letters, digits and _, 2 to 31, a letter first (as the editor checks).
+bool GoodLevelName(const std::string& name) {
+    if (name.size() < 2 || name.size() > 31 || name[0] < 'a' || name[0] > 'z') return false;
+    for (char c : name)
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    return true;
+}
+
+// "ok", "bad" (not a file name New level takes), "game" (one of the game's own levels) or "taken" (a level the editor
+// made already: it can be made again, new).
+const char* LevelNameCheck(const std::string& name) {
+    if (!GoodLevelName(name)) return "bad";
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    const std::wstring archive = L"\\build\\pc\\cache\\" + std::wstring(name.begin(), name.end()) + L".vpp_pc";
+    if (GetFileAttributesW((rfa::RootDir() + L"\\overrides" + archive).c_str()) != INVALID_FILE_ATTRIBUTES) return "taken";
+    if (GetFileAttributesW((gameDir + archive).c_str()) != INVALID_FILE_ATTRIBUTES) return "game";
+    return "ok";
+}
+
+// Lua: rfa_new_level_check(name) -> "ok", "bad", "game" or "taken" (see LevelNameCheck)
+int __cdecl LuaNewLevelCheck(lua_State* L) {
+    const char* name = rfa::game::lua_tolstring(L, 1, nullptr);
+    rfa::game::lua_pushstring(L, LevelNameCheck(name ? name : ""));
+    return 1;
+}
+
+// Lua: rfa_new_level_suggest(mode) -> a free file name for a new level of the mode: custom_ruin_01, custom_ruin_02...
+int __cdecl LuaNewLevelSuggest(lua_State* L) {
+    const char* mode = rfa::game::lua_tolstring(L, 1, nullptr);
+    const std::string stem = (mode && _stricmp(mode, "infestation") == 0) ? "custom_infestation_" : "custom_ruin_";
+    std::string name = stem + "01";
+    for (int n = 1; n < 100; ++n) {
+        char number[4];
+        sprintf_s(number, "%02d", n);
+        if (strcmp(LevelNameCheck(stem + number), "ok") == 0) {
+            name = stem + number;
+            break;
+        }
+    }
+    rfa::game::lua_pushstring(L, name.c_str());
+    return 1;
+}
+
+// What the page offers for ground textures and sky: editor\new_level_choices.txt, which the editor writes each time it
+// has read the game's files (texture=<level> and sky=<sky> lines). Read again each time the page asks how many.
+std::vector<std::string> g_choiceTextures, g_choiceSkies;
+
+void ReadNewLevelChoices() {
+    g_choiceTextures.clear();
+    g_choiceSkies.clear();
+    const std::wstring path = rfa::RootDir() + L"\\editor\\new_level_choices.txt";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    std::string text(GetFileSize(file, nullptr), '\0');
+    DWORD read = 0;
+    const bool ok = !text.empty() && ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+    CloseHandle(file);
+    if (!ok) return;
+    text.resize(read);
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.rfind("texture=", 0) == 0 && line.size() > 8) g_choiceTextures.push_back(line.substr(8));
+        else if (line.rfind("sky=", 0) == 0 && line.size() > 4) g_choiceSkies.push_back(line.substr(4));
+    }
+}
+
+// Lua: rfa_new_level_choices(kind) -> how many there are of "texture" or "sky" (0: the editor hasn't listed them yet)
+int __cdecl LuaNewLevelChoices(lua_State* L) {
+    const char* kind = rfa::game::lua_tolstring(L, 1, nullptr);
+    ReadNewLevelChoices();
+    const auto& list = (kind && strcmp(kind, "sky") == 0) ? g_choiceSkies : g_choiceTextures;
+    rfa::game::lua_pushnumber(L, static_cast<double>(list.size()));
+    return 1;
+}
+
+// Lua: rfa_new_level_choice(kind, n) -> the n'th (from 1) of rfa_new_level_choices' list, or nil
+int __cdecl LuaNewLevelChoice(lua_State* L) {
+    const char* kind = rfa::game::lua_tolstring(L, 1, nullptr);
+    const int n = static_cast<int>(rfa::game::lua_tonumber(L, 2));
+    const auto& list = (kind && strcmp(kind, "sky") == 0) ? g_choiceSkies : g_choiceTextures;
+    if (n >= 1 && n <= static_cast<int>(list.size())) rfa::game::lua_pushstring(L, list[n - 1].c_str());
+    else rfa::game::lua_pushnil(L);
+    return 1;
+}
+
+// Lua: rfa_text_begin(text, kind) -> true if typing has begun: the keyboard types into `text` ("file": a file name,
+// lower case letters, digits and _, up to 31; anything else: a name, up to 40) until Enter or Esc (see menus.cpp).
+int __cdecl LuaTextBegin(lua_State* L) {
+    const char* text = rfa::game::lua_tolstring(L, 1, nullptr);
+    const char* kind = rfa::game::lua_tolstring(L, 2, nullptr);
+    const bool file = kind && strcmp(kind, "file") == 0;
+    rfa::game::lua_pushboolean(L, BeginTyping(text ? text : "", file, file ? 31 : 40));
+    return 1;
+}
+
+// Lua: rfa_text_state() -> what is typed, and -1 (not typing), 0 (typing), 1 (Enter: kept) or 2 (Esc: put back)
+int __cdecl LuaTextState(lua_State* L) {
+    std::string text;
+    const int state = TypingState(&text);
+    rfa::game::lua_pushstring(L, text.c_str());
+    rfa::game::lua_pushnumber(L, state);
+    return 2;
+}
+
+// Lua: rfa_text_end() -> the keyboard is the game's again
+int __cdecl LuaTextEnd(lua_State*) {
+    EndTyping();
+    return 0;
+}
+
+// The Ruin levels made with New level: rows of our wrecking_crew_maps.xtbl (the editor writes it to
+// table.vpp_pc's folder in overrides\, or misc.vpp_pc's: every table is in both) with no game archive.
+std::vector<std::string> CustomRuinLevels() {
+    std::vector<std::string> levels;
+    std::wstring gameDir = rfa::game::InstalledExePath();
+    gameDir.resize(gameDir.find_last_of(L'\\'));
+    for (const wchar_t* archive : {L"table.vpp_pc", L"misc.vpp_pc"}) {
+        const std::wstring path = rfa::RootDir() + L"\\overrides\\build\\pc\\cache\\" + archive + L"\\wrecking_crew_maps.xtbl";
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE) continue;
+        std::string text(GetFileSize(file, nullptr), '\0');
+        DWORD read = 0;
+        const bool ok = !text.empty() && ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+        CloseHandle(file);
+        if (!ok) continue;
+        text.resize(read);
+        for (size_t row = text.find("<wc_map_list>"); row != std::string::npos; row = text.find("<wc_map_list>", row + 1)) {
+            const size_t end = text.find("</wc_map_list>", row);
+            const size_t open = text.find("<file_name>", row);
+            if (end == std::string::npos || open == std::string::npos || open > end) continue;
+            const size_t start = open + 11, close = text.find("</file_name>", start);
+            if (close == std::string::npos || close > end) continue;
+            std::string name = text.substr(start, close - start);
+            name.erase(0, name.find_first_not_of(" \t\r\n"));
+            name.erase(name.find_last_not_of(" \t\r\n") + 1);
+            if (name.empty() || name.find_first_of("\\/:*?\"<>| ") != std::string::npos) continue;
+            const std::wstring wide(name.begin(), name.end());
+            if (GetFileAttributesW((gameDir + L"\\build\\pc\\cache\\" + wide + L".vpp_pc").c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+            if (std::find(levels.begin(), levels.end(), name) == levels.end()) levels.push_back(name);
+        }
+        break;  // the first copy found is the one the game reads
+    }
+    return levels;
+}
+
+// Lua: rfa_custom_levels() -> the names, as separate values ({rfa_custom_levels()} makes a list)
+int __cdecl LuaCustomLevels(lua_State* L) {
+    const std::vector<std::string> levels = CustomRuinLevels();
+    for (const std::string& level : levels) rfa::game::lua_pushstring(L, level.c_str());
+    return static_cast<int>(levels.size());
+}
+
+HANDLE g_deleting = nullptr;  // the editor deleting a level, while it runs
+std::string g_deletingName;
+
+// Lua: rfa_delete_custom_level(name) -> true if the editor was started to delete it
+int __cdecl LuaDeleteCustomLevel(lua_State* L) {
+    const char* name = rfa::game::lua_tolstring(L, 1, nullptr);
+    bool started = false;
+    if (g_deleting) rfa::Log("Delete custom level: already deleting %s", g_deletingName.c_str());
+    else if (name) {
+        const std::vector<std::string> levels = CustomRuinLevels();
+        if (std::find(levels.begin(), levels.end(), std::string(name)) == levels.end())
+            rfa::Log("Delete custom level: %s isn't a level made with the editor", name);
+        else if ((started = StartEditor(L"--delete-level " + std::wstring(name, name + strlen(name)), false, &g_deleting))) {
+            g_deletingName = name;
+            rfa::Log("Delete custom level: the editor is deleting %s (what it does goes to logs\\editor.log)", name);
+        }
+    }
+    rfa::game::lua_pushboolean(L, started);
+    return 1;
+}
+
+// Lua: rfa_delete_custom_level_done() -> nil while the editor is deleting, else its exit code (0: deleted)
+int __cdecl LuaDeleteCustomLevelDone(lua_State* L) {
+    if (g_deleting && WaitForSingleObject(g_deleting, 0) == WAIT_TIMEOUT) {
+        rfa::game::lua_pushnil(L);
+        return 1;
+    }
+    DWORD code = 0;
+    if (g_deleting) {
+        GetExitCodeProcess(g_deleting, &code);
+        CloseHandle(g_deleting);
+        g_deleting = nullptr;
+        rfa::Log(code == 0 ? "Delete custom level: %s deleted; the game reads its map list at start-up, so restart it"
+                           : "Delete custom level: %s wasn't deleted (editor exit code %lu)", g_deletingName.c_str(), code);
+    }
+    rfa::game::lua_pushnumber(L, static_cast<double>(code));
+    return 1;
+}
+
 // Runs instead of the game's function that registers its C functions with the menu Lua state:
 // lets it do that, then adds ours, then each mod's: a mod that exports
 //     extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(rfa::game::lua_State* L);
@@ -1162,7 +1782,25 @@ void __cdecl RegisterLuaFunctions(lua_State* L) {
     lua_register(L, "rfa_get_setting", LuaGetSetting);
     lua_register(L, "rfa_set_setting", LuaSetSetting);
     lua_register(L, "rfa_log", LuaLog);
-    rfa::Log("Added rfa_get_setting, rfa_set_setting and rfa_log to the game's menu Lua");
+    lua_register(L, "rfa_open_level_editor", LuaOpenLevelEditor);
+    lua_register(L, "rfa_custom_levels", LuaCustomLevels);
+    lua_register(L, "rfa_delete_custom_level", LuaDeleteCustomLevel);
+    lua_register(L, "rfa_delete_custom_level_done", LuaDeleteCustomLevelDone);
+    lua_register(L, "rfa_guerrilla_world_built", LuaGuerrillaWorldBuilt);
+    lua_register(L, "rfa_open_guerrilla_builder", LuaOpenGuerrillaBuilder);
+    lua_register(L, "rfa_console_command", LuaConsoleCommand);
+    lua_register(L, "rfa_level_editor_ready", LuaLevelEditorReady);
+    lua_register(L, "rfa_load_ui_pack", LuaLoadUiPack);
+    lua_register(L, "rfa_processing_popup", LuaProcessingPopup);
+    lua_register(L, "rfa_failed_level", LuaFailedLevel);
+    lua_register(L, "rfa_new_level_check", LuaNewLevelCheck);
+    lua_register(L, "rfa_new_level_suggest", LuaNewLevelSuggest);
+    lua_register(L, "rfa_new_level_choices", LuaNewLevelChoices);
+    lua_register(L, "rfa_new_level_choice", LuaNewLevelChoice);
+    lua_register(L, "rfa_text_begin", LuaTextBegin);
+    lua_register(L, "rfa_text_state", LuaTextState);
+    lua_register(L, "rfa_text_end", LuaTextEnd);
+    rfa::Log("Added rfa_get_setting, rfa_set_setting, rfa_log and the level editor's functions to the game's menu Lua");
     WatchLuaErrors();
     rfa::Log("Lua script errors go to this log (\"Lua error: ...\")");
     using RegisterLuaFn = void(__cdecl*)(lua_State*);
@@ -1270,7 +1908,11 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
         InstallOverrides();
         InstallRuinQuit();
         InstallLuaFunctions();
+        InstallProcessingHold();
+        InstallLoadFailure();
         InstallMenus(&g_mods);
+        InstallMenuMusic();
+        FindUiPack();
     }
 
     const std::wstring dir = rfa::RootDir() + L"\\mods\\";
