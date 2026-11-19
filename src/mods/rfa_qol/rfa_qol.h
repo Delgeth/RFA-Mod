@@ -51,6 +51,13 @@ namespace streaming {
 void Init();
 }
 
+// Enemies that fight in Ruin levels ([Ruin] HostileAI=; ruin_ai.cpp).
+namespace ruin_ai {
+void Init();
+// A setting changed in the game's menus (RFAMod_SettingChanged).
+void SettingChanged(const char* section, const char* key);
+}  // namespace ruin_ai
+
 // Live analysis mod: named pipe interface for external debugging/profiling tools.
 namespace live_analysis {
 void Init();

@@ -11,6 +11,7 @@
 //   graphics        Graphics in the in-game menus: the ported world's     [GuerrillaWorld]
 //                   picture settings, saved as you change them
 //   streaming       a fix for a race in the game's zone stream-out         (no settings)
+//   ruin_ai         enemies that fight in Ruin levels (editor-made ones)  [Ruin]
 //                   (two worker threads; a crash when zones stream out)
 //   live analysis   a pipe for the MCP servers (live_analysis_mcp.exe):    [Mcp]
 //                   only when [Mcp] Enabled=1 (off by default)
@@ -56,6 +57,7 @@ bool g_fovRunning = false;
 bool g_spawnerRunning = false;
 bool g_limitsRunning = false;
 bool g_graphicsRunning = false;
+bool g_ruinAiRunning = false;
 
 }  // namespace
 
@@ -70,6 +72,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     g_limitsRunning = StartPart(L"limits", limits::Init);
     g_graphicsRunning = StartPart(L"graphics", graphics::Init);
     StartPart(L"streaming", streaming::Init);
+    g_ruinAiRunning = StartPart(L"ruin_ai", ruin_ai::Init);
     // The live analysis pipe lets a program on this PC read and change the running game, for the MCP
     // servers. It is opened only when the player turns the MCP servers on ([Mcp] Enabled=1).
     if (rfa::IniInt(L"Mcp", L"Enabled", 0))
@@ -84,9 +87,10 @@ extern "C" __declspec(dllexport) int __cdecl RFAQol_QueueConsoleCommand(const ch
     return g_consoleRunning && console::QueueCommand(line) ? 1 : 0;
 }
 
-// The game's menus changed a setting: only fov listens.
+// The game's menus changed a setting: fov and ruin_ai listen.
 extern "C" __declspec(dllexport) void __cdecl RFAMod_SettingChanged(const char* section, const char* key) {
     if (g_fovRunning) fov::SettingChanged(section, key);
+    if (g_ruinAiRunning) ruin_ai::SettingChanged(section, key);
 }
 
 // The in-game menus (rfa_menu.h): the spawner's, the limits' and the graphics'.

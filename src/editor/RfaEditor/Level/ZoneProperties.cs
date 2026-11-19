@@ -579,15 +579,9 @@ sealed class ZonePropertyRows
                         navpointTypeProp ??= rows.schema?.Base?.Property(NameHashes.PropertyHash("navpoint_type"));
                         return NavpointEditor(property, navpoint, navpointTypeProp);
                     }
-                    // Road/spline editors for object_path_road and object_spline (from RFG PDB cross-decompilation)
-                    if (name.Equals("path_road_data", StringComparison.OrdinalIgnoreCase) && RoadData.FromBytes(property.Value) is { } roadData)
-                    {
-                        return RoadEditor(property, roadData);
-                    }
-                    if (name.Equals("object_spline_data", StringComparison.OrdinalIgnoreCase) && SplineData.FromBytes(property.Value) is { } splineData)
-                    {
-                        return SplineEditor(property, splineData);
-                    }
+                    // A road's and a spline's packed data (path_road_data, object_spline_data) go to the hex editor below:
+                    // RoadEditor and SplineEditor guessed at layouts that aren't the game's (a Guerrilla road's spline type
+                    // read as -1003239117 crashed the inspector), and wrote back 8 or 16 bytes over the whole of it.
                     // Specific link/logic editors (from RFG PDB cross-decompilation)
                     if (name.Equals("obj_links", StringComparison.OrdinalIgnoreCase))
                     {
@@ -920,7 +914,7 @@ sealed class ZonePropertyRows
                     TextWrapping = TextWrapping.Wrap,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                     MaxHeight = 200,
-                    Background = Theme.Brush("BackgroundBrush"),
+                    Background = Theme.Brush("InputBrush"),
                     BorderBrush = Theme.Brush("StrongBorderBrush"),
                     BorderThickness = new Thickness(1)
                 };

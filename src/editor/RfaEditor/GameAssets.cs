@@ -399,6 +399,45 @@ public sealed class GameAssets
         return headers.Count == 0 ? null : Package("effects", headers, null, out _);
     }
 
+    /// <summary>
+    /// The animations these animated rigs (object_anim_rig's rig_name: anim_rig_objects.xtbl entries) play, those
+    /// <paramref name="present"/> says the level hasn't: every state's and action's file (x.animx, kept as x.anim_pc).
+    /// A level only has them where its world's containers do (Infestation's precache has the monoliths' and tentacles';
+    /// a Ruin level none), and a rig without them doesn't move. As a package to bring into a level's containers; null if
+    /// there is nothing to bring. <paramref name="missing"/> names the rigs it was for.
+    /// </summary>
+    public ChunkPackage? RigAnimationPackageFor(IEnumerable<string> rigs, Func<string, bool> present, out List<string> missing)
+    {
+        missing = [];
+        ReadAssetLists();
+        if (files == null || Table("anim_rig_objects.xtbl") is not { } table) return null;
+        var headers = new List<string>();
+        foreach (string rig in rigs.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (table.Entries.FirstOrDefault(e => XtblFile.EntryName(e).Equals(rig, StringComparison.OrdinalIgnoreCase)) is not { } entry) continue;
+            bool any = false;
+            foreach (string clip in RigFiles(entry).Where(f => f.EndsWith(".animx", StringComparison.OrdinalIgnoreCase)))
+            {
+                string header = Path.ChangeExtension(clip, ".anim_pc");
+                if (present(header) || headers.Contains(header, StringComparer.OrdinalIgnoreCase) || !files.ContainsKey(header)) continue;
+                headers.Add(header);
+                any = true;
+            }
+            if (any) missing.Add(rig);
+        }
+        return headers.Count == 0 ? null : Package("rig animations", headers, null, out _);
+    }
+
+    /// <summary>Every file an entry names (its Filename fields, at any depth).</summary>
+    static IEnumerable<string> RigFiles(XtblElement element)
+    {
+        foreach (XtblElement child in element.Elements)
+        {
+            if (child.Name.Equals("Filename", StringComparison.OrdinalIgnoreCase) && !child.HasElements && child.Value.Trim().Length > 0) yield return child.Value.Trim();
+            foreach (string inside in RigFiles(child)) yield return inside;
+        }
+    }
+
     /// <summary>The textures a version-36 effect file names (its bitmaps: a count at +0x1C, a list of their names' offsets at +0x20).</summary>
     static IEnumerable<string> EffectTextures(byte[] effect)
     {
@@ -437,6 +476,7 @@ public sealed class GameAssets
                 {
                     ".cchk_pc" or ".cstch_pc" => ((byte)2, (byte)1, (byte)6, (byte)0),
                     ".cefct_pc" => ((byte)13, (byte)1, (byte)6, (byte)0),
+                    ".anim_pc" => ((byte)16, (byte)1, (byte)2, (byte)0),
                     ".cpeg_pc" or ".cvbm_pc" => ((byte)1, (byte)1, (byte)6, (byte)1),
                     _ => ((byte)0, (byte)0, (byte)0, (byte)0),
                 };
