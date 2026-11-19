@@ -32,7 +32,7 @@ public static class NavigationBuilder
     /// <paramref name="place"/> in the world's grid (column × 16 + row: the single-zone levels' 0x88).
     /// Cells about <paramref name="step"/> m across.
     /// </summary>
-    public static NavigationFile FlatSquare(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place = 0x88, float step = 4) =>
+    public static NavigationFile FlatSquare(Vector2 centre, float half, float height, Vector2 zoneCorner, float zoneWidth, byte place = 0x88, float step = 2) =>
         FromGround((_, _) => height, centre, half, zoneCorner, zoneWidth, place, step);
 
     /// <summary>
@@ -44,7 +44,7 @@ public static class NavigationBuilder
     /// above it: the 300 m drop round a new level's square). Islands are numbered by what joins.
     /// </summary>
     public static NavigationFile FromGround(Func<float, float, float> height, Vector2 centre, float half, Vector2 zoneCorner, float zoneWidth,
-                                            byte place = 0x88, float step = 4, float steepest = 42, float steepestForVehicles = 30)
+                                            byte place = 0x88, float step = 2, float steepest = 42, float steepestForVehicles = 30)
     {
         var (people, peopleTree) = Grid(height, centre, half, zoneCorner, zoneWidth, place, step, vehicles: false, steepest);
         var (vehicles, vehiclesTree) = Grid(height, centre, half, zoneCorner, zoneWidth, place, step, vehicles: true, steepestForVehicles);
@@ -54,7 +54,11 @@ public static class NavigationBuilder
     static (NavigationLayer Layer, byte[] Tree) Grid(Func<float, float, float> height, Vector2 centre, float half, Vector2 zoneCorner, float zoneWidth, byte place,
                                                      float step, bool vehicles, float steepest)
     {
-        int n = Math.Clamp((int)MathF.Ceiling(2 * half / step), 1, 120);
+        // 2 m squares (4 m before): the game switches off the cells a building or a parked vehicle stands on,
+        // and with big cells that took the ground at their doors too (the player walked round and round a
+        // vehicle to get in; doorway navpoints found no cell; the mesh fell into pieces). 127 squares a side
+        // is 32,258 cells, just under the cap below, and 16,384 vertices.
+        int n = Math.Clamp((int)MathF.Ceiling(2 * half / step), 1, 127);
         float s = 2 * half / n, x0 = centre.X - half, z0 = centre.Y - half;
         var grid = new Vector3[(n + 1) * (n + 1)];
         for (int j = 0; j <= n; j++)
