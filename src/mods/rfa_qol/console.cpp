@@ -411,11 +411,20 @@ HANDLE g_modLog = INVALID_HANDLE_VALUE;
 LONGLONG g_modLogRead = 0;  // how much of it the console has
 std::string g_modLogRest;   // the start of a line still being written
 
+// A mod's routine line, "[module:log] text" (rfa_mod.h's rfa::LogDetail): for the file only.
+bool IsDetailLine(const std::string& line) {
+    if (line.empty() || line[0] != '[') return false;
+    const size_t end = line.find(']');
+    return end != std::string::npos && end >= 4 && line.compare(end - 4, 4, ":log") == 0;
+}
+
 // "[12:34:56.789] [module] text" without the time, which the console doesn't show for its own lines.
+// The mods' routine lines are left out: the console shows what they found as they started, their
+// problems and the rare changes a player cares about.
 void AddModLine(std::string line) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     if (line.size() > 15 && line[0] == '[' && line[13] == ']' && line[14] == ' ') line.erase(0, 15);
-    if (!line.empty()) AddLine(line, Kind::Mod, false);
+    if (!line.empty() && !IsDetailLine(line)) AddLine(line, Kind::Mod, false);
 }
 
 // On the console's files thread: what the mods wrote to rfa_mods.log since the last look, as whole lines.
@@ -966,7 +975,7 @@ void __cdecl MouseMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             g_wheel += GET_WHEEL_DELTA_WPARAM(wParam);
             for (; g_wheel >= WHEEL_DELTA; g_wheel -= WHEEL_DELTA) Scroll(kLinesPerNotch);
             for (; g_wheel <= -WHEEL_DELTA; g_wheel += WHEEL_DELTA) Scroll(-kLinesPerNotch);
-            RFA_LOG_FIRST(3, "Scrolled the console with the mouse wheel");
+            RFA_LOG_DETAIL_FIRST(3, "Scrolled the console with the mouse wheel");
             return;  // the game doesn't see it
         }
         POINT point = {static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
@@ -982,7 +991,7 @@ void __cdecl MouseMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_RBUTTONUP: button = 2; break;
         }
         if (button >= 0 && ConsoleButton(button, down, inWindow ? &point : nullptr)) {
-            RFA_LOG_FIRST(3, "The console took a mouse click");
+            RFA_LOG_DETAIL_FIRST(3, "The console took a mouse click");
             return;
         }
     } else {
@@ -1259,7 +1268,7 @@ void ApplySection(const char* section) {
                      static_cast<unsigned>(kMaxCommandLength));
             continue;
         }
-        rfa::Log("console.ini [%s]: %s", section, typed.c_str());
+        rfa::LogDetail("console.ini [%s]: %s", section, typed.c_str());
         RunConsoleCommand("%s", typed.c_str());
         ++count;
     }
@@ -1387,7 +1396,7 @@ void Paste() {
                 Kind::Warning);
     if (!g_pasted.empty())
         AddLine("Pasted " + std::to_string(lines.size()) + " lines: Enter runs each in turn, Esc drops the rest", Kind::Info);
-    RFA_LOG_FIRST(3, "Pasted %u line(s) into the console", static_cast<unsigned>(lines.size()));
+    RFA_LOG_DETAIL_FIRST(3, "Pasted %u line(s) into the console", static_cast<unsigned>(lines.size()));
 }
 
 // Tab (in place of the game's 0xC7D200). The game matched the whole line against the command names,
@@ -1571,7 +1580,7 @@ void ShowEditor() {
     InterlockedIncrement(&g_shared->sequence);  // even: done
     if (g_debugTarget != g_lastPicked) {
         g_lastPicked = g_debugTarget;
-        rfa::Log("Editor link: picked 0x%08X", static_cast<unsigned>(g_lastPicked));
+        rfa::LogDetail("Editor link: picked 0x%08X", static_cast<unsigned>(g_lastPicked));
     }
 }
 
@@ -1629,7 +1638,7 @@ void RunEditorCommands() {
                 rfa::Log("Editor link: a command longer than %u characters was skipped", static_cast<unsigned>(kMaxCommandLength));
                 continue;
             }
-            rfa::Log("Editor link: %s", line.c_str());
+            rfa::LogDetail("Editor link: %s", line.c_str());
             RunConsoleCommand("%s", line.c_str());
         }
     }
@@ -1789,7 +1798,7 @@ void SpawnFromNode(DWORD handle, DWORD classHash) {
     }
     NoteSpawned();
     g_nodeSpawned[handle] = spawned;
-    rfa::Log("Editor link: node 0x%08X spawned its %s (0x%08X)", static_cast<unsigned>(handle), what, static_cast<unsigned>(spawned));
+    rfa::LogDetail("Editor link: node 0x%08X spawned its %s (0x%08X)", static_cast<unsigned>(handle), what, static_cast<unsigned>(spawned));
 }
 
 void MakeEditorObject(DWORD handle) {
@@ -1826,7 +1835,8 @@ void MakeEditorObject(DWORD handle) {
     *reinterpret_cast<WORD*>(stubs[0] + kStubNumber) = 0;
     MakeFromStubs(world, nullptr, 1, stubs, blocks);
     const bool made = stubs[0] && FindObject(world, nullptr, handle);
-    rfa::Log(made ? "Editor link: made object 0x%08X" : "Editor link: the game couldn't make object 0x%08X from its block", static_cast<unsigned>(handle));
+    if (made) rfa::LogDetail("Editor link: made object 0x%08X", static_cast<unsigned>(handle));
+    else rfa::Log("Editor link: the game couldn't make object 0x%08X from its block", static_cast<unsigned>(handle));
     if (made) SpawnFromNode(handle, *reinterpret_cast<DWORD*>(block));
 }
 
@@ -1922,10 +1932,10 @@ int GuardedLoadContainer(void* container) {
 
 void LoadEditorChunk(const std::string& assetList, const std::string& container) {
     bool faulted = false;
-    rfa::Log("Editor link: chunk container %s: looking it up", container.c_str());
+    rfa::LogDetail("Editor link: chunk container %s: looking it up", container.c_str());
     void* found = GuardedFindContainer(container.c_str(), &faulted);
     if (!found && !faulted) {
-        rfa::Log("Editor link: chunk container %s: reading the asset list %s", container.c_str(), assetList.c_str());
+        rfa::LogDetail("Editor link: chunk container %s: reading the asset list %s", container.c_str(), assetList.c_str());
         const int read = GuardedReadAssetList(assetList.c_str());
         if (read < 0) rfa::Log("Editor link: reading the asset list FAULTED (exception %08X)", static_cast<unsigned>(-read) | 0x80000000u);
         found = read < 0 ? nullptr : GuardedFindContainer(container.c_str(), &faulted);
@@ -1933,12 +1943,13 @@ void LoadEditorChunk(const std::string& assetList, const std::string& container)
     }
     int load = 0;
     if (found) {
-        rfa::Log("Editor link: chunk container %s: loading it (container record %p)", container.c_str(), found);
+        rfa::LogDetail("Editor link: chunk container %s: loading it (container record %p)", container.c_str(), found);
         load = GuardedLoadContainer(found);
         if (load < 0) rfa::Log("Editor link: loading the container FAULTED (exception %08X)", static_cast<unsigned>(-load) | 0x80000000u);
     }
     const bool loaded = load > 0;
-    rfa::Log("Editor link: chunk container %s %s", container.c_str(), loaded ? "loaded" : "NOT loaded");
+    if (loaded) rfa::LogDetail("Editor link: chunk container %s loaded", container.c_str());
+    else rfa::Log("Editor link: chunk container %s NOT loaded", container.c_str());
     const std::wstring answer = LinkFolder() + L"\\chunk_" + std::wstring(container.begin(), container.end()) + L".txt";
     FILE* file = nullptr;
     if (_wfopen_s(&file, answer.c_str(), L"w") == 0 && file) {
@@ -2067,7 +2078,8 @@ int GuardedContainerState(void* container) {
 }
 
 void AnswerChunk(const std::string& group, bool loaded) {
-    rfa::Log("Editor link: chunk %s %s", group.c_str(), loaded ? "loaded" : "NOT loaded");
+    if (loaded) rfa::LogDetail("Editor link: chunk %s loaded", group.c_str());
+    else rfa::Log("Editor link: chunk %s NOT loaded", group.c_str());
     const std::wstring path = LinkFolder() + L"\\chunk_" + std::wstring(group.begin(), group.end()) + L".txt";
     FILE* file = nullptr;
     if (_wfopen_s(&file, path.c_str(), L"w") == 0 && file) {
@@ -2151,7 +2163,7 @@ void LoadEditorChunkGroup(const std::string& line) {
             AnswerChunk(group, false);
             return;
         }
-        rfa::Log("Editor link: chunk %s: reading its asset list %s", groupText, listText);
+        rfa::LogDetail("Editor link: chunk %s: reading its asset list %s", groupText, listText);
         // As the game itself reads a file while it runs (0x501C30): its "no reading now" flag (cf_open,
         // 0xC91470, stops at "Someone is accessing cfile synchronously, but it is locked!" while it is
         // set, part way, after which the game couldn't find a level's files) cleared for the read and
@@ -2184,7 +2196,7 @@ void LoadEditorChunkGroup(const std::string& line) {
         AnswerChunk(group, false);
         return;
     }
-    rfa::Log("Editor link: chunk %s: loading", groupText);
+    rfa::LogDetail("Editor link: chunk %s: loading", groupText);
     g_chunksLoading.push_back({group, found, GetTickCount64(), onDemand});
 }
 
@@ -2228,7 +2240,7 @@ void LoadEditorChunkFiles(const std::string& line) {
         }
         const char* keptGroup = _strdup(group.c_str());
         int failedFile = -1;
-        rfa::Log("Editor link: chunk %s: making its group of %d files", group.c_str(), static_cast<int>(files.size()));
+        rfa::LogDetail("Editor link: chunk %s: making its group of %d files", group.c_str(), static_cast<int>(files.size()));
         const int made = keptGroup ? GuardedMakeChunkGroup(keptGroup, files, &failedFile) : -1;
         if (made < 0) {
             rfa::Log("Editor link: chunk %s: making its group FAILED at %s%s", group.c_str(),
@@ -2245,7 +2257,7 @@ void LoadEditorChunkFiles(const std::string& line) {
         reply(false);
         return;
     }
-    rfa::Log("Editor link: chunk %s: loading", group.c_str());
+    rfa::LogDetail("Editor link: chunk %s: loading", group.c_str());
     g_chunksLoading.push_back({group, found, GetTickCount64()});
 }
 
@@ -2517,7 +2529,7 @@ void EditorStitchPiece(const std::string& line, bool hide) {
     }
     static int done = 0, problems = 0;
     if (result > 0) {
-        if (++done <= 5) rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) %s", name, cterrain, list, index, hide ? "taken away" : "moved");
+        if (++done <= 5) rfa::LogDetail("Editor link: level geometry piece %s (%s list %d #%d) %s", name, cterrain, list, index, hide ? "taken away" : "moved");
     } else if (++problems <= 10) {
         rfa::Log("Editor link: level geometry piece %s (%s list %d #%d) not %s: %s", name, cterrain, list, index, hide ? "taken away" : "moved",
                  kPieceWhy[-result]);
@@ -2622,7 +2634,7 @@ void EditorAddStitchPiece(const std::string& line) {
     // Pieces of our own always have a body of their own (made for them, as for a combined collision).
     const int result = GuardedPlacePiece(spawned->piece, record, zone, false, numbers);
     static int count = 0;
-    if (result > 0 && (!made && ++count <= 10)) rfa::Log("Editor link: made level geometry piece %s (0x%08X)", name, id);
+    if (result > 0 && (!made && ++count <= 10)) rfa::LogDetail("Editor link: made level geometry piece %s (0x%08X)", name, id);
     if (result <= 0) rfa::Log("Editor link: new level geometry piece %s not %s: %s", name, made ? "moved" : "made", kPieceWhy[-result]);
     AnswerEditor(answerName, result > 0 ? (made ? "moved" : "made") : result == -6 ? "nochunk" : "failed");
 }
@@ -2632,7 +2644,7 @@ void EditorDropStitchPiece(const std::string& line) {
     const DWORD id = static_cast<DWORD>(strtoul(line.c_str() + 19, nullptr, 16));
     for (SpawnedPiece& s : g_spawnedPieces) {
         if (s.id != id || LivePieceOf(s.piece).hidden) continue;
-        if (GuardedHidePiece(s.piece, false) > 0) rfa::Log("Editor link: level geometry piece %s (0x%08X) taken away", s.name.c_str(), static_cast<unsigned>(id));
+        if (GuardedHidePiece(s.piece, false) > 0) rfa::LogDetail("Editor link: level geometry piece %s (0x%08X) taken away", s.name.c_str(), static_cast<unsigned>(id));
     }
 }
 
@@ -2676,7 +2688,7 @@ void __cdecl TerrainTakeDown(BYTE* record) {
         it = g_livePieces.erase(it);
     }
     g_ownBodyRecords.erase(std::remove(g_ownBodyRecords.begin(), g_ownBodyRecords.end(), record), g_ownBodyRecords.end());
-    if (freed) rfa::Log("Editor link: %d level geometry pieces made live let go with their zone", freed);
+    if (freed) rfa::LogDetail("Editor link: %d level geometry pieces made live let go with their zone", freed);
     g_terrainTakeDown(record);
 }
 
@@ -2703,7 +2715,8 @@ auto const RenderDevice = reinterpret_cast<void*(__cdecl*)()>(0xC26500);
 int g_terrainBuffersKept = 0;
 
 void AnswerTerrain(const std::string& file, const char* answer) {
-    rfa::Log("Editor link: terrain %s %s", file.c_str(), answer);
+    if (strcmp(answer, "done") == 0) rfa::LogDetail("Editor link: terrain %s done", file.c_str());
+    else rfa::Log("Editor link: terrain %s %s", file.c_str(), answer);
     const std::wstring path = LinkFolder() + L"\\terrain_" + std::wstring(file.begin(), file.end()) + L".txt";
     FILE* out = nullptr;
     if (_wfopen_s(&out, path.c_str(), L"w") == 0 && out) {
@@ -2968,7 +2981,7 @@ bool RunEditorEdit(const std::string& line) {
                     player ? 1 : 0, at[0], at[1], at[2]);
             fclose(file);
         }
-        rfa::Log("Editor link: the editor asked which level is loaded: %s", name[0] ? name : "(none)");
+        rfa::LogDetail("Editor link: the editor asked which level is loaded: %s", name[0] ? name : "(none)");
         return true;
     }
     if (line == "editor_reload") {
@@ -3007,7 +3020,7 @@ bool RunEditorEdit(const std::string& line) {
             g_nodeSpawned.erase(spawned);
         }
         RemoveObject(reinterpret_cast<void*>(kObjectList), nullptr, handle, 0);
-        if (++removed <= 10) rfa::Log("Editor link: removed object 0x%08X", static_cast<unsigned>(handle));
+        if (++removed <= 10) rfa::LogDetail("Editor link: removed object 0x%08X", static_cast<unsigned>(handle));
         return true;
     }
     float numbers[12];
@@ -3022,7 +3035,7 @@ bool RunEditorEdit(const std::string& line) {
     }
     const auto setPlace = reinterpret_cast<SetPlaceFn>((*static_cast<void***>(object))[10]);
     setPlace(object, nullptr, numbers, numbers + 3, 1);
-    if (++moved <= 5) rfa::Log("Editor link: moved object 0x%08X to %.2f, %.2f, %.2f", static_cast<unsigned>(handle), numbers[0], numbers[1], numbers[2]);
+    if (++moved <= 5) rfa::LogDetail("Editor link: moved object 0x%08X to %.2f, %.2f, %.2f", static_cast<unsigned>(handle), numbers[0], numbers[1], numbers[2]);
     return true;
 }
 
@@ -3060,7 +3073,7 @@ void AnswerWhereWanted() {
     static bool told = false;
     if (!told) {
         told = true;
-        rfa::Log("Editor link: the editor asked where %u objects are (%d found); it asks again while it shows props as in the game",
+        rfa::LogDetail("Editor link: the editor asked where %u objects are (%d found); it asks again while it shows props as in the game",
                  static_cast<unsigned>(handles.size()), found);
     }
 }
@@ -3169,7 +3182,7 @@ void AnswerLightingWanted() {
     }
     fclose(file);
     MoveFileExW(partial.c_str(), answer.c_str(), MOVEFILE_REPLACE_EXISTING);
-    rfa::Log("Editor link: told the editor the game's light (time %.2f, exposure %.2f to %.2f)", g_timeOfDay,
+    rfa::LogDetail("Editor link: told the editor the game's light (time %.2f, exposure %.2f to %.2f)", g_timeOfDay,
              RendererFloat(0xAE0), RendererFloat(0xAE4));
 }
 
@@ -3307,7 +3320,8 @@ void console::Init() {
                      ? "The console also shows the game's debug output and error reports, marked [game]"
                      : "Could not take the game's debug output; the console shows its error reports only");
     }
-    if (g_drawsConsole && g_settings.modLog) rfa::Log("The console also shows logs\\rfa_mods.log as it grows");
+    if (g_drawsConsole && g_settings.modLog)
+        rfa::Log("The console also shows logs\\rfa_mods.log as it grows (not the mods' routine [module:log] lines)");
 
     g_runScriptFile = reinterpret_cast<RunScriptFileFn>(
         rfa::HookFunction(kRunScriptFile, kRunScriptFilePrologue, reinterpret_cast<void*>(&RunScriptFile)));

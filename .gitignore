@@ -24,6 +24,9 @@ __pycache__/
 /reference/**/*.exe
 /reference/**/changelist.txt
 
+# This PC's MCP server setup for Claude Code (points at this PC's bin\).
+/.mcp.json
+
 # Editor and system clutter.
 .vs/
 *.user

@@ -162,11 +162,11 @@ void RequestPauseMenu(bool away) {
     if (away) {
         *g_pauseMenuRequest = 1;
         g_pauseRequested = true;
-        rfa::Log("Asked the game to open its pause menu");
+        rfa::LogDetail("Asked the game to open its pause menu");
     } else if (!away && g_pauseRequested) {
         if (*g_pauseMenuRequest) {
             *g_pauseMenuRequest = 0;
-            rfa::Log("The game didn't need to pause (menu or cutscene); request withdrawn");
+            rfa::LogDetail("The game didn't need to pause (menu or cutscene); request withdrawn");
         }
         g_pauseRequested = false;
     }
@@ -231,7 +231,7 @@ void OnFocusChanged(bool active) {
     g_inBackground = !active;
     bool docked = Docked();
     if (!HidingFocus() && !docked) return;
-    rfa::Log("You %s the game%s", active ? "returned to" : "switched away from", docked ? " (docked in the editor)" : "");
+    rfa::LogDetail("You %s the game%s", active ? "returned to" : "switched away from", docked ? " (docked in the editor)" : "");
     if (!active) o_ClipCursor(nullptr);  // never leave the cursor trapped while you're in another app
     else if (g_gameClipSet) o_ClipCursor(&g_gameClip);
     if (!docked) RequestPauseMenu(!active);  // docked, it keeps running while you edit
@@ -270,12 +270,12 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_ACTIVATEAPP:
-        RFA_LOG_FIRST(100, "WM_ACTIVATEAPP %s", wp ? "gained" : "lost");
+        RFA_LOG_DETAIL_FIRST(100, "WM_ACTIVATEAPP %s", wp ? "gained" : "lost");
         OnFocusChanged(wp != FALSE);
         hide = (HidingFocus() || Docked()) && !wp;
         break;
     case WM_ACTIVATE:
-        RFA_LOG_FIRST(100, "WM_ACTIVATE %u", LOWORD(wp));
+        RFA_LOG_DETAIL_FIRST(100, "WM_ACTIVATE %u", LOWORD(wp));
         // Docked, the game's window is never activated again (the editor's is), so it must not be
         // told it was deactivated either: it would stop reading the controller for good.
         hide = (HidingFocus() || Docked()) && LOWORD(wp) == WA_INACTIVE;
@@ -315,12 +315,12 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (Docked() && g_inBackground) return DefWindowProcW(hwnd, msg, wp, lp);
         break;
     case WM_SIZE:
-        RFA_LOG_FIRST(100, "WM_SIZE type %u, %ux%u", static_cast<unsigned>(wp), LOWORD(lp), HIWORD(lp));
+        RFA_LOG_DETAIL_FIRST(100, "WM_SIZE type %u, %ux%u", static_cast<unsigned>(wp), LOWORD(lp), HIWORD(lp));
         hide = HidingFocus() && wp == SIZE_MINIMIZED;
         break;
-    case WM_DISPLAYCHANGE: RFA_LOG_FIRST(20, "WM_DISPLAYCHANGE %ux%u", LOWORD(lp), HIWORD(lp)); break;
+    case WM_DISPLAYCHANGE: RFA_LOG_DETAIL_FIRST(20, "WM_DISPLAYCHANGE %ux%u", LOWORD(lp), HIWORD(lp)); break;
     case WM_SYSCOMMAND:
-        RFA_LOG_FIRST(50, "WM_SYSCOMMAND %X", static_cast<unsigned>(wp & 0xFFF0));
+        RFA_LOG_DETAIL_FIRST(50, "WM_SYSCOMMAND %X", static_cast<unsigned>(wp & 0xFFF0));
         hide = HidingFocus() && (wp & 0xFFF0) == SC_MONITORPOWER;  // the game suspends on monitor off
         break;
     }
@@ -330,7 +330,7 @@ LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 ATOM WINAPI Hk_RegisterClassExW(const WNDCLASSEXW* wc) {
     if (!wc || g_gameWndProc) return o_RegisterClassExW(wc);
-    rfa::Log("RegisterClassExW class=%ls", ClassName(wc->lpszClassName));
+    rfa::LogDetail("RegisterClassExW class=%ls", ClassName(wc->lpszClassName));
     WNDCLASSEXW copy = *wc;
     g_gameWndProc = copy.lpfnWndProc;
     copy.lpfnWndProc = WndProcHook;
@@ -340,7 +340,7 @@ ATOM WINAPI Hk_RegisterClassExW(const WNDCLASSEXW* wc) {
 HWND WINAPI Hk_CreateWindowExW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style, int x, int y, int w, int h,
                                HWND parent, HMENU menu, HINSTANCE inst, LPVOID param) {
     bool gameWindow = !g_hwnd && !parent && !(style & WS_CHILD);
-    rfa::Log("CreateWindowExW class=%ls title=\"%ls\" style=%08lX ex=%08lX %dx%d at %d,%d", ClassName(cls),
+    rfa::LogDetail("CreateWindowExW class=%ls title=\"%ls\" style=%08lX ex=%08lX %dx%d at %d,%d", ClassName(cls),
              title ? title : L"", style, ex, w, h, x, y);
     if (gameWindow) NoteGameMode(static_cast<LONG>(style));
     if (gameWindow && Borderless()) {
@@ -351,7 +351,7 @@ HWND WINAPI Hk_CreateWindowExW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style
         y = r.top;
         w = r.right - r.left;
         h = r.bottom - r.top;
-        rfa::Log("  -> borderless %dx%d at %d,%d", w, h, x, y);
+        rfa::LogDetail("  -> borderless %dx%d at %d,%d", w, h, x, y);
     }
     HWND hwnd = o_CreateWindowExW(ex, cls, title, style, x, y, w, h, parent, menu, inst, param);
     if (gameWindow && hwnd) g_hwnd = hwnd;
@@ -392,7 +392,7 @@ LONG FilterWindowLong(HWND hwnd, int index, LONG value) {
     if (index == GWL_STYLE) NoteGameMode(value);
     LONG filtered = value;
     if (Borderless()) filtered = index == GWL_STYLE ? BorderlessStyle(value) : BorderlessExStyle(value);
-    RFA_LOG_FIRST(20, "SetWindowLong(%s, %08lX) -> %08lX", index == GWL_STYLE ? "STYLE" : "EXSTYLE", value, filtered);
+    RFA_LOG_DETAIL_FIRST(20, "SetWindowLong(%s, %08lX) -> %08lX", index == GWL_STYLE ? "STYLE" : "EXSTYLE", value, filtered);
     return filtered;
 }
 
@@ -406,7 +406,7 @@ LONG WINAPI Hk_SetWindowLongW(HWND hwnd, int index, LONG value) {
 
 BOOL WINAPI Hk_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy, UINT flags) {
     if (hwnd == g_hwnd) {
-        RFA_LOG_FIRST(20, "SetWindowPos(%dx%d at %d,%d, flags %X, after %p)", cx, cy, x, y, flags, after);
+        RFA_LOG_DETAIL_FIRST(20, "SetWindowPos(%dx%d at %d,%d, flags %X, after %p)", cx, cy, x, y, flags, after);
         if (Docked()) {
             // Where it sits and how big is the editor's to say.
             flags |= SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
@@ -426,7 +426,7 @@ BOOL WINAPI Hk_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int cy,
 
 BOOL WINAPI Hk_ShowWindow(HWND hwnd, int cmd) {
     if (hwnd == g_hwnd) {
-        RFA_LOG_FIRST(20, "ShowWindow(%d)", cmd);
+        RFA_LOG_DETAIL_FIRST(20, "ShowWindow(%d)", cmd);
         if ((Borderless() || Docked()) && cmd == SW_SHOWMAXIMIZED) cmd = SW_SHOW;
         if (Docked() && (cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED || cmd == SW_SHOWMINNOACTIVE)) return TRUE;
     }
@@ -434,8 +434,8 @@ BOOL WINAPI Hk_ShowWindow(HWND hwnd, int cmd) {
 }
 
 BOOL WINAPI Hk_ClipCursor(const RECT* rect) {
-    if (rect) RFA_LOG_FIRST(10, "ClipCursor(%ld,%ld - %ld,%ld)", rect->left, rect->top, rect->right, rect->bottom);
-    else RFA_LOG_FIRST(10, "ClipCursor(NULL)");
+    if (rect) RFA_LOG_DETAIL_FIRST(10, "ClipCursor(%ld,%ld - %ld,%ld)", rect->left, rect->top, rect->right, rect->bottom);
+    else RFA_LOG_DETAIL_FIRST(10, "ClipCursor(NULL)");
     g_gameClipSet = rect != nullptr;
     if (rect) g_gameClip = *rect;
     if (Muting()) return TRUE;  // applied once you are back in the game
@@ -446,7 +446,7 @@ BOOL WINAPI Hk_ClipCursor(const RECT* rect) {
 // keep doing that while you're in another app (it isn't told you left), so those calls are dropped.
 BOOL WINAPI Hk_SetCursorPos(int x, int y) {
     if (Muting()) {
-        RFA_LOG_FIRST(3, "Ignored the game moving the cursor to %d,%d while you're in another app", x, y);
+        RFA_LOG_DETAIL_FIRST(3, "Ignored the game moving the cursor to %d,%d while you're in another app", x, y);
         return TRUE;
     }
     return o_SetCursorPos(x, y);
@@ -462,7 +462,7 @@ HWND WINAPI Hk_GetForegroundWindow() {
     bool isGame = g_hwnd && fg == g_hwnd;
     if (isGame != wasGame) {
         wasGame = isGame;
-        RFA_LOG_FIRST(50, "GetForegroundWindow: %s (%p)", isGame ? "the game" : "another window", fg);
+        RFA_LOG_DETAIL_FIRST(50, "GetForegroundWindow: %s (%p)", isGame ? "the game" : "another window", fg);
     }
     // Docked, the foreground window is the editor's: the game is told it is itself, so it doesn't suspend.
     return (HidingFocus() || Docked()) && g_hwnd ? g_hwnd : fg;
@@ -503,7 +503,7 @@ LRESULT CALLBACK KeyboardHookFilter(int code, WPARAM wp, LPARAM lp) {
     auto key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp);
     DWORD vk = key->vkCode;
     if ((vk == VK_LWIN || vk == VK_RWIN) && g_enabled && (g_inBackground || (Borderless() && g_allowWindowsKey))) {
-        RFA_LOG_FIRST(5, "Let the Windows key through to Windows");
+        RFA_LOG_DETAIL_FIRST(5, "Let the Windows key through to Windows");
         return CallNextHookEx(nullptr, code, wp, lp);
     }
     if (Docked() && g_inBackground) return CallNextHookEx(nullptr, code, wp, lp);  // you're typing in the editor
@@ -511,7 +511,7 @@ LRESULT CALLBACK KeyboardHookFilter(int code, WPARAM wp, LPARAM lp) {
         bool alt = (key->flags & LLKHF_ALTDOWN) != 0;
         bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         if ((alt && (vk == VK_TAB || vk == VK_ESCAPE || vk == VK_DELETE)) || (ctrl && vk == VK_ESCAPE)) {
-            RFA_LOG_FIRST(20, "Kept %s+vk %02lX away from the game's keyboard hook", alt ? "Alt" : "Ctrl", vk);
+            RFA_LOG_DETAIL_FIRST(20, "Kept %s+vk %02lX away from the game's keyboard hook", alt ? "Alt" : "Ctrl", vk);
             return CallNextHookEx(nullptr, code, wp, lp);
         }
     }
@@ -519,7 +519,7 @@ LRESULT CALLBACK KeyboardHookFilter(int code, WPARAM wp, LPARAM lp) {
 }
 
 HHOOK WINAPI Hk_SetWindowsHookExA(int id, HOOKPROC proc, HINSTANCE module, DWORD thread) {
-    rfa::Log("SetWindowsHookExA(%d, %p)", id, proc);
+    rfa::LogDetail("SetWindowsHookExA(%d, %p)", id, proc);
     if (g_enabled && id == WH_KEYBOARD_LL && proc) {
         g_gameKeyboardHook = proc;
         proc = KeyboardHookFilter;
@@ -534,7 +534,7 @@ BOOL WINAPI Hk_RegisterRawInputDevices(PCRAWINPUTDEVICE devices, UINT count, UIN
     if (!devices || count > 16 || size != sizeof(RAWINPUTDEVICE)) return o_RegisterRawInputDevices(devices, count, size);
     for (UINT i = 0; i < count; ++i) {
         copy[i] = devices[i];
-        RFA_LOG_FIRST(20, "RegisterRawInputDevices usage %X/%X flags %lX", copy[i].usUsagePage, copy[i].usUsage,
+        RFA_LOG_DETAIL_FIRST(20, "RegisterRawInputDevices usage %X/%X flags %lX", copy[i].usUsagePage, copy[i].usUsage,
                       copy[i].dwFlags);
         // Foreground only, so the mouse doesn't drive the game while you're in another app.
         if (g_enabled && g_ignoreFocusLoss) copy[i].dwFlags &= ~(RIDEV_INPUTSINK | RIDEV_EXINPUTSINK);
@@ -562,7 +562,7 @@ void borderless::Init() {
         g_pauseMenuRequest = reinterpret_cast<BYTE*>(0x135B3F1);
     else
         rfa::Log("Not the publicbeta build; switching away won't open the pause menu");
-    if (!g_enabled) rfa::Log("Enabled=0: logging only, the game runs unmodified");
+    if (!g_enabled) rfa::Log("Enabled=0: the game runs unmodified (with [Loader] Log=1 what its window does is logged)");
     if (g_enabled && rfa::IniInt(L"Borderless", L"DpiAware", 1)) MakeDpiAware();
 
     int count = 0;
@@ -605,5 +605,10 @@ void borderless::Init() {
         {"USER32.dll", "SetWindowsHookExA", rfa::HookImport(game, "USER32.dll", "SetWindowsHookExA", &Hk_SetWindowsHookExA, &o_SetWindowsHookExA)},
         {"XINPUT1_3.dll", "#2 (XInputGetState)", rfa::HookImport(game, "XINPUT1_3.dll", "#2", &Hk_XInputGetState, &o_XInputGetState)},
     };
-    for (const auto& h : hooks) rfa::Log("Hook %s!%s: %s", h.dll, h.func, h.ok ? "ok" : "FAILED");
+    int hooked = 0;
+    for (const auto& h : hooks) {
+        if (h.ok) ++hooked;
+        else rfa::Log("Hook %s!%s: FAILED", h.dll, h.func);
+    }
+    rfa::Log("Hooked %d of the game's %d window, cursor and input functions", hooked, static_cast<int>(sizeof(hooks) / sizeof(hooks[0])));
 }

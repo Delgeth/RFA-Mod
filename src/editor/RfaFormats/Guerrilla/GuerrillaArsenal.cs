@@ -175,6 +175,11 @@ public static class GuerrillaArsenal
     {
         string guerrillaCache = Path.Combine(guerrilla, "build", "pc", "cache"), gameCache = Path.Combine(game, "build", "pc", "cache");
         var guerrillaTables = Packfile.Open(Path.Combine(guerrillaCache, "misc.vpp_pc"));
+        // Guerrilla's default steering torque, vehicle_defaults.xtbl's <Defaults> (see where each car's entry is copied).
+        string? guerrillaSteeringTorque = guerrillaTables.Find("vehicle_defaults.xtbl") is { } defaultsFile &&
+                                          System.Text.RegularExpressions.Regex.Match(System.Text.Encoding.UTF8.GetString(guerrillaTables.Read(defaultsFile)),
+                                              @"<Extra_Steering_Torque>\s*([^<\s]+)\s*</Extra_Steering_Torque>") is { Success: true } torque
+                                              ? torque.Groups[1].Value : null;
         var gameTables = Packfile.Open(Path.Combine(gameCache, "misc.vpp_pc"));
         XtblFile ReadTable(Packfile pack, string name) => XtblFile.FromBytes(pack.Read(pack.Find(name) ?? throw new InvalidDataException($"no {name} in {pack.Name}")));
         var rfgVehicles = ReadTable(guerrillaTables, "vehicles.xtbl");
@@ -337,6 +342,14 @@ public static class GuerrillaArsenal
                 foreach (var camera in cameras.Elements)
                     if (camera.ValueOf("Y_Axis_Rotation") is { } speed && camera.Element("Y_Axis_Rotation_mouse") == null)
                         camera.AddElement("Y_Axis_Rotation_mouse", speed.Trim());
+            // Its steering torque: both games build Havok's extra yaw torque for a car as Extra_Steering_Torque × Mass ÷ its
+            // steering angle (Guerrilla automobile_create_havok_vehicle_data RM 0xB9B4A8, Armageddon 0x5EEB50), and none of
+            // Guerrilla's cars names the field: they all take vehicle_defaults.xtbl's -0.5. Armageddon built ours with 0
+            // (Min_LightPickup_1, the drive log 2026-11-18: "extra 0.00", where Guerrilla's gives -1,719): no push into the
+            // turn, a wide circle (the user: "as if you are on a boat"). So a car of Guerrilla's that doesn't name it gets
+            // Guerrilla's default written in.
+            if (copy.Element("Steering") != null && copy.Element("Extra_Steering_Torque") == null && guerrillaSteeringTorque != null)
+                copy.AddElement("Extra_Steering_Torque", guerrillaSteeringTorque);
             // Its turrets, Guerrilla's (see GuerrillaTurrets): a mount whose turret can't be had yet is left out.
             if (copy.Element("Turrets") is { } mounts)
             {

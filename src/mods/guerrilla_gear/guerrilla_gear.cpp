@@ -452,7 +452,7 @@ void __fastcall SetAnimationGroup(BYTE* character, void* unused, int group, DWOR
             if (variant != g_playerVariant) {
                 g_playerVariant = variant;
                 const char* name = WeaponName(weapon);
-                rfa::Log("Player animations: %s (%s)", variant == kConfident ? "Guerrilla's" : "Darius's own", name ? name : "no gun");
+                rfa::LogDetail("Player animations: %s (%s)", variant == kConfident ? "Guerrilla's" : "Darius's own", name ? name : "no gun");
             }
         }
     }
@@ -651,7 +651,7 @@ void ReadAmmoPickup() {
 
 float AmmoPickup() {
     const int level = *reinterpret_cast<const int*>(kDifficulty);
-    return level >= 0 && level < 4 ? g_ammoPickup[level] : 1.0f;
+    return g_ammoPickup[level >= 0 && level < 4 ? level : 1];  // Custom (4) as Medium (the campaign's rule)
 }
 
 float RandomRange(float low, float high) {
@@ -700,7 +700,7 @@ void __fastcall AdjustDroppedAmmo(BYTE* weapon, void* unused) {
     int dropped = static_cast<int>(static_cast<float>(magazineSize) * (RandomRange(0.5f, 1.5f) * scale));
     dropped = (std::max)(1, (std::min)(dropped, magazineSize));
     const int rest = (std::max)(0, total - dropped);
-    rfa::Log("Dropped guns: %s dropped by an NPC with %d | %d (it had %d | %d; Guerrilla's: x %.2f, difficulty x %.2f)",
+    rfa::LogDetail("Dropped guns: %s dropped by an NPC with %d | %d (it had %d | %d; Guerrilla's: x %.2f, difficulty x %.2f)",
              NameOf(info), dropped, rest, magazine, reserve, scale, AmmoPickup());
     g_droppedGuns[weapon] = {info, dropped, rest};  // given when he picks it up (below)
 }
@@ -743,7 +743,7 @@ bool __cdecl GiveItem(BYTE* human, BYTE* item, bool* ask, bool* other) {
         SetReserve(ammo, item, ReserveRounds(ammo, nullptr, item, 0), before);
         AddRounds(ammo, nullptr, item, 0, drop.reserve);
     }
-    rfa::Log("Dropped guns: %s picked up %s: %d | %d (reserve %d before, %d after the game's pickup, %d now)", NameOf(drop.info),
+    rfa::LogDetail("Dropped guns: %s picked up %s: %d | %d (reserve %d before, %d after the game's pickup, %d now)", NameOf(drop.info),
              had ? "as ammo" : "into a free slot", drop.magazine, drop.reserve, before, after, ReserveRounds(ammo, nullptr, item, 0));
     g_droppedGuns.erase(item);
     return result;
@@ -763,7 +763,7 @@ BYTE* __cdecl AddItem(BYTE* human, BYTE* item, int slot, bool first, bool second
     SetMagazine(item, nullptr, drop.magazine, 0);  // first: what's loaded counts against what the reserve holds
     SetReserve(ammo, item, ReserveRounds(ammo, nullptr, item, 0), before);
     AddRounds(ammo, nullptr, item, 0, drop.reserve);
-    rfa::Log("Dropped guns: %s swapped in: %d | %d (reserve %d before, %d now)", NameOf(drop.info), drop.magazine, drop.reserve,
+    rfa::LogDetail("Dropped guns: %s swapped in: %d | %d (reserve %d before, %d now)", NameOf(drop.info), drop.magazine, drop.reserve,
              before, ReserveRounds(ammo, nullptr, item, 0));
     g_droppedGuns.erase(item);
     return added;
@@ -841,7 +841,7 @@ void KeepAmmoCapacity() {
             c.set = wanted;
             continue;
         }
-        rfa::Log("Ammo capacity: %s carries %d rounds (Guerrilla's %s %d%s)", c.weapon.c_str(), wanted,
+        rfa::LogDetail("Ammo capacity: %s carries %d rounds (Guerrilla's %s %d%s)", c.weapon.c_str(), wanted,
                  extra ? "Max_Rounds_Upgrade" : "Max_Rounds", extra ? c.upgraded : c.max,
                  factor != 1.0f ? (std::string(", x ") + std::to_string(factor).substr(0, 4) + " for the worn pack").c_str() : "");
         maxReserve = maxReserveMp = c.set = wanted;
@@ -986,7 +986,7 @@ void LogHolds(BYTE* player) {
         std::snprintf(other, sizeof other, "the action 0x%X", heldBy.value);
         what = other;
     }
-    rfa::Log("Held: %s holds Mason (his %s); its animation %s", what,
+    rfa::LogDetail("Held: %s holds Mason (his %s); its animation %s", what,
              how == 0 ? "place" : how == 1 ? "heading" : how == 2 ? "place and heading" : "?",
              !info ? "isn't found" : zeroInput ? "takes his movement input until its release" : "lets him move (no Zero_Input)");
 }
@@ -1098,7 +1098,7 @@ void __cdecl MovementStep(BYTE* human) {
     g_movementTurned += turned;
     if (std::fabs(turned) < kNoticeableTurn || !StillTurnLogDue()) return;
     const float* steering = reinterpret_cast<const float*>(human + kSteering);
-    rfa::Log("Still turn: %s turned %.1f degrees in the movement step standing still: %.1f in the stand-turn step "
+    rfa::LogDetail("Still turn: %s turned %.1f degrees in the movement step standing still: %.1f in the stand-turn step "
              "(asked %.1f, so %.1f the animation's own turn), %.1f set by the movement step itself; the heading "
              "step asked %.1f (zeroed); steering (%.2f, %.2f, %.2f); camera mode %d; held: %s",
              PlaysSet(human, kMasonSet) ? "Mason" : "Darius", turned * kRadiansToDegrees,
@@ -1111,18 +1111,19 @@ void __cdecl MovementStep(BYTE* human) {
 // From the heading step, once a frame: says why he faces the camera when he stands without walking
 // free (once for each reason), and what turned him since the last frame outside the movement step.
 void WatchStillFacing(BYTE* player, Facing facing, const char* why) {
+    if (!rfa::DetailLog()) return;  // a diagnosis, with Log=1
     const bool standing = facing != Facing::Walking;
     if (standing && why != g_lastFacingWhy && g_facingWhyLines < kMaxStillTurnLines) {
         g_lastFacingWhy = why;
         ++g_facingWhyLines;
-        rfa::Log("Still turn: standing, %s %s (%s)", PlaysSet(player, kMasonSet) ? "Mason" : "Darius",
+        rfa::LogDetail("Still turn: standing, %s %s (%s)", PlaysSet(player, kMasonSet) ? "Mason" : "Darius",
                  facing == Facing::Still ? "keeps his heading" : "faces the camera", why);
     }
     const float yaw = Yaw(player);
     if (facing == Facing::Still && g_watchingStill && g_haveStillYaw) {
         const float elsewhere = Wrapped(yaw - g_lastStillYaw - g_movementTurned);
         if (std::fabs(elsewhere) >= kNoticeableTurn && StillTurnLogDue())
-            rfa::Log("Still turn: %s turned %.1f degrees standing still outside the movement step (camera mode %d)",
+            rfa::LogDetail("Still turn: %s turned %.1f degrees standing still outside the movement step (camera mode %d)",
                      PlaysSet(player, kMasonSet) ? "Mason" : "Darius", elsewhere * kRadiansToDegrees, *kCameraMode);
     }
     g_watchingStill = facing == Facing::Still;
@@ -1172,7 +1173,7 @@ void __cdecl LookVector(BYTE* human, float* out) {
         const float degrees = std::acos((std::max)(-1.0f, (std::min)(1.0f, along))) * kRadiansToDegrees;
         if (degrees >= 30.0f) {
             ++g_lookAheadLogs;
-            rfa::Log("Look: %s standing still looks ahead, not %.0f degrees round to the camera's aim (Guerrilla: the camera's way only "
+            rfa::LogDetail("Look: %s standing still looks ahead, not %.0f degrees round to the camera's aim (Guerrilla: the camera's way only "
                      "while combat ready)", PlaysSet(human, kMasonSet) ? "Mason" : "Darius", degrees);
         }
     }
@@ -1427,7 +1428,7 @@ BYTE* __fastcall LaunchThrown(BYTE* weapon, void* unused, const float* position,
     DestroyObject(kWorld, nullptr, weapon, true);
     // (Its item's name is logged for the tank drawn red, 2026-11-11: which items_3d entry the game drew.)
     const BYTE* item = *reinterpret_cast<const BYTE* const*>(info + kWeaponItem);
-    rfa::Log("Thrown: %s (its item: %s) thrown as its projectile; the one carried is out of his hands (in them now: %s; on its way: %s)",
+    rfa::LogDetail("Thrown: %s (its item: %s) thrown as its projectile; the one carried is out of his hands (in them now: %s; on its way: %s)",
              WeaponName(info), item && *reinterpret_cast<const char* const*>(item) ? *reinterpret_cast<const char* const*>(item) : "none",
              RecordName(RecordEquipped(player, nullptr, 0)), RecordName(RecordWanted(player, nullptr, 0)));
     g_carriedThrownAt = GetTickCount64();
@@ -1446,7 +1447,7 @@ void AfterCarriedThrow(BYTE* player) {
     BYTE* held = RecordEquipped(player, nullptr, 0);
     BYTE* wanted = RecordWanted(player, nullptr, 0);
     if (held || wanted) {
-        rfa::Log("Thrown: after the throw he holds %s (on its way: %s)", RecordName(held), RecordName(wanted));
+        rfa::LogDetail("Thrown: after the throw he holds %s (on its way: %s)", RecordName(held), RecordName(wanted));
         g_carriedThrownAt = 0;
         return;
     }
@@ -1460,7 +1461,7 @@ void AfterCarriedThrow(BYTE* player) {
     for (int slot = 0; !record && slot < kRadialSlots; ++slot) record = RecordInSlot(player, slot);
     if (!record) return;
     const bool taken = PlayerEquip(player, record, 0, false, false);
-    rfa::Log("Thrown: his hands were empty after the throw; %s %s", RecordName(record), taken ? "equipped" : "not equipped (the game refused; trying again)");
+    rfa::LogDetail("Thrown: his hands were empty after the throw; %s %s", RecordName(record), taken ? "equipped" : "not equipped (the game refused; trying again)");
 }
 
 // Setting a carried thing down (Guerrilla's player_set_down_non_inventory, RM 0xABE780: when he equips another
@@ -1490,7 +1491,7 @@ bool __cdecl SetDown(BYTE* human) {
     const float place[3] = {at[0] + facing[0] * kSetDownAhead, at[1] + facing[1] * kSetDownAhead, at[2] + facing[2] * kSetDownAhead};
     const float still[3] = {0.0f, 0.0f, 0.0f};
     g_launchThrown(weapon, nullptr, place, reinterpret_cast<const float*>(weapon + 0x10), still, false);
-    rfa::Log("Thrown: %s set down as Guerrilla's (no animation; in his hands now: %s)", WeaponName(info), RecordName(RecordEquipped(player, nullptr, 0)));
+    rfa::LogDetail("Thrown: %s set down as Guerrilla's (no animation; in his hands now: %s)", WeaponName(info), RecordName(RecordEquipped(player, nullptr, 0)));
     return true;
 }
 
@@ -2056,13 +2057,13 @@ const char* ObjectKind(int type) {
 float __cdecl MeleeDamage(BYTE* attacker, const BYTE* data, BYTE* target) {
     const float damage = g_meleeDamage(attacker, data, target);
     if (g_upgradesRunning) backpacks::MeleeHit(attacker, target);  // a pack's ripple (Guerrilla's attempt_ripple)
-    if (attacker && attacker == LocalPlayer()) {
+    if (rfa::DetailLog() && attacker && attacker == LocalPlayer()) {
         const DWORD now = GetTickCount();
         if (now - g_lastMeleeLog >= 250) {
             g_lastMeleeLog = now;
             const char* weapon = WeaponName(HeldWeapon(attacker));
             const int type = target ? ObjectTypeOf(target) : -1;
-            rfa::Log("Melee hit: %s hit a %s (type %d) for %.0f%s", weapon ? weapon : "(nothing in hand)", ObjectKind(type), type,
+            rfa::LogDetail("Melee hit: %s hit a %s (type %d) for %.0f%s", weapon ? weapon : "(nothing in hand)", ObjectKind(type), type,
                      damage, data ? "" : " (the move has no data for the player's set: the game's 10)");
         }
     }
@@ -2072,7 +2073,7 @@ float __cdecl MeleeDamage(BYTE* attacker, const BYTE* data, BYTE* target) {
 void LogMeleeHits() {
     g_meleeDamage = reinterpret_cast<MeleeDamageFn>(rfa::HookFunction(kMeleeDamage, kMeleeDamagePrologue, reinterpret_cast<void*>(&MeleeDamage)));
     if (!g_meleeDamage) rfa::Log("Melee hits: could not wrap the damage pick; they aren't logged");
-    else rfa::Log("Melee hits: the player's are logged (\"Melee hit:\" lines)");
+    else if (rfa::DetailLog()) rfa::Log("Melee hits: the player's are logged (\"Melee hit:\" lines)");
 }
 
 // ---- The guns' high-detail copies, logged (2026-11-12: does a gun he swaps to stay on its low copy?)
@@ -2104,15 +2105,15 @@ bool __fastcall StreamHighDetail(BYTE* item, void* unused) {
         const BYTE* info = *reinterpret_cast<const BYTE* const*>(item + kItemInfo);
         const char* name = ItemInfoName(info);
         if (!info || !*reinterpret_cast<const DWORD*>(info + kItemInfoHighContainer))
-            rfa::Log("Guns: %s has no high-detail copy (no _high container); its low copy is drawn", name);
+            rfa::LogDetail("Guns: %s has no high-detail copy (no _high container); its low copy is drawn", name);
         else if (asked)
-            rfa::Log("Guns: %s's high-detail copy streamed in", name);
+            rfa::LogDetail("Guns: %s's high-detail copy streamed in", name);
         else if (holder && holder != info)
-            rfa::Log("Guns: %s's high-detail copy refused, held by %s; it stays on its low copy", name, ItemInfoName(holder));
+            rfa::LogDetail("Guns: %s's high-detail copy refused, held by %s; it stays on its low copy", name, ItemInfoName(holder));
         else if (holder == info)
-            rfa::Log("Guns: %s's high-detail copy already in (kept)", name);
+            rfa::LogDetail("Guns: %s's high-detail copy already in (kept)", name);
         else
-            rfa::Log("Guns: %s's high-detail copy not asked for (the item isn't ready); it stays on its low copy", name);
+            rfa::LogDetail("Guns: %s's high-detail copy not asked for (the item isn't ready); it stays on its low copy", name);
     }
     return asked;
 }
@@ -2194,7 +2195,7 @@ int __cdecl PlaySoundLogged(DWORD soundObject, DWORD eventId, DWORD* handle, int
         auto use = std::find_if(g_weaponSoundTypes.begin(), g_weaponSoundTypes.end(), [&](const ObjectSwitch& s) { return s.soundObject == soundObject; });
         if (g_heldSounds.size() >= 64) g_heldSounds.erase(g_heldSounds.begin());
         g_heldSounds.push_back({started, eventId, GetTickCount()});
-        RFA_LOG_FIRST(400, "Held sounds: event %lu started for %s (sound object 0x%08lX, handle %lu, result %d)", eventId,
+        RFA_LOG_DETAIL_FIRST(400, "Held sounds: event %lu started for %s (sound object 0x%08lX, handle %lu, result %d)", eventId,
                       WeaponSoundTypeName(use != g_weaponSoundTypes.end() ? use->value : 0), soundObject, started, result);
     }
     return result;
@@ -2204,7 +2205,7 @@ int __cdecl StopSoundLogged(DWORD* handle) {
     const DWORD stopped = handle ? *handle : 0;
     auto found = std::find_if(g_heldSounds.begin(), g_heldSounds.end(), [&](const HeldSound& s) { return s.handle == stopped; });
     if (stopped && found != g_heldSounds.end()) {
-        RFA_LOG_FIRST(400, "Held sounds: event %lu (handle %lu) stopped by the game after %lu ms; %s", found->eventId, stopped,
+        RFA_LOG_DETAIL_FIRST(400, "Held sounds: event %lu (handle %lu) stopped by the game after %lu ms; %s", found->eventId, stopped,
                       GetTickCount() - found->startedAt, SoundGameObject(stopped) ? "it was still playing" : "it had already ended by itself");
         g_heldSounds.erase(found);
     }
@@ -2235,6 +2236,7 @@ void LogHeldSounds() {
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    if (rfa::ReadLogSwitch(L"GuerrillaGear")) rfa::Log("Log=1: routine lines and the diagnoses (\"[guerrilla_gear:log]\") are on");
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
@@ -2251,13 +2253,17 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     ThrownCarried();
     RedMaterials();
     PlayerMovement();
-    WatchStillTurns();
     LookAheadStill();
     HeldInPlace();
     MasonsHammer();
-    LogMeleeHits();
-    LogHighDetailGuns();
-    LogHeldSounds();
+    LogMeleeHits();  // its hook also gives the packs their ripple on a hit
+    // Diagnoses that change nothing in the game, each wrapping game code the player's every step or sound
+    // passes through: only with Log=1.
+    if (rfa::DetailLog()) {
+        WatchStillTurns();
+        LogHighDetailGuns();
+        LogHeldSounds();
+    }
     // The upgrades' purchases happen in the heading step: without it the window stays shut.
     if (g_headingStep) {
         upgrades::Init();

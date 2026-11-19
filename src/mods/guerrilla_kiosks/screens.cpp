@@ -187,22 +187,22 @@ void UpdateKiosk(const tables::Kiosk& kiosk, BYTE* mover, int alert) {
     if (!shown.seen) {
         shown.seen = true;
         if (screenPoints == 0)
-            RFA_LOG_FIRST(60, "Screens: kiosk %08lX (%s, %s) loaded %.0f m away: it has no screens (a radio)", kiosk.handle, kiosk.gameplay.c_str(),
+            RFA_LOG_DETAIL_FIRST(60, "Screens: kiosk %08lX (%s, %s) loaded %.0f m away: it has no screens (a radio)", kiosk.handle, kiosk.gameplay.c_str(),
                           kiosk.props.c_str(), away);
         else if (ready == 0)
-            RFA_LOG_FIRST(60, "Screens: kiosk %08lX (%s, %s) loaded %.0f m away: %d screens, not streamed in yet (they light up when the game streams "
+            RFA_LOG_DETAIL_FIRST(60, "Screens: kiosk %08lX (%s, %s) loaded %.0f m away: %d screens, not streamed in yet (they light up when the game streams "
                               "the kiosk in near you)%s",
                           kiosk.handle, kiosk.gameplay.c_str(), kiosk.props.c_str(), away, screenPoints, killed ? " (destroyed)" : "");
         else
-            RFA_LOG_FIRST(60, "Screens: kiosk %08lX (%s, %s) loaded %.0f m away, streamed in: %d of its %d screens show %s", kiosk.handle,
+            RFA_LOG_DETAIL_FIRST(60, "Screens: kiosk %08lX (%s, %s) loaded %.0f m away, streamed in: %d of its %d screens show %s", kiosk.handle,
                           kiosk.gameplay.c_str(), kiosk.props.c_str(), away, ready, screenPoints, killed ? "nothing (destroyed)" : ScreenName(wanted));
     } else if (ready > 0 && shown.ready == 0) {
-        RFA_LOG_FIRST(120, "Screens: kiosk %08lX streamed in %.0f m away: %d of its %d screens show %s", kiosk.handle, away, ready, screenPoints,
+        RFA_LOG_DETAIL_FIRST(120, "Screens: kiosk %08lX streamed in %.0f m away: %d of its %d screens show %s", kiosk.handle, away, ready, screenPoints,
                       killed ? "nothing (destroyed)" : ScreenName(wanted));
     } else if (ready == 0 && shown.ready > 0 && g_log) {
-        rfa::Log("Screens: kiosk %08lX streamed out %.0f m away: its screens' records are gone until it streams in again", kiosk.handle, away);
+        rfa::LogDetail("Screens: kiosk %08lX streamed out %.0f m away: its screens' records are gone until it streams in again", kiosk.handle, away);
     } else if (changed > 0 && g_log) {
-        rfa::Log("Screens: kiosk %08lX: %d screens now show %s (alert %d)", kiosk.handle, changed, ScreenName(wanted), alert);
+        rfa::LogDetail("Screens: kiosk %08lX: %d screens now show %s (alert %d)", kiosk.handle, changed, ScreenName(wanted), alert);
     }
     shown.ready = ready;
 }

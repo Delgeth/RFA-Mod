@@ -24,6 +24,7 @@
 // look-at), its turns to the node's other facings every 10-15 s (guard_at_post_action, human_move_turn_to_target), its
 // idle animations (do_guard_idle_action_animate RM 0x5EAC20), and its moves to other nodes of its group after a while.
 
+#define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "guards.h"
 #include <cfloat>
@@ -147,7 +148,7 @@ void Step(BYTE* human, DWORD handle, Guard& g, int now) {
         g.node = PickNode(p, Pos(human));
         if (g.node < 0) {
             ++g_noNode;
-            RFA_LOG_FIRST(16, "Guards: NPC 0x%08X of post 0x%08X finds no free guard node (%d nodes); the game's AI keeps it", handle, g.box,
+            RFA_LOG_DETAIL_FIRST(16, "Guards: NPC 0x%08X of post 0x%08X finds no free guard node (%d nodes); the game's AI keeps it", handle, g.box,
                           static_cast<int>(p.nodes.size()));
             g.phase = kNoWay;
             g.until = now + kNoWayAgain;
@@ -156,14 +157,14 @@ void Step(BYTE* human, DWORD handle, Guard& g, int now) {
         GuardNode& n = p.nodes[g.node];
         n.by = handle;
         ++g_taken;
-        RFA_LOG_FIRST(32, "Guards: NPC 0x%08X of post 0x%08X takes guard node %d (group %d) at (%.1f, %.1f, %.1f), as Guerrilla's pick_best_node", handle, g.box,
+        RFA_LOG_DETAIL_FIRST(32, "Guards: NPC 0x%08X of post 0x%08X takes guard node %d (group %d) at (%.1f, %.1f, %.1f), as Guerrilla's pick_best_node", handle, g.box,
                       g.node, n.group, n.at.x, n.at.y, n.at.z);
     }
     const GuardNode& n = p.nodes[g.node];
     if (FleeToSafetyBelief(human) || EnemyFleeBelief(human) || CombatTarget(human)) {
         if (g.phase != kFighting) {
             ++g_fights;
-            RFA_LOG_FIRST(16, "Guards: NPC 0x%08X of post 0x%08X fights; the game's AI has it, its ways only to the post's guard nodes", handle, g.box);
+            RFA_LOG_DETAIL_FIRST(16, "Guards: NPC 0x%08X of post 0x%08X fights; the game's AI has it, its ways only to the post's guard nodes", handle, g.box);
         }
         g.phase = kFighting;
         g.until = now + kCalmAgain;
@@ -196,7 +197,7 @@ void Step(BYTE* human, DWORD handle, Guard& g, int now) {
     Teleport(human, &n.at, &facing, true);
     g.phase = kAtPost;
     ++g_arrived;
-    RFA_LOG_FIRST(32, "Guards: NPC 0x%08X of post 0x%08X is at its guard node %d, facing (%.2f, %.2f)", handle, g.box, g.node, f.x, f.z);
+    RFA_LOG_DETAIL_FIRST(32, "Guards: NPC 0x%08X of post 0x%08X is at its guard node %d, facing (%.2f, %.2f)", handle, g.box, g.node, f.x, f.z);
 }
 
 }  // namespace
@@ -209,7 +210,7 @@ bool GuardsPostSpawned(unsigned long node, unsigned long box, unsigned long squa
     g_postOfNode[node] = box;
     g_released.erase(squad);
     ++g_squads;
-    RFA_LOG_FIRST(64, "Guards: node 0x%08lX's squad 0x%08lX guards post 0x%08lX (%d guard nodes), as Guerrilla's", node, squad, box,
+    RFA_LOG_DETAIL_FIRST(64, "Guards: node 0x%08lX's squad 0x%08lX guards post 0x%08lX (%d guard nodes), as Guerrilla's", node, squad, box,
                   static_cast<int>(post->second.nodes.size()));
     return true;
 }
@@ -217,7 +218,7 @@ bool GuardsPostSpawned(unsigned long node, unsigned long box, unsigned long squa
 void GuardsReleaseSquad(unsigned long squad) {
     if (g_posts.empty()) return;
     g_released.insert(squad);
-    RFA_LOG_FIRST(16, "Guards: squad 0x%08lX sent out from its post: its members leave their guard nodes", squad);
+    RFA_LOG_DETAIL_FIRST(16, "Guards: squad 0x%08lX sent out from its post: its members leave their guard nodes", squad);
 }
 
 int GuardsGoalAllowed(unsigned long human, const float* goal) {
@@ -278,7 +279,7 @@ void GuardsFrame(bool ours) {
         if (g_squads > 0) {
             int atPost = 0, fighting = 0;
             for (const auto& [handle, g] : g_guards) atPost += g.phase == kAtPost, fighting += g.phase == kFighting;
-            rfa::Log("Guards: %d guards at their posts now (%d at their nodes, %d in a fight); %d squads at posts so far, %d nodes taken, %d arrivals, "
+            rfa::LogDetail("Guards: %d guards at their posts now (%d at their nodes, %d in a fight); %d squads at posts so far, %d nodes taken, %d arrivals, "
                      "%d fights, %d with no way to their node, %d with no free node, %d ways refused (not to a guard node)",
                      static_cast<int>(g_guards.size()), atPost, fighting, g_squads, g_taken, g_arrived, g_fights, g_noWay, g_noNode, g_refused);
         }

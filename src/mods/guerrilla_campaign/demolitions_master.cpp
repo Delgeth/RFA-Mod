@@ -294,7 +294,7 @@ void SweepNpcs(const Vector& center, float range) {
         converts::SendAway(*reinterpret_cast<const DWORD*>(human + kHandle));
         ++sent;
     }
-    if (sent) rfa::Log("Demolitions master: %d people leave the area", sent);
+    if (sent) rfa::LogDetail("Demolitions master: %d people leave the area", sent);
 }
 
 // The HUD's results reasons (DemolitionsInfo's failure text).
@@ -472,7 +472,7 @@ void Swap(BYTE* player, const Level& level) {
     std::string kept;
     for (int s = 0; s < kSlots; ++s)
         if (g_haveKept[s]) kept += (kept.empty() ? "" : ", ") + g_kept[s].name + " " + std::to_string(g_kept[s].rounds);
-    rfa::Log("Demolitions master %s: the player's own kept (%s), given %s", level.name.c_str(), kept.empty() ? "none" : kept.c_str(), list.c_str());
+    rfa::LogDetail("Demolitions master %s: the player's own kept (%s), given %s", level.name.c_str(), kept.empty() ? "none" : kept.c_str(), list.c_str());
 }
 
 // The player's own back, as they were (reload_inventory).
@@ -497,7 +497,7 @@ void Restore(BYTE* player, const char* why) {
         ++back;
     }
     if (held) PlayerEquip(player, held, 0, false, false);
-    rfa::Log("Demolitions master: the player's own %d weapons given back (%s)", back, why);
+    rfa::LogDetail("Demolitions master: the player's own %d weapons given back (%s)", back, why);
 }
 
 // The level went (a reload brings the save's inventory): nothing to give back.
@@ -570,7 +570,7 @@ public:
         target_ = target;
         targetIsBuilding_ = IsBuilding(building);
         const Vector at = PositionOf(building);
-        rfa::Log("Demolitions master %s: target %08X at (%.0f, %.0f, %.0f), %s, %.0f m from the node", level_->name.c_str(), target_, at.x, at.y, at.z,
+        rfa::LogDetail("Demolitions master %s: target %08X at (%.0f, %.0f, %.0f), %s, %.0f m from the node", level_->name.c_str(), target_, at.x, at.y, at.z,
                  targetIsBuilding_ ? "a building" : "NOT one of the world's buildings (won when it is gone)", FlatDistance(at, node.pos));
         // The play area's middle (do_startup_initialization, then activity_do_frame_active's LOADING_LAYERS): the
         // building's bounding-box centre, or the layer's "Demo Master" dummy where it has one.
@@ -579,7 +579,7 @@ public:
         targetCenter_ = node.hasParentCenter ? node.parentCenter : at;
         targetRadius_ = node.hasParentSize ? 0.5f * (std::max)(node.parentSize.x, node.parentSize.z) : kTargetMarkMin;
         if (targetRadius_ < kTargetMarkMin) targetRadius_ = kTargetMarkMin;
-        rfa::Log("Demolitions master %s: the area (%.0f m) is centred on %s at (%.0f, %.0f, %.0f), %.0f m from the node", level_->name.c_str(),
+        rfa::LogDetail("Demolitions master %s: the area (%.0f m) is centred on %s at (%.0f, %.0f, %.0f), %.0f m from the node", level_->name.c_str(),
                  level_->activeRange, node.hasAreaCenter ? "the layer's Demo Master marker" : node.hasParentCenter ? "the building's box" : "the building's place",
                  center_.x, center_.y, center_.z, FlatDistance(center_, node.pos));
         progress_ = LoadProgress(node);
@@ -700,14 +700,14 @@ protected:
             choice_ = -1;
             screenAsked_ = false;
             briefingTime_ = 0.0f;
-            rfa::Log("Demolitions master %s: the briefing", level_->name.c_str());
+            rfa::LogDetail("Demolitions master %s: the briefing", level_->name.c_str());
         }
         if (step_ == Step::PregameBriefing) {
             briefingTime_ += seconds;
             // A HUD that doesn't show the briefing never answers: go on as if accepted.
             if (choice_ < 0 && !screenAsked_ && briefingTime_ > 1.0f) choice_ = 1;
             if (choice_ == 0) {  // demolitions_master_reject
-                rfa::Log("Demolitions master %s: the briefing was cancelled", level_->name.c_str());
+                rfa::LogDetail("Demolitions master %s: the briefing was cancelled", level_->name.c_str());
                 step_ = Step::PregameReject;
                 End();
                 return;
@@ -752,9 +752,9 @@ protected:
         // finalize_activity_initialization: the inventory swapped for the challenge's weapons.
         for (const Weapon& weapon : level_->weapons) {
             if (IsProp(weapon))
-                rfa::Log("Demolitions master %s: prop %s x%d (placed by the challenge's layer)", level_->name.c_str(), weapon.icon.c_str(), weapon.ammo);
+                rfa::LogDetail("Demolitions master %s: prop %s x%d (placed by the challenge's layer)", level_->name.c_str(), weapon.icon.c_str(), weapon.ammo);
             else
-                rfa::Log("Demolitions master %s: weapon %s, ammo %d", level_->name.c_str(), weapon.weapon.c_str(), weapon.ammo);
+                rfa::LogDetail("Demolitions master %s: weapon %s, ammo %d", level_->name.c_str(), weapon.weapon.c_str(), weapon.ammo);
         }
         if (BYTE* player = static_cast<BYTE*>(Player())) kit::Swap(player, *level_);
         if (level_->unlimitedAmmo) NotPorted("Unlimited_Ammo (no challenge of Guerrilla's sets it)");

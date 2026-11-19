@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Text;
 using RfaFormats;
 using RfaFormats.Guerrilla;
 using RfaFormats.Tables;
@@ -95,6 +96,7 @@ static class TableCheck
             }
         }
         if (!SquadsCheck(setup, archives, log)) bad++;
+        if (!ActivityLayersCheck(setup, log)) bad++;
         // The sound banks the game will list, Armageddon's and ours, against the most its bank list holds.
         string worldFolder = Path.Combine(setup.ModFolder, "mods", "guerrilla_world");
         int banks = GuerrillaSoundBanks.BankRows(setup.Game, worldFolder);
@@ -103,6 +105,7 @@ static class TableCheck
                      ? $"({GuerrillaSoundBanks.GameBankLimit - banks} left)"
                      : $"({banks - GuerrillaSoundBanks.GameBankLimit} too many: the game would load no sound at all; {GuerrillaSoundBanks.BankTable} in mods\\guerrilla_world\\)"));
         if (banks > GuerrillaSoundBanks.GameBankLimit) bad++;
+        if (!DistanceCheck(setup, log)) bad++;
         log.Line(bad == 0
             ? $"Table check: none of the {checkedTables} tables lacks a field the game requires" + (doubtful > 0 ? $"; {doubtful} have values to look into (above)" : "")
             : $"Table check: {bad} of {checkedTables} tables have entries the game stops on at start-up (above)" + (doubtful > 0 ? $"; {doubtful} have values to look into" : ""));
@@ -116,6 +119,66 @@ static class TableCheck
         bool constraints = ConstraintCheck.Run(setup, log);
         return bad == 0 && solid && ladders && cloth && constraints;
     }
+
+    /// <summary>
+    /// Our sound banks' 3D nodes (those placing themselves: their children take it from them) and their fade on the
+    /// game's distance (<see cref="WwiseBankWriter.GameDistance"/>; Wwise's own attenuation doesn't fade them in game).
+    /// False if one has no fade. A line warns past <see cref="MostDistanceCurves"/> curves: Wwise goes through every
+    /// curve on a game parameter each time the game sets it for a sound, and with one on each of the voices' 5,362
+    /// lines (2026-11-18) the fades stopped working in game.
+    /// </summary>
+    static bool DistanceCheck(Setup setup, BuildLog log)
+    {
+        string cache = Path.Combine(setup.Overrides, "build", "pc", "cache");
+        if (!Directory.Exists(cache)) return true;
+        byte[] placed = [0x00, 0x00, 0xC8, 0x42, 0x01, 0x03, 0x00, 0x00, 0x00];  // 3D, game-defined (WwiseBankWriter.NodeBase)
+        int withFade = 0, without = 0;
+        var lacking = new List<string>();
+        foreach (string file in Directory.EnumerateFiles(cache, "rfg*.bnk_pc").Where(f => !f.EndsWith("_media.bnk_pc", StringComparison.OrdinalIgnoreCase)))
+        {
+            byte[] d = File.ReadAllBytes(file);
+            for (int o = 0; o + 8 <= d.Length;)
+            {
+                int size = BitConverter.ToInt32(d, o + 4);
+                if (size < 0 || o + 8 + size > d.Length) break;
+                if (Encoding.ASCII.GetString(d, o, 4) == "HIRC")
+                    for (int k = 0, count = BitConverter.ToInt32(d, o + 8), p = o + 12; k < count && p + 12 <= o + 8 + size; k++)
+                    {
+                        uint type = BitConverter.ToUInt32(d, p);
+                        int length = BitConverter.ToInt32(d, p + 4);
+                        if (length < 4) break;
+                        int body = p + 12, end = p + 8 + length;
+                        int at = type is 2 or 5 or 6 or 7 or 9 ? d.AsSpan(body, end - body).IndexOf(placed) : -1;
+                        if (at >= 0)
+                        {
+                            // After it: the attenuation (4), spatialized and dynamic (2), the voice settings (8), no states (2), the curves.
+                            int q = body + at + placed.Length + 4 + 2 + 8 + 2;
+                            int curves = BitConverter.ToUInt16(d, q);
+                            bool fades = false;
+                            q += 2;
+                            for (int c = 0; c < curves && q + 20 <= end; c++)
+                            {
+                                uint parameter = BitConverter.ToUInt32(d, q + 5), property = BitConverter.ToUInt32(d, q + 9);
+                                int points = BitConverter.ToUInt16(d, q + 18);
+                                if (parameter == WwiseBankWriter.GameDistance && property == 0) fades = true;
+                                q += 20 + 12 * points;
+                            }
+                            if (fades) withFade++;
+                            else { without++; if (lacking.Count < 5) lacking.Add($"{Path.GetFileName(file)} {BitConverter.ToUInt32(d, p + 8):X8}"); }
+                        }
+                        p = end;
+                    }
+                o += 8 + size;
+            }
+        }
+        log.Line($"Sound distance check: {withFade} of our 3D sounds and mixers fade on the game's distance" +
+                 (without > 0 ? $"; {without} don't (they'd play at full volume however far: {string.Join(", ", lacking)})" : "") +
+                 (withFade > MostDistanceCurves ? $"; that is past the {MostDistanceCurves} curves the fades are known to work with (to look into: hang more of them from mixers)" : ""));
+        return without == 0;
+    }
+
+    /// <summary>How many fade curves on the game's distance our banks may carry before the check warns (772 worked; 6,100 didn't).</summary>
+    const int MostDistanceCurves = 2000;
 
     /// <summary>
     /// The squads the world's tables (mods\guerrilla_world\) hand the game, as its squad and loadout readers take them
@@ -142,6 +205,19 @@ static class TableCheck
         log.Line($"Squads check: {problems.Count} thing(s) the game would turn down (its squads naming them aren't read):");
         foreach (string problem in problems) log.Line("  " + problem);
         return false;
+    }
+
+    /// <summary>
+    /// The activities' managed layers the world wrote (GuerrillaActivityLayers.Check): each set's container on disk and in
+    /// missions.vpp_pc's asset list after Armageddon's own entries byte for byte, each row of the layer table naming one,
+    /// each layer a layer the game reads (ZONE 46, flags 4) with its objects in its zone and layer, the sets and their
+    /// names within the game's room. False if any; what the objects name that the game's tables lack is only noted.
+    /// </summary>
+    static bool ActivityLayersCheck(Setup setup, BuildLog log)
+    {
+        var found = GuerrillaActivityLayers.Check(setup.Game!, setup.Overrides, setup.WorldFolder);
+        foreach (var (_, text) in found) log.Line($"Activity layers check: {text}");
+        return !found.Any(f => f.Problem);
     }
 
     static void Report(BuildLog log, string heading, List<Problem> problems)

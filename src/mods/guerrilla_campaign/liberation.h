@@ -73,6 +73,14 @@ float PlayerDeathMorale();
 void ReloadState();
 // Set outright (gfm_set_edf_control: clamped to 0..max, then the district may be liberated).
 void SetEdfControl(float control, int district);
+// A district is liberated at EDF control 0 with none of its story missions left (Guerrilla's rule; the user,
+// 2026-11-18). A mission recorded done (the mission work will call it) may liberate its district.
+void RecordMissionDone(const char* mission);
+// Testing only, before missions exist: every story mission of the district (-1: the player's) marked done, then
+// liberation checked. The number marked.
+int MarkMissionsDone(int district);
+// The district's story missions not done yet (-1: the player's).
+int MissionsLeftIn(int district);
 // What morale's effects read: the district's, or the temporary morale while a mission uses it,
 // plus the offset (gfm_get_effective_morale), and that as a fraction of the most.
 float EffectiveMoralePercent(int district);
@@ -85,6 +93,7 @@ int TechLevel();
 void SetTechLevel(int level);
 void SetEdfProgression(int level);
 void SetMarauderProgression(int level);
+int MarauderProgressionLevel();
 // edf_progression_level_internal (RM 0x78C140): the player's district's min_progression_edf (0-7) or the global
 // level, whichever is higher; the global one where the player is in no district.
 int EdfProgressionLevel();

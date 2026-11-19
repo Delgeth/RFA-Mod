@@ -19,10 +19,16 @@
 //   - Below its level, its squads go (do_frame_inactive: each squad's do_frame until it despawns), and it waits.
 //
 // Here:
-//   - The squads come on the road points within those distances (the EDF's squad spawn nodes and nav cells aren't
-//     looked up yet).
-//   - The Flyer kind (the player off the nav mesh) isn't asked for: Armageddon's nav mesh query isn't found yet.
-//     The On Foot profiles that bring a flyer still bring it.
+//   - The places as Guerrilla's (master_spawn_info: build_node_info 0x787320, build_cell_info 0x787430):
+//       - on foot, an EDF squad node 80 to 160 m from the player, at random among those loaded (the world build lists
+//         them: mods\guerrilla_world\reinforcement_nodes.txt), else the nearest road point in the band, else a nav cell;
+//       - in a vehicle, the road point, else a nav cell;
+//       - a nav cell: four probes at the band's middle (120 m on foot, 200 m in vehicles) north, east, south and west of
+//         the player, the first open cell within 20 m of one (the people's mesh, or the vehicles' for a squad with
+//         vehicles), its centroid (guerrilla_people's GuerrillaPeople_OpenNavCell).
+//   - The Flyer kind as Guerrilla's: the player 15 m or more from the people's nav mesh's nearest border edge, or none
+//     loaded (guerrilla_people's GuerrillaPeople_NavMeshDistance: bb_pf_find_closest_point_on_nav_mesh_slow); it wins
+//     over In Vehicle.
 //   - A squad is made with Armageddon's squad spawn (the drop_squad record, 0x507950 / 0x5080A0: its vehicle group
 //     at +0x38 from 0x757340 by name, the orders at +0x98 Attack 3 on the player).
 //   - Its members on foot who don't see the player are sent running to where he is every 4 s, as the alert orders'
@@ -44,6 +50,7 @@
 #include "liberation.h"
 #include "tables.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
@@ -91,6 +98,7 @@ auto const RemoveObject = reinterpret_cast<int(__fastcall*)(void* world, void* u
 auto& g_difficulty = *reinterpret_cast<const int*>(0x10F7E98);  // 0 Easy
 
 constexpr float kFootNear = 80.0f, kFootFar = 160.0f;          // Master_ped_spawn_info
+constexpr float kFlyerOffMesh = 15.0f;                          // pick_desired_reinforcement_group: dist^2 >= 225
 constexpr float kVehicleNear = 150.0f, kVehicleFar = 250.0f;   // Master_veh_spawn_info
 constexpr float kFlyerHeight = 30.0f;                         // a flyer starts this far above its road point
 constexpr int kPeriodMs = 500;
@@ -198,6 +206,67 @@ std::vector<BYTE*> Members(DWORD squad) {
     return members;
 }
 
+// The EDF's squad nodes as placed (the world build's reinforcement_nodes.txt).
+struct Node {
+    DWORD handle;
+    Vector at;
+};
+std::vector<Node> g_nodes;
+
+void ReadNodes() {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (rfa::RootDir() + L"\\mods\\guerrilla_world\\reinforcement_nodes.txt").c_str(), L"r") != 0 || !file) {
+        rfa::Log("Reinforcements: no mods\\guerrilla_world\\reinforcement_nodes.txt (the world built before it); squads on foot come on roads or nav cells");
+        return;
+    }
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        Node node{};
+        if (sscanf_s(line, "node %lx %f %f %f", &node.handle, &node.at.x, &node.at.y, &node.at.z) == 4) g_nodes.push_back(node);
+    }
+    fclose(file);
+    rfa::Log("Reinforcements: %u of the EDF's squad nodes as places for squads on foot", static_cast<unsigned>(g_nodes.size()));
+}
+
+// A random loaded EDF squad node between the two distances (build_node_info: no sight test, uniform), or false.
+bool NodePlace(const Vector& here, float nearest, float farthest, Vector& place) {
+    std::vector<Vector> places;
+    for (const Node& node : g_nodes) {
+        const void* object = ObjectFromHandle(node.handle);
+        if (!object) continue;
+        const Vector at = PositionOf(object);
+        const float d = Distance2(at, here);
+        if (d >= nearest * nearest && d <= farthest * farthest) places.push_back(at);
+    }
+    if (places.empty()) return false;
+    place = places[rand() % places.size()];
+    return true;
+}
+
+using OpenNavCellFn = int(__cdecl*)(float x, float y, float z, float within, int vehicles, float* out);
+using NavMeshDistanceFn = float(__cdecl*)(float x, float y, float z);
+
+template <typename Fn> Fn PeopleExport(const char* name) {
+    HMODULE people = GetModuleHandleW(L"guerrilla_people.dll");
+    return people ? reinterpret_cast<Fn>(GetProcAddress(people, name)) : nullptr;
+}
+
+// build_cell_info: four probes at the band's middle along +Z, +X, -Z, -X; the first open cell within 20 m of one.
+bool CellPlace(const Vector& here, float nearest, float farthest, bool vehicles, Vector& place) {
+    const auto openCell = PeopleExport<OpenNavCellFn>("GuerrillaPeople_OpenNavCell");
+    if (!openCell) return false;
+    const float middle = (nearest + farthest) / 2.0f;
+    const float directions[4][2] = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
+    for (const auto& d : directions) {
+        float out[3];
+        if (openCell(here.x + d[0] * middle, here.y, here.z + d[1] * middle, 20.0f, vehicles ? 1 : 0, out)) {
+            place = {out[0], out[1], out[2]};
+            return true;
+        }
+    }
+    return false;
+}
+
 // The road point nearest the player between the two distances, or false.
 bool RoadPlace(const Vector& here, float nearest, float farthest, Vector& place) {
     float best = 1e30f;
@@ -248,11 +317,20 @@ bool SpawnOne(Allocation& a, BYTE* player, const SquadInfo& info) {
     const Vector here = PositionOf(player);
     Vector place{};
     const bool inVehicle = group != nullptr;
-    if (!RoadPlace(here, inVehicle ? kVehicleNear : kFootNear, inVehicle ? kVehicleFar : kFootFar, place)) {
-        RFA_LOG_FIRST(16, "Reinforcements (%s): no road %.0f to %.0f m from the player; %s waits", a.name, inVehicle ? kVehicleNear : kFootNear,
-                      inVehicle ? kVehicleFar : kFootFar, name.c_str());
-        return false;
+    const float nearest = inVehicle ? kVehicleNear : kFootNear, farthest = inVehicle ? kVehicleFar : kFootFar;
+    const char* where = "a squad node";
+    if (inVehicle || !NodePlace(here, nearest, farthest, place)) {
+        where = "a road";
+        if (!RoadPlace(here, nearest, farthest, place)) {
+            where = "a nav cell";
+            if (!CellPlace(here, nearest, farthest, inVehicle, place)) {
+                RFA_LOG_FIRST(16, "Reinforcements (%s): no squad node, road or nav cell %.0f to %.0f m from the player; %s waits", a.name, nearest, farthest,
+                              name.c_str());
+                return false;
+            }
+        }
     }
+    RFA_LOG_DETAIL_FIRST(40, "Reinforcements (%s): %s comes from %s", a.name, name.c_str(), where);
     if (inVehicle && IsFlyerGroup(info.group)) place.y += kFlyerHeight;
     alignas(8) BYTE parameters[kParametersSize] = {};
     SpawnParameters(parameters, nullptr);
@@ -270,7 +348,17 @@ bool SpawnOne(Allocation& a, BYTE* player, const SquadInfo& info) {
     *reinterpret_cast<int*>(parameters + kOrdersTeam) = kEdf;
     *reinterpret_cast<Vector*>(parameters + kOrdersPlace) = here;
     *reinterpret_cast<DWORD*>(parameters + kOrdersTarget) = HandleOf(player);
+    // Its members take the Reinforcement EDF set's weapons at the EDF's level (Guerrilla's squad_flags.reinforcement_squad;
+    // guerrilla_people's squad levels): named for the squads made now, and by its handle for members made later.
+    using SquadSetFn = void(__cdecl*)(unsigned squad, const char* set);
+    using NextSquadsSetFn = void(__cdecl*)(const char* set);
+    HMODULE people = GetModuleHandleW(L"guerrilla_people.dll");
+    const auto squadSet = people ? reinterpret_cast<SquadSetFn>(GetProcAddress(people, "GuerrillaPeople_SquadSet")) : nullptr;
+    const auto nextSquadsSet = people ? reinterpret_cast<NextSquadsSetFn>(GetProcAddress(people, "GuerrillaPeople_NextSquadsSet")) : nullptr;
+    if (nextSquadsSet) nextSquadsSet("Reinforcement EDF");
     BYTE* squad = SpawnSquad(parameters, nullptr);
+    if (nextSquadsSet) nextSquadsSet(nullptr);
+    if (squad && squadSet) squadSet(HandleOf(squad), "Reinforcement EDF");
     if (!squad) {
         const int now = GameTime();
         if (a.tryingSince < 0) a.tryingSince = now;
@@ -284,7 +372,7 @@ bool SpawnOne(Allocation& a, BYTE* player, const SquadInfo& info) {
     sent.what = name + (groupName.empty() ? std::string(" on foot") : " in " + groupName);
     sent.usefulUntil = GameTime() + kFirstUseMs;
     a.squads.push_back(sent);
-    rfa::Log("Reinforcements (%s, %s): %s from (%.0f, %.0f, %.0f), %.0f m away, attacking the player", a.name, a.profile->name.c_str(), sent.what.c_str(),
+    rfa::LogDetail("Reinforcements (%s, %s): %s from (%.0f, %.0f, %.0f), %.0f m away, attacking the player", a.name, a.profile->name.c_str(), sent.what.c_str(),
              place.x, place.y, place.z, sqrtf(Distance2(place, here)));
     return true;
 }
@@ -373,7 +461,7 @@ void FrameAllocation(Allocation& a, BYTE* player, int level, bool allowed, int n
         Sent& sent = a.squads[i];
         const std::vector<BYTE*> members = Members(sent.squad);
         if (members.empty()) {
-            RFA_LOG_FIRST(60, "Reinforcements (%s): %s is gone", a.name, sent.what.c_str());
+            RFA_LOG_DETAIL_FIRST(60, "Reinforcements (%s): %s is gone", a.name, sent.what.c_str());
             a.squads.erase(a.squads.begin() + i);
             continue;
         }
@@ -392,7 +480,7 @@ void FrameAllocation(Allocation& a, BYTE* player, int level, bool allowed, int n
         }
         const char* why = d2 > kTooFar * kTooFar ? "farther than 325 m" : now >= sent.usefulUntil ? "neither fighting nor coming closer" : nullptr;
         if (why) {
-            RFA_LOG_FIRST(60, "Reinforcements (%s): %s taken away (%s)", a.name, sent.what.c_str(), why);
+            RFA_LOG_DETAIL_FIRST(60, "Reinforcements (%s): %s taken away (%s)", a.name, sent.what.c_str(), why);
             LetGo(sent);
             a.squads.erase(a.squads.begin() + i);
             continue;
@@ -416,18 +504,27 @@ void FrameAllocation(Allocation& a, BYTE* player, int level, bool allowed, int n
         return;
     }
     if (!a.profile && now >= a.readyAt) {
+        // pick_desired_reinforcement_group: Flyer when the player is 15 m or more from the nav mesh (or none is loaded),
+        // else In Vehicle while he drives, else On Foot.
         const bool driving = *reinterpret_cast<const DWORD*>(player + kInVehicle) != kNone;
+        const Vector at = PositionOf(player);
+        const auto navMeshDistance = PeopleExport<NavMeshDistanceFn>("GuerrillaPeople_NavMeshDistance");
+        const float offMesh = navMeshDistance ? navMeshDistance(at.x, at.y, at.z) : 0.0f;
+        const bool flyer = navMeshDistance && (offMesh < 0 || offMesh >= kFlyerOffMesh);
+        const Kind kind = flyer ? kKindFlyer : driving ? kKindInVehicle : kKindOnFoot;
+        const char* why = flyer ? (offMesh < 0 ? "off the nav mesh (none loaded)" : "off the nav mesh") : driving ? "in a vehicle" : "on foot";
         const int progression = liberation::EdfProgressionLevel();
-        a.profile = PickProfile(a.level, progression, driving ? kKindInVehicle : kKindOnFoot);
+        a.profile = PickProfile(a.level, progression, kind);
         if (!a.profile) {
-            RFA_LOG_FIRST(16, "Reinforcements (%s): no profile for progression %d %s", a.name, progression, driving ? "in a vehicle" : "on foot");
+            RFA_LOG_FIRST(16, "Reinforcements (%s): no profile for progression %d, the player %s", a.name, progression, why);
             a.readyAt = now + 5000;
             return;
         }
         a.next = 0;
         a.tryingSince = -1;
-        rfa::Log("Reinforcements (%s): profile %s (progression %d, the player %s), %u squads", a.name, a.profile->name.c_str(), progression,
-                 driving ? "in a vehicle" : "on foot", static_cast<unsigned>(a.profile->squads.size()));
+        rfa::Log("Reinforcements (%s): profile %s (progression %d, the player %s%s), %u squads", a.name, a.profile->name.c_str(), progression, why,
+                 flyer && offMesh >= 0 ? (" " + std::to_string(static_cast<int>(offMesh)) + " m").c_str() : "",
+                 static_cast<unsigned>(a.profile->squads.size()));
     }
     if (now - a.chasedAt >= kChaseAgainMs) {
         a.chasedAt = now;
@@ -440,6 +537,7 @@ void FrameAllocation(Allocation& a, BYTE* player, int level, bool allowed, int n
 void Init() {
     g_on = rfa::IniInt(L"GuerrillaCampaign", L"Reinforcements", 1) != 0;
     LoadProfiles();
+    ReadNodes();
     if (!g_on) rfa::Log("Reinforcements: off (Reinforcements=0 in [GuerrillaCampaign])");
     else if (g_profiles.empty()) rfa::Log("Reinforcements: no reinforcement_profile.xtbl; the EDF send no squads");
     else rfa::Log("reinforcement_profile.xtbl: %u profiles; the EDF send squads at orange and red", static_cast<unsigned>(g_profiles.size()));

@@ -655,6 +655,25 @@ public sealed class WwiseBankWriter
     }
 
     /// <summary>
+    /// An actor-mixer: a parent its children (made with <see cref="ObjectId"/>("mixer:" + key) as their parent and no
+    /// output of their own) take their bus, 3D placing and curves from, as Armageddon's own (type 7: the node's
+    /// settings, then its children's count and ids). Given a 3D output, it alone carries the fade on the game's
+    /// distance for all of them (<see cref="NodeBase"/>), where every node out to a bus would carry its own: Wwise
+    /// goes through every curve on a game parameter each time the game sets it.
+    /// </summary>
+    public uint Mixer(string key, IReadOnlyList<uint> children, Settings settings, Output output)
+    {
+        uint id = ObjectId("mixer:" + key);
+        if (taken.Contains(id)) return id;
+        var w = new Writer();
+        NodeBase(w, settings, 0, output);
+        w.U32((uint)children.Count);
+        foreach (uint c in children) w.U32(c);
+        Add(objects, 7, id, w);
+        return id;
+    }
+
+    /// <summary>
     /// A sequence container in step mode: each time it plays, the next of its children (made with this one's id as their
     /// parent: <see cref="ObjectId"/>("sequence:" + key)) in their order, back to the first after the last, the place
     /// kept across every game object (global): Guerrilla's voice lines' variations, played in turn per persona.
@@ -942,7 +961,7 @@ public sealed class WwiseBankWriter
     public string Counts() =>
         string.Join(", ", attenuations.Concat(objects).GroupBy(o => o.Type).OrderBy(g => g.Key).Select(g => $"{g.Count()} {TypeName(g.Key)}")) + $", {media.Count} media";
 
-    static string TypeName(uint type) => type switch { 2 => "sounds", 3 => "actions", 4 => "events", 5 => "random containers", 6 => "switch containers", 9 => "layer containers", 14 => "attenuations", _ => $"type {type}" };
+    static string TypeName(uint type) => type switch { 2 => "sounds", 3 => "actions", 4 => "events", 5 => "random containers", 6 => "switch containers", 7 => "actor-mixers", 9 => "layer containers", 14 => "attenuations", _ => $"type {type}" };
 
     static int Align(int n) => (n + 2047) & ~2047;
 

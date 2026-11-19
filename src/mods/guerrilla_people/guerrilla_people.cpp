@@ -78,6 +78,7 @@
 #include "story.h"
 #include "actions.h"
 #include "guards.h"
+#include "squad_levels.h"
 #include "voices.h"
 #include <intrin.h>
 #include <malloc.h>
@@ -159,7 +160,7 @@ void __cdecl ReadCharacters(int which, void* table, int dlc) {
         g_skeletonsLoaded = true;
         for (const std::string& skeleton : g_skeletons) {
             LoadSkeleton(skeleton.c_str());
-            if (FindSkeleton(skeleton.c_str()) >= 0) rfa::Log("Skeletons: %s loaded", skeleton.c_str());
+            if (FindSkeleton(skeleton.c_str()) >= 0) rfa::LogDetail("Skeletons: %s loaded", skeleton.c_str());
             else rfa::Log("Skeletons: %s could not be loaded (a character that names it will stop the game)", skeleton.c_str());
         }
         LogRigPool();
@@ -613,7 +614,7 @@ DWORD __fastcall NodeSpawn(BYTE* node, void* edx, DWORD a, DWORD b) {
     SetLeash(squad, nullptr, kBoxLeash, boxHandle);
     if (g_leashesLogged < 64) {
         ++g_leashesLogged;
-        rfa::Log("Squads: node 0x%08X's squad 0x%08X leashed to its guard post's box 0x%08X (no guard_posts.txt: the world was built before the guard post AI)",
+        rfa::LogDetail("Squads: node 0x%08X's squad 0x%08X leashed to its guard post's box 0x%08X (no guard_posts.txt: the world was built before the guard post AI)",
                  ObjectHandle(node, nullptr), squadHandle, boxHandle);
     }
     return squadHandle;
@@ -702,7 +703,7 @@ void LogFailedPath(BYTE* human, const float* goal) {
         goalToPlayer = sqrtf((player[0] - goal[0]) * (player[0] - goal[0]) + (player[2] - goal[2]) * (player[2] - goal[2]));
     }
     BYTE* squad = SquadOfNpc(human);
-    rfa::Log("Paths: no way found for NPC 0x%08X (squad 0x%08X, leash type %d, spawn node 0x%08X) from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f), %.0f m straight; "
+    rfa::LogDetail("Paths: no way found for NPC 0x%08X (squad 0x%08X, leash type %d, spawn node 0x%08X) from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f), %.0f m straight; "
              "the goal is %.0f m from the player; asked through %s (%d so far)",
              ObjectHandle(human, nullptr), squad ? ObjectHandle(squad, nullptr) : kNoHandle, squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0,
              *reinterpret_cast<const DWORD*>(human + kHumanSpawnNode), from[0], from[1], from[2], goal[0], goal[1], goal[2], sqrtf(dx * dx + dz * dz), goalToPlayer,
@@ -731,7 +732,7 @@ void* __cdecl HumanPath(BYTE* human, const float* start, const float* goal, DWOR
         if (guard) return AskTheGame(human, start, goal, pathA, pathB, flagsLow, flagsHigh, flag);
         ++g_pathsTurnedDown;
         if (g_pathsTurnedDown <= 16 || g_pathsTurnedDown % 200 == 0)
-            rfa::Log("Guard posts: a guard 0x%08X asked for a way to (%.1f, %.1f, %.1f), not to one of its post's guard nodes; none given, it fights from its post "
+            rfa::LogDetail("Guard posts: a guard 0x%08X asked for a way to (%.1f, %.1f, %.1f), not to one of its post's guard nodes; none given, it fights from its post "
                      "(%d so far)", ObjectHandle(human, nullptr), goal[0], goal[1], goal[2], g_pathsTurnedDown);
         return nullptr;
     }
@@ -747,7 +748,7 @@ void* __cdecl HumanPath(BYTE* human, const float* start, const float* goal, DWOR
     ++g_pathsTurnedDown;
     if (g_pathsTurnedDown <= 16 || g_pathsTurnedDown % 200 == 0) {
         const float* from = reinterpret_cast<const float*>(human + kObjectPlace);
-        rfa::Log("Guard posts: a guard of squad 0x%08X at (%.1f, %.1f, %.1f) asked for a way to (%.1f, %.1f, %.1f), outside its post's box 0x%08X; "
+        rfa::LogDetail("Guard posts: a guard of squad 0x%08X at (%.1f, %.1f, %.1f) asked for a way to (%.1f, %.1f, %.1f), outside its post's box 0x%08X; "
                  "none given, it holds its post (%d so far)",
                  ObjectHandle(squad, nullptr), from[0], from[1], from[2], goal[0], goal[1], goal[2], boxHandle, g_pathsTurnedDown);
     }
@@ -871,7 +872,7 @@ void ReportUnderground(BYTE* human, const float* at, bool hasGround, float groun
     else
         strcpy_s(where, "over NO ground collision at all (a ray from 999 m down met nothing)");
     BYTE* squad = SquadOfNpc(human);
-    RFA_LOG_FIRST(64, "Falls watch: NPC 0x%08X at (%.1f, %.1f, %.1f) is %s; %s; squad 0x%08X (leash type %d), spawn node 0x%08X; the player %.0f m away",
+    RFA_LOG_DETAIL_FIRST(64, "Falls watch: NPC 0x%08X at (%.1f, %.1f, %.1f) is %s; %s; squad 0x%08X (leash type %d), spawn node 0x%08X; the player %.0f m away",
                   ObjectHandle(human, nullptr), at[0], at[1], at[2], where, before, squad ? ObjectHandle(squad, nullptr) : kNoHandle,
                   squad ? *reinterpret_cast<const int*>(squad + kSquadLeashType) : 0, *reinterpret_cast<const DWORD*>(human + kHumanSpawnNode),
                   PlayerDistance(at));
@@ -956,7 +957,7 @@ void __cdecl NavCheck() {
     if (InOurWorld()) {
         int without = 0;
         const int given = GiveTransitionsCells(without);
-        rfa::Log("Transitions: %d given their cell before the game's check (their zone's mesh came in after them), %d still without one (their zone's mesh not in)",
+        rfa::LogDetail("Transitions: %d given their cell before the game's check (their zone's mesh came in after them), %d still without one (their zone's mesh not in)",
                  given, without);
     }
     g_navCheck();
@@ -968,7 +969,7 @@ void RunTransitionCells() {  // each second in our worlds: zones streamed in sin
     const int given = GiveTransitionsCells(without);
     if (given > 0 && g_cellPasses < 32) {
         ++g_cellPasses;
-        rfa::Log("Transitions: %d given their cell as their zone's mesh came in", given);
+        rfa::LogDetail("Transitions: %d given their cell as their zone's mesh came in", given);
     }
 }
 
@@ -1031,6 +1032,91 @@ BYTE* LayerOfCell(const BYTE* cell) {
         if (cells && cell >= cells && cell < cells + count * kNavCellSize && (cell - cells) % kNavCellSize == 0) return layer;
     }
     return nullptr;
+}
+
+// ---- For guerrilla_campaign's reinforcements (the live session, step 2, 2026-11-18)
+//
+// Guerrilla's nav-mesh questions its reinforcements ask, over Armageddon's cells (the layout above):
+//   - build_cell_info (RM 0x787430): the first open cell (flag 0x08 clear) within 20 m of a probe, collected as
+//     havok_collect_nav_cells does (the people's mesh, or the vehicles' for a squad with vehicles), its centroid the place;
+//   - bb_pf_find_closest_point_on_nav_mesh_slow (0xB0EDB0), for pick_desired_reinforcement_group (0x771250: Flyer when the
+//     nearest point is 15 m or more away, or none): every loaded zone's people's layer, every open cell, only its border
+//     edges (no neighbour across, or a closed one), the nearest point on each edge; the nearest of all.
+constexpr BYTE kCellClosed = 0x08;  // Guerrilla's test (ours elsewhere also treats 0x10 as off)
+
+const float* CellVertex(const BYTE* layer, const BYTE* cell, int k) {
+    return *reinterpret_cast<const float* const*>(layer + kLayerVertices) + 3 * *reinterpret_cast<const WORD*>(cell + kCellVertices + 2 * k);
+}
+
+bool OpenCellNear(const float* probe, float within, bool vehicles, float* centroid) {
+    void* world = reinterpret_cast<void*>(kWorld);
+    const int zones = NavZoneCount(world, nullptr);
+    for (int z = 0; z < zones; ++z) {
+        const BYTE* zone = NavZoneAt(world, nullptr, z);
+        const BYTE* layer = zone ? *reinterpret_cast<BYTE* const*>(zone + (vehicles ? kZoneVehicleLayer : kZonePeopleLayer)) : nullptr;
+        if (!layer || !*reinterpret_cast<const float* const*>(layer + kLayerVertices)) continue;
+        const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
+        const int count = *reinterpret_cast<const WORD*>(layer + kLayerCellCount);
+        for (int i = 0; cells && i < count; ++i) {
+            const BYTE* cell = cells + i * kNavCellSize;
+            if (cell[kCellFlags] & kCellClosed) continue;
+            float middle[3] = {0, 0, 0};
+            for (int k = 0; k < 3; ++k)
+                for (int c = 0; c < 3; ++c) middle[c] += CellVertex(layer, cell, k)[c] / 3.0f;
+            const float dx = middle[0] - probe[0], dy = middle[1] - probe[1], dz = middle[2] - probe[2];
+            if (dx * dx + dy * dy + dz * dz > within * within) continue;
+            for (int c = 0; c < 3; ++c) centroid[c] = middle[c];
+            return true;
+        }
+    }
+    return false;
+}
+
+float NearestNavMeshEdge(const float* point) {
+    void* world = reinterpret_cast<void*>(kWorld);
+    const int zones = NavZoneCount(world, nullptr);
+    float best = -1.0f;
+    for (int z = 0; z < zones; ++z) {
+        const BYTE* zone = NavZoneAt(world, nullptr, z);
+        const BYTE* layer = zone ? *reinterpret_cast<BYTE* const*>(zone + kZonePeopleLayer) : nullptr;
+        if (!layer || !*reinterpret_cast<const float* const*>(layer + kLayerVertices)) continue;
+        const BYTE* cells = *reinterpret_cast<BYTE* const*>(layer + kLayerCells);
+        const int count = *reinterpret_cast<const WORD*>(layer + kLayerCellCount);
+        for (int i = 0; cells && i < count; ++i) {
+            const BYTE* cell = cells + i * kNavCellSize;
+            if (cell[kCellFlags] & kCellClosed) continue;
+            for (int e = 0; e < 3; ++e) {
+                const float* a = CellVertex(layer, cell, e);
+                const float* b = CellVertex(layer, cell, (e + 1) % 3);
+                // A border edge: no open neighbour shares both its ends.
+                bool shared = false;
+                for (int n = 0; n < 3 && !shared; ++n) {
+                    const BYTE* next = *reinterpret_cast<BYTE* const*>(cell + 4 * n);
+                    if (!next || next == reinterpret_cast<const BYTE*>(-1) || (next[kCellFlags] & kCellClosed)) continue;
+                    const bool sameLayer = next >= cells && next < cells + count * kNavCellSize;  // most are: no search
+                    const BYTE* nextLayer = sameLayer ? layer : LayerOfCell(next);
+                    if (!nextLayer) continue;
+                    int same = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        const float* v = CellVertex(nextLayer, next, k);
+                        if ((fabsf(v[0] - a[0]) < 0.01f && fabsf(v[1] - a[1]) < 0.01f && fabsf(v[2] - a[2]) < 0.01f) ||
+                            (fabsf(v[0] - b[0]) < 0.01f && fabsf(v[1] - b[1]) < 0.01f && fabsf(v[2] - b[2]) < 0.01f))
+                            ++same;
+                    }
+                    shared = same >= 2;
+                }
+                if (shared) continue;
+                const float ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                const float length2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+                float t = length2 > 0 ? ((point[0] - a[0]) * ab[0] + (point[1] - a[1]) * ab[1] + (point[2] - a[2]) * ab[2]) / length2 : 0.0f;
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                const float dx = a[0] + ab[0] * t - point[0], dy = a[1] + ab[1] * t - point[1], dz = a[2] + ab[2] * t - point[2];
+                const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+                if (best < 0 || d < best) best = d;
+            }
+        }
+    }
+    return best;
 }
 
 struct WalkResult {
@@ -1160,7 +1246,7 @@ bool OutOfReach(BYTE* human, BYTE* startCell, const float* from, BYTE* goalCell,
         char walked[64];
         if (walk.reached) sprintf_s(walked, "the walk %.0f m", walk.length);
         else sprintf_s(walked, "no walk within %.0f m in this zone", kLongestWalkLogged);
-        rfa::Log("Goals: NPC 0x%08X (squad 0x%08X) asked for a way from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)%s: %.0f m straight, %s, past the search's "
+        rfa::LogDetail("Goals: NPC 0x%08X (squad 0x%08X) asked for a way from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f)%s: %.0f m straight, %s, past the search's "
                  "budget of %.0f m; not searched for (its action goes on as when no way is found, as Guerrilla's) (%d so far)",
                  ObjectHandle(human, nullptr), squad ? ObjectHandle(squad, nullptr) : kNoHandle, from[0], from[1], from[2], goal[0], goal[1], goal[2],
                  moved ? " (the places the game's query moved onto its cells)" : "", sqrtf(dx * dx + dz * dz), walked, budget, g_goalsTurnedDown);
@@ -1250,11 +1336,11 @@ bool __fastcall NavpointSerialize(BYTE* navpoint, void* unused, void* props, boo
     if (version == 0 && g_navpointsWithoutData++ < 32) {  // no navpoint_data: made while the game runs (a blown hole's)
         const float* at = reinterpret_cast<const float*>(navpoint + kObjectPlace);
         if (left != 0)
-            rfa::Log("Navpoints: one made at (%.1f, %.1f, %.1f), type %d, with no navpoint_data had version %d, left in its slot by the "
+            rfa::LogDetail("Navpoints: one made at (%.1f, %.1f, %.1f), type %d, with no navpoint_data had version %d, left in its slot by the "
                      "navpoint before it; cleared, so the game looks its nav cell up by place, as for any new navpoint",
                      at[0], at[1], at[2], static_cast<signed char>(navpoint[kNavpointType]), left);
         else
-            rfa::Log("Navpoints: one made at (%.1f, %.1f, %.1f), type %d, with no navpoint_data, in a slot with no version left; the game "
+            rfa::LogDetail("Navpoints: one made at (%.1f, %.1f, %.1f), type %d, with no navpoint_data, in a slot with no version left; the game "
                      "looks its nav cell up by place", at[0], at[1], at[2], static_cast<signed char>(navpoint[kNavpointType]));
     }
     return result;
@@ -1276,7 +1362,7 @@ void RunFallsWatch() {
     }
     if (!g_fallWatchTold && tick - g_fallWatchSince >= 30000) {
         g_fallWatchTold = true;
-        rfa::Log("Falls watch: running; %d NPCs in the world's list now, %d looks at living ones in 30 s, %d found under the ground", count,
+        rfa::LogDetail("Falls watch: running; %d NPCs in the world's list now, %d looks at living ones in 30 s, %d found under the ground", count,
                  g_fallWatchLooks, g_fallWatchUnder);
     }
     if (count <= 0) return;
@@ -1431,18 +1517,18 @@ bool __cdecl BackFromFarGround(float* height, float x, float z, float* normal, b
     const float away = player ? sqrtf((player[0] - x) * (player[0] - x) + (player[2] - z) * (player[2] - z)) : -1;
     if (g_groundHeight(height, x, z, normal, false)) {
         if (*height < feet - kPutFarLower)
-            RFA_LOG_FIRST(16, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f) was put %.1f m LOWER, at %.1f (the first ground under its feet); the player %.0f m away",
+            RFA_LOG_DETAIL_FIRST(16, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f) was put %.1f m LOWER, at %.1f (the first ground under its feet); the player %.0f m away",
                           handle, x, feet, z, feet - *height, *height, away);
         return true;
     }
     *height = kRayFromTheTop;
     if (g_groundHeight(height, x, z, normal, false)) {
-        RFA_LOG_FIRST(32, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f), %.1f m under the ground, put back on it at %.1f, as Guerrilla does (Armageddon's look from its feet found nothing and would have put it at height 0); the player %.0f m away",
+        RFA_LOG_DETAIL_FIRST(32, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f), %.1f m under the ground, put back on it at %.1f, as Guerrilla does (Armageddon's look from its feet found nothing and would have put it at height 0); the player %.0f m away",
                       handle, x, feet, z, *height - feet, *height, away);
         return true;
     }
     *height = feet;
-    RFA_LOG_FIRST(16, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f) has no ground loaded under it; it keeps its height (Armageddon would have put it at 0); the player %.0f m away",
+    RFA_LOG_DETAIL_FIRST(16, "Far people: 0x%08X back from far off at (%.1f, %.1f, %.1f) has no ground loaded under it; it keeps its height (Armageddon would have put it at 0); the player %.0f m away",
                   handle, x, feet, z, away);
     return false;
 }
@@ -1498,7 +1584,7 @@ void ReportFarMode(DWORD tick) {
         ++people;
         if (*reinterpret_cast<const DWORD*>(human + kHumanFarFlags) & kInFarMode) ++farOff;
     }
-    rfa::Log("Far mode: %d of %d people in it (past %.0f m from the camera%s); the humans' controller step took %.2f ms a frame on average, the slowest %.2f ms, over %d frames",
+    rfa::LogDetail("Far mode: %d of %d people in it (past %.0f m from the camera%s); the humans' controller step took %.2f ms a frame on average, the slowest %.2f ms, over %d frames",
              farOff, people, FarModeStarts(g_farRealDistance), g_farRealDistance ? ", the real distance" : ", the game's own measure", g_controllersFrames ? g_controllersMs / g_controllersFrames : 0.0,
              g_controllersSlowest, g_controllersFrames);
     g_controllersMs = g_controllersSlowest = 0;
@@ -1523,6 +1609,10 @@ void __cdecl HumanControllers(float frameTime) {
         rfa::Log("Far mode: people switch to it past %.0f m from the camera%s (the camera's FOV for distances is %.1f degrees; the game's own test would switch at %.0f m)",
                  FarModeStarts(g_farRealDistance), g_farRealDistance ? ", by the real distance" : ", by the game's own measure", *kDistanceFov,
                  FarModeStarts(false));
+    }
+    if (!rfa::DetailLog()) {  // the step's timing and the "Far mode:" report are for the log (Log=1)
+        g_humanControllers(frameTime);
+        return;
     }
     LARGE_INTEGER start, end, frequency;
     QueryPerformanceCounter(&start);
@@ -1567,7 +1657,7 @@ bool __cdecl SquadStaticSpawn(BYTE* spawn) {
     const bool all = AllMembersSpawned(spawn, nullptr);
     if (g_spreadSquadsLogged < 32) {
         ++g_spreadSquadsLogged;
-        rfa::Log("Squads: node 0x%08X's %d spread out from it over the nav mesh, as in Guerrilla (%d spawn point(s) under it)%s",
+        rfa::LogDetail("Squads: node 0x%08X's %d spread out from it over the nav mesh, as in Guerrilla (%d spawn point(s) under it)%s",
                  ObjectHandle(node, nullptr), members, points, all ? "" : "; not all of them found room");
     }
     return all;
@@ -1822,7 +1912,7 @@ void MaybeGuerrillaMan(BYTE* npc, const char* why) {
     BYTE* instance = animation ? *reinterpret_cast<BYTE**>(animation + 4) : nullptr;
     // The first few in each run, whoever they are: whether the game's NPCs go through here at all.
     if (++g_drawsSeen <= 8)
-        rfa::Log("Guerrilla men: NPC 0x%08X (team %d, set %s) %s", ObjectHandle(npc, nullptr), team,
+        rfa::LogDetail("Guerrilla men: NPC 0x%08X (team %d, set %s) %s", ObjectHandle(npc, nullptr), team,
                  NpcSetName(instance ? *reinterpret_cast<void**>(instance + 0x10) : nullptr), why);
     if (team != 0 && team != 2) return;
     if (!instance) return;
@@ -1836,7 +1926,7 @@ void MaybeGuerrillaMan(BYTE* npc, const char* why) {
     *reinterpret_cast<void**>(instance + 0x10) = male;
     *reinterpret_cast<void**>(instance + 0xC) = male;
     if (++g_guerrillaMen <= 16)
-        rfa::Log("Guerrilla men: NPC 0x%08X (team %d) %s: Guerrilla's Male set in place of the male civilians' (%d so far)", ObjectHandle(npc, nullptr), team, why,
+        rfa::LogDetail("Guerrilla men: NPC 0x%08X (team %d) %s: Guerrilla's Male set in place of the male civilians' (%d so far)", ObjectHandle(npc, nullptr), team, why,
                  g_guerrillaMen);
 }
 
@@ -1866,7 +1956,7 @@ bool __cdecl MayThrow(BYTE* npc) {
     if (!npc || !InOurWorld()) return g_mayThrow(npc);
     const bool may = TimerOver(reinterpret_cast<int*>(npc + kOwnThrowTimer)) && TimerOver(kSharedThrowTimer);
     if (!may && g_mayThrow(npc) && ++g_throwsHeld <= 8)
-        rfa::Log("Grenades: NPC 0x%08X may not throw yet (Guerrilla's rule: its own and the shared wait both over; Armageddon's check would let it)",
+        rfa::LogDetail("Grenades: NPC 0x%08X may not throw yet (Guerrilla's rule: its own and the shared wait both over; Armageddon's check would let it)",
                  ObjectHandle(npc, nullptr));
     return may;
 }
@@ -2066,7 +2156,7 @@ void __cdecl HumanJump(void* human, bool first, bool second, bool third) {
     const DWORD b0Bit21 = (*reinterpret_cast<DWORD*>(h + 0xB0) >> 21) & 1, b4Bit11 = (*reinterpret_cast<DWORD*>(h + 0xB4) >> 11) & 1;
     if (!blocked && !busy && !refused && state != 2 && mode != 4 && !action && !(b0Bit21 && !b4Bit11)) return;  // a timer: pressed again too soon
     ++g_jumpsLogged;
-    rfa::Log("Jump: %s in world \"%s\" (flags %d %d %d): turned down; checks: blocked %d, state +0x770 %d, +0x730 %d, "
+    rfa::LogDetail("Jump: %s in world \"%s\" (flags %d %d %d): turned down; checks: blocked %d, state +0x770 %d, +0x730 %d, "
              "+0xB0 bit 21 %lu, +0xB4 bit 11 %lu, busy %d, an action playing %d, refused %d",
              Whose(human), WorldName(), first, second, third, blocked, state, mode, b0Bit21, b4Bit11, busy, action, refused);
 }
@@ -2165,10 +2255,10 @@ void RunSpawnResourceChanges() {
     const int before = *static_cast<const int*>(kPools);
     if (loggedStart != g_levelStarts) {
         loggedStart = g_levelStarts;
-        RFA_LOG_FIRST(40, "Spawn resource: the mod runs its change each frame in world \"%s\" (a Wrecking Crew match; state %d)", WorldName(), before);
+        RFA_LOG_DETAIL_FIRST(40, "Spawn resource: the mod runs its change each frame in world \"%s\" (a Wrecking Crew match; state %d)", WorldName(), before);
     }
     const int after = RunSpawnResourceChange();
-    if (after != before) RFA_LOG_FIRST(60, "Spawn resource: its change went from state %d to %d (run by the mod; 4 = in force)", before, after);
+    if (after != before) RFA_LOG_DETAIL_FIRST(60, "Spawn resource: its change went from state %d to %d (run by the mod; 4 = in force)", before, after);
 }
 
 void __cdecl GameplayFrame() {
@@ -2184,6 +2274,7 @@ void __cdecl GameplayFrame() {
     ActionsFrame(InOurWorld());  // Guerrilla's action nodes for the people under them (actions.cpp)
     GuardsFrame(InOurWorld());   // Guerrilla's guard posts (guards.cpp)
     VoicesFrame(InOurWorld());   // Guerrilla's pain, death, spotting and grenade lines (voices.cpp)
+    SquadLevelsFrame(InOurWorld());  // Guerrilla's squads' weapons by level (squad_levels.cpp)
     const DWORD now = GetTickCount();
     if (now - g_lastCheck < 1000) return;
     g_lastCheck = now;
@@ -2216,6 +2307,7 @@ void __cdecl GameplayFrame() {
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    if (rfa::ReadLogSwitch(L"GuerrillaPeople")) rfa::Log("Log=1: routine lines and the diagnoses (\"[guerrilla_people:log]\") are on");
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
@@ -2242,6 +2334,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     StartActions();
     StartGuards();
     StartVoices();
+    StartSquadLevels();
     if (!g_skeletons.empty()) {
         g_readCharacters = reinterpret_cast<ReadCharactersFn>(rfa::HookFunction(kReadCharacters, kReadCharactersPrologue, reinterpret_cast<void*>(&ReadCharacters)));
         if (g_readCharacters) rfa::Log("Skeletons: %u of Guerrilla's people's own to load before the character table", static_cast<unsigned>(g_skeletons.size()));
@@ -2266,8 +2359,10 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         rfa::Log("Guerrilla men: could not hook the draw actions; a guerrilla in civilian clothes keeps his civilian set when he draws");
     g_resetDispositions = reinterpret_cast<ResetDispositionsFn>(rfa::HookFunction(kResetDispositions, kResetDispositionsPrologue, reinterpret_cast<void*>(&ResetDispositions)));
     if (!g_resetDispositions) rfa::Log("Sides: could not hook the teams' reset; Armageddon's dispositions stay");
-    g_humanJump = reinterpret_cast<HumanJumpFn>(rfa::HookFunction(kHumanJump, kHumanJumpPrologue, reinterpret_cast<void*>(&HumanJump)));
-    if (!g_humanJump) rfa::Log("Jump: could not hook the jump; a jump turned down isn't written in the log");
+    if (rfa::DetailLog()) {  // a diagnosis only: it changes nothing in the game
+        g_humanJump = reinterpret_cast<HumanJumpFn>(rfa::HookFunction(kHumanJump, kHumanJumpPrologue, reinterpret_cast<void*>(&HumanJump)));
+        if (!g_humanJump) rfa::Log("Jump: could not hook the jump; a jump turned down isn't written in the log");
+    }
     g_gameplayFrame = reinterpret_cast<GameplayFrameFn>(rfa::HookFunction(kGameplayFrame, kGameplayFramePrologue, reinterpret_cast<void*>(&GameplayFrame)));
     if (!g_gameplayFrame) rfa::Log("Could not hook the gameplay update; Guerrilla's sides are set only at a level's start, and the people's loading isn't reported");
     g_squadStaticSpawn = reinterpret_cast<SquadStaticSpawnFn>(rfa::HookFunction(kSquadStaticSpawn, kSquadStaticSpawnPrologue, reinterpret_cast<void*>(&SquadStaticSpawn)));
@@ -2454,6 +2549,20 @@ extern "C" __declspec(dllexport) const char* __cdecl GuerrillaPeople_GuerrillaSq
 // The walkers also let go on their own of one whose team changes.
 extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_LeaveToGame(DWORD person) { AmbientLeaveToGame(person); }
 
+// For guerrilla_campaign's reinforcements (Guerrilla's build_cell_info): an open nav cell whose centroid is within `within`
+// metres of (x, y, z), on the people's mesh or (vehicles 1) the vehicles'; 1 and its centroid in out[3], or 0.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaPeople_OpenNavCell(float x, float y, float z, float within, int vehicles, float* out) {
+    const float probe[3] = {x, y, z};
+    return out && OpenCellNear(probe, within, vehicles != 0, out) ? 1 : 0;
+}
+
+// For guerrilla_campaign's reinforcements (Guerrilla's pick_desired_reinforcement_group): how far (x, y, z) is from the
+// nearest border edge of the loaded people's nav mesh, in metres; -1 when none is loaded.
+extern "C" __declspec(dllexport) float __cdecl GuerrillaPeople_NavMeshDistance(float x, float y, float z) {
+    const float point[3] = {x, y, z};
+    return NearestNavMeshEdge(point);
+}
+
 // A squad sent out from its post: its leash is taken off (type 0, no anchor; 0x810990), and with it the refusal of
 // ways out of a guard post's box (HumanPath, which only holds squads on the box leash, type 4).
 // Guerrilla's disable_safehouse_vip (its scripts' action; safehouse_vip_disable RM 0x7909F0): a VIP character (by its
@@ -2470,6 +2579,6 @@ extern "C" __declspec(dllexport) void __cdecl GuerrillaPeople_ReleaseLeash(DWORD
     const int type = *reinterpret_cast<const int*>(squad + kSquadLeashType);
     if (type == 0) return;
     SetLeash(squad, nullptr, 0, kNoHandle);
-    RFA_LOG_FIRST(32, "Squads: squad 0x%08X's leash (type %d, anchor 0x%08X) taken off: sent out from its post", squadHandle, type,
+    RFA_LOG_DETAIL_FIRST(32, "Squads: squad 0x%08X's leash (type %d, anchor 0x%08X) taken off: sent out from its post", squadHandle, type,
                   *reinterpret_cast<const DWORD*>(squad + kSquadLeashAnchor));
 }

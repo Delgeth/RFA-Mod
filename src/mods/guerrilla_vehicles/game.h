@@ -123,6 +123,7 @@ struct Data {
     std::vector<std::pair<std::string, std::vector<std::string>>> groups;        // traffic's vehicle groups
     std::vector<std::pair<std::string, std::vector<std::string>>> edf;           // the EDF's ambient actions' vehicles
     std::vector<std::string> gunnerVehicles;                                     // vehicles with a gunner's seat
+    std::vector<std::string> dropOff;                                            // Default Guerilla: the drop-off's vehicles
     std::vector<std::pair<std::pair<std::string, std::string>, std::vector<std::string>>> people;  // (resource, team) → characters
 };
 const Data& Files();  // read once
@@ -131,6 +132,7 @@ const Zone* TrafficZoneAt(const V3& where);
 const std::string& ResourceAt(const V3& where);  // the zone's spawn resource (rfg_Default if none)
 const std::vector<std::string>* People(const std::string& resource, const char* team);  // "Guerilla", "EDF", "Marauder"
 const std::vector<std::string>* EdfVehicles(const char* action);                       // "driveby", "harass", "flyby"
+const std::vector<std::string>* DropOffVehicles();  // the player's team's default group, Default Guerilla (drop_off.cpp)
 bool HasGunnerSeat(BYTE* vehicle);
 bool InTrafficWorld();  // the player's world is one named in [GuerrillaVehicles] TrafficWorlds=
 void ReadWorlds(const std::wstring& worlds);
@@ -148,6 +150,14 @@ void StartEdf();      // edf.cpp
 void EdfFrame();
 void StartChases();   // crews.cpp
 void ChasesFrame();
+void StartDropOff();  // drop_off.cpp
+void DropOffFrame();
+bool PlayerInSafehouse();  // safehouses.cpp: the player is in a safehouse's area
+// guerrilla_campaign's state (its exports, looked up as asked): the alert level (0 green .. 3 red; 0 without the campaign
+// or while its systems rest), whether an activity or mission runs, and whether the player's district is liberated.
+int CampaignAlert();
+bool CampaignActivityRunning();
+bool PlayerDistrictLiberated();
 void StartSafehouses();  // safehouses.cpp
 void SafehousesFrame();
 void StartRiders();      // riders.cpp (a log: shooting riders, getting into occupied vehicles)

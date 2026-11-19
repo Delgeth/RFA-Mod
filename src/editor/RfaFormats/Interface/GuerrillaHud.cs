@@ -77,7 +77,7 @@ public static partial class GuerrillaHud
         // master's briefing and results (Enter and Esc, key_178 and key_124; the weapons' icons). STAMP_PAD is a global of
         // both rfg_ui_hud_missions and rfg_ui_demolitions: renamed in the latter, which comes and goes.
         new("rfg_ui_district_liberated", ["key_178"], GuerrillaScript: true, BridgedItems: true, ExtraTextures: ["interface-pc"],
-            GuerrillaTextSizes: true),
+            UpgradePictures: true, GuerrillaTextSizes: true),
         new("rfg_ui_demolitions", ["key_178", "key_124"], GuerrillaScript: true, BridgedItems: true, WeaponPictures: HudWeaponPictures.Icons,
             ExtraTextures: ["interface-pc"], RenamedGlobals: ["STAMP_PAD"], GuerrillaTextSizes: true),
         // Guerrilla's handbook (its pause menu's HANDBOOK): its pages and entries (GuerrillaHandbook, handbook.txt), the
@@ -222,6 +222,7 @@ public static partial class GuerrillaHud
         var wholeTextures = new List<(string Name, int Width, int Height)>();  // whole-texture pictures, each made a sheet
         var documentNames = new List<string>();
         var texturesBrought = new HashSet<string>(StringComparer.OrdinalIgnoreCase);  // by an earlier document
+        var broughtByUpgradeScreens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);  // by one showing upgrades
         foreach (HudDocument hud in Documents)
         {
             string name = hud.Name;
@@ -346,9 +347,14 @@ public static partial class GuerrillaHud
                 foreach (Match literal in ScriptString().Matches(guerrillaScript))
                     if (sheetOf.ContainsKey(literal.Groups[1].Value) && TextureFor(literal.Groups[1].Value) is { } texture &&
                         !needed.Contains(texture, StringComparer.OrdinalIgnoreCase)) needed.Add(texture);
-            var shared = needed.Where(texturesBrought.Contains).ToList();
-            needed.RemoveAll(texturesBrought.Contains);
+            // The screens showing upgrades (the upgrade shop, the district-liberated screen) are each loaded only while
+            // open, and never two at once: a texture one of them brought (the blueprints, each a texture of its own,
+            // and the icons' sheet) isn't there while another is open, so that one brings its own copy.
+            bool BroughtBefore(string texture) => texturesBrought.Contains(texture) && !(hud.UpgradePictures && broughtByUpgradeScreens.Contains(texture));
+            var shared = needed.Where(BroughtBefore).ToList();
+            needed.RemoveAll(BroughtBefore);
             foreach (string texture in needed) texturesBrought.Add(texture);
+            if (hud.UpgradePictures) broughtByUpgradeScreens.UnionWith(needed);
 
             // One texture file with every texture it needs, renamed. The document waits for its
             // first texture file; any others it named point at one Armageddon always has loaded.

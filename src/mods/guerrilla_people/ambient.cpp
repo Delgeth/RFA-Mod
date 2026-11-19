@@ -312,6 +312,14 @@ struct Rotating { std::string base; int versions = 1, at = 0, lastSwitch = 0; V3
 std::vector<Rotating> g_rotating;
 std::string g_currentBase;  // the rotating district whose resource the game last asked for
 int g_nextRotateCheck = 0, g_rotations = 0, g_rotationsHeld = 0;
+// Behind [GuerrillaPeople] RotateCivilians (0 when it isn't set: no changes; 1 turns them on): the user's run of 2026-11-18 22:27-22:35 ("vehicles keep
+// despawning along with all of the npc's") showed Armageddon's change of spawn resource doesn't swap only what differs:
+// state 1 lets go of every person and vehicle model (streamed people 17 → 1, vehicle models 6 → 0) and states 2-4 load
+// them all again (people 15, models 3), so every car and person of the district went at each change. Guerrilla's
+// spawn-resource manager swaps one civilian at a time and keeps what's in use streamed. Off, each district stays on
+// its first version; the proper way (only the 4 walker slots swapped, by our own load and release of one character
+// type, once that is proven safe) is the later step.
+bool g_rotateOn = false;
 
 std::string VersionName(const Rotating& r, int v) { return v == 0 ? r.base : r.base + "_r" + std::to_string(v + 1); }
 
@@ -341,7 +349,7 @@ void FindRotating() {
 // Every 2 s in our worlds: the district in force moves on to its next version when Guerrilla's walk of the player would
 // have swapped its rotating civilians, and none of those going out is in view near the player.
 void RotateFrame(const V3& player, int now, int alert) {
-    if (g_rotating.empty() || now < g_nextRotateCheck) return;
+    if (!g_rotateOn || g_rotating.empty() || now < g_nextRotateCheck) return;
     g_nextRotateCheck = now + kRotateCheckEvery;
     Rotating* r = RotatingFor(g_currentBase);
     if (!r || *kResourceState != kResourceInForce) return;
@@ -376,7 +384,7 @@ void RotateFrame(const V3& player, int now, int alert) {
         const V3 head{place.x, place.y + 1.0f, place.z};
         if (Distance(place, player) <= kGoingOutSeen && InView(&head.x, 1.0f)) {
             ++g_rotationsHeld;
-            RFA_LOG_FIRST(8, "Walkers: %s's civilians stay as they are for now: a %s going out is in view nearby", r->base.c_str(),
+            RFA_LOG_DETAIL_FIRST(8, "Walkers: %s's civilians stay as they are for now: a %s going out is in view nearby", r->base.c_str(),
                           goingOut.empty() ? "person" : goingOut.front().c_str());
             return;
         }
@@ -391,7 +399,7 @@ void RotateFrame(const V3& player, int now, int alert) {
     r->lastSwitch = now;
     r->lastPlace = player;
     ++g_rotations;
-    rfa::Log("Walkers: %s's civilians change to version %d of %d (%s), after %.0f m: in %s; out %s (%d changes so far)", r->base.c_str(), next + 1, r->versions,
+    rfa::LogDetail("Walkers: %s's civilians change to version %d of %d (%s), after %.0f m: in %s; out %s (%d changes so far)", r->base.c_str(), next + 1, r->versions,
              VersionName(*r, next).c_str(), moved, Join(comingIn).c_str(), Join(goingOut).c_str(), g_rotations);
 }
 
@@ -443,7 +451,7 @@ void GiveBehavior(BYTE* human, const std::string& character, const V3& place, co
                 if (propMade) ++g_behaviorPropsMade;
             }
         ++g_behaviorsGiven;
-        RFA_LOG_FIRST(24, "Walkers: %s takes Guerrilla's ambient behaviour of %s: %s%s%s%s (at %.1f h, morale %.2f)", character.c_str(), group->c_str(),
+        RFA_LOG_DETAIL_FIRST(24, "Walkers: %s takes Guerrilla's ambient behaviour of %s: %s%s%s%s (at %.1f h, morale %.2f)", character.c_str(), group->c_str(),
                       b.variant.empty() ? "no variant" : b.variant.c_str(), variantSet ? "" : b.variant.empty() ? "" : " (not a variant)",
                       b.prop.empty() ? "" : propMade ? ", holding " : ", without ", b.prop.c_str(), hour, morale);
         return;
@@ -836,7 +844,7 @@ bool VehicleHazard(BYTE* human, BYTE* vehicle, BYTE* player, int team, Hazard& h
     const V3 least = *reinterpret_cast<const V3*>(vehicle + kObjectBoxLeast), most = *reinterpret_cast<const V3*>(vehicle + kObjectBoxMost);
     h.halfWidth = (most.x - least.x) * 0.5f;
     if (!(h.halfWidth > 0.2f && h.halfWidth < 25.0f)) {
-        RFA_LOG_FIRST(4, "Walkers: vehicle 0x%08X's box (%.1f to %.1f across) isn't a vehicle's size; no cower from it", Handle(vehicle), least.x, most.x);
+        RFA_LOG_DETAIL_FIRST(4, "Walkers: vehicle 0x%08X's box (%.1f to %.1f across) isn't a vehicle's size; no cower from it", Handle(vehicle), least.x, most.x);
         return false;
     }
     BYTE* body = HavokBody(*reinterpret_cast<const DWORD*>(vehicle + kObjectBody));
@@ -924,7 +932,7 @@ bool VehicleReaction(Walker& w, BYTE* human, BYTE* ai, int now) {
             w.incoming = true;
             w.gawking = false;
             ++g_cowersIncoming;
-            RFA_LOG_FIRST(16, "Walkers: NPC 0x%08X cowers from vehicle 0x%08X coming at it (passes %.1f m off in %.1f s, half its width %.1f m%s), as Guerrilla's cower_goal (%d so far)",
+            RFA_LOG_DETAIL_FIRST(16, "Walkers: NPC 0x%08X cowers from vehicle 0x%08X coming at it (passes %.1f m off in %.1f s, half its width %.1f m%s), as Guerrilla's cower_goal (%d so far)",
                           w.human, Handle(vehicle), h.distanceAtPass, h.timeToPass, h.halfWidth, h.heavy ? ", heavy" : "", g_cowersIncoming);
         }
         else StandStill(human, ai);
@@ -948,7 +956,7 @@ bool VehicleReaction(Walker& w, BYTE* human, BYTE* ai, int now) {
         if (!w.gawking) {
             w.gawking = true;
             ++g_gawks;
-            RFA_LOG_FIRST(12, "Walkers: NPC 0x%08X stops to gawk at heavy vehicle 0x%08X, %.1f m away, as Guerrilla's gawk_goal (%d so far)", w.human, Handle(vehicle),
+            RFA_LOG_DETAIL_FIRST(12, "Walkers: NPC 0x%08X stops to gawk at heavy vehicle 0x%08X, %.1f m away, as Guerrilla's gawk_goal (%d so far)", w.human, Handle(vehicle),
                           Distance(Pos(human), Pos(vehicle)), g_gawks);
         }
         SitOut(human);
@@ -982,13 +990,13 @@ bool Fetal(Walker& w, BYTE* human, BYTE* ai) {
     if (!w.fetal) {
         w.fetal = true;
         ++g_fetal;
-        RFA_LOG_FIRST(12, "Walkers: NPC 0x%08X was beaten down and lies in the fetal position, as Guerrilla's fetal_position_goal (%d so far)", w.human, g_fetal);
+        RFA_LOG_DETAIL_FIRST(12, "Walkers: NPC 0x%08X was beaten down and lies in the fetal position, as Guerrilla's fetal_position_goal (%d so far)", w.human, g_fetal);
     }
     if (StayInFetal(ai, nullptr)) return true;
     flags &= ~kInFetalPosition;
     SetStance(human, kStandingStance);
     w.fetal = false;
-    RFA_LOG_FIRST(12, "Walkers: NPC 0x%08X gets up from the fetal position (10 s after the beating)", w.human);
+    RFA_LOG_DETAIL_FIRST(12, "Walkers: NPC 0x%08X gets up from the fetal position (10 s after the beating)", w.human);
     return false;
 }
 
@@ -1004,7 +1012,7 @@ void Walk(Walker& w, BYTE* human, int now) {
             ++g_fled;
             // Guerrilla's flee_to_safety_goal: a guerrilla's com_ally_combat_flee, anyone else's voc_panic (flee_action).
             VoiceSay(human, *reinterpret_cast<const int*>(human + kTeam) == 0 ? "com_ally_combat_flee" : "voc_panic");
-            RFA_LOG_FIRST(20, "Walkers: NPC 0x%08X flees from a danger at (%.1f, %.1f, %.1f) (Guerrilla's flee_to_safety_goal; belief kind %d)",
+            RFA_LOG_DETAIL_FIRST(20, "Walkers: NPC 0x%08X flees from a danger at (%.1f, %.1f, %.1f) (Guerrilla's flee_to_safety_goal; belief kind %d)",
                           w.human, w.danger.x, w.danger.y, w.danger.z, static_cast<int>(static_cast<char>(belief[kBeliefType])));
         }
         w.fleeUntil = now + kFleeLingers;
@@ -1056,7 +1064,7 @@ void Walk(Walker& w, BYTE* human, int now) {
         w.stuck = 0;
         if (!next) {  // nowhere to go: it stands, and goes once out of view
             w.leaving = true;
-            RFA_LOG_FIRST(10, "Walkers: NPC 0x%08X has no pedestrian navpoint to walk to at (%.1f, %.1f, %.1f); it leaves once out of view", w.human, at.x, at.y, at.z);
+            RFA_LOG_DETAIL_FIRST(10, "Walkers: NPC 0x%08X has no pedestrian navpoint to walk to at (%.1f, %.1f, %.1f); it leaves once out of view", w.human, at.x, at.y, at.z);
             return;
         }
     }
@@ -1066,7 +1074,7 @@ void Walk(Walker& w, BYTE* human, int now) {
     const int result = GoTo(ai, nullptr, &w.goal.x, movement, kStanding, kLowPriority, kNone, kNone, false);
     if (result >= 0 && result < 9) {
         if (g_results[result]++ == 0)
-            rfa::Log("Walkers: the AI's go-to first answered %d for NPC 0x%08X, to navpoint 0x%08X at (%.1f, %.1f, %.1f) from (%.1f, %.1f, %.1f)", result, w.human,
+            rfa::LogDetail("Walkers: the AI's go-to first answered %d for NPC 0x%08X, to navpoint 0x%08X at (%.1f, %.1f, %.1f) from (%.1f, %.1f, %.1f)", result, w.human,
                      w.target, w.goal.x, w.goal.y, w.goal.z, at.x, at.y, at.z);
     }
     if (result == kNoPath || result == kStartOffMesh || result == kDestinationOffMesh) {
@@ -1085,7 +1093,7 @@ void Walk(Walker& w, BYTE* human, int now) {
             Head(w, from ? NextNavpoint(w, from, {0, 0, 0}) : NearestNavpoint(at, w.target));
             if (w.stuck >= 3 && !w.leaving) {
                 w.leaving = true;
-                RFA_LOG_FIRST(20, "Walkers: NPC 0x%08X got stuck three times near (%.1f, %.1f, %.1f); it leaves once out of view", w.human, at.x, at.y, at.z);
+                RFA_LOG_DETAIL_FIRST(20, "Walkers: NPC 0x%08X got stuck three times near (%.1f, %.1f, %.1f); it leaves once out of view", w.human, at.x, at.y, at.z);
             }
         }
         w.lastPlace = at;
@@ -1132,7 +1140,7 @@ void SpawnStep(const V3& at, const V3& forward, int now) {
     static int lastKey = -1;
     const int key = density * 100 + alert * 10 + (night ? 1 : 0);
     if (cap != g_cap || zone != lastZone || key != lastKey)
-        RFA_LOG_FIRST(60, "Walkers: the cap is now %d (%s); %d out", cap, why, static_cast<int>(g_walkers.size()));
+        RFA_LOG_DETAIL_FIRST(60, "Walkers: the cap is now %d (%s); %d out", cap, why, static_cast<int>(g_walkers.size()));
     lastZone = zone;
     lastKey = key;
     g_cap = cap;
@@ -1177,7 +1185,7 @@ void SpawnStep(const V3& at, const V3& forward, int now) {
     }
     if (nodes.empty()) {
         ++g_noNode;
-        RFA_LOG_FIRST(5, "Walkers: no pedestrian navpoint 20-100 m from the player out of view at (%.0f, %.0f, %.0f) (zone %02d_%02d, cap %d)", at.x, at.y, at.z,
+        RFA_LOG_DETAIL_FIRST(5, "Walkers: no pedestrian navpoint 20-100 m from the player out of view at (%.0f, %.0f, %.0f) (zone %02d_%02d, cap %d)", at.x, at.y, at.z,
                       zone->col, zone->row, cap);
         return;
     }
@@ -1195,7 +1203,7 @@ void SpawnStep(const V3& at, const V3& forward, int now) {
         BYTE* human = info ? MakeHuman(info, &place.x, orientation, nullptr) : nullptr;
         if (!human) {
             ++g_notStreamed;
-            RFA_LOG_FIRST(10, "Walkers: %s (%s) %s", name.c_str(), zone->resource.c_str(), info ? "isn't streamed in yet" : "isn't one of the game's characters");
+            RFA_LOG_DETAIL_FIRST(10, "Walkers: %s (%s) %s", name.c_str(), zone->resource.c_str(), info ? "isn't streamed in yet" : "isn't one of the game's characters");
             continue;
         }
         Walker w;
@@ -1217,7 +1225,7 @@ void SpawnStep(const V3& at, const V3& forward, int now) {
         GiveBehavior(human, name, place, *zone);  // Guerrilla's ambient behaviour (its variant and prop)
         g_walkers.push_back(w);
         ++g_made;
-        RFA_LOG_FIRST(10, "Walkers: %s walks from navpoint 0x%08X at (%.1f, %.1f, %.1f), %.0f m away, in zone %02d_%02d (%s: %s by %s, alert %s, cap %d); %d out",
+        RFA_LOG_DETAIL_FIRST(10, "Walkers: %s walks from navpoint 0x%08X at (%.1f, %.1f, %.1f), %.0f m away, in zone %02d_%02d (%s: %s by %s, alert %s, cap %d); %d out",
                       name.c_str(), w.from, place.x, place.y, place.z, Distance(place, at), zone->col, zone->row, zone->entry.c_str(), kDensity[density],
                       night ? "night" : "day", kAlert[alert], cap, static_cast<int>(g_walkers.size()));
         return;
@@ -1233,8 +1241,12 @@ void StartAmbient() {
     }
     ReadFiles();
     FindRotating();
+    g_rotateOn = rfa::IniInt(L"GuerrillaPeople", L"RotateCivilians", 0) != 0;  // off unless set to 1 (the main session, 2026-11-18)
     if (!g_rotating.empty())
-        rfa::Log("Walkers: %u districts' civilians change in batches as the player goes about (their resources' versions, Guerrilla's rotate_character_usage)",
+        rfa::Log(g_rotateOn ? "Walkers: %u districts' civilians change in batches as the player goes about (their resources' versions; RotateCivilians=1: each "
+                              "change reloads the district's people and vehicles)"
+                            : "Walkers: %u districts have versions of their civilians; they don't change (RotateCivilians=0: Armageddon's change of spawn "
+                              "resource reloads every person and vehicle)",
                  static_cast<unsigned>(g_rotating.size()));
     if (g_files.zones.empty()) {
         rfa::Log("Walkers: no mods\\guerrilla_people\\ambient.txt (build the people); no one walks");
@@ -1282,7 +1294,7 @@ void AmbientFrame(bool ours) {
         if (asked || (w->team >= 0 && team != w->team)) {
             if (w->walked) GiveBack(*w, human);
             ++g_leftToOthers;
-            RFA_LOG_FIRST(32, "Walkers: NPC 0x%08X is no longer a walker (%s); the game's AI has it", w->human,
+            RFA_LOG_DETAIL_FIRST(32, "Walkers: NPC 0x%08X is no longer a walker (%s); the game's AI has it", w->human,
                           asked ? "another mod took it" : team == 0 ? "it joined the guerrillas" : "its team changed");
             w = g_walkers.erase(w);
             continue;
@@ -1304,7 +1316,7 @@ void AmbientFrame(bool ours) {
     if (now >= g_nextReport && (g_made > 0 || ZoneAt(at))) {
         g_nextReport = now + 30000;
         if (g_made > 0 || g_noNode > 0)
-            rfa::Log("Walkers: %d out of a cap of %d (%s), %d people in the world (no spawning from %d); %d made, %d gone out of view, %d died or were taken, "
+            rfa::LogDetail("Walkers: %d out of a cap of %d (%s), %d people in the world (no spawning from %d); %d made, %d gone out of view, %d died or were taken, "
                      "%d fled (%d cowered), %d cowered from a vehicle, %d gawked, %d lay fetal, %d left to others; %d made civilians, %d made in a safehouse's area on their own team; %d navpoints reached, %d go-tos without a way; %d not streamed in, %d times no navpoint to spawn on",
                      static_cast<int>(g_walkers.size()), g_cap < 0 ? 0 : g_cap, g_capWhy[0] ? g_capWhy : "not worked out yet", NpcCount(kWorld, nullptr), kMostPeople,
                      g_made, g_despawned, g_died, g_fled, g_cowered, g_cowersIncoming, g_gawks, g_fetal, g_leftToOthers, g_madeCivilians, g_madeInSafehouses, g_reachedNodes, g_goToFailures, g_notStreamed, g_noNode);
@@ -1313,7 +1325,7 @@ void AmbientFrame(bool ours) {
     const int people = NpcCount(kWorld, nullptr);
     g_nextSpawn = people >= kBusyPeople ? now + 500 + std::rand() % 501 : now + 250 + std::rand() % 251;
     if (people >= kMostPeople) {
-        RFA_LOG_FIRST(5, "Walkers: no new walker: the world has %d people (Guerrilla's spawner stops at %d)", people, kMostPeople);
+        RFA_LOG_DETAIL_FIRST(5, "Walkers: no new walker: the world has %d people (Guerrilla's spawner stops at %d)", people, kMostPeople);
         return;
     }
     SpawnStep(at, *reinterpret_cast<const V3*>(player + kOrientation + 24), now);

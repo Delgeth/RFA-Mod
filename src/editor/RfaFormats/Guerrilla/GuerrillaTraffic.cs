@@ -16,6 +16,7 @@ namespace RfaFormats.Guerrilla;
 ///   people &lt;col&gt; &lt;row&gt; &lt;spawn resource&gt;   (every zone: whose people crew its vehicles)
 ///   edf &lt;driveby|harass|flyby&gt; &lt;vehicles&gt;   (the EDF's ambient actions' groups: Default EDF, Default EDF NoTurret, EDF_flyer)
 ///   gunners &lt;vehicles&gt;   (the vehicles built with a turret on a passenger seat: their crews have a gunner)
+///   dropoff &lt;vehicles&gt;   (Default Guerilla: the vehicles a guerrilla brings the player at high morale)
 /// A zone whose group none of the vehicles built are in, or with no traffic, has no zone line.
 /// </summary>
 public static class GuerrillaTraffic
@@ -63,6 +64,8 @@ public static class GuerrillaTraffic
         foreach (string group in named) lines.Add($"group {GuerrillaVehiclePlaces.GroupPrefix}{group} {string.Join(",", groups[group])}");
         foreach (var (action, group) in new[] { ("driveby", "Default EDF"), ("harass", "Default EDF NoTurret"), ("flyby", "EDF_flyer") })
             if (groups.TryGetValue(group, out var vehicles) && vehicles.Count > 0) lines.Add($"edf {action} {string.Join(",", vehicles)}");
+        // The vehicle drop-off's: the player's team's default group (sog_default_vehicle_spawn_group, team 0).
+        if (groups.TryGetValue("Default Guerilla", out var guerrillas) && guerrillas.Count > 0) lines.Add($"dropoff {string.Join(",", guerrillas)}");
         if (gunnerVehicles.Any()) lines.Add($"gunners {string.Join(",", gunnerVehicles)}");
         Directory.CreateDirectory(vehiclesModFolder);
         System.IO.File.WriteAllLines(Path.Combine(vehiclesModFolder, File), lines);

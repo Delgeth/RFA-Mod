@@ -75,8 +75,10 @@ public static class GuerrillaWorld
     /// 8 (v0.6.4-beta): the action nodes and their types, the civilians' own AI properties, the walkers'
     /// blend trees served on every load, the demolitions masters' markers and kits, the vehicle cameras'
     /// mouse turn speed.
+    /// 9 (v0.6.5-beta): the shape cutters, guard posts, props and NPC voices, the EDF's reinforcement
+    /// places, the squads' progression weapons, and the demolitions masters' managed layers.
     /// </summary>
-    public const int Format = 8;
+    public const int Format = 9;
     // The effects' emitters the game holds (guerrilla_world makes its pool 6,600) and Armageddon's own files' (639 files).
     const int EmitterRoom = 6600, ArmageddonEmitters = 3457;
 
@@ -454,6 +456,12 @@ public static class GuerrillaWorld
         static bool IsBlendMap(string texture) => texture.StartsWith("terr01_", StringComparison.OrdinalIgnoreCase) && texture.EndsWith("_alpha00", StringComparison.OrdinalIgnoreCase);
         static string RoadTexture(string texture) => IsBlendMap(texture) ? $"rfg{texture[7..9]}{texture[10..12]}_a00" : Alias(texture);
 
+        // Guerrilla's activities' managed layers (see GuerrillaActivityLayers, written at the end): their destructible
+        // objects' chunk files are converted with their zone's (below), but the objects are placed by their layer.
+        var activityLayers = GuerrillaActivityLayers.Sets(rfgCache);
+        var layerMovers = GuerrillaActivityLayers.Movers(activityLayers);
+        var layerMoversPlaced = zones.ToDictionary(z => z, _ => new List<GuerrillaZoneObject>());
+
         // ---- Guerrilla's destructible objects: the rfg_movers and general_movers its zones place whose
         // chunk files are asked for, each file converted, its textures under new names (as the
         // ground's and rocks').
@@ -475,7 +483,8 @@ public static class GuerrillaWorld
                 if (rfgZones.Find($"terr01_{col:00}_{row:00}.rfgzone_pc") is not { } entry) continue;
                 var objects = GuerrillaZones.Objects(rfgZones.Read(entry));
                 guerrillaObjects[(col, row)] = objects.GroupBy(o => o.Handle).ToDictionary(g => g.Key, g => g.First());
-                foreach (var o in objects)
+                var layerHere = layerMovers.GetValueOrDefault((col, row)) ?? [];
+                foreach (var o in objects.Concat(layerHere))
                 {
                     if (o.ClassHash != generalMover && o.ClassHash != rfgMover || o.Text("chunk_name") is not { } file) continue;
                     string name = Path.GetFileNameWithoutExtension(file);
@@ -519,7 +528,8 @@ public static class GuerrillaWorld
                             chunkTextures[texture] = [(Alias(texture) + ".cvbm_pc", Repacked(th, tg, Alias(texture))), (Alias(texture) + ".gvbm_pc", tg)];
                         }
                     }
-                    propsIn[(col, row)].Add(o);
+                    if (layerHere.Contains(o)) layerMoversPlaced[(col, row)].Add(o);
+                    else propsIn[(col, row)].Add(o);
                 }
             }
             missing.ExceptWith(chunkFiles.Keys);
@@ -534,7 +544,7 @@ public static class GuerrillaWorld
         // Guerrilla's gameplay properties (see GuerrillaGameplay): Armageddon's table with Guerrilla's
         // settings added, for the guerrilla_world mod to hand the game; each object names its entry there.
         var rfgTables = Packfile.Open(Path.Combine(rfgCache, "misc.vpp_pc"));
-        var gameplay = GuerrillaGameplay.Build(misc, rfgTables, propsIn.Values.SelectMany(p => p).Select(o => o.Text("gameplay_props")).OfType<string>().Where(n => n.Length > 0));
+        var gameplay = GuerrillaGameplay.Build(misc, rfgTables, propsIn.Values.Concat(layerMoversPlaced.Values).SelectMany(p => p).Select(o => o.Text("gameplay_props")).OfType<string>().Where(n => n.Length > 0));
         Directory.CreateDirectory(modFolder);
         File.WriteAllBytes(Path.Combine(modFolder, "gameplay_properties.xtbl"), gameplay.Text);
         log($"Gameplay properties: {gameplay.EntryOf.Count} of Guerrilla's entries named by the objects, {gameplay.Added} added to Armageddon's table with Guerrilla's settings " +
@@ -563,7 +573,7 @@ public static class GuerrillaWorld
         // exhaust and sparks: GuerrillaArsenal names these in the vehicles it makes), and Guerrilla's
         // campaign weapons' (muzzle flashes, smoke, tracers: GuerrillaWeapons names these).
         var rfgFiles = new GuerrillaTextures(rfgCache, GuerrillaTextures.EffectArchives);
-        var placedProps = propsIn.Values.SelectMany(p => p).Select(o => o.Text("Props")).OfType<string>().Where(n => n.Length > 0)
+        var placedProps = propsIn.Values.Concat(layerMoversPlaced.Values).SelectMany(p => p).Select(o => o.Text("Props")).OfType<string>().Where(n => n.Length > 0)
             .GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
         var dustEffects = rfgTables.Find("weather.xtbl") is { } weather
             ? XElement.Parse(Encoding.Latin1.GetString(rfgTables.Read(weather))).Descendants("Dust_effects").Elements("Element").Select(e => e.Value.Trim())
@@ -729,6 +739,14 @@ public static class GuerrillaWorld
                     zoneChunks.Add(name);
                     zoneCost += Cost(name);
                 }
+                // An activity layer's movers' chunks (GuerrillaActivityLayers) go in the zone's container too: the layer is
+                // made while its activity runs, wherever in the zone the player is, so they must load with the whole zone.
+                foreach (string name in layerMoversPlaced[(col, row)].Select(p => Path.GetFileNameWithoutExtension(p.Text("chunk_name")!)).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (!zoneChunks.Contains(name, StringComparer.OrdinalIgnoreCase))
+                    {
+                        zoneChunks.Add(name);
+                        zoneCost += Cost(name);
+                    }
                 var partCost = new long[9];
                 foreach (int n in Enumerable.Range(0, 9).OrderByDescending(n => wanted[n].Sum(Cost)))
                     foreach (string name in wanted[n].OrderByDescending(Cost))
@@ -777,7 +795,7 @@ public static class GuerrillaWorld
                 GuerrillaTerrain.Undergrowth(guerrillaTerrainFile) is { } undergrowth)
                 foreach (string mesh in GuerrillaTerrain.UndergrowthMeshes(undergrowth.Section, undergrowth.Layers))
                     files.AddRange(UndergrowthFiles(col, row, mesh));
-            foreach (string file in propsIn[(col, row)].Select(o => o.Text("Props")).OfType<string>()
+            foreach (string file in propsIn[(col, row)].Concat(layerMoversPlaced[(col, row)]).Select(o => o.Text("Props")).OfType<string>()
                          .SelectMany(p => effectTables.FilesOf.GetValueOrDefault(p) ?? []).Concat(effectTables.WorldFiles).Distinct(StringComparer.OrdinalIgnoreCase))
                 files.AddRange(effectFiles[file]);
             var parts = chunksIn.Select(names =>
@@ -932,6 +950,17 @@ public static class GuerrillaWorld
         var storyCharacter = XtblFile.FromBytes(rfgTables.Read(rfgTables.Find(GuerrillaSquads.SquadTable)!)).Entries
             .Where(e => e.ValueOf("special_npc")?.Trim() is { Length: > 0 })
             .ToDictionary(XtblFile.EntryName, e => e.ValueOf("special_npc")!.Trim(), StringComparer.OrdinalIgnoreCase);
+        // The EDF's squad nodes placed, for guerrilla_campaign's reinforcements (Guerrilla's build_node_info, RM 0x787320:
+        // any loaded squad node whose squad's team is allied to the EDF is a place an EDF reinforcement squad on foot may
+        // be made, 80 to 160 m from the player).
+        var edfSquads = XtblFile.FromBytes(rfgTables.Read(rfgTables.Find(GuerrillaSquads.SquadTable)!)).Entries
+            .Where(e => string.Equals(e.ValueOf("team_name")?.Trim(), "EDF", StringComparison.OrdinalIgnoreCase))
+            .Select(XtblFile.EntryName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var reinforcementLines = new List<string>
+        {
+            "; The EDF's squad nodes as placed, for guerrilla_campaign's reinforcements (places on foot), written by the world build.",
+            "; node <the squad node's handle as placed> <place x y z>",
+        };
         var guardLines = new List<string>
         {
             "; Guerrilla's guard posts for guerrilla_people's guards.cpp (its guard post AI), written by the world build.",
@@ -1158,6 +1187,11 @@ public static class GuerrillaWorld
                         }
                 }
                 guardLines.AddRange(GuerrillaPopulation.GuardPostLines(rfgZone, nodalCount.Handles));
+                foreach (var (handle, squad) in standingIn.GetValueOrDefault((col, row)) ?? [])
+                    if (edfSquads.Contains(squad) && nodalCount.Handles.TryGetValue(handle, out uint placedEdf) && rfgZone.TryGetValue(handle, out var edfNode) &&
+                        edfNode.Value("op") is { Length: >= 12 } edfAt)
+                        reinforcementLines.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                            $"node {placedEdf:X8} {BitConverter.ToSingle(edfAt, 0):0.##} {BitConverter.ToSingle(edfAt, 4):0.##} {BitConverter.ToSingle(edfAt, 8):0.##}"));
                 var storyCulture = System.Globalization.CultureInfo.InvariantCulture;
                 foreach (var node in storyHere)
                     if (nodalCount.Handles.TryGetValue(node.Handle, out uint placedStory) &&
@@ -1248,6 +1282,8 @@ public static class GuerrillaWorld
         File.WriteAllLines(Path.Combine(modFolder, "ambush_regions.txt"), ambushLines);
         File.WriteAllLines(Path.Combine(modFolder, "story_nodes.txt"), storyLines);
         File.WriteAllLines(Path.Combine(modFolder, "guard_posts.txt"), guardLines);
+        File.WriteAllLines(Path.Combine(modFolder, "reinforcement_nodes.txt"), reinforcementLines);
+        log($"People: {reinforcementLines.Count(l => l.StartsWith("node "))} of the EDF's squad nodes placed written to reinforcement_nodes.txt (places for its reinforcements on foot)");
         log($"People: {storyNodesPlaced} of Guerrilla's story people's squad nodes at the safehouses placed and written to story_nodes.txt " +
             $"({storyLines.Count(l => l.StartsWith("special "))} special NPCs', {storyLines.Count(l => l.StartsWith("vip "))} VIPs'; held for guerrilla_people's story.cpp)");
         log($"People: {ambushRegionsWritten} of Guerrilla's Marauder ambush regions written to ambush_regions.txt, {ambushNodesPlaced} of their squad nodes on foot " +
@@ -1326,6 +1362,11 @@ public static class GuerrillaWorld
         Packfile.Write(Path.Combine(output, World + "_precache.vpp_pc"), precacheFiles.Select(f => (f.Key, f.Value)).ToList());
         Packfile.Write(Path.Combine(output, World + "_l1.vpp_pc"), layer1);
         Packfile.Write(Path.Combine(output, "zonescript_" + World + ".vpp_pc"), zonescript, compressed: true);
+        // Guerrilla's activities' managed layers (the demolitions masters' barrels, propane tanks, ammo boxes, walkers and
+        // turret) as Armageddon's: see GuerrillaActivityLayers.
+        foreach (string line in GuerrillaActivityLayers.Write(activityLayers, game, overrides, modFolder, schema, PropsOf, GameplayProps, LodProps,
+                     chunk => chunkFiles.TryGetValue(chunk, out var built) ? (uint?)BitConverter.ToUInt32(built.Header, 0x24) : null, pickupItems, pickupWeapons))
+            log("Activity layers: " + line);
         // Guerrilla's districts (the territory, an override of Armageddon's table) and a time of day for each.
         var rfgMisc = Packfile.Open(Path.Combine(rfgCache, "misc.vpp_pc"));
         var (territories, districts) = GuerrillaTerritory.Build(Packfile.Open(Path.Combine(cache, "table.vpp_pc")), rfgMisc, World);

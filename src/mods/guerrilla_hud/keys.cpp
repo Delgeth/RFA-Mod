@@ -6,6 +6,7 @@
 // it can't take is said in the window, 2026-11-13: only letters, digits and a few were taken, others went unseen). Each change is
 // written to rfa_mods.ini at once and used at once. Before [GuerrillaKeys] the map's key was [GuerrillaHud] MapKey and
 // the backpack's [GuerrillaGear] BackpackKey: those are still read where [GuerrillaKeys] has no setting.
+#define RFA_MOD_NAME "guerrilla_hud"
 #include "rfa_mod.h"
 #include "rfa_menu.h"
 #include "keys.h"
@@ -256,7 +257,7 @@ void Window() {
                 g_capturing = i;
                 g_status.clear();
                 for (int code = 0; code < 256; ++code) g_heldAtCapture[code] = (GetAsyncKeyState(code) & 0x8000) != 0;
-                rfa::Log("Guerrilla's keys: waiting for the new key of %s", a.shown);
+                rfa::LogDetail("Guerrilla's keys: waiting for the new key of %s", a.shown);
             }
             ImGui::TableNextColumn();
             const int defaultCode = CodeOf(a.defaultKey);

@@ -9,6 +9,8 @@
 // the end point nearest the player that is more than 150 m from it, whose hours (tod_info) include the game's
 // hour and which hasn't sent one in the last 10 minutes; none in the first [GuerrillaVehicles]
 // ConvoyWaitAfterLoad= seconds in the world (600, Guerrilla's: an end point loads with its 10 minutes set).
+// An end point Guerrilla's zones mark convoy_disabled sends none until a district is liberated (its liberation
+// clears the flag on every end point; asked of guerrilla_campaign).
 // Its crews are EDF people of the zone's spawn resource (crews.txt), as many as its squad has (1, 2, 4 or 7;
 // at most the seats).
 //
@@ -52,6 +54,7 @@ struct MemberInfo {
 struct Definition {
     std::string name, district;
     bool capture = false;
+    bool disabled = false;     // convoy_disabled: held until a district is liberated (convoys.txt's last field)
     float normal = 8, evade = 8;
     int startHour = 0, endHour = 0;
     V3 at{};
@@ -99,6 +102,8 @@ bool ReadConvoys() {
             int difficulty;
             if (!(in >> type >> difficulty >> def.normal >> def.evade >> def.startHour >> def.endHour >> def.at.x >> def.at.y >> def.at.z >> def.district)) continue;
             def.capture = type == "Capture";
+            int disabled = 0;
+            if (in >> disabled) def.disabled = disabled != 0;  // older files lack it
             g_definitions.push_back(def);
             continue;
         }
@@ -164,10 +169,30 @@ bool HoursAllow(const Definition& def) {
     return hour >= def.startHour || hour < def.endHour;  // across midnight
 }
 
+// Whether any district is liberated: Guerrilla's district::liberate_district (RM 0x7A5CE0) clears convoy_disabled on
+// every convoy end point, so a held one sends convoys from the first liberation on. Asked of guerrilla_campaign
+// (GuerrillaCampaign_DistrictLiberated) for the districts the end points name; without it, held ones stay held.
+bool AnyDistrictLiberated() {
+    using DistrictLiberatedFn = int(__cdecl*)(const char* name);
+    static DistrictLiberatedFn ask = nullptr;
+    if (!ask)
+        if (HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll"))
+            ask = reinterpret_cast<DistrictLiberatedFn>(GetProcAddress(campaign, "GuerrillaCampaign_DistrictLiberated"));
+    if (!ask) return false;
+    for (const Definition& def : g_definitions) {
+        std::string name = def.district;
+        std::replace(name.begin(), name.end(), '_', ' ');  // convoys.txt writes spaces as _
+        if (name != "-" && ask(name.c_str()) == 1) return true;
+    }
+    return false;
+}
+
 void TryStart(const BYTE* player, int clock) {
     const V3 at = Pos(player);
     Definition* best = nullptr;
+    const bool heldOnesGo = AnyDistrictLiberated();
     for (Definition& def : g_definitions) {
+        if (def.disabled && !heldOnesGo) continue;
         if (clock < def.nextAllowed || !HoursAllow(def) || FlatDistance(def.at, at) <= kMinStart) continue;
         if (!best || FlatDistance(def.at, at) < FlatDistance(best->at, at)) best = &def;
     }
@@ -183,7 +208,7 @@ void TryStart(const BYTE* player, int clock) {
     convoy.ghost = kSpacing * (convoy.members.size() - 1);  // the lead, furthest ahead
     convoy.lastTime = clock;
     g_convoys.push_back(convoy);
-    RFA_LOG_FIRST(40, "Convoys: %s sets off (%s, %u vehicles, from %s, %.0f m away)", best->name.c_str(), best->capture ? "capture" : "destroy",
+    RFA_LOG_DETAIL_FIRST(40, "Convoys: %s sets off (%s, %u vehicles, from %s, %.0f m away)", best->name.c_str(), best->capture ? "capture" : "destroy",
                   static_cast<unsigned>(best->members.size()), best->district.c_str(), FlatDistance(best->at, at));
 }
 
@@ -229,7 +254,7 @@ void Retire(Convoy& convoy) {
 
 void Attacked(Convoy& convoy, const BYTE* player, const char* why) {
     convoy.attacked = true;
-    RFA_LOG_FIRST(40, "Convoys: %s is attacked (%s)", convoy.def->name.c_str(), why);
+    RFA_LOG_DETAIL_FIRST(40, "Convoys: %s is attacked (%s)", convoy.def->name.c_str(), why);
     for (Member& member : convoy.members) {
         if (member.gone) continue;
         BYTE* vehicle = VehicleByHandle(kWorld, nullptr, member.crew.vehicle);
@@ -246,7 +271,7 @@ void Attacked(Convoy& convoy, const BYTE* player, const char* why) {
 }
 
 void AtDestination(Convoy& convoy) {
-    RFA_LOG_FIRST(40, "Convoys: %s reached its destination", convoy.def->name.c_str());
+    RFA_LOG_DETAIL_FIRST(40, "Convoys: %s reached its destination", convoy.def->name.c_str());
     for (Member& member : convoy.members) {
         if (member.gone || member.left) continue;
         BYTE* vehicle = VehicleByHandle(kWorld, nullptr, member.crew.vehicle);
@@ -267,7 +292,7 @@ bool ConvoyFrame(Convoy& convoy, BYTE* player, int clock) {
     if (!convoy.spawned) {  // only a point on the route
         convoy.ghost += def.normal * dt;
         if (convoy.ghost >= RouteLength(def)) {
-            RFA_LOG_FIRST(40, "Convoys: %s reached its destination unseen", def.name.c_str());
+            RFA_LOG_DETAIL_FIRST(40, "Convoys: %s reached its destination unseen", def.name.c_str());
             return false;
         }
         if (Distance(PointAt(def, convoy.ghost), at) < kSpawnRange && !BeginSpawning(convoy)) {
@@ -368,7 +393,7 @@ bool ConvoyFrame(Convoy& convoy, BYTE* player, int clock) {
     for (Member& member : convoy.members)
         if (!member.gone && !member.left) { lead = &member; break; }
     if (!lead) {
-        if (!chasing) RFA_LOG_FIRST(40, "Convoys: %s is over (no vehicle of it left)", def.name.c_str());
+        if (!chasing) RFA_LOG_DETAIL_FIRST(40, "Convoys: %s is over (no vehicle of it left)", def.name.c_str());
         convoy.ended = true;
         return chasing;
     }

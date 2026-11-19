@@ -150,6 +150,9 @@ Data Read() {
         } else if (kind == "gunners") {
             std::string vehicles;
             if (in >> vehicles) data.gunnerVehicles = Split(vehicles, ',');
+        } else if (kind == "dropoff") {
+            std::string vehicles;
+            if (in >> vehicles) data.dropOff = Split(vehicles, ',');
         }
     }
     std::ifstream crews(rfa::RootDir() + L"\\mods\\guerrilla_people\\crews.txt");
@@ -201,6 +204,8 @@ const std::vector<std::string>* People(const std::string& resource, const char* 
     return fallback;
 }
 
+const std::vector<std::string>* DropOffVehicles() { return Files().dropOff.empty() ? nullptr : &Files().dropOff; }
+
 const std::vector<std::string>* EdfVehicles(const char* action) {
     for (const auto& [name, vehicles] : Files().edf)
         if (_stricmp(name.c_str(), action) == 0 && !vehicles.empty()) return &vehicles;
@@ -220,6 +225,42 @@ void ReadWorlds(const std::wstring& worlds) {
     std::string narrow;
     for (wchar_t c : worlds) narrow += static_cast<char>(c & 0x7F);  // world names are plain ASCII
     g_worlds = Split(narrow, ',');
+}
+
+namespace {
+template <typename Fn> Fn CampaignExport(const char* name) {
+    HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll");
+    return campaign ? reinterpret_cast<Fn>(GetProcAddress(campaign, name)) : nullptr;
+}
+// guerrilla_campaign's DistrictInfo (campaign_state.cpp).
+struct CampaignDistrictInfo {
+    const char* name;
+    int index;
+    float control, controlMax, controlBefore;
+    float morale, moraleMax, moraleBefore;
+    float effectiveMorale;
+    int liberated;
+    int controlChangedAt, moraleChangedAt;
+    unsigned changes;
+};
+static_assert(sizeof(CampaignDistrictInfo) == 52, "guerrilla_campaign's DistrictInfo is 52 bytes");
+}  // namespace
+
+int CampaignAlert() {
+    static const auto alert = CampaignExport<int(__cdecl*)(float*)>("GuerrillaCampaign_Alert");
+    const int level = alert ? alert(nullptr) : 0;
+    return level >= 0 && level <= 3 ? level : 0;
+}
+
+bool CampaignActivityRunning() {
+    static const auto running = CampaignExport<int(__cdecl*)(int*, int*)>("GuerrillaCampaign_Running");
+    return running && running(nullptr, nullptr) != 0;
+}
+
+bool PlayerDistrictLiberated() {
+    static const auto district = CampaignExport<int(__cdecl*)(int, CampaignDistrictInfo*)>("GuerrillaCampaign_District");
+    CampaignDistrictInfo info{};
+    return district && district(-1, &info) && info.liberated != 0;
 }
 
 bool InTrafficWorld() {

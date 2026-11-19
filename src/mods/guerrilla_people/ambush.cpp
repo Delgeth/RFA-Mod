@@ -248,7 +248,7 @@ bool __cdecl NodeOrders(BYTE* node, BYTE* params, BYTE* parent) {
 
 void Fire(Region& r, float chance, bool night) {
     if (r.marauders && g_dispositions[0][3] >= kFriendly) {
-        RFA_LOG_FIRST(8, "Ambushes: region 0x%08X not fired: the Marauders are the player's friends", r.handle);
+        RFA_LOG_DETAIL_FIRST(8, "Ambushes: region 0x%08X not fired: the Marauders are the player's friends", r.handle);
         return;
     }
     if (r.guerrillas) return;  // Guerrilla's trigger_ambush makes nothing in a region a guerrilla squad hangs under
@@ -281,7 +281,7 @@ void Fire(Region& r, float chance, bool night) {
     r.aborting = false;
     r.nextUpdate = GameTime() + kUpdateLeast + std::rand() % (kUpdateMost - kUpdateLeast + 1);
     const float* p = PlaceOf(g_localPlayer);
-    rfa::Log("Ambushes: region 0x%08X fired (the player at (%.0f, %.0f, %.0f); its %s chance %.0f %%): %d of its %d squad nodes picked (%d to %d), %d squad(s) made",
+    rfa::LogDetail("Ambushes: region 0x%08X fired (the player at (%.0f, %.0f, %.0f); its %s chance %.0f %%): %d of its %d squad nodes picked (%d to %d), %d squad(s) made",
              r.handle, p[0], p[1], p[2], night ? "night" : "day", chance * 100, wanted, count, fewest, most, made);
 }
 
@@ -292,7 +292,7 @@ void Update(Region& r, bool abortAll) {
     if (!r.aborting && (abortAll || away > kAbortDistance)) {
         r.aborting = true;
         ++g_aborted;
-        RFA_LOG_FIRST(32, "Ambushes: region 0x%08X aborted (%s); its squads leave once out of view", r.handle,
+        RFA_LOG_DETAIL_FIRST(32, "Ambushes: region 0x%08X aborted (%s); its squads leave once out of view", r.handle,
                       abortAll ? "an activity or mission runs" : "the player is past 400 m from its box");
     }
     if (!g_lookedForVehicles) {
@@ -344,7 +344,7 @@ void Update(Region& r, bool abortAll) {
                 s.handed = true;
                 s.vehicle = a.vehicle;
                 ++g_handed;
-                RFA_LOG_FIRST(32, "Ambushes: region 0x%08X's riding squad 0x%08X (vehicle 0x%08X) goes after the player (guerrilla_vehicles' chase)", r.handle, s.handle,
+                RFA_LOG_DETAIL_FIRST(32, "Ambushes: region 0x%08X's riding squad 0x%08X (vehicle 0x%08X) goes after the player (guerrilla_vehicles' chase)", r.handle, s.handle,
                               a.vehicle);
             }
         }
@@ -368,14 +368,14 @@ void Update(Region& r, bool abortAll) {
             NodeSetOrders(node, nullptr, target, kAttackOrders);
             s.target = HandleOf(target);
             ++g_skirmishOrders;
-            RFA_LOG_FIRST(32, "Ambushes: region 0x%08X's squad 0x%08X (team %d) attacks %s 0x%08X, as Guerrilla's update_squad_orders", r.handle, s.handle, a.team,
+            RFA_LOG_DETAIL_FIRST(32, "Ambushes: region 0x%08X's squad 0x%08X (team %d) attacks %s 0x%08X, as Guerrilla's update_squad_orders", r.handle, s.handle, a.team,
                           target == g_localPlayer ? "the player" : "another team's squad, its member", s.target);
         }
     }
     r.squads.erase(std::remove_if(r.squads.begin(), r.squads.end(), [&](const Region::Squad& s) { return about[s.handle].left == 0; }), r.squads.end());
     if (r.squads.empty()) {
         r.fired = r.aborting = false;
-        RFA_LOG_FIRST(64, "Ambushes: region 0x%08X over (its squads dead or gone); it can fire again the next time the player comes in", r.handle);
+        RFA_LOG_DETAIL_FIRST(64, "Ambushes: region 0x%08X over (its squads dead or gone); it can fire again the next time the player comes in", r.handle);
     }
 }
 
@@ -421,7 +421,7 @@ void AmbushFrame(bool ours) {
         const float chance = night ? r.night : r.day;
         if (static_cast<float>(std::rand()) / RAND_MAX >= chance) {
             ++g_rolledOut;
-            RFA_LOG_FIRST(32, "Ambushes: the player came into region 0x%08X; its %s chance of %.0f %% didn't come up", r.handle, night ? "night" : "day", chance * 100);
+            RFA_LOG_DETAIL_FIRST(32, "Ambushes: the player came into region 0x%08X; its %s chance of %.0f %% didn't come up", r.handle, night ? "night" : "day", chance * 100);
             continue;
         }
         Fire(r, chance, night);

@@ -222,7 +222,7 @@ bool g_rawWasDown = false;
 void LogKey(const char* what) {
     if (g_keyLines >= kKeyLines) return;
     ++g_keyLines;
-    rfa::Log("Backpacks: the key went down; %s", what);
+    rfa::LogDetail("Backpacks: the key went down; %s", what);
 }
 
 // Whether the backpack key went down this frame: the game's window in front, the menus not up.
@@ -277,7 +277,7 @@ void LogJet(const char* format, ...) {
     va_start(args, format);
     vsnprintf(text, sizeof text, format, args);
     va_end(args);
-    rfa::Log("Backpacks: %s", text);
+    rfa::LogDetail("Backpacks: %s", text);
 }
 
 void Jetpack(BYTE* player, const Pack& pack, float seconds) {
@@ -309,7 +309,7 @@ void Jetpack(BYTE* player, const Pack& pack, float seconds) {
     if (pushing != g_on) {
         g_on = pushing;
         if (!pushing) {
-            if (g_fuel <= 0.0f) rfa::Log("Backpacks: the jetpack ran out of fuel");
+            if (g_fuel <= 0.0f) rfa::LogDetail("Backpacks: the jetpack ran out of fuel");
             else LogJet("the jetpack stops (fuel %.2f, climb %.2f m/s)", g_fuel, gear::Climb(player));
         }
     }
@@ -467,7 +467,7 @@ bool Thrust(BYTE* player, const Pack& pack, ULONGLONG now) {
             auto found = pack.values.find("activatable.active_abilities.jump_boost.jump_boost_downthrust_ground_hit_effect");
             if (found != pack.values.end()) PlayEffectNamed(player, pack, found->second, false, true, std::string());
         }
-        rfa::Log("Backpacks: Thrust landed%s; off", g_thrustUp ? "" : " from its slam");
+        rfa::LogDetail("Backpacks: Thrust landed%s; off", g_thrustUp ? "" : " from its slam");
         return false;
     }
     const float delay = pack.Number("activatable.active_abilities.jump_boost.jump_boost_delay_ms", 180.0f);
@@ -477,7 +477,7 @@ bool Thrust(BYTE* player, const Pack& pack, ULONGLONG now) {
     const float horizontal = pack.Number("activatable.active_abilities.jump_boost.jump_boost_horizontal", 0.0f);
     const float vertical = pack.Number("activatable.active_abilities.jump_boost.jump_boost_vertical", 10.0f);
     const float before = gear::JumpBoost(player, horizontal, vertical, g_thrustUp);
-    rfa::Log("Backpacks: Thrust %s, climb %.1f -> %.1f m/s (%s; sideways x %.1f)", g_thrustUp ? "boost" : "slam down", before, gear::Climb(player),
+    rfa::LogDetail("Backpacks: Thrust %s, climb %.1f -> %.1f m/s (%s; sideways x %.1f)", g_thrustUp ? "boost" : "slam down", before, gear::Climb(player),
              g_thrustLeftGround ? "in the air" : "from the ground", horizontal);
     PackAttack(player, pack);  // Guerrilla's use_jump_boost -> effects_alr_attack
     return true;
@@ -627,7 +627,7 @@ int PlayEffectNamed(BYTE* player, const Pack& pack, const std::string& name, boo
                                    HandleOfObject(host), point, HandleOfObject(player), false, 0, 0);
     if (g_effectLogs < 24) {
         ++g_effectLogs;
-        rfa::Log("Backpacks: %s plays %s%s on %s%s%s (point %d, handle %d)", pack.name.c_str(), name.c_str(), looping ? " (looping)" : "",
+        rfa::LogDetail("Backpacks: %s plays %s%s on %s%s%s (point %d, handle %d)", pack.name.c_str(), name.c_str(), looping ? " (looping)" : "",
                  host == player ? "him" : "its model", attach.empty() ? "" : " at ", attach.c_str(), point, handle);
     }
     return handle;
@@ -732,7 +732,7 @@ void VisionOn(bool on) {
     g_xrayOn = on;
     if (on) XrayStart(kVisionXray);
     else XrayStop(kVisionXray);
-    rfa::Log("Backpacks: Vision's x-ray %s", on ? "on" : "off");
+    rfa::LogDetail("Backpacks: Vision's x-ray %s", on ? "on" : "off");
 }
 
 // Off (by its key, spent, run dry, taken off): its loops end, its sound set's loop stops and its release plays.
@@ -812,7 +812,7 @@ void Stealth(BYTE* player, const Pack& pack, ULONGLONG now) {
     }
     if (g_stealthFadeFrom && now - g_stealthFadeFrom >= fadeMs) g_stealthFadeFrom = 0;
     const bool fully = g_stealthed && !g_stealthFadeFrom && !g_restealthAt;
-    if (fully != g_fullyStealthed) rfa::Log("Backpacks: Stealth: %s", fully ? "wholly stealthed (the EDF lose him as a target)" : "seen");
+    if (fully != g_fullyStealthed) rfa::LogDetail("Backpacks: Stealth: %s", fully ? "wholly stealthed (the EDF lose him as a target)" : "seen");
     g_fullyStealthed = fully;
 }
 
@@ -820,7 +820,7 @@ void StealthOff(BYTE* player) {
     for (auto& [id, pack] : g_packs)
         if (id == 3) StealthLook(player, pack, false);
     g_stealthFadeFrom = g_restealthAt = 0;
-    if (g_fullyStealthed) rfa::Log("Backpacks: Stealth: off");
+    if (g_fullyStealthed) rfa::LogDetail("Backpacks: Stealth: off");
     g_fullyStealthed = false;
 }
 
@@ -997,7 +997,7 @@ void Ripple(BYTE* player, const Pack& pack, const Vec3& at) {
     }
     if (g_rippleLogs < 24) {
         ++g_rippleLogs;
-        rfa::Log("Backpacks: %s's ripple at (%.1f, %.1f, %.1f): %d people thrown and hurt (%.0f), %d vehicles, %d movers pushed, within %.1f m",
+        rfa::LogDetail("Backpacks: %s's ripple at (%.1f, %.1f, %.1f): %d people thrown and hurt (%.0f), %d vehicles, %d movers pushed, within %.1f m",
                  pack.name.c_str(), at.x, at.y, at.z, people, damage, vehicles, movers, range);
     }
 }
@@ -1075,7 +1075,7 @@ void RhinoLog(const char* format, ...) {
     va_start(args, format);
     vsnprintf(text, sizeof text, format, args);
     va_end(args);
-    rfa::Log("Backpacks: Rhino: %s", text);
+    rfa::LogDetail("Backpacks: Rhino: %s", text);
 }
 
 struct RhinoCastData {
@@ -1244,7 +1244,7 @@ void Activate(BYTE* player, const Pack& pack, float cost) {
     g_rhinoNextCast = 0;
     g_rhinoEffectAt = 0;
     g_rhinoSpeedLooked = false;
-    rfa::Log("Backpacks: %s on (fuel %.2f)", pack.name.c_str(), g_fuel);
+    rfa::LogDetail("Backpacks: %s on (fuel %.2f)", pack.name.c_str(), g_fuel);
     PackOn(player, pack);  // its effects, shakes and sounds
     g_nextKaboom = 0;
     if (HasKaboom(pack)) {
@@ -1255,7 +1255,7 @@ void Activate(BYTE* player, const Pack& pack, float cost) {
     if (!Deactivatable(pack)) {
         g_on = false;
         PackOff(player);
-        rfa::Log("Backpacks: %s spent as it went on (Guerrilla's: no deactivatable block; fuel %.2f)", pack.name.c_str(), g_fuel);
+        rfa::LogDetail("Backpacks: %s spent as it went on (Guerrilla's: no deactivatable block; fuel %.2f)", pack.name.c_str(), g_fuel);
     }
 }
 
@@ -1274,32 +1274,32 @@ void Activated(BYTE* player, const Pack& pack, float seconds) {
                 g_rampUntil = now + kRampUpMs;
                 RampUp(player, pack);
             } else {
-                rfa::Log("Backpacks: %s needs %.2f fuel to switch on (has %.2f)", pack.name.c_str(), minimum, g_fuel);
+                rfa::LogDetail("Backpacks: %s needs %.2f fuel to switch on (has %.2f)", pack.name.c_str(), minimum, g_fuel);
                 PackSound(player, pack, kNoFuelFoley);
             }
         } else if (g_on && playerOff) {
             g_on = false;
             PackOff(player);
-            rfa::Log("Backpacks: %s off (fuel %.2f)", pack.name.c_str(), g_fuel);
+            rfa::LogDetail("Backpacks: %s off (fuel %.2f)", pack.name.c_str(), g_fuel);
         }
     }
     if (g_rampUntil && now >= g_rampUntil) {
         g_rampUntil = 0;
         if (!fuel || g_fuel + 0.0001f >= minimum) Activate(player, pack, cost);
-        else rfa::Log("Backpacks: %s's ramp-up over, but it has %.2f fuel of the %.2f it needs: not on", pack.name.c_str(), g_fuel, minimum);
+        else rfa::LogDetail("Backpacks: %s's ramp-up over, but it has %.2f fuel of the %.2f it needs: not on", pack.name.c_str(), g_fuel, minimum);
     }
     if (g_on) {
         if (!WhileOn(player, pack, seconds)) {
             g_on = false;
             PackOff(player);
-            rfa::Log("Backpacks: %s spent (fuel %.2f)", pack.name.c_str(), g_fuel);
+            rfa::LogDetail("Backpacks: %s spent (fuel %.2f)", pack.name.c_str(), g_fuel);
             return;
         }
         g_fuel = std::fmax(0.0f, g_fuel - use * seconds);
         if (fuel && g_fuel <= 0.0f) {
             g_on = false;
             PackOff(player);
-            rfa::Log("Backpacks: %s ran dry", pack.name.c_str());
+            rfa::LogDetail("Backpacks: %s ran dry", pack.name.c_str());
         }
     } else {
         const float before = g_fuel;
@@ -1585,7 +1585,7 @@ BYTE* __cdecl ActiveAbility(BYTE* player) {
             const std::string said = found->second.name + " " + kBulletEffects[i].field;
             if (std::find(g_bulletEffectsSaid.begin(), g_bulletEffectsSaid.end(), said) == g_bulletEffectsSaid.end() && g_bulletEffectsSaid.size() < 16) {
                 g_bulletEffectsSaid.push_back(said);
-                rfa::Log("Backpacks: %s's %s %s plays at a bullet's hit (%s)", found->second.name.c_str(), kBulletEffects[i].field, name->c_str(),
+                rfa::LogDetail("Backpacks: %s's %s %s plays at a bullet's hit (%s)", found->second.name.c_str(), kBulletEffects[i].field, name->c_str(),
                          kBulletEffects[i].slot == 0x190 ? "his shots" : "shots that hit him");
             }
         }

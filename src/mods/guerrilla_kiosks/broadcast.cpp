@@ -293,16 +293,16 @@ double g_nextSoundCheckMs = 0.0;
 int g_soundChecks = 0;
 
 void CheckSound(const BYTE* kiosk) {
-    if (g_clockMs < g_nextSoundCheckMs || g_soundChecks >= 90) return;  // 3 minutes of broadcasts a run
+    if (!rfa::DetailLog() || g_clockMs < g_nextSoundCheckMs || g_soundChecks >= 90) return;  // with Log=1: 3 minutes of broadcasts a run
     g_nextSoundCheckMs = g_clockMs + 2000.0;
     ++g_soundChecks;
     const float camera = Distance(g_cameraPosition, PlaceOf(kiosk));
     const BYTE* object = SoundObjectFromHandle(g_soundObject);
     if (!object) {
-        rfa::Log("Broadcast sound: camera %.1f m from the kiosk; the game has no sound object for the broadcast's handle %lu", camera, g_soundObject);
+        rfa::LogDetail("Broadcast sound: camera %.1f m from the kiosk; the game has no sound object for the broadcast's handle %lu", camera, g_soundObject);
         return;
     }
-    rfa::Log("Broadcast sound: camera %.1f m from the kiosk; the sound object %.1f m from the kiosk, %u place(s), its listener %.1f m away as the "
+    rfa::LogDetail("Broadcast sound: camera %.1f m from the kiosk; the sound object %.1f m from the kiosk, %u place(s), its listener %.1f m away as the "
              "game measured it, given to Wwise as game_distance (audiolib's listener %.1f m from the camera); Guerrilla's curve gives the "
              "newsreader %.1f dB here",
              camera, Distance(reinterpret_cast<const float*>(object + 0x24), PlaceOf(kiosk)), static_cast<unsigned>(object[0x8B]),
@@ -310,7 +310,7 @@ void CheckSound(const BYTE* kiosk) {
     // The listener's front and top as audiolib gives them to Wwise: Wwise needs them of length 1 and at right angles.
     static const float zero[3] = {0.0f, 0.0f, 0.0f};
     if (g_soundChecks <= 5)
-        rfa::Log("Broadcast sound: the listener's front %.2f %.2f %.2f (length %.2f), top %.2f %.2f %.2f (length %.2f), their dot product %.2f; "
+        rfa::LogDetail("Broadcast sound: the listener's front %.2f %.2f %.2f (length %.2f), top %.2f %.2f %.2f (length %.2f), their dot product %.2f; "
                  "the sound object's orientation %.2f %.2f %.2f",
                  g_listenerFront[0], g_listenerFront[1], g_listenerFront[2], Distance(g_listenerFront, zero), g_listenerTop[0], g_listenerTop[1],
                  g_listenerTop[2], Distance(g_listenerTop, zero),
@@ -349,7 +349,7 @@ void SetActive(bool active, const char* why) {
     Stop(g_outroPlaying);
     if (g_soundObject) EndSoundObject(g_soundObject);  // the broadcast's own sound object, made at its start
     g_soundObject = 0;
-    if (g_kiosk >= 0) rfa::Log("Broadcast: ended at kiosk %08lX after %d lines (%s)", tables::Kiosks()[g_kiosk].handle, g_sessionLines, why);
+    if (g_kiosk >= 0) rfa::LogDetail("Broadcast: ended at kiosk %08lX after %d lines (%s)", tables::Kiosks()[g_kiosk].handle, g_sessionLines, why);
     g_kiosk = -1;
     screens::SetBroadcastScreen(-1);
 }
@@ -369,7 +369,7 @@ void StartDeactivate(const std::string& why) {
     }
     g_outroPlaying = Play(g_outro.event);
     g_nextLineTimer.Set(stationMs + (g_outroPlaying ? g_outro.ms : 0));
-    rfa::Log("Broadcast: ending (%s): station ID %s, outro %s", why.c_str(), stationMs ? "played" : "not played", g_outroPlaying ? "played" : "not played");
+    rfa::LogDetail("Broadcast: ending (%s): station ID %s, outro %s", why.c_str(), stationMs ? "played" : "not played", g_outroPlaying ? "played" : "not played");
 }
 
 // How far the player is from an object on x and z (as Guerrilla measures a kiosk's 50 m), or -1.
@@ -446,7 +446,7 @@ void Update(float seconds) {
         g_loopPlaying = Play(g_loop.event, d.musicLoopDelayMs);
         g_nextLineTimer.Set(d.lineDelayMs + d.musicLoopDelayMs);
         const tables::Kiosk& k = tables::Kiosks()[kiosk];
-        rfa::Log("Broadcast: started at kiosk %08lX (%s) %.0f m away, %d lines this time (%u available); intro %s, loop %s; screens show %s",
+        rfa::LogDetail("Broadcast: started at kiosk %08lX (%s) %.0f m away, %d lines this time (%u available); intro %s, loop %s; screens show %s",
                  k.handle, k.gameplay.c_str(), howFar, g_sessionCutoff, static_cast<unsigned>(g_available.size()),
                  g_introPlaying ? "playing" : "NOT PLAYING", g_loopPlaying ? "playing" : "NOT PLAYING", ScreenName(d.activeScreen));
         return;
@@ -464,7 +464,7 @@ void Update(float seconds) {
     if (!g_voiceChecked && g_voice && g_clockMs - g_voiceStartedMs >= 2000.0) {
         g_voiceChecked = true;
         if (SoundGameObject(g_voice) != 0)
-            RFA_LOG_FIRST(20, "Broadcast: line %s is still playing 2 s on (%.1f s long): Wwise took its file and is decoding it", g_voiceLine.c_str(),
+            RFA_LOG_DETAIL_FIRST(20, "Broadcast: line %s is still playing 2 s on (%.1f s long): Wwise took its file and is decoding it", g_voiceLine.c_str(),
                           g_voiceMs / 1000.0f);
         else
             RFA_LOG_FIRST(20, "Broadcast: line %s had ended 2 s on, of its %.1f s: it did not play (Wwise's reason, if it gave one, is in a "
@@ -522,7 +522,7 @@ void Update(float seconds) {
         g_nextScreen = l.screen;
     }
     if (!g_screenTimer.Valid() || !g_screenTimer.Elapsed()) screens::SetBroadcastScreen(d.activeScreen);
-    rfa::Log("Broadcast: line %d of %d, %s (%.1f s; played %d of %d times; picture %s in %d ms)", g_sessionLines, g_sessionCutoff, l.name.c_str(),
+    rfa::LogDetail("Broadcast: line %d of %d, %s (%.1f s; played %d of %d times; picture %s in %d ms)", g_sessionLines, g_sessionCutoff, l.name.c_str(),
              sound.ms / 1000.0f, g_lineStates[line].plays, l.minReplays, ScreenName(l.screen), l.screenDelayMs);
     if (g_lineStates[line].plays >= l.minReplays && static_cast<int>(g_available.size()) > d.minAvailableLines)
         g_available.erase(std::remove(g_available.begin(), g_available.end(), line), g_available.end());
@@ -579,7 +579,7 @@ int UnlockLine(const char* line) {
     const auto& lines = tables::Lines();
     for (size_t i = 0; i < lines.size(); ++i)
         if (_stricmp(lines[i].name.c_str(), line) == 0 && Unlock(static_cast<int>(i))) {
-            rfa::Log("Broadcast: line %s unlocked", line);
+            rfa::LogDetail("Broadcast: line %s unlocked", line);
             Save();
             return 1;
         }

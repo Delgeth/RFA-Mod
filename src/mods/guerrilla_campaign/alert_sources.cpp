@@ -275,6 +275,11 @@ void LookAtVehicles() {
 
 const char* ImportanceName(int importance) { return importance == 3 ? "high" : importance == 2 ? "medium" : "low"; }
 
+bool InLiberatedDistrict(const BYTE* building) {
+    const liberation::District* district = liberation::GetDistrict(liberation::DistrictAt(PositionOf(building)));
+    return district && district->liberated;
+}
+
 // sdc_do_frame, with the reports kept here.
 void LookAtBuildings() {
     const int now = GameTime();
@@ -286,6 +291,10 @@ void LookAtBuildings() {
         if (!building) continue;
         // sdc_create_damage_tracking_report: the EDF's, of some importance.
         if (*reinterpret_cast<const signed char*>(building + kMoverTeam) != kEdf) continue;
+        // Not in a liberated district: Guerrilla's liberation turns the EDF's buildings there to no team
+        // (object_mover::check_liberation RM 0xA13860, on liberation and as each streams in), so they make no
+        // reports. Ours keep their team; they're left out here instead.
+        if (InLiberatedDistrict(building)) continue;
         const int importance = ImportanceOf(building, nullptr);
         if (importance < 1 || importance > 3) continue;
         const float percent = *reinterpret_cast<const float*>(building + kDamagePercent);
@@ -309,7 +318,7 @@ void LookAtBuildings() {
         if (destroyed && !seen.destroyedSeen) {
             seen.destroyedSeen = true;
             // Guerrilla lowers the district's EDF control here too (object_mover::drop_control): district_sources.cpp.
-            rfa::Log("An EDF building of %s importance is destroyed (%.0f %% gone)", ImportanceName(importance), percent * 100.0f);
+            rfa::LogDetail("An EDF building of %s importance is destroyed (%.0f %% gone)", ImportanceName(importance), percent * 100.0f);
         }
         if (seen.damage <= seen.reported || now < seen.mayReportAt) continue;
         liberation::DamageReport report;

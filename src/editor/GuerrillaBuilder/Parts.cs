@@ -402,6 +402,8 @@ static class Parts
         foreach (string line in GuerrillaKiosks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder)) yield return line;
         // Its people's voices: the guerrilla_voices mod's table and the personas' banks.
         foreach (string line in GuerrillaVoiceBanks.Remove(setup.Game!, setup.Overrides, setup.WorldFolder)) yield return line;
+        // Its activities' managed layers: their containers, the missions' asset list override and the layer table.
+        foreach (string line in GuerrillaActivityLayers.Remove(setup.Game!, setup.Overrides, setup.WorldFolder)) yield return line;
     }
 
     /// <summary>

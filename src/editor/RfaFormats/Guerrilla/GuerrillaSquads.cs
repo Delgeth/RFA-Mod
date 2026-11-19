@@ -41,8 +41,17 @@ public static class GuerrillaSquads
     /// </summary>
     public const string SpawnResource = "rfg_Default";
 
-    /// <summary>The level of the progression the squads' members are picked at: the campaign's first.</summary>
+    /// <summary>
+    /// The level of the progression the squads' members are written at: the campaign's first. guerrilla_people gives
+    /// them their level's loadouts as they're made, from <see cref="SquadLevelsFile"/>.
+    /// </summary>
     const int Level = 1;
+
+    /// <summary>The progression levels Guerrilla reads (squad_level_1 to _8; its table has 6, the rest copy the last).</summary>
+    const int MostLevels = 8;
+
+    /// <summary>Each progression set's loadouts by level, and the squads that follow a set, for guerrilla_people.</summary>
+    public const string SquadLevelsFile = "squad_levels.txt";
 
     /// <summary>Guerrilla's teams' progression sets (squad_progression.xtbl), by a squad's team_name.</summary>
     static readonly Dictionary<string, string> ProgressionOf = new(StringComparer.OrdinalIgnoreCase)
@@ -119,6 +128,32 @@ public static class GuerrillaSquads
             }
             progression[XtblFile.EntryName(set)] = list;
         }
+
+        // Each progression set's levels 1 to 8, for guerrilla_people's squad levels (squad_levels.cpp: a squad's members
+        // get their level's loadouts as they're made). squad_progress_info::load (RM 0x78C900) copies the level before
+        // into one the table lacks; here a level none of whose loadouts are ported takes the one before too. A line each:
+        // level <set> <1-8> <character> <our loadout> <weight>.
+        var levelLines = new List<string>();
+        foreach (var set in Read(guerrillaTables, "squad_progression.xtbl").Entries)
+        {
+            string setName = XtblFile.EntryName(set);
+            var previous = new List<(string Character, string Loadout, double Weight)>();
+            for (int level = 1; level <= MostLevels; level++)
+            {
+                var list = new List<(string Character, string Loadout, double Weight)>();
+                foreach (var property in set.Element($"squad_level_{level}")?.Element("progression_properties")?.Elements ?? [])
+                {
+                    if (property.ValueOf("weapon_type")?.Trim() is not { } loadout || !loadoutName.TryGetValue(loadout, out var ours)) continue;
+                    double weight = double.TryParse(property.ValueOf("spawn_weight"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double w) ? w : 1;
+                    if (weight > 0) list.Add((property.ValueOf("human_type")?.Trim() is { Length: > 0 } human ? human : "-", ours, weight));
+                }
+                if (list.Count == 0) list = previous;
+                previous = list;
+                foreach (var (character, loadout, weight) in list)
+                    levelLines.Add(string.Join("\t", "level", setName, level, character, loadout, weight.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            }
+        }
+        var squadSets = new List<string>();  // squad <name> <set>: the squads whose members follow a set's levels
 
         // The world's spawn resources (GuerrillaDistricts): rfg_Default for the zones with no human group, one for
         // each district group the zones name; each lists one character a container (the others come with it).
@@ -210,6 +245,8 @@ public static class GuerrillaSquads
                     if (!placed.Contains(version) && !forAFight) { notPlaced++; continue; }
                     if (!placed.Contains(version)) forFights++;
                     squads.Table!.AddElement(Squad(version, team, count, pool, people.Count));
+                    if (!civilians) squadSets.Add(string.Join("\t", "squad", version, ProgressionOf[GuerrillaTeam]));
+                    else squadSets.Add(string.Join("\t", "civilian", version));  // despawned at orange and red (do_alert_despawn)
                     groupSquads++;
                 }
                 written.Add($"{name} ({count}, a version a group)");
@@ -217,6 +254,7 @@ public static class GuerrillaSquads
             }
             if (!ProgressionOf.TryGetValue(team, out var set) || !progression.TryGetValue(set, out var progressionPool) || progressionPool.Count == 0) { leftOut.Add($"{name} ({team}: none of its people made yet)"); continue; }
             squads.Table!.AddElement(Squad(name, team, count, progressionPool, 0));
+            squadSets.Add(string.Join("\t", "squad", name, set));
             written.Add($"{name} ({count})");
         }
 
@@ -247,6 +285,9 @@ public static class GuerrillaSquads
         File.WriteAllBytes(Path.Combine(worldFolder, ResourceTable), resources.ToBytes());
         File.WriteAllBytes(Path.Combine(worldFolder, SquadTable), squads.ToBytes());
         File.WriteAllBytes(Path.Combine(worldFolder, LoadoutTable), loadouts.ToBytes());
+        File.WriteAllLines(Path.Combine(worldFolder, SquadLevelsFile),
+                           new[] { "# Guerrilla's squads' loadouts by level (squad_progression.xtbl), for guerrilla_people (written by editor\\GuerrillaBuilder.exe with the people)" }
+                               .Concat(levelLines).Concat(squadSets));
         var everywhere = resourceLists.Values.SelectMany(l => l).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var withThem = characters.Where(c => !everywhere.Contains(c) && containerOf.TryGetValue(c, out var owner) && everywhere.Contains(owner)).Order(StringComparer.OrdinalIgnoreCase).ToList();
         var nowhere = characters.Where(c => !everywhere.Contains(c) && !withThem.Contains(c, StringComparer.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase).ToList();

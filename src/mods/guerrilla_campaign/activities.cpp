@@ -24,6 +24,7 @@
 #include "activity_base.h"
 #include "handle_kinds.h"
 #include "liberation.h"
+#include "managed_layers.h"
 #include "script_words.h"
 #include "tables.h"
 #include "world_objects.h"
@@ -44,6 +45,7 @@ constexpr float kCooldownBase = 180.0f, kCooldownPerReady = 60.0f, kCooldownMax 
 constexpr float kInterfaceHold = 10.0f;
 // A modal run stays in SHUTDOWN at least this long (activity_base_modal::activity_clean_up_once).
 constexpr float kShutdownPeriod = 1.0f;
+constexpr float kLayersWaitMost = 20.0f;  // a run's layers not in by then: it goes on without them
 
 int AlertCapFrom(const std::string& name, int fallback) {
     static const char* const kNames[] = {"green", "yellow", "orange", "red"};
@@ -128,6 +130,8 @@ bool Activity::StartSpawn(unsigned node, const BaseData* data, int district) {
     data_ = data;
     district_ = district;
     ChangeState(State::Loading);
+    // Its layers start loading (managed_layer_set::start_layer_loading), named as the activity's table row.
+    layersRequested_ = data && !data->layers.empty() && managed_layers::Request(data->name.c_str());
     return true;
 }
 
@@ -138,9 +142,11 @@ void Activity::Reset() {
     data_ = nullptr;
     cleanedUp_ = victoryRecorded_ = active_ = false;
     shutdownTime_ = 0.0f;
+    layersRequested_ = false;
 }
 
 void Activity::LevelInit() {
+    managed_layers::LevelInit();
     disabled_ = 0;
     Reset();
     if (modal_ && g_current == mode_) g_current = ModeNone;
@@ -182,6 +188,8 @@ bool Activity::Start() {
     if (data_) liberation::SetAlertCap(data_->minAlertCap, data_->maxAlertCap);
     ChangeInterface(Interface::Running);
     ChangeState(State::Running);
+    // Its "At Start" layers' objects made (activity_base::create_managed_layer), behind the start's fade.
+    if (layersRequested_ && data_) managed_layers::Create(data_->name.c_str());
     return true;
 }
 
@@ -213,6 +221,9 @@ bool Activity::CleanUpCompleted() const { return cleanedUp_ && shutdownTime_ <= 
 
 // Back to WAIT; the scripts are told for the node that just ended, and the result stays on show.
 void Activity::Complete() {
+    // Its layers' objects taken away and their files let go (start_layer_unloading), after its own clean-up (a
+    // challenge's weapons given back first, so a propane tank in the player's hands goes with them).
+    if (layersRequested_ && data_) managed_layers::Release(data_->name.c_str());
     const Interface shown = interface_;
     const float shownTime = interfaceTime_;
     const unsigned node = node_;
@@ -232,6 +243,15 @@ void Activity::RecordVictory(const Rewards& rewards) {
     if (rewards.control != 0.0f) liberation::ChangeEdfControl(-rewards.control, district_);
     if (rewards.morale != 0.0f) liberation::ChangeMorale(rewards.morale, district_);
     if (rewards.salvage != 0) liberation::AddSalvage(rewards.salvage);
+    // kiosk_unlock_from_activity (its only caller is record_victory, RM 0x755BB9): the EDF news lines this win unlocks
+    // (kiosk_lines.xtbl's, by the activity's name; guerrilla_kiosks keeps them).
+    if (data_) {
+        using UnlockFn = int(__cdecl*)(const char* activity);
+        if (HMODULE kiosks = GetModuleHandleW(L"guerrilla_kiosks.dll"))
+            if (const auto unlock = reinterpret_cast<UnlockFn>(GetProcAddress(kiosks, "GuerrillaKiosks_UnlockActivity")))
+                if (const int unlocked = unlock(data_->name.c_str()); unlocked > 0)
+                    rfa::Log("Activities: %s won: %d kiosk lines unlocked", data_->name.c_str(), unlocked);
+    }
 }
 
 void Activity::RecordLoss() { ChangeInterface(Interface::Loss); }
@@ -268,8 +288,14 @@ void Activity::DoFrame(float seconds) {
         if (interface_ != Interface::None && interfaceTime_ > kInterfaceHold) ChangeInterface(Interface::None);
         break;
     case State::Loading:
-        // Guerrilla waits here for the activity's layers, voice, restored objects and reserved
-        // vehicles; none of those is ported yet, so the run is ready at once.
+        // Guerrilla waits here for the activity's layers (layer_resources_loaded), voice, restored objects and
+        // reserved vehicles; of those only the layers are ported. Not in after kLayersWaitMost: on without them.
+        if (layersRequested_ && data_ && !managed_layers::Loaded(data_->name.c_str())) {
+            if (stateTime_ < kLayersWaitMost) break;
+            rfa::Log("Activities: %s's layers didn't load in %.0f s; the run goes on without them", data_->name.c_str(), kLayersWaitMost);
+            managed_layers::Release(data_->name.c_str());
+            layersRequested_ = false;
+        }
         if (!Initialize()) Kill();
         break;
     case State::Ready:
@@ -308,6 +334,7 @@ const BaseData* FindBaseData(const std::string& name) {
 }
 
 void Init() {
+    managed_layers::Init();
     LoadBaseData();
     Register(MakeDemolitionsMaster());
 }

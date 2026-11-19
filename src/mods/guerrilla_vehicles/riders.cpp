@@ -247,13 +247,13 @@ void LogRiders(BYTE* user, BYTE* vehicle, bool usable, DWORD from, bool a, bool 
             if (LoggedLately(Handle(vehicle))) return;
             const char* asked = from == kPromptAsksEnter ? "the use prompt" : (from == kPromptAsksFlip ? "the use prompt (to flip it)" : "the game");
             if (usable)
-                rfa::Log("Riders: %s offers the player %s (0x%08lX) with its riders in:", asked, VehicleName(vehicle), Handle(vehicle));
+                rfa::LogDetail("Riders: %s offers the player %s (0x%08lX) with its riders in:", asked, VehicleName(vehicle), Handle(vehicle));
             else
                 rfa::Log("Riders: the player can't get into %s (0x%08lX; asked by %s with %d, %d):", VehicleName(vehicle), Handle(vehicle), asked, a, b);
         }
         const Verdict v = Judge(rider, user);
         anyBlocks |= v.blocks;
-        rfa::Log("Riders:   seat %d: 0x%08lX, %s, team %d (%s the player's enemy), %s, orders %d (%s), flags 0x%08lX (tied up %d, activity driver %d)"
+        rfa::LogDetail("Riders:   seat %d: 0x%08lX, %s, team %d (%s the player's enemy), %s, orders %d (%s), flags 0x%08lX (tied up %d, activity driver %d)"
                  " → Armageddon: %s; Guerrilla: %s",
                  seat, Handle(rider), StateName(Field<int>(rider, kState)), v.team, v.enemy ? "is" : "not", v.npc ? "an NPC" : "not an NPC",
                  v.orders, OrdersName(v.orders), v.flags, v.tied, v.activityDriver, v.blocks ? "blocks" : "lets him in",
@@ -262,7 +262,7 @@ void LogRiders(BYTE* user, BYTE* vehicle, bool usable, DWORD from, bool a, bool 
                                     : "lets him in (the rider is made to get out)");
     }
     if (riders && !anyBlocks && !usable)
-        rfa::Log("Riders:   no rider blocks: the game refused before the riders (vehicle flags 0x%08lX 0x%08lX, object flags 0x%02X)",
+        rfa::LogDetail("Riders:   no rider blocks: the game refused before the riders (vehicle flags 0x%08lX 0x%08lX, object flags 0x%02X)",
                  Field<DWORD>(vehicle, kVehicleFlags), Field<DWORD>(vehicle, kVehicleFlags2), Field<BYTE>(vehicle, kObjectFlags));
 }
 
@@ -323,7 +323,7 @@ bool __cdecl PlayerRequestEnter(BYTE* human, BYTE* vehicle, int* enter) {
     for (int seat = 0, seats = Seats(vehicle); seat < seats; ++seat)
         if (SeatOccupant(vehicle, seat)) ++riders;
     if (!riders) return asked;
-    RFA_LOG_FIRST(100, "Riders: the player asks to get into %s (0x%08lX, %d riders): %s; the vehicle %s hijacked%s%s", VehicleName(vehicle), Handle(vehicle),
+    RFA_LOG_DETAIL_FIRST(100, "Riders: the player asks to get into %s (0x%08lX, %d riders): %s; the vehicle %s hijacked%s%s", VehicleName(vehicle), Handle(vehicle),
                   riders, asked ? "the game takes it" : "the game refuses", (Field<DWORD>(vehicle, kVehicleFlags) & kHijacked) ? "is" : "isn't",
                   watch ? "; " : "", driver);
     g_watch = {};
@@ -343,7 +343,7 @@ bool __cdecl PlayerRequestEnter(BYTE* human, BYTE* vehicle, int* enter) {
 void WatchFrame() {
     if (g_watch.vehicle == kNone) return;
     if (GameTime() > g_watch.until) {
-        RFA_LOG_FIRST(100, "Riders: 8 s after the player asked to get into 0x%08lX: watching ends", g_watch.vehicle);
+        RFA_LOG_DETAIL_FIRST(100, "Riders: 8 s after the player asked to get into 0x%08lX: watching ends", g_watch.vehicle);
         g_watch.vehicle = kNone;
         return;
     }
@@ -353,7 +353,7 @@ void WatchFrame() {
         const int state = rider ? Field<int>(rider, kState) : -1;
         const DWORD in = rider ? VehicleOf(rider) : kNone;
         if (state == g_watch.states[i] && in == g_watch.in[i]) continue;
-        RFA_LOG_FIRST(200, "Riders:   rider 0x%08lX: %s → %s, %s", g_watch.riders[i], StateName(g_watch.states[i]), rider ? StateName(state) : "gone",
+        RFA_LOG_DETAIL_FIRST(200, "Riders:   rider 0x%08lX: %s → %s, %s", g_watch.riders[i], StateName(g_watch.states[i]), rider ? StateName(state) : "gone",
                       in == kNone ? "out of the vehicle" : (in == g_watch.vehicle ? "in the vehicle" : "in another vehicle"));
         g_watch.states[i] = state;
         g_watch.in[i] = in;
@@ -439,7 +439,7 @@ void FlushShot() {
                       own == *reinterpret_cast<const DWORD*>(kMinimumFilter) ? "the minimum one" : (own == VehicleFilter(vehicle) ? "the vehicle's" : "another"),
                       VehicleFilter(vehicle), InProtectedSeat(rider) ? ", a protected seat" : "");
         }
-        RFA_LOG_FIRST(400,
+        RFA_LOG_DETAIL_FIRST(400,
                       "Riders: a shot of the player's passed 0x%08lX (%s, seat %d of %s) %.2f m from the ray, %.1f m along it; the ray met %s at %.1f m;"
                       " his body %s%s; hit boxes %s; his body's filter %s; the hit %s",
                       r.handle, rider ? StateName(Field<int>(rider, kState)) : "gone", rider && vehicle ? SeatOf(vehicle, rider) : -1, VehicleName(vehicle),
@@ -447,7 +447,7 @@ void FlushShot() {
                       r.hidden ? " (hidden)" : "", r.hitBox == -2 ? "not tested" : (r.hitBox == -1 ? "missed" : "hit"), filter,
                       r.hit ? "reached him" : "didn't reach him");
         if (r.hit)
-            RFA_LOG_FIRST(400, "Riders:   damage %.1f (%s): hit points %.1f → %.1f%s", r.damage, r.why, r.before, r.after, r.died ? ", dead" : "");
+            RFA_LOG_DETAIL_FIRST(400, "Riders:   damage %.1f (%s): hit points %.1f → %.1f%s", r.damage, r.why, r.before, r.after, r.died ? ", dead" : "");
     }
     g_shot.count = 0;
 }
@@ -592,7 +592,7 @@ void __fastcall BulletHit(BYTE* victim, void* unused, BYTE* attacker, float dama
     const float after = Field<float>(victim, kHitPoints);
     Rider* rider = Find(Handle(victim));
     if (!rider) {
-        RFA_LOG_FIRST(200, "Riders: the player's bullet hit 0x%08lX (%s in %s): damage %.1f (%s), hit points %.1f → %.1f%s", Handle(victim),
+        RFA_LOG_DETAIL_FIRST(200, "Riders: the player's bullet hit 0x%08lX (%s in %s): damage %.1f (%s), hit points %.1f → %.1f%s", Handle(victim),
                       StateName(Field<int>(victim, kState)), VehicleName(vehicle), damage, why, before, after, IsDead(victim) ? ", dead" : "");
         return;
     }
@@ -613,7 +613,7 @@ void SwitchSeat(BYTE* player) {
     const BYTE* mountInfo = mount ? Field<const BYTE*>(mount, 0) : nullptr;
     const int gunSeat = mountInfo ? Field<int>(mountInfo, 8) : -1;
     if (gunSeat == -1) {
-        RFA_LOG_FIRST(20, "Change seat: %s has no gun seat; the player stays where he is", VehicleName(vehicle));
+        RFA_LOG_DETAIL_FIRST(20, "Change seat: %s has no gun seat; the player stays where he is", VehicleName(vehicle));
         return;
     }
     BYTE* interaction = vehicle + kViInstance;
@@ -631,7 +631,7 @@ void SwitchSeat(BYTE* player) {
     enter[12] = 0;                            // flags
     const bool asked = RequestEnter(player, vehicle, reinterpret_cast<int*>(enter));
     if (g_log)
-        RFA_LOG_FIRST(100, "Change seat: in %s from seat %d to seat %d (%s): %s", VehicleName(vehicle), from, to, to == kDriverSeat ? "the driver's" : "the gun's",
+        RFA_LOG_DETAIL_FIRST(100, "Change seat: in %s from seat %d to seat %d (%s): %s", VehicleName(vehicle), from, to, to == kDriverSeat ? "the driver's" : "the gun's",
                       asked ? "the game takes it" : "the game refuses");
 }
 
@@ -695,7 +695,7 @@ void GetOutFrame() {
         for (const Leaving& l : g_leaving) known |= l.npc == Handle(human);
         if (known) continue;
         g_leaving.push_back({Handle(human), VehicleOf(human)});
-        RFA_LOG_FIRST(60, "Carjack: 0x%08lX (%s) is asked out of %s (someone takes his seat): he gets out, as Guerrilla's", Handle(human),
+        RFA_LOG_DETAIL_FIRST(60, "Carjack: 0x%08lX (%s) is asked out of %s (someone takes his seat): he gets out, as Guerrilla's", Handle(human),
                       StateName(Field<int>(human, kState)), VehicleName(VehicleByHandle(kWorld, nullptr, VehicleOf(human))));
     }
     for (auto l = g_leaving.begin(); l != g_leaving.end();) {
@@ -704,7 +704,7 @@ void GetOutFrame() {
         if (!npc || IsDead(npc) || !vehicle) { l = g_leaving.erase(l); continue; }
         if (VehicleOf(npc) != l->vehicle) {  // out: Guerrilla's cleanup clears the flag
             *reinterpret_cast<DWORD*>(npc + kNpcFlags) &= ~kForceOut;
-            RFA_LOG_FIRST(60, "Carjack: 0x%08lX is out of %s", l->npc, VehicleName(vehicle));
+            RFA_LOG_DETAIL_FIRST(60, "Carjack: 0x%08lX is out of %s", l->npc, VehicleName(vehicle));
             l = g_leaving.erase(l);
             continue;
         }
@@ -749,7 +749,7 @@ void StartRiders() {
     g_asGuerrilla = rfa::IniInt(L"GuerrillaVehicles", L"RiderDamageAsGuerrilla", 1) != 0;
     g_changeSeats = rfa::IniInt(L"GuerrillaVehicles", L"ChangeSeatsAsGuerrilla", 1) != 0;
     g_carjack = rfa::IniInt(L"GuerrillaVehicles", L"CarjackAsGuerrilla", 1) != 0;
-    g_log = rfa::IniInt(L"GuerrillaVehicles", L"RiderLog", 1) != 0;
+    g_log = rfa::ReadLogSwitch(L"GuerrillaVehicles", L"RiderLog");
     rfa::Log(g_carjack ? "Carjack: in Guerrilla's world someone whose seat is taken gets out, as Guerrilla's ([GuerrillaVehicles] CarjackAsGuerrilla=1)"
                        : "Carjack: someone whose seat is taken stays in it, as in Armageddon ([GuerrillaVehicles] CarjackAsGuerrilla=0)");
     if (g_asGuerrilla) {
@@ -772,10 +772,7 @@ void StartRiders() {
                                         reinterpret_cast<void*>(&BulletHit));
         g_damageCalc = Hook<DamageCalcFn>("the damage's working out", kDamageCalc, {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x58}, reinterpret_cast<void*>(&DamageCalc));
     }
-    if (!g_log) {
-        rfa::Log("Riders: no log of shooting riders and getting into occupied vehicles ([GuerrillaVehicles] RiderLog=0)");
-        return;
-    }
+    if (!g_log) return;  // the riders' log needs RiderLog=1 and Log=1
     g_usable = Hook<UsableFn>("vehicle_is_usable", kUsable, {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x74}, reinterpret_cast<void*>(&Usable));
     g_requestEnter = Hook<RequestEnterFn>("vehicle_interaction_request_enter", kRequestEnter, {0x55, 0x8B, 0xEC, 0x51, 0x8B, 0x45, 0x10},
                                           reinterpret_cast<void*>(&PlayerRequestEnter));

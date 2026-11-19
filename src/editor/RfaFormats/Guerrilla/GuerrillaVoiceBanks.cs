@@ -120,6 +120,7 @@ public static class GuerrillaVoiceBanks
         }
         var banks = new GuerrillaSoundBanks(guerrillaCache, guerrillaTables, Part, BankPrefix) { Adpcm = true };
         var bank = banks.Bank("voices");
+        var mixers = new Dictionary<uint, (uint Id, List<uint> Children)>();  // by attenuation
         var table = new List<string>();
         var problems = new List<string>();
         int lineCount = 0, waves = 0;
@@ -148,17 +149,28 @@ public static class GuerrillaVoiceBanks
                 catch (Exception e) when (e is InvalidDataException or NotSupportedException) { problems.Add($"{persona} {line}: {e.Message}"); continue; }
                 if (sounds.Count == 0) continue;
                 string key = $"{persona}:{line}";
-                var output = new WwiseBankWriter.Output(GuerrillaKiosks.DialogueBus, banks.Attenuation(bank, variations[0].DistanceIndex), true);
-                byte priority = GuerrillaSoundBanks.Priority(variations[0].Rank, false);
+                // The line hangs from its distances' mixer, which places it in 3D and fades it (one curve on the
+                // game's distance for all the lines of those distances, not one each: see WwiseBankWriter.Mixer).
+                uint attenuation = banks.Attenuation(bank, variations[0].DistanceIndex);
+                if (!mixers.TryGetValue(attenuation, out var mixer))
+                    mixers[attenuation] = mixer = (bank.ObjectId("mixer:" + attenuation.ToString("X8")), []);
+                var own = new WwiseBankWriter.Settings
+                {
+                    Priority = GuerrillaSoundBanks.Priority(variations[0].Rank, false), OwnPriority = true, EndsWhenQuiet = true,
+                };
                 uint played;
                 if (sounds.Count == 1)
-                    played = bank.Sound(key, sounds[0].Medium, false, new WwiseBankWriter.Settings { Volume = sounds[0].Volume, Priority = priority, EndsWhenQuiet = true }, 0, output);
+                {
+                    own.Volume = sounds[0].Volume;
+                    played = bank.Sound(key, sounds[0].Medium, false, own, mixer.Id);
+                }
                 else
                 {
                     uint sequence = bank.ObjectId("sequence:" + key);
                     var children = sounds.Select((m, i) => bank.Sound($"{key}~{i}", m.Medium, false, new WwiseBankWriter.Settings { Volume = m.Volume }, sequence)).ToList();
-                    played = bank.Sequence(key, children, new WwiseBankWriter.Settings { Priority = priority, EndsWhenQuiet = true }, 0, output);
+                    played = bank.Sequence(key, children, own, mixer.Id);
                 }
+                mixer.Children.Add(played);
                 bank.Event(EventName(persona, line), bank.Play(key, played));
                 has.Add($"has {persona} {line} {sounds.Count}");
                 lineCount++;
@@ -167,6 +179,10 @@ public static class GuerrillaVoiceBanks
             table.Add($"persona {persona} {typeOf[persona]} {bank.Name} {WwiseBankWriter.Id(bank.Name)}");
             table.AddRange(has);
         }
+        // The mixers, after their children: 3D on Armageddon's bus for spoken lines, each with its distances' fade.
+        foreach (var (attenuation, mixer) in mixers)
+            bank.Mixer(attenuation.ToString("X8"), mixer.Children, new WwiseBankWriter.Settings(),
+                       new WwiseBankWriter.Output(GuerrillaKiosks.DialogueBus, attenuation, true));
         table.AddRange(rules);
         table.AddRange(characters);
         string folder = Folder(worldModFolder);

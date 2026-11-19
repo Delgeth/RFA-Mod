@@ -12,8 +12,7 @@
 // Only the producer resets the count, as the first thing it does. When the consumer gets to look
 // before that, the count is still the last batch's, so it takes the first zone at once, saves it
 // half written and frees its buffers while the producer is still writing into them: the producer
-// then reads the freed list and crashes (0xC94D2F reading 0x168; 2026-11-07's crash in rfg_07_11,
-// see "Crash in a zone's stream-out" in docs\game-notes.md).
+// then reads the freed list and crashes (0xC94D2F reading 0x168; 2026-11-07's crash in rfg_07_11).
 //
 // Here the two jobs are replaced with ones that call the same two functions, in the same way, except
 // that the producer sets the count to 0 before anything else and says so, and the consumer waits until

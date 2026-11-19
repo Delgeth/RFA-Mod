@@ -17,8 +17,9 @@ namespace RfaFormats.Guerrilla;
 /// activities done (Activity_Count), or another level (its Also_Unlock and Also_Unlock_Level: when that level is
 /// bought, Unlock_Action Purchased, or when it is itself unlocked, Unlocked). Buying the grinder opens its faster
 /// and explosive upgrades; buying the rocket launcher opens its heat seeking, which opens its multiple rockets.
-/// The world has no districts to liberate or activities yet, so those conditions are written as notes and not
-/// held to; the chains between upgrades are (each level's "needs").
+/// The chains between upgrades are held to (each level's "needs"), and so is a district's liberation (each level's
+/// district: guerrilla_gear holds the level until guerrilla_campaign has that district liberated). The activity
+/// counts are written as notes and not held to yet.
 ///
 /// Left out: its placeholders for the story (Guns of Tharsis, Eos's missions, the "pistol"), its reconstructor (never
 /// for sale in its campaign) and its bare "sledgehammer" entry (Mason has his hammer from the start).
@@ -27,6 +28,7 @@ namespace RfaFormats.Guerrilla;
 ///   costs     Easy Medium Hard Insane   (Guerrilla's MENU_UPGRADE_COST_MULTIPLIER, difficulty.xtbl)
 ///   upgrade   name  shown name  type  weapon (ours, or -)  effect (weapon, charges, hammer:&lt;weapon&gt;, backpack:&lt;id&gt;, none)
 ///   level     cost  value  shown name  description  needs (-, or upgrade:level)  Guerrilla's condition (or -)
+///             district (Guerrilla's district name whose liberation unlocks it, or -)
 /// </summary>
 public static class GuerrillaUpgrades
 {
@@ -93,6 +95,15 @@ public static class GuerrillaUpgrades
             var (needs, more) = Conditions(source, depth + 1);
             return (needs, [.. notes, .. more]);
         }
+        // The district whose liberation unlocks a level (upgrade_unlock_from_liberation RM 0x790E20: each level whose
+        // District_Liberated names the district), or the one that unlocks the level that unlocks it on being unlocked.
+        // A level unlocked by a purchase waits for that purchase instead ("needs"), which is held to its own district.
+        string? DistrictOf(Level level, int depth = 0)
+        {
+            if (level.Available || depth > 8) return null;
+            if (level.District != null) return level.District;
+            return unlockedBy.TryGetValue($"{level.Upgrade}:{level.Index}", out var source) && !source.OnPurchase ? DistrictOf(source, depth + 1) : null;
+        }
 
         int written = 0;
         foreach (var u in upgrades.Entries)
@@ -123,7 +134,8 @@ public static class GuerrillaUpgrades
             {
                 var (needs, notes) = Conditions(level);
                 lines.Add(string.Join("\t", "level", Int(level.Element, "Cost"), Int(level.Element, "Value"), Text(level.Element.ValueOf("Upgrade_Name")) ?? "",
-                                      Text(level.Element.ValueOf("Description")) ?? "", needs, notes.Count > 0 ? "Guerrilla: " + string.Join(", ", notes) : "-"));
+                                      Text(level.Element.ValueOf("Description")) ?? "", needs, notes.Count > 0 ? "Guerrilla: " + string.Join(", ", notes) : "-",
+                                      DistrictOf(level) ?? "-"));
             }
             written++;
         }

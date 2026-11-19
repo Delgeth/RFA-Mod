@@ -407,6 +407,9 @@ BuiltTable g_builtTables[] = {
     // bank>", new files in overrides\): Armageddon's patch rows with ours. The game registers each bank
     // listed (its media opened by name, the bank loaded at boot), and posts their events by name.
     {"audio_banks_patch.xtbl", "Sound banks", {}},
+    // Armageddon's managed layer sets with Guerrilla's added (GuerrillaBuilder.exe: the demolitions master's layers),
+    // read once at start-up (0x4FF360 from 0x4FE6D0), so only through this copy of table.vpp_pc, not a loose file.
+    {"rf4_layer_definition.xtbl", "Managed layer sets", {}},
 };
 BuiltTable& g_gameplayTable = g_builtTables[0];
 constexpr char kGameplayNames[] = "Gameplay Property Names";
@@ -1184,24 +1187,24 @@ void __cdecl ResumeStreamIo() {
 void* __cdecl BinkOpen(void* first, const char* name, DWORD flags, DWORD fourth) {
     if (InOurWorld()) {
         InterlockedIncrement(&g_videosOpened);
-        RFA_LOG_FIRST(100, "Streaming: a video opened: %.120s (flags %08lX)", name ? name : "(no name)", flags);
+        RFA_LOG_DETAIL_FIRST(100, "Streaming: a video opened: %.120s (flags %08lX)", name ? name : "(no name)", flags);
     }
     return g_binkOpen(first, name, flags, fourth);
 }
 
 // Every 10 s in our worlds: the level heap's largest free block, and what paused the stream I/O meanwhile.
 void StreamWatchUpdate(bool ours) {
-    if (!ours || !g_pauseStreamIo) return;
+    if (!rfa::DetailLog() || !ours || !g_pauseStreamIo) return;  // a report for the log (Log=1)
     const DWORD now = GetTickCount();
     if (now - g_streamWatchAt < 10000) return;
     g_streamWatchAt = now;
     const DWORD largest = LargestFree(kLevelHeap, nullptr);
     const DWORD pausedNow = g_streamPausedAt ? now - g_streamPausedAt : 0;
-    rfa::Log("Streaming (10 s): the level heap's largest free block %.1f MB; the stream I/O paused %ld times for %.1f s in all (the longest "
+    rfa::LogDetail("Streaming (10 s): the level heap's largest free block %.1f MB; the stream I/O paused %ld times for %.1f s in all (the longest "
              "%.1f s, by %p)%s; %ld videos opened",
              largest / 1048576.0, g_streamPauses, g_streamPausedMs / 1000.0, g_streamPausedLongest / 1000.0, g_streamPausedLongestBy,
              pausedNow ? " and paused now" : "", g_videosOpened);
-    if (pausedNow) rfa::Log("Streaming: the stream I/O has been paused %.1f s, by the code at %p", pausedNow / 1000.0, g_streamPausedBy);
+    if (pausedNow) rfa::LogDetail("Streaming: the stream I/O has been paused %.1f s, by the code at %p", pausedNow / 1000.0, g_streamPausedBy);
     g_streamPauses = g_videosOpened = 0;
     g_streamPausedMs = g_streamPausedLongest = 0;
     g_streamPausedLongestBy = nullptr;
@@ -1297,7 +1300,7 @@ DWORD __fastcall AddZoneObjectChecked(void* world, void* unused, BYTE* object, i
         const DWORD parent = *reinterpret_cast<DWORD*>(object + kObjectParent);
         if (parent != 0xFFFFFFFF && parent >> 24 == handle >> 24 && InOurWorld() &&
             !ObjectInWorld(world, nullptr, parent) && !InListedSet(t_listedSet, nullptr, parent)) {
-            RFA_LOG_FIRST(200, "Zones made again: object %08X is made unattached; its parent %08X, in its zone, was in neither the zone's "
+            RFA_LOG_DETAIL_FIRST(200, "Zones made again: object %08X is made unattached; its parent %08X, in its zone, was in neither the zone's "
                                "list nor its saved state (destroyed before the save)", handle, parent);
             *reinterpret_cast<DWORD*>(object + kObjectParent) = 0xFFFFFFFF;
         }
@@ -1614,13 +1617,13 @@ void __cdecl DebugPrint(const char* format, ...) {
     va_start(arguments, format);
     vsnprintf(text, sizeof(text), format ? format : "", arguments);
     va_end(arguments);
-    if (g_debugPrintsLogged < 500 && InOurWorld()) {
+    if (rfa::DetailLog() && g_debugPrintsLogged < 500 && InOurWorld()) {
         char shown[1024];
         strcpy_s(shown, text);
         size_t length = strlen(shown);
         while (length > 0 && (shown[length - 1] == '\n' || shown[length - 1] == '\r')) shown[--length] = '\0';
-        if (++g_debugPrintsLogged == 500) rfa::Log("Game debug print: %s (the last one logged)", shown);
-        else rfa::Log("Game debug print: %s", shown);
+        if (++g_debugPrintsLogged == 500) rfa::LogDetail("Game debug print: %s (the last one logged)", shown);
+        else rfa::LogDetail("Game debug print: %s", shown);
     }
     g_debugPrint("%s", text);
 }
@@ -1703,7 +1706,7 @@ bool __cdecl EffectFileLoad(const char* name, void* unused1, void* data, void* u
     int holds = 0;
     const int used = EmitterPoolUse(holds);
     ++g_effectFilesLoaded;
-    rfa::Log("Effects: loading %d: %s (emitters %d of %d)", g_effectFilesLoaded, name ? name : "?", used, holds);
+    rfa::LogDetail("Effects: loading %d: %s (emitters %d of %d)", g_effectFilesLoaded, name ? name : "?", used, holds);
     const bool loaded = g_effectFileLoad(name, unused1, data, unused2, dataFile);
     if (loaded && name && _strnicmp(name, "rfg_", 4) == 0 && strstr(name, ".cefct_pc") &&
         std::find(g_ourEffectFiles.begin(), g_ourEffectFiles.end(), name) == g_ourEffectFiles.end())
@@ -1769,7 +1772,7 @@ int __cdecl PlayEffect(BYTE* effect, const float* where, DWORD a3, DWORD a4, DWO
         const float radius = *reinterpret_cast<float*>(visual + 0x84), spawning = *reinterpret_cast<float*>(visual + 0xA4);
         float away = 0;
         for (int i = 0; i < 3; ++i) away += (where[i] - g_cameraPosition[i]) * (where[i] - g_cameraPosition[i]);
-        rfa::Log("Effects: play %s at %.1f %.1f %.1f (%.1f m from the camera): handle %d; LOD %d, spawning %.0f m, view %d (in view: %d), "
+        rfa::LogDetail("Effects: play %s at %.1f %.1f %.1f (%.1f m from the camera): handle %d; LOD %d, spawning %.0f m, view %d (in view: %d), "
                  "radius %.1f, flags 0x%X, category %d, file %s (%s), sound %d, count %d",
                  name, where[0], where[1], where[2], sqrtf(away), handle, visual[0x9C], spawning, visual[0x9D], InView(where, radius) ? 1 : 0,
                  radius, *reinterpret_cast<DWORD*>(visual + 0x88), *reinterpret_cast<int*>(visual + 0x94),
@@ -1878,6 +1881,7 @@ void __cdecl WwiseOutput(int code, const wchar_t* message, int level, DWORD play
 
 // Each watched sound that has ended since the last look: how long it played, and what is known of it.
 void LogEndedSounds() {
+    if (!g_effectSound) return;  // not watched (Log=0)
     const DWORD now = GetTickCount();
     for (WatchedSound& watched : g_watchedSounds) {
         if (!watched.handle || SoundGameObject(watched.handle) != 0) continue;
@@ -1890,7 +1894,7 @@ void LogEndedSounds() {
             if (watched.wwise[0]) snprintf(wwise, sizeof(wwise), "Wwise after %lu ms: %s", watched.wwiseAfter, watched.wwise);
             // (The effect lets go of the handle when it ends itself; the effects are in a pool, so its place can be read.)
             const bool held = *reinterpret_cast<const DWORD*>(watched.effect + kEffectSoundHandle) == watched.handle;
-            rfa::Log("Effect sounds: %s's sound (event %lu) ended %lu ms after it started; %.1f m from the camera at its start, its effect moved %.1f m "
+            rfa::LogDetail("Effect sounds: %s's sound (event %lu) ended %lu ms after it started; %.1f m from the camera at its start, its effect moved %.1f m "
                      "and %s; %s",
                      watched.visual, watched.event, now - watched.started, watched.fromCamera, watched.moved,
                      held ? "still held the sound" : "had ended or let go of it", wwise);
@@ -1945,7 +1949,7 @@ void LogWwiseMemory() {
     // how often a piece a stream asked for was in it, and how often it had to come from the disk).
     const BYTE* audioPool = reinterpret_cast<const BYTE*>(0x26AF858);
     const DWORD* audioCache = reinterpret_cast<const DWORD*>(0x2745E98);
-    rfa::Log("Wwise memory: %s; the audio thread's time %ld ms; the game's audio pool %lu of %lu KB; its stream cache %lu hits, %lu misses", line,
+    rfa::LogDetail("Wwise memory: %s; the audio thread's time %ld ms; the game's audio pool %lu of %lu KB; its stream cache %lu hits, %lu misses", line,
              WwiseAudioTime(), *reinterpret_cast<const DWORD*>(audioPool + 0x4C) / 1024, *reinterpret_cast<const DWORD*>(audioPool + 0x44) / 1024,
              audioCache[3], audioCache[4]);
 }
@@ -5101,7 +5105,7 @@ void DrawToneMapping(ID3D11RenderTargetView* target, ID3D11ShaderResourceView* s
                 if (lit < 0.1f) lit = 0.1f;
                 static int told = 0;
                 if (told++ < 60)
-                    rfa::Log("Tone mapping at %.2f h: the eye's brightness %.3f, exposure %.3f (range %.3g, offset %.3g, base %.3g, amount %.3g, "
+                    rfa::LogDetail("Tone mapping at %.2f h: the eye's brightness %.3f, exposure %.3f (range %.3g, offset %.3g, base %.3g, amount %.3g, "
                              "Exposure=%.3g)", g_timeOfDay, adapted, constants.exposure[0] / lit * g_exposure, constants.exposure[0],
                              constants.exposure[1], constants.exposure[2], constants.exposure[3], g_exposure);
             }
@@ -5235,7 +5239,7 @@ void TellSunLamp(ID3D11ShaderResourceView* map, ID3D11Buffer* lamp) {
         const char* names[11] = {"light position", "inverse projection", "", "", "", "spot direction",
                                  "shadow map projection", "", "", "", "shadow fade"};
         for (UINT row = 0; row < 11 && row * 16 + 16 <= bufferDesc.ByteWidth; ++row)
-            rfa::Log("Sun's shadows: the lamp's constants [%u] %g %g %g %g %s", row, f[row * 4], f[row * 4 + 1], f[row * 4 + 2], f[row * 4 + 3], names[row]);
+            rfa::LogDetail("Sun's shadows: the lamp's constants [%u] %g %g %g %g %s", row, f[row * 4], f[row * 4 + 1], f[row * 4 + 2], f[row * 4 + 3], names[row]);
         g_context->Unmap(staging, 0);
     }
     staging->Release();
@@ -5491,13 +5495,13 @@ void TellComposite(int which) {
     } else {
         sprintf_s(text, "none");
     }
-    rfa::Log("Composite: the last step (0x%X) drew into %s", kFinalComposite[which], text);
+    rfa::LogDetail("Composite: the last step (0x%X) drew into %s", kFinalComposite[which], text);
     ID3D11ShaderResourceView* views[8] = {};
     g_context->PSGetShaderResources(0, 8, views);
     for (int slot = 0; slot < 8; ++slot) {
         if (!views[slot]) continue;
         DescribeView(views[slot], text, sizeof(text));
-        rfa::Log("Composite: t%d left bound: %s", slot, text);
+        rfa::LogDetail("Composite: t%d left bound: %s", slot, text);
         views[slot]->Release();
     }
 }
@@ -6434,7 +6438,7 @@ void __fastcall ParticleDraw(void* renderer, void* unused, BYTE* instance) {
         g_particleDraw(renderer, unused, instance);
         return;
     }
-    RFA_LOG_FIRST(3, "Particles: an effect %.0f m off fogged %.2f as Guerrilla's (toward %.3f %.3f %.3f)", distance, fog,
+    RFA_LOG_DETAIL_FIRST(3, "Particles: an effect %.0f m off fogged %.2f as Guerrilla's (toward %.3f %.3f %.3f)", distance, fog,
                   g_particleFogColour[0], g_particleFogColour[1], g_particleFogColour[2]);
     float& opacity = *reinterpret_cast<float*>(instance + kInstanceOpacity);
     const float opacityBefore = opacity;
@@ -6450,7 +6454,7 @@ void __fastcall CoronaDraw(void* renderer, void* unused, BYTE* corona, int pass)
         return;
     }
     const float* at = reinterpret_cast<const float*>(corona + kCoronaAt);
-    RFA_LOG_FIRST(2, "Particles: a corona %.0f m off fogged %.2f as Guerrilla's",
+    RFA_LOG_DETAIL_FIRST(2, "Particles: a corona %.0f m off fogged %.2f as Guerrilla's",
                   sqrtf((at[0] - g_cameraPosition[0]) * (at[0] - g_cameraPosition[0]) + (at[1] - g_cameraPosition[1]) * (at[1] - g_cameraPosition[1]) +
                         (at[2] - g_cameraPosition[2]) * (at[2] - g_cameraPosition[2])), fog);
     DrawFogged(fog, nullptr, [&] { g_coronaDraw(renderer, unused, corona, pass); });
@@ -6596,7 +6600,7 @@ void GuerrillaWindUpdate(float seconds) {
         const float down = std::clamp(low - g_wind.speed, -kWindMostChange, 0.0f);
         g_wind.rampFrom = g_wind.speed;
         g_wind.rampTo = g_wind.speed + WindRandom(down, up);
-        RFA_LOG_FIRST(6, "Wind: heading from %.0f to %.0f mph over %.0f s (the zone's %.0f-%.0f)", g_wind.rampFrom, g_wind.rampTo,
+        RFA_LOG_DETAIL_FIRST(6, "Wind: heading from %.0f to %.0f mph over %.0f s (the zone's %.0f-%.0f)", g_wind.rampFrom, g_wind.rampTo,
                       kWindRampTime, low, top);
     } else {
         g_wind.changeLeft -= seconds;
@@ -7100,7 +7104,7 @@ void KeepConstants(ID3D11Resource* buffer, const void* data) {
 
 HRESULT STDMETHODCALLTYPE MapNoted(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT subresource, D3D11_MAP type, UINT flags,
                                    D3D11_MAPPED_SUBRESOURCE* mapped) {
-    RFA_LOG_FIRST(1, "Road log: the first Map through the log's wrapper (in our world: %d)", InOurWorld());
+    RFA_LOG_DETAIL_FIRST(1, "Road log: the first Map through the log's wrapper (in our world: %d)", InOurWorld());
     SummariseRoadLog();
     KeepDrawSlots(context);
     const ContextMethods* methods = MethodsOf(context);
@@ -7137,7 +7141,7 @@ void STDMETHODCALLTYPE UpdateSubresourceNoted(ID3D11DeviceContext* context, ID3D
 HRESULT STDMETHODCALLTYPE CreateVertexShaderNoted(ID3D11Device* device, const void* code, SIZE_T size, ID3D11ClassLinkage* linkage,
                                                   ID3D11VertexShader** shader) {
     const HRESULT result = g_createVertexShader(device, code, size, linkage, shader);
-    RFA_LOG_FIRST(1, "Road log: the first CreateVertexShader through the log's wrapper");
+    RFA_LOG_DETAIL_FIRST(1, "Road log: the first CreateVertexShader through the log's wrapper");
     if (SUCCEEDED(result) && shader && *shader && code) {
         AcquireSRWLockExclusive(&g_roadLogLock);
         ++g_vertexShadersMade;
@@ -7177,7 +7181,7 @@ void SummariseRoadLog() {
     const bool instancedOurs =
         g_mainContextTable && g_mainContextTable[kDrawIndexedInstancedSlot] == reinterpret_cast<void*>(&DrawIndexedInstancedLogged);
     char module[MAX_PATH];
-    rfa::Log("Road log: so far %ld vertex shaders made (%u road, %u ground), %ld deferred contexts; draws: %ld indexed, %ld instanced; "
+    rfa::LogDetail("Road log: so far %ld vertex shaders made (%u road, %u ground), %ld deferred contexts; draws: %ld indexed, %ld instanced; "
              "with a terrain shader: %ld road, %ld ground (%ld without values kept); constant buffer writes kept: %ld; world \"%s\" "
              "(ours: %d); the draw slots still ours: %d %d (now in %s), wrapped again %ld times",
              g_vertexShadersMade, static_cast<unsigned>(g_roadShaders.size()), static_cast<unsigned>(g_groundShaders.size()),
@@ -7224,7 +7228,7 @@ void LogTerrainDraw(ID3D11DeviceContext* context, bool instanced) {
     ReleaseSRWLockExclusive(&g_roadLogLock);
     if (known || g_roadLogLines >= kRoadLogLines) return;
     ++g_roadLogLines;
-    rfa::Log("Road log: %s%s  uv_params (%.6g, %.6g, %.6g, %.6g)  subzone_offset (%.6g, %.6g, %.6g)  objTM at (%.6g, %.6g, %.6g)  "
+    rfa::LogDetail("Road log: %s%s  uv_params (%.6g, %.6g, %.6g, %.6g)  subzone_offset (%.6g, %.6g, %.6g)  objTM at (%.6g, %.6g, %.6g)  "
              "render_offset (%.6g, %.6g, %.6g)  position_scale (%.6g, %.6g, %.6g)",
              road ? "ROAD  " : "ground", instanced ? " (instanced)" : "", c[24], c[25], c[26], c[27], c[92], c[93], c[94], c[63], c[67],
              c[71], c[72], c[73], c[74], c[28], c[29], c[30]);
@@ -7239,7 +7243,7 @@ bool RoadLogging() {
 }
 
 void STDMETHODCALLTYPE DrawIndexedLogged(ID3D11DeviceContext* context, UINT count, UINT first, INT base) {
-    RFA_LOG_FIRST(1, "Road log: the first DrawIndexed through the log's wrapper (in our world: %d)", InOurWorld());
+    RFA_LOG_DETAIL_FIRST(1, "Road log: the first DrawIndexed through the log's wrapper (in our world: %d)", InOurWorld());
     SummariseRoadLog();
     if (RoadLogging()) LogTerrainDraw(context, false);
     MethodsOf(context)->drawIndexed(context, count, first, base);
@@ -7247,7 +7251,7 @@ void STDMETHODCALLTYPE DrawIndexedLogged(ID3D11DeviceContext* context, UINT coun
 
 void STDMETHODCALLTYPE DrawIndexedInstancedLogged(ID3D11DeviceContext* context, UINT count, UINT instances, UINT first, INT base,
                                                   UINT firstInstance) {
-    RFA_LOG_FIRST(1, "Road log: the first DrawIndexedInstanced through the log's wrapper (in our world: %d)", InOurWorld());
+    RFA_LOG_DETAIL_FIRST(1, "Road log: the first DrawIndexedInstanced through the log's wrapper (in our world: %d)", InOurWorld());
     SummariseRoadLog();
     if (RoadLogging()) LogTerrainDraw(context, true);
     MethodsOf(context)->drawIndexedInstanced(context, count, instances, first, base, firstInstance);
@@ -7298,7 +7302,7 @@ bool WrapContext(ID3D11DeviceContext* context) {
     g_contextMethods.push_back(methods);  // before the table changes, so a call already finds its originals
     if (!g_mainContextTable) g_mainContextTable = table;
     char drawModule[MAX_PATH], mapModule[MAX_PATH];
-    rfa::Log("Road log: a context's methods at %p: DrawIndexed in %s, Map in %s", static_cast<void*>(table),
+    rfa::LogDetail("Road log: a context's methods at %p: DrawIndexed in %s, Map in %s", static_cast<void*>(table),
              ModuleOf(reinterpret_cast<void*>(methods.drawIndexed), drawModule), ModuleOf(reinterpret_cast<void*>(methods.map), mapModule));
     DrawIndexedFn drawIndexed;
     DrawIndexedInstancedFn drawIndexedInstanced;
@@ -7622,7 +7626,7 @@ int __cdecl MaterialEffect(int kind, int size, int type, DWORD material, DWORD o
     if (!ours && !theirs) return g_materialEffect(kind, size, type, material, other, a6, a7);
     int effect = ours ? GuerrillaEventEffect(*ours, kind, type, size, otherName) : -1;
     if (effect == -1 && theirs) effect = GuerrillaEventEffect(*theirs, kind, type, size, name);
-    RFA_LOG_FIRST(80, "Material events: %s, size %d, piece %d, %s on %s: effect %d", kEventKindNames[kind], size, type, name ? name : "?",
+    RFA_LOG_DETAIL_FIRST(80, "Material events: %s, size %d, piece %d, %s on %s: effect %d", kEventKindNames[kind], size, type, name ? name : "?",
                   otherName ? otherName : "nothing", effect);
     return effect;
 }
@@ -8542,12 +8546,12 @@ void __cdecl RandomlyPlace(GrowthCell** cells, int count, uint8_t* zone, GrowthL
     g_growthNoGround += withoutGround;
     g_growthUnderRock += underRock;
     if (++g_growthCalls % 500 == 0)
-        rfa::Log("Undergrowth scatter: %d cells scattered so far, %lld of %lld pieces kept (%lld where no ground was loaded yet; %lld under a rock, "
+        rfa::LogDetail("Undergrowth scatter: %d cells scattered so far, %lld of %lld pieces kept (%lld where no ground was loaded yet; %lld under a rock, "
                  "put on the ground below it)", g_growthCalls, g_growthKept, g_growthTried, g_growthNoGround, g_growthUnderRock);
     if (logThis) {
         ++g_growthCallsLogged;
         const GrowthModel* model = firstModel >= 0 ? &(*layer)->model[firstModel] : nullptr;
-        rfa::Log("Undergrowth scatter: %d of %d pieces kept in the cell at (%.1f, %.1f, %.1f) (%d where no ground is loaded yet, %d under a rock), cell size %.3f; "
+        rfa::LogDetail("Undergrowth scatter: %d of %d pieces kept in the cell at (%.1f, %.1f, %.1f) (%d where no ground is loaded yet, %d under a rock), cell size %.3f; "
                  "first %s at (%.1f, %.1f, %.1f), ground %.2f, its mesh %s",
                  kept, count, middle->x, middle->y, middle->z, withoutGround, underRock, cellSize, model && model->name ? model->name : "-", firstAt.x, firstAt.y, firstAt.z,
                  firstHeight, model && model->name ? (FindFoliageMesh(model->name) ? "found" : "NOT found") : "-");
@@ -8660,7 +8664,7 @@ constexpr int kGlassMarksLogged = 12;
 void GlassLog(const char* what, int piece, float damage) {
     if (g_glassMarksLogged >= kGlassMarksLogged) return;
     ++g_glassMarksLogged;
-    rfa::Log("Glass: a shot on piece %d (damage %.0f): %s", piece, damage, what);
+    rfa::LogDetail("Glass: a shot on piece %d (damage %.0f): %s", piece, damage, what);
 }
 
 float& DecalFloat(uint8_t* decal, size_t at) { return *reinterpret_cast<float*>(decal + at); }
@@ -8906,7 +8910,7 @@ GuerrillaValue g_guerrillaValues[] = {
     {true, "Default", "Force_Scalar", 0x2C, false, 0.15, 0.12, false},
 };
 
-bool g_anchorsSetting = true, g_materialsSetting = true, g_destructionLog = true;
+bool g_anchorsSetting = true, g_materialsSetting = true, g_destructionLog = false;
 void ReadPropLog();  // PropLog= (below, with the props' log)
 bool g_buildingsWorld;     // our world, as last seen
 bool g_anchorsOurs;        // Guerrilla's anchors now
@@ -8936,10 +8940,12 @@ bool GameInFront() {
     return front && GetWindowThreadProcessId(front, &process) && process == GetCurrentProcessId();
 }
 
-// Long frames: what the main thread was doing (a diagnosis, with DestructionLog=1, in our worlds). A watchdog thread
-// looks every 50 ms. Once a frame (from one effects update to the next) has run 250 ms, then at 500 ms, 1 s and 2 s,
+// Long frames: what the main thread was doing (in our worlds, always: a stall is a problem to know of). A watchdog
+// thread looks every 50 ms; all a frame does for it is MarkFrame (a tick and a count), and it does nothing more while
+// frames are short. Once a frame (from one effects update to the next) has run 250 ms, then at 500 ms, 1 s and 2 s,
 // it stops the main thread for an instant, copies its registers and its stack, and lets it go. When the frame ends it
-// logs one line for it: its length and where the main thread was at the last look, with the call chain read from
+// logs one line for it (from 1 s; shorter ones only with Log=1, which also takes the looks before 1 s): its length
+// and where the main thread was at the last look, with the call chain read from
 // its frame pointers (the game keeps them: push ebp / mov ebp,esp throughout); the game's own addresses as
 // themselves, others as module+offset. Not before 15 s of play in our world (the world's load and its first seconds
 // are long frames by nature), nor for a frame with the game's window behind another (the game pauses itself then):
@@ -8952,6 +8958,7 @@ volatile LONG g_lastFrameEnded = -1;    // the number of the frame that last end
 volatile LONG g_lastFrameMs;
 volatile LONG g_playSinceTick;          // GetTickCount when frames began in our world (0 not yet)
 volatile DWORD g_loopThread;            // the thread that runs the frames (the effects update's)
+bool g_framesMarked;                    // MarkFrame has run since frames began in our world
 int g_backgroundFrames;                 // frames left out of the frame times since the last line
 HANDLE g_watchdog;
 
@@ -8964,6 +8971,7 @@ constexpr DWORD kLookAtMs[] = {250, 500, 1000, 2000, 5000};
 constexpr DWORD kStuckMs = 5000;
 constexpr DWORD kFrontCheckedForMs = 3000;
 constexpr DWORD kPlayBeforeLooking = 15000;
+constexpr DWORD kStallMs = 1000;  // a frame this long is always logged; looks before it only with Log=1
 constexpr int kChainLength = 20;
 
 // Copies memory that may not be readable; false if it wasn't.
@@ -9112,25 +9120,37 @@ DWORD WINAPI Watchdog(void*) {
         const LONG frame = g_frameNumber;
         if (frame != watchedFrame) {
             // The frame watched has ended: one line for it, if it was looked at.
-            if (haveLook && !behind && g_lastFrameEnded == watchedFrame)
-                RFA_LOG_FIRST(50, "Long frame: %ld ms; at the last look (%lu ms in) the main thread was at %s", g_lastFrameMs,
-                              kLookAtMs[looks - 1], DescribeLook(last).c_str());
+            if (haveLook && !behind && g_lastFrameEnded == watchedFrame) {
+                if (g_lastFrameMs >= static_cast<LONG>(kStallMs))
+                    RFA_LOG_FIRST(50, "Long frame: %ld ms; at the last look (%lu ms in) the main thread was at %s", g_lastFrameMs,
+                                  kLookAtMs[looks - 1], DescribeLook(last).c_str());
+                else
+                    RFA_LOG_DETAIL_FIRST(50, "Long frame: %ld ms; at the last look (%lu ms in) the main thread was at %s", g_lastFrameMs,
+                                         kLookAtMs[looks - 1], DescribeLook(last).c_str());
+            }
             watchedFrame = frame;
             looks = 0;
             behind = haveLook = false;
         }
-        if (!g_destructionLog || !g_buildingsWorld || !g_loopThread || !g_playSinceTick) continue;
+        if (!g_buildingsWorld || !g_loopThread || !g_playSinceTick) continue;
         const DWORD now = GetTickCount();
         if (now - static_cast<DWORD>(g_playSinceTick) < kPlayBeforeLooking) continue;
         const LONG elapsed = static_cast<LONG>(now - static_cast<DWORD>(g_frameStartTick));
         if (behind) continue;
-        if (elapsed < static_cast<LONG>(kFrontCheckedForMs) && !GameInFront()) {
+        const bool lookDue = looks < static_cast<int>(sizeof(kLookAtMs) / sizeof(kLookAtMs[0])) && elapsed >= static_cast<LONG>(kLookAtMs[looks]);
+        // Whether the game's window is behind another: asked only when a look is due, or each time round while the
+        // frame times are kept (the Destruction line's), so a short frame costs nothing here either.
+        if ((lookDue || g_destructionLog) && elapsed < static_cast<LONG>(kFrontCheckedForMs) && !GameInFront()) {
             behind = true;
             InterlockedExchange(&g_frameInBackground, 1);
             InterlockedExchange(&g_simFrameInBackground, 1);
             continue;
         }
-        if (looks >= static_cast<int>(sizeof(kLookAtMs) / sizeof(kLookAtMs[0])) || elapsed < static_cast<LONG>(kLookAtMs[looks])) continue;
+        if (!lookDue) continue;
+        if (kLookAtMs[looks] < kStallMs && !rfa::DetailLog()) {  // under a second: only for the log (Log=1)
+            ++looks;
+            continue;
+        }
         if (threadId != g_loopThread) {
             if (thread) CloseHandle(thread);
             threadId = g_loopThread;
@@ -9168,20 +9188,28 @@ DWORD WINAPI Watchdog(void*) {
     }
 }
 
-// Each frame (from BuildingsUpdate): this frame's time and the game's last physics step's.
+// Each frame in our worlds (from BuildingsUpdate), always: all the long frames' watchdog needs, a tick and a count.
+void MarkFrame() {
+    const DWORD tick = GetTickCount();
+    g_loopThread = GetCurrentThreadId();
+    if (!g_framesMarked) {
+        g_framesMarked = true;
+        InterlockedExchange(&g_playSinceTick, static_cast<LONG>(tick | 1));  // frames begin in our world
+    } else {
+        InterlockedExchange(&g_lastFrameMs, static_cast<LONG>(tick - static_cast<DWORD>(g_frameStartTick)));
+    }
+    InterlockedExchange(&g_lastFrameEnded, g_frameNumber);
+    InterlockedExchange(&g_frameStartTick, static_cast<LONG>(tick));
+    InterlockedIncrement(&g_frameNumber);
+}
+
+// Each frame (from BuildingsUpdate) with DestructionLog=1: this frame's time and the game's last physics step's.
 void TimeFrame() {
     LARGE_INTEGER now, rate;
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&rate);
     const bool front = GameInFront();
     const bool background = InterlockedExchange(&g_frameInBackground, front ? 0 : 1) != 0 || !front;
-    g_loopThread = GetCurrentThreadId();
-    const DWORD tick = GetTickCount();
-    if (g_frameAt.QuadPart == 0) InterlockedExchange(&g_playSinceTick, static_cast<LONG>(tick | 1));  // frames begin in our world
-    else InterlockedExchange(&g_lastFrameMs, static_cast<LONG>(tick - static_cast<DWORD>(g_frameStartTick)));
-    InterlockedExchange(&g_lastFrameEnded, g_frameNumber);
-    InterlockedExchange(&g_frameStartTick, static_cast<LONG>(tick));
-    InterlockedIncrement(&g_frameNumber);
     if (g_frameAt.QuadPart != 0 && background) {
         ++g_backgroundFrames;  // the game behind another window: not a frame of play
     } else if (g_frameAt.QuadPart != 0) {
@@ -9343,7 +9371,7 @@ void SectionsFrame() {
             snprintf(part, sizeof(part), " (%d more past the table's room, not timed)", g_sectionsDropped);
             line += part;
         }
-        rfa::Log("%s", line.c_str());
+        rfa::LogDetail("%s", line.c_str());
     }
     ClearSectionTimes();
 }
@@ -9445,7 +9473,7 @@ void SetGuerrillaValues(bool ours, const char* when) {
         WriteValue(v, at, to);
         v.set = ours;
         ++changed;
-        rfa::Log("Buildings: %s's %s %.10g (%s; the game's own %.10g)", v.record, v.field, to, ours ? "Guerrilla's" : "the game's own back", v.game);
+        rfa::LogDetail("Buildings: %s's %s %.10g (%s; the game's own %.10g)", v.record, v.field, to, ours ? "Guerrilla's" : "the game's own back", v.game);
     }
     rfa::Log("Buildings: %s (%d values, %s)", ours ? "Guerrilla's materials and load in this world" : "the game's own materials and load again", changed, when);
 }
@@ -9462,7 +9490,7 @@ void BuildingsSync(const char* when) {
         if (world) {
             g_anchorsSetting = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaAnchors", 1) != 0;
             g_materialsSetting = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaMaterials", 1) != 0;
-            g_destructionLog = rfa::IniInt(L"GuerrillaWorld", L"DestructionLog", 1) != 0;
+            g_destructionLog = rfa::ReadLogSwitch(L"GuerrillaWorld", L"DestructionLog");
             ReadPropLog();
         }
         const bool anchors = world && g_anchorsSetting && g_createWorldAnchor;
@@ -9485,6 +9513,204 @@ void __fastcall ResetLinkStrengths(void* shape, void* unused) {
     g_resetLinkStrengths(shape, unused);
 }
 
+// ---- Cars hitting buildings and props, measured (DestructionLog=1; the user's 22:28 run, 2026-11-18: "when hitting
+// walls that are supposed to be breakable I hit them like a brick wall going full speed") ------------------------------
+// Both games turn a contact into destruction the same way, as far as read: the contact step (Armageddon 0x670E60,
+// Guerrilla rfg_dyn_add_pre_collide_contact RM 0x72DDB0) has the hit's energy worked out (Armageddon 0x671AD0,
+// Guerrilla rfg_dyn_compute_point_collision_energy RM 0x71C470: half of each side's mass times its speed squared, times
+// the other side's energy scale (a vehicle's Energy_Scale, 1 by default), times 100 when a vehicle is in it), then
+// records an impact whose energy becomes the damage to the piece hit (× the level object's Damage_Scalar, 1 by default,
+// in Armageddon's object-collision step 0x67C560). The constants of both games' destruction code are the same (200000
+// for a dent, 15 for stress, ...). What is left to see is what our cars' hits come to: whether they reach the energy
+// step at all, and with how much energy. A car-against-mover contact near the player is counted at the contact step; its
+// energy step writes one line (energy, both masses and speeds), at most one each 100 ms and 40 a run.
+// Armageddon's energy record (0x671680 makes it): +0 one object, +8 the other, +0x14 the energy, +0x18 and +0x1C the
+// masses, +0x20 and +0x2C the velocities, +0x38 flags.
+constexpr DWORD kContactStep = 0x670E60, kEnergyStep = 0x671AD0;
+constexpr int kCarHitLines = 40;
+constexpr float kCarHitNearPlayer = 40.0f;
+using ContactStepFn = bool(__cdecl*)(void* event, BYTE* a, BYTE* b);
+using EnergyStepFn = bool(__cdecl*)(BYTE* info, void* event);
+using ObjectTypeFn = int(__fastcall*)(const BYTE* object, void* unused);
+auto const ObjectTypeOf = reinterpret_cast<ObjectTypeFn>(0x422AD0);  // 0 a person, 2 a building or other mover, 3 a vehicle
+ContactStepFn g_contactStep;
+EnergyStepFn g_energyStep;
+volatile LONG g_carHitLines, g_carContacts, g_carContactsTaken;
+volatile LONG g_impactLines;  // the impact handlers' lines have a budget of their own
+DWORD g_lastCarHitLine, g_lastCarContactsLine;
+
+// The movers a car hit in the last 3 s (their handles), so the later steps' lines can be matched to them: a recorded
+// impact keeps the other object's handle at +0xA0 (0x66F390's key), and the per-piece damage step is handed a position
+// that isn't the world's, so neither a vehicle check nor a distance from the player finds them.
+struct CarHitMover { DWORD handle, at; };
+CarHitMover g_carHitMovers[8];
+LONG g_carHitMoverNext;
+
+void NoteCarHitMover(DWORD handle) {
+    for (CarHitMover& m : g_carHitMovers)
+        if (m.handle == handle) {
+            m.at = GetTickCount();
+            return;
+        }
+    g_carHitMovers[(InterlockedIncrement(&g_carHitMoverNext) - 1) & 7] = {handle, GetTickCount()};
+}
+
+bool HitByCarLately(DWORD handle) {
+    const DWORD now = GetTickCount();
+    for (const CarHitMover& m : g_carHitMovers)
+        if (m.handle == handle && now - m.at < 3000) return true;
+    return false;
+}
+
+// A vehicle and a mover, near the player: which is which (null when not that pair).
+bool CarAndMover(BYTE* a, BYTE* b, BYTE*& car, BYTE*& mover) {
+    car = mover = nullptr;
+    if (!a || !b) return false;
+    const int ta = ObjectTypeOf(a, nullptr), tb = ObjectTypeOf(b, nullptr);
+    if (ta == 3 && tb == 2) car = a, mover = b;
+    else if (tb == 3 && ta == 2) car = b, mover = a;
+    else return false;
+    const BYTE* player = LocalPlayer();
+    if (!player) return false;
+    const float* at = reinterpret_cast<const float*>(car + 4);
+    const float* me = reinterpret_cast<const float*>(player + 4);
+    const float dx = at[0] - me[0], dz = at[2] - me[2];
+    return dx * dx + dz * dz < kCarHitNearPlayer * kCarHitNearPlayer;
+}
+
+bool __cdecl ContactStepCounted(void* event, BYTE* a, BYTE* b) {
+    BYTE *car, *mover;
+    const bool counted = g_destructionLog && g_carHitLines < kCarHitLines && CarAndMover(a, b, car, mover);
+    const bool taken = g_contactStep(event, a, b);
+    if (counted) {
+        InterlockedIncrement(&g_carContacts);
+        if (taken) InterlockedIncrement(&g_carContactsTaken);
+        const DWORD now = GetTickCount();
+        if (now - g_lastCarContactsLine >= 1000 && InterlockedIncrement(&g_carHitLines) <= kCarHitLines) {
+            g_lastCarContactsLine = now;
+            rfa::LogDetail("Car hits: %ld contacts between a vehicle and a mover near the player in the last second, %ld of them made an impact",
+                     InterlockedExchange(&g_carContacts, 0), InterlockedExchange(&g_carContactsTaken, 0));
+        }
+    }
+    return taken;
+}
+
+bool __cdecl EnergyStepLogged(BYTE* info, void* event) {
+    const bool result = g_energyStep(info, event);
+    if (!g_destructionLog || !info || g_carHitLines >= kCarHitLines) return result;
+    BYTE *car, *mover;
+    if (!CarAndMover(*reinterpret_cast<BYTE**>(info), *reinterpret_cast<BYTE**>(info + 8), car, mover)) return result;
+    if (*reinterpret_cast<const float*>(info + 0x14) > 100.0f) NoteCarHitMover(*reinterpret_cast<const DWORD*>(mover + kObjectHandle));
+    const DWORD now = GetTickCount();
+    if (*reinterpret_cast<const float*>(info + 0x14) < 1000.0f) return result;  // scrapes: no line
+    if (now - g_lastCarHitLine < 100 || InterlockedIncrement(&g_carHitLines) > kCarHitLines) return result;
+    g_lastCarHitLine = now;
+    const float* va = reinterpret_cast<const float*>(info + 0x20);
+    const float* vb = reinterpret_cast<const float*>(info + 0x2C);
+    const BYTE* first = *reinterpret_cast<BYTE**>(info);
+    rfa::LogDetail("Car hits: vehicle %08lX on mover %08lX: energy %.0f (the impact threshold for a dent is 200000), masses %.0f and %.0f kg, speeds "
+             "%.1f and %.1f m/s (the %s first), flags 0x%X, %s",
+             *reinterpret_cast<const DWORD*>(car + kObjectHandle), *reinterpret_cast<const DWORD*>(mover + kObjectHandle),
+             *reinterpret_cast<const float*>(info + 0x14), *reinterpret_cast<const float*>(info + 0x18), *reinterpret_cast<const float*>(info + 0x1C),
+             sqrtf(va[0] * va[0] + va[1] * va[1] + va[2] * va[2]), sqrtf(vb[0] * vb[0] + vb[1] * vb[1] + vb[2] * vb[2]),
+             first == car ? "vehicle" : "mover", *reinterpret_cast<const WORD*>(info + 0x38), result ? "taken" : "not taken");
+    return result;
+}
+
+// Past "taken": the impact is recorded and handled in the destruction frame (the dispatcher 0x672380 by its kind:
+// 3 → 0x67C440, simple; 4 → 0x67CBE0, complex; Guerrilla's rfg_dyn_apply_object_simple / _complex, RM 0x73A1F0 /
+// 0x73A2E0), which hand it to the object-collision step 0x67C560 (cdecl: the mover, the piece, the position, the
+// direction, the energy, the kind, flags; Guerrilla's rfg_dyn_apply_single_object_collision). The user's 23:30 run
+// (2026-11-19) had cars' impacts taken (energy 231443) and no piece damaged. A handler's impact whose other object (the
+// event's +0xBC handle) is a vehicle near the player gets one line: whether it reached the object-collision step, and if
+// the simple handler stopped before it, at which of its checks: no rfg_mover for its +0x4C handle (0x424350), the mover
+// being removed (+0x54 bit 6), "player damage only" and the player over 20 m away (0x68A5D0, as Guerrilla's
+// rfg_mover::player_damage_only), the mover's +0xF0 bit 0x8000, or its +0xDC record's +4 bit 0x100 (the last two are
+// Armageddon's own; Guerrilla's handler checks neither).
+constexpr DWORD kImpactSimple = 0x67C440, kImpactComplex = 0x67CBE0, kObjectCollision = 0x67C560;
+using ImpactHandlerFn = void(__cdecl*)(BYTE* event);
+using ObjectCollisionFn = void*(__cdecl*)(BYTE* mover, int piece, const float* position, const float* direction, DWORD energy, int kind,
+                                           DWORD flags);
+using MoverFromHandleFn = BYTE*(__fastcall*)(void* world, void* unused, DWORD handle);
+using MoverCheckFn = bool(__fastcall*)(BYTE* mover, void* unused);
+auto const MoverFromHandle = reinterpret_cast<MoverFromHandleFn>(0x424350);
+auto const PlayerDamageOnlyAndFar = reinterpret_cast<MoverCheckFn>(0x68A5D0);
+ImpactHandlerFn g_impactSimple, g_impactComplex;
+ObjectCollisionFn g_objectCollision;
+thread_local int t_collisionsReached = 0;
+thread_local DWORD t_collisionEnergy = 0;
+thread_local int t_collisionPiece = -1;
+thread_local int t_pieceDamageCalls = 0;    // the per-piece damage step (0x6797B0, PieceDamaged) on this thread
+thread_local int t_collisionPieceDamages = 0;  // how many of them the last object-collision step made
+DWORD g_lastImpactLine;
+
+// The event's other object, if it is a vehicle near the player.
+bool ImpactByCarNearPlayer(BYTE* event) {
+    if (HitByCarLately(*reinterpret_cast<const DWORD*>(event + 0x4C))) return true;
+    const DWORD other = *reinterpret_cast<const DWORD*>(event + 0xA0);  // the other object (0x66F390's key +8)
+    if (other == 0xFFFFFFFF) return false;
+    BYTE* car = ObjectInWorld(reinterpret_cast<void*>(kWorld), nullptr, other);
+    if (!car || ObjectTypeOf(car, nullptr) != 3) return false;
+    const BYTE* player = LocalPlayer();
+    if (!player) return false;
+    const float* at = reinterpret_cast<const float*>(car + 4);
+    const float* me = reinterpret_cast<const float*>(player + 4);
+    const float dx = at[0] - me[0], dz = at[2] - me[2];
+    return dx * dx + dz * dz < kCarHitNearPlayer * kCarHitNearPlayer;
+}
+
+void* __cdecl ObjectCollisionCounted(BYTE* mover, int piece, const float* position, const float* direction, DWORD energy, int kind, DWORD flags) {
+    ++t_collisionsReached;
+    t_collisionEnergy = energy;
+    t_collisionPiece = piece;
+    const int before = t_pieceDamageCalls;
+    void* const result = g_objectCollision(mover, piece, position, direction, energy, kind, flags);
+    t_collisionPieceDamages = t_pieceDamageCalls - before;
+    return result;
+}
+
+// Which of the simple handler's checks would stop this impact, read before the handler runs (it can change them).
+const char* SimpleImpactStop(BYTE* event) {
+    BYTE* mover = MoverFromHandle(reinterpret_cast<void*>(kWorld), nullptr, *reinterpret_cast<const DWORD*>(event + 0x4C));
+    if (!mover) return "no rfg_mover for its handle";
+    if (mover[0x54] & 0x40) return "the mover is being removed (+0x54 bit 6)";
+    if (PlayerDamageOnlyAndFar(mover, nullptr)) return "\"player damage only\" and the player over 20 m away";
+    if (*reinterpret_cast<const DWORD*>(mover + 0xF0) & 0x8000) return "the mover's +0xF0 bit 0x8000 (Armageddon's own check)";
+    const BYTE* record = *reinterpret_cast<BYTE* const*>(mover + 0xDC);
+    if (record && (*reinterpret_cast<const DWORD*>(record + 4) & 0x100)) return "the mover's +0xDC record's +4 bit 0x100 (Armageddon's own check)";
+    return "none of its first checks (something later in the handler)";
+}
+
+void LogImpact(BYTE* event, bool simple, const char* stop) {
+    const DWORD now = GetTickCount();
+    if (now - g_lastImpactLine < 200 || InterlockedIncrement(&g_impactLines) > kCarHitLines) return;
+    g_lastImpactLine = now;
+    const DWORD handle = *reinterpret_cast<const DWORD*>(event + 0x4C);
+    if (t_collisionsReached)
+        rfa::LogDetail("Car hits: the %s impact on mover %08lX (piece %d) reached the object-collision step with energy %lu and piece %d; the "
+                       "per-piece damage step ran %d times in it",
+                       simple ? "simple" : "complex", handle, *reinterpret_cast<const int*>(event + 0x48), t_collisionEnergy, t_collisionPiece,
+                       t_collisionPieceDamages);
+    else
+        rfa::LogDetail("Car hits: the %s impact on mover %08lX (piece %d) stopped before the object-collision step: %s", simple ? "simple" : "complex",
+                       handle, *reinterpret_cast<const int*>(event + 0x48), stop);
+}
+
+void __cdecl ImpactSimpleLogged(BYTE* event) {
+    const bool watched = g_destructionLog && event && g_impactLines < kCarHitLines && ImpactByCarNearPlayer(event);
+    const char* stop = watched ? SimpleImpactStop(event) : nullptr;
+    t_collisionsReached = 0;
+    g_impactSimple(event);
+    if (watched) LogImpact(event, true, stop);
+}
+
+void __cdecl ImpactComplexLogged(BYTE* event) {
+    const bool watched = g_destructionLog && event && g_impactLines < kCarHitLines && ImpactByCarNearPlayer(event);
+    t_collisionsReached = 0;
+    g_impactComplex(event);
+    if (watched) LogImpact(event, false, "a check of the complex handler's (not looked into)");
+}
+
 // A hit on an anchored piece, logged (a diagnosis, for road signs that stop a car the first time): the game's damage
 // to one piece, 0x6797B0 (cdecl: the mover, the piece's state, the damage, the hit's position, its kind, two flags (the
 // second: break it outright), two more; Guerrilla's rfg_dyn_apply_damage_to_subpiece, RM 0x732A30). Like Guerrilla's,
@@ -9502,26 +9728,93 @@ using PieceDamageFn = DWORD(__cdecl*)(BYTE* mover, BYTE* state, DWORD damage, co
 PieceDamageFn g_pieceDamage;
 volatile LONG g_pieceHitLines;
 
+// A piece's links as the game holds them (for the car-hit lines, 2026-11-19): the piece's link numbers (state +4, u16;
+// how many at state +0x23), each link's run-time yield left (shape +0x28: an int per link number; 0x663620) and its
+// record (the base shape, shape +0x3C, its +0x10: 16 bytes per link, yield_max +0, area +4, flags +0xC; 0x663600, as
+// Guerrilla's rfg_link_base). The per-piece damage step takes an impact's share off each link's yield and breaks the link
+// at 0 (0x699790, 0x699620). Read through CopyIfReadable, so a wrong guess can't fault.
+constexpr int kLinksShown = 6;
+struct LinkSnapshot {
+    int count = 0;
+    int left[kLinksShown] = {}, most[kLinksShown] = {};
+    float area[kLinksShown] = {};
+};
+
+void SnapLinks(BYTE* mover, BYTE* state, LinkSnapshot& snap) {
+    snap.count = 0;
+    BYTE* shape = ShapeOf(mover, nullptr);
+    BYTE count = 0;
+    BYTE* numbers = nullptr;
+    BYTE* yields = nullptr;
+    BYTE* base = nullptr;
+    BYTE* records = nullptr;
+    if (!shape || !CopyIfReadable(&count, state + 0x23, 1) || !CopyIfReadable(&numbers, state + 4, 4) || !CopyIfReadable(&yields, shape + 0x28, 4) ||
+        !CopyIfReadable(&base, shape + 0x3C, 4) || !base || !CopyIfReadable(&records, base + 0x10, 4) || !numbers || !yields || !records)
+        return;
+    for (int i = 0; i < count && snap.count < kLinksShown; ++i) {
+        WORD number = 0;
+        if (!CopyIfReadable(&number, numbers + i * 2, 2)) break;
+        int left = 0, most = 0;
+        float area = 0;
+        if (!CopyIfReadable(&left, yields + number * 4, 4) || !CopyIfReadable(&most, records + number * 16, 4) ||
+            !CopyIfReadable(&area, records + number * 16 + 4, 4))
+            break;
+        snap.left[snap.count] = left;
+        snap.most[snap.count] = most;
+        snap.area[snap.count] = area;
+        ++snap.count;
+    }
+}
+
+std::string DescribeLinks(const LinkSnapshot& before, const LinkSnapshot& after) {
+    std::string text;
+    char part[96];
+    for (int i = 0; i < before.count; ++i) {
+        snprintf(part, sizeof(part), "%s%d -> %d of %d (%.2f m2)", i ? ", " : "", before.left[i], i < after.count ? after.left[i] : -1, before.most[i],
+                 before.area[i]);
+        text += part;
+    }
+    return text.empty() ? "none read" : text;
+}
+
 DWORD __cdecl PieceDamaged(BYTE* mover, BYTE* state, DWORD damage, const float* position, int kind, int flag, int outright, void* other,
                            void* more) {
-    if (!g_destructionLog || g_pieceHitLines >= kPieceHitLines || (outright & 0xFF) || !state || !mover || !position ||
-        !(*reinterpret_cast<const DWORD*>(state + 0x18) & 1) || *reinterpret_cast<const int*>(state) <= 0)
+    ++t_pieceDamageCalls;
+    if (!g_destructionLog || g_pieceHitLines >= kPieceHitLines || (outright & 0xFF) || !state || !mover || !position)
         return g_pieceDamage(mover, state, damage, position, kind, flag, outright, other, more);
-    const int before = *reinterpret_cast<const int*>(state);
+    // Pieces not anchored to the ground are logged too (2026-11-18): a wall's pieces hang on links to others.
+    const bool wasAnchored = (*reinterpret_cast<const DWORD*>(state + 0x18) & 1) != 0;
+    const int before = wasAnchored ? *reinterpret_cast<const int*>(state) : 0;
+    LinkSnapshot linksBefore, linksAfter;
+    const bool carHitBefore = HitByCarLately(*reinterpret_cast<const DWORD*>(mover + kObjectHandle));
+    if (carHitBefore) SnapLinks(mover, state, linksBefore);
     const DWORD result = g_pieceDamage(mover, state, damage, position, kind, flag, outright, other, more);
+    if (carHitBefore) SnapLinks(mover, state, linksAfter);
     const BYTE* player = LocalPlayer();
     if (!player || !InOurWorld()) return result;
+    // Near the player by the mover's own position (the hit position handed in isn't the world's), or a mover a car hit.
     const float* at = reinterpret_cast<const float*>(player + 4);
-    const float dx = position[0] - at[0], dy = position[1] - at[1], dz = position[2] - at[2];
+    const float* moverAt = reinterpret_cast<const float*>(mover + 4);
+    const float dx = moverAt[0] - at[0], dy = moverAt[1] - at[1], dz = moverAt[2] - at[2];
     const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-    if (distance > kPieceHitNearPlayer || InterlockedIncrement(&g_pieceHitLines) > kPieceHitLines) return result;
+    const bool carHit = HitByCarLately(*reinterpret_cast<const DWORD*>(mover + kObjectHandle));
+    if ((distance > kPieceHitNearPlayer && !carHit) || InterlockedIncrement(&g_pieceHitLines) > kPieceHitLines) return result;
     const bool anchored = (*reinterpret_cast<const DWORD*>(state + 0x18) & 1) != 0;
     const int after = anchored ? *reinterpret_cast<const int*>(state) : 0;
-    rfa::Log("Piece hit: mover %08lX, kind %d, damage %lu against an anchor strength of %d: %s (%d left); at (%.1f, %.1f, %.1f), %.1f m from "
-             "the player (seat %d)",
-             *reinterpret_cast<const DWORD*>(mover + kObjectHandle), kind, damage, before,
-             !anchored || after <= 0 ? "it gives way" : "it holds", after, position[0], position[1], position[2], distance,
-             *reinterpret_cast<const int*>(player + 0x1168));
+    const bool loose = (*reinterpret_cast<const DWORD*>(state + 0x18) & 0x100) != 0;  // freed (0x69A720 sets it)
+    if (wasAnchored)
+        rfa::LogDetail("Piece hit: mover %08lX, kind %d, damage %lu against an anchor strength of %d: %s (%d left); at (%.1f, %.1f, %.1f), %.1f m "
+                 "from the player",
+                 *reinterpret_cast<const DWORD*>(mover + kObjectHandle), kind, damage, before, !anchored || after <= 0 ? "it gives way" : "it holds",
+                 after, position[0], position[1], position[2], distance);
+    else
+        rfa::LogDetail("Piece hit: mover %08lX, kind %d, damage %lu on a piece held by links, not anchored: %s; at (%.1f, %.1f, %.1f), %.1f m from the "
+                 "player",
+                 *reinterpret_cast<const DWORD*>(mover + kObjectHandle), kind, damage, loose ? "it came loose" : "still held", position[0],
+                 position[1], position[2], distance);
+    if (carHitBefore)
+        rfa::LogDetail("Piece hit: its links (yield left before -> after the hit, of the most, and the link's area): %s",
+                       DescribeLinks(linksBefore, linksAfter).c_str());
     return result;
 }
 
@@ -9585,7 +9878,7 @@ std::string PropBodyText(BYTE* prop) {
             if (fabsf(v[0] - at[0]) < 0.01f && fabsf(v[1] - at[1]) < 0.01f && fabsf(v[2] - at[2]) < 0.01f &&
                 (fabsf(at[0]) + fabsf(at[1]) + fabsf(at[2])) > 1.0f) {
                 g_propTranslation = o;
-                rfa::Log("Props: a body's motion state found (its translation at +0x%X)", o);
+                rfa::LogDetail("Props: a body's motion state found (its translation at +0x%X)", o);
                 break;
             }
         }
@@ -9627,7 +9920,7 @@ DWORD __fastcall PropDamaged(BYTE* prop, void* unused, float damage, int kind, c
     const DWORD self = *reinterpret_cast<const DWORD*>(prop + kObjectHandle);
     const int after = props ? *reinterpret_cast<const int*>(props + kPropsHitpoints) : 0;
     const bool killed = reinterpret_cast<IsKilledFn>((*reinterpret_cast<void***>(prop))[0x10 / 4])(prop, nullptr);
-    rfa::Log("Props: %08lX hit (damage %.0f, kind %d, by %s): hit points %d -> %d%s; %s; at (%.1f, %.1f, %.1f)", self, damage, kind,
+    rfa::LogDetail("Props: %08lX hit (damage %.0f, kind %d, by %s): hit points %d -> %d%s; %s; at (%.1f, %.1f, %.1f)", self, damage, kind,
              attacker == player ? "the player" : (attacker ? "someone" : "nothing"), before, after, killed ? ", killed" : "",
              PropBodyText(prop).c_str(), at[0], at[1], at[2]);
     for (PropFollow& f : g_follows)
@@ -9640,7 +9933,7 @@ DWORD __fastcall PropDamaged(BYTE* prop, void* unused, float damage, int kind, c
 
 // When one of our worlds loads: PropLog= (0, off, unless set).
 void ReadPropLog() {
-    g_propLog = rfa::IniInt(L"GuerrillaWorld", L"PropLog", 0) != 0 && g_propDamage;
+    g_propLog = rfa::ReadLogSwitch(L"GuerrillaWorld", L"PropLog") && g_propDamage;
     if (g_propLog) rfa::Log("Props: hits and tips of the props near the player are logged (PropLog=1, at most %d lines)", kPropLines);
 }
 
@@ -9653,11 +9946,11 @@ void PropLogUpdate() {
     for (PropFollow& f : g_follows) {
         if (!f.handle || static_cast<LONG>(now - f.due) < 0) continue;
         BYTE* prop = ObjectInWorld(reinterpret_cast<void*>(kWorld), nullptr, f.handle);
-        if (!prop) rfa::Log("Props: %08lX 0.3 s after its hit: gone from the world", f.handle);
+        if (!prop) rfa::LogDetail("Props: %08lX 0.3 s after its hit: gone from the world", f.handle);
         else {
             const float* at = reinterpret_cast<const float*>(prop + kObjectPos);
             const float dx = at[0] - f.from[0], dy = at[1] - f.from[1], dz = at[2] - f.from[2];
-            rfa::Log("Props: %08lX 0.3 s after its hit: moved %.1f m (up %.1f); %s", f.handle, sqrtf(dx * dx + dy * dy + dz * dz), dy,
+            rfa::LogDetail("Props: %08lX 0.3 s after its hit: moved %.1f m (up %.1f); %s", f.handle, sqrtf(dx * dx + dy * dy + dz * dz), dy,
                      PropBodyText(prop).c_str());
         }
         InterlockedIncrement(&g_propLines);
@@ -9679,7 +9972,7 @@ void PropLogUpdate() {
                 if (!object || !ReadableMemory(object, kObjectTypeNumber + 1) || *reinterpret_cast<const DWORD*>(object) != kPropVtable) continue;
                 if (object[kObjectTypeNumber] != t) continue;
                 g_propType = t;
-                rfa::Log("Props: the world's props are its type %d objects (%d now)", t, count);
+                rfa::LogDetail("Props: the world's props are its type %d objects (%d now)", t, count);
                 break;
             }
         }
@@ -9718,7 +10011,7 @@ void PropLogUpdate() {
         if (slot->told || turned > -0.5f) continue;  // turned less than 120 degrees
         slot->told = true;
         InterlockedIncrement(&g_propLines);
-        rfa::Log("Props: %08lX turned over (its top now faces (%.2f, %.2f, %.2f), was (%.2f, %.2f, %.2f)); %s; at (%.1f, %.1f, %.1f)", handle,
+        rfa::LogDetail("Props: %08lX turned over (its top now faces (%.2f, %.2f, %.2f), was (%.2f, %.2f, %.2f)); %s; at (%.1f, %.1f, %.1f)", handle,
                  up[0], up[1], up[2], slot->up[0], slot->up[1], slot->up[2], PropBodyText(prop).c_str(), at[0], at[1], at[2]);
         if (!PropLineLeft()) return;
     }
@@ -9789,7 +10082,7 @@ void __fastcall SetAsAnchor(void* collector, void* unused, BYTE* mover, int piec
     if (!other) {
         void* shape = reinterpret_cast<MoverShapeFn>(kMoverShape)(mover, nullptr);
         const BYTE* state = shape ? reinterpret_cast<PieceStateFn>(kPieceState)(shape, nullptr, mine) : nullptr;
-        rfa::Log("Contact: %08lX piece %d touches the world: %s", handle, mine,
+        rfa::LogDetail("Contact: %08lX piece %d touches the world: %s", handle, mine,
                  state && (*reinterpret_cast<const DWORD*>(state + 0x18) & 1) ? "anchored" : "not anchored");
         return;
     }
@@ -9797,12 +10090,12 @@ void __fastcall SetAsAnchor(void* collector, void* unused, BYTE* mover, int piec
     const int takenAfter = pool ? *reinterpret_cast<const int*>(kDynamicLinksTaken) : 0;
     if (pool && takenAfter == takenBefore + 1 && slot != 0xFFFF) {
         const BYTE* link = reinterpret_cast<const BYTE*>(kRunTimeLinks + slot * kRunTimeLinkSize);
-        rfa::Log("Contact: %08lX piece %d touches %08lX piece %u: linked (link pieces %u and %u, depths %u and %u, area %d = %.3f m2)",
+        rfa::LogDetail("Contact: %08lX piece %d touches %08lX piece %u: linked (link pieces %u and %u, depths %u and %u, area %d = %.3f m2)",
                  handle, mine, otherHandle, static_cast<unsigned>(static_cast<WORD>(otherPiece)), *reinterpret_cast<const WORD*>(link),
                  *reinterpret_cast<const WORD*>(link + 2), *reinterpret_cast<const WORD*>(link + 4), *reinterpret_cast<const WORD*>(link + 6),
                  *reinterpret_cast<const int*>(link + 0x14), *reinterpret_cast<const int*>(link + 0x14) / 1024.0);
     } else {
-        rfa::Log("Contact: %08lX piece %d touches %08lX piece %u: no link made", handle, mine, otherHandle,
+        rfa::LogDetail("Contact: %08lX piece %d touches %08lX piece %u: no link made", handle, mine, otherHandle,
                  static_cast<unsigned>(static_cast<WORD>(otherPiece)));
     }
 }
@@ -9817,8 +10110,10 @@ void BuildingsUpdate() {
     g_sectionsWanted = g_buildingsWorld && g_destructionLog && g_sectionBegin && g_sectionEnd;
     if (!g_buildingsWorld) {
         g_frameAt.QuadPart = 0;
+        g_framesMarked = false;
         return;
     }
+    MarkFrame();
     if (g_destructionLog) TimeFrame();
     PropLogUpdate();
     const bool pool = rfa::CodeValue(kDynamicLinkCheckAt) == kDynamicLinksTaken;
@@ -9868,7 +10163,7 @@ void BuildingsUpdate() {
         snprintf(part, sizeof(part), "; %d frames with the game's window behind another left out", g_backgroundFrames);
         line += part;
     }
-    rfa::Log("%s", line.c_str());
+    rfa::LogDetail("%s", line.c_str());
     for (LONG& n : g_breakEvents) n = 0;
     g_otherBreakEvents = g_anchorsMade = g_anchorsNone = g_anchorsWrapped = 0;
     g_anchorLeast = -1;
@@ -9884,7 +10179,7 @@ void BuildingsSettingsChanged() {
     EnterCriticalSection(&g_buildingsLock);
     const bool anchors = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaAnchors", 1) != 0;
     const bool materials = rfa::IniInt(L"GuerrillaWorld", L"GuerrillaMaterials", 1) != 0;
-    const bool log = rfa::IniInt(L"GuerrillaWorld", L"DestructionLog", 1) != 0;
+    const bool log = rfa::ReadLogSwitch(L"GuerrillaWorld", L"DestructionLog");
     if (anchors != g_anchorsSetting || materials != g_materialsSetting || log != g_destructionLog) {
         g_anchorsSetting = anchors;
         g_materialsSetting = materials;
@@ -9920,6 +10215,27 @@ void InstallBuildings() {
             g_pieceDamage = reinterpret_cast<PieceDamageFn>(
                 rfa::HookFunction(kPieceDamage, kPieceDamagePrologue, reinterpret_cast<void*>(&PieceDamaged)));
         if (!g_pieceDamage) rfa::Log("Buildings: could not wrap the game's damage to a piece (its code isn't as expected); hits on anchored pieces aren't logged");
+        const BYTE contactOpening[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xF4, 0x00, 0x00, 0x00};
+        const BYTE energyOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x44};
+        if (memcmp(reinterpret_cast<const void*>(kContactStep), contactOpening, sizeof(contactOpening)) == 0 &&
+            memcmp(reinterpret_cast<const void*>(kEnergyStep), energyOpening, sizeof(energyOpening)) == 0) {
+            g_contactStep = reinterpret_cast<ContactStepFn>(rfa::HookFunction(kContactStep, sizeof(contactOpening), reinterpret_cast<void*>(&ContactStepCounted)));
+            g_energyStep = reinterpret_cast<EnergyStepFn>(rfa::HookFunction(kEnergyStep, sizeof(energyOpening), reinterpret_cast<void*>(&EnergyStepLogged)));
+        }
+        const BYTE simpleOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x40};
+        const BYTE complexOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x74};
+        const BYTE collisionOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x3C};
+        if (memcmp(reinterpret_cast<const void*>(kImpactSimple), simpleOpening, sizeof(simpleOpening)) == 0 &&
+            memcmp(reinterpret_cast<const void*>(kImpactComplex), complexOpening, sizeof(complexOpening)) == 0 &&
+            memcmp(reinterpret_cast<const void*>(kObjectCollision), collisionOpening, sizeof(collisionOpening)) == 0) {
+            g_objectCollision = reinterpret_cast<ObjectCollisionFn>(
+                rfa::HookFunction(kObjectCollision, sizeof(collisionOpening), reinterpret_cast<void*>(&ObjectCollisionCounted)));
+            if (g_objectCollision) {  // the handlers' lines need its count
+                g_impactSimple = reinterpret_cast<ImpactHandlerFn>(rfa::HookFunction(kImpactSimple, sizeof(simpleOpening), reinterpret_cast<void*>(&ImpactSimpleLogged)));
+                g_impactComplex = reinterpret_cast<ImpactHandlerFn>(rfa::HookFunction(kImpactComplex, sizeof(complexOpening), reinterpret_cast<void*>(&ImpactComplexLogged)));
+            }
+        }
+        if (!g_contactStep || !g_energyStep) rfa::Log("Car hits: could not wrap the game's contact or energy step; they aren't measured");
         const BYTE propOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x74};
         if (memcmp(reinterpret_cast<const void*>(kPropDamage), propOpening, sizeof(propOpening)) == 0 &&
             *reinterpret_cast<const DWORD*>(kPropVtable + 0xA4) == kPropDamage)
@@ -9945,14 +10261,16 @@ void InstallBuildings() {
     }
     const BYTE sectionBeginOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30};
     const BYTE sectionEndOpening[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28};
-    if (memcmp(reinterpret_cast<const void*>(kSectionBegin), sectionBeginOpening, sizeof(sectionBeginOpening)) == 0 &&
+    // Timed only for the Sections line (Log=1 and DestructionLog=1): their hooks run thousands of times a frame.
+    if (rfa::DetailLog() && memcmp(reinterpret_cast<const void*>(kSectionBegin), sectionBeginOpening, sizeof(sectionBeginOpening)) == 0 &&
         memcmp(reinterpret_cast<const void*>(kSectionEnd), sectionEndOpening, sizeof(sectionEndOpening)) == 0 &&
         strcmp(reinterpret_cast<const char*>(kSimFrameName), "sim frame") == 0) {
         g_sectionEnd = reinterpret_cast<SectionEndFn>(rfa::HookFunction(kSectionEnd, kSectionEndPrologue, reinterpret_cast<void*>(&SectionEnd)));
         if (g_sectionEnd)
             g_sectionBegin = reinterpret_cast<SectionBeginFn>(rfa::HookFunction(kSectionBegin, kSectionBeginPrologue, reinterpret_cast<void*>(&SectionBegin)));
     }
-    if (!g_sectionBegin || !g_sectionEnd) rfa::Log("Buildings: could not time the game's sections (its code isn't as expected); the log won't list them");
+    if (rfa::DetailLog() && (!g_sectionBegin || !g_sectionEnd))
+        rfa::Log("Buildings: could not time the game's sections (its code isn't as expected); the log won't list them");
     g_buildingsReady = true;
 }
 
@@ -10056,7 +10374,7 @@ void KillTurbineMotor(DWORD handle, const char* why) {
     memcpy(at, motor + 4, sizeof(at));
     auto const applyDamage = reinterpret_cast<ApplyDamageFn>((*reinterpret_cast<void** const*>(motor))[kApplyDamageSlot]);
     applyDamage(motor, nullptr, kTurbineMotorDamage, kLevelObjectDamage, at, kNoDirection, nullptr, 0xFFFFFFFF, 1.0f, 0, false, false);
-    RFA_LOG_FIRST(40, "Wind turbines: motor %08lX given %.0f damage (%s)", handle, kTurbineMotorDamage, why);
+    RFA_LOG_DETAIL_FIRST(40, "Wind turbines: motor %08lX given %.0f damage (%s)", handle, kTurbineMotorDamage, why);
 }
 
 // Guerrilla's turbine code on a damaged event (windmill_base_damaged_callback, windmill_blade_damaged_callback).
@@ -10156,7 +10474,7 @@ void TurbinesUpdate(float seconds) {
         if (timer.seconds >= kBladesFallAt) {
             if (BYTE* hinge = GameObjectFromHandle(kWorld, nullptr, turbine.hinge)) {
                 DestroyGameObject(kWorld, nullptr, hinge, false);
-                RFA_LOG_FIRST(40, "Wind turbines: blades %08lX come off (their hinge %08lX taken away)", turbine.blades, turbine.hinge);
+                RFA_LOG_DETAIL_FIRST(40, "Wind turbines: blades %08lX come off (their hinge %08lX taken away)", turbine.blades, turbine.hinge);
             }
             g_bladesTimers.erase(g_bladesTimers.begin() + k);
             continue;
@@ -10323,7 +10641,7 @@ extern "C" __declspec(dllexport) bool __cdecl GuerrillaWorld_CutBuildings(const 
     reinterpret_cast<ShapeCutterPropsFn>(kShapeCutterProps)(props, nullptr, position, turn, radius, info, nullptr, source, source);
     BYTE* cutter = reinterpret_cast<MakeShapeCutterFn>(kMakeShapeCutter)(kWorld, nullptr, props, -1);
     reinterpret_cast<FreeObjectPropsFn>(kFreeObjectProps)(props, nullptr);
-    RFA_LOG_FIRST(10, "Cutting buildings: a cutter of %.2f m at %.1f %.1f %.1f (explosion %s)%s", radius, position[0], position[1], position[2],
+    RFA_LOG_DETAIL_FIRST(10, "Cutting buildings: a cutter of %.2f m at %.1f %.1f %.1f (explosion %s)%s", radius, position[0], position[1], position[2],
                   info ? explosion : "none", cutter ? "" : ": the game made none");
     return cutter != nullptr;
 }
@@ -10463,7 +10781,7 @@ int __cdecl LadderBuildingDamaged(const BYTE* event) {
     auto setEnabled = reinterpret_cast<SetLadderEnabledFn>((*reinterpret_cast<void* const* const*>(ladder))[kVtableSetEnabled / 4]);
     setEnabled(ladder, nullptr, on);
     if (LadderOn(ladder) != was)
-        rfa::Log("Ladders: building %08lX %.1f%% destroyed, %s: its ladder %08lX switched %s", handle, destroyed * 100.0f,
+        rfa::LogDetail("Ladders: building %08lX %.1f%% destroyed, %s: its ladder %08lX switched %s", handle, destroyed * 100.0f,
                  static_cast<signed char>(building[kMoveType]) == kMoveFixed ? "fixed" : "moving", *reinterpret_cast<const DWORD*>(ladder + 0x68),
                  LadderOn(ladder) ? "on" : "off");
     return 2;
@@ -10507,6 +10825,7 @@ void InstallLadders() {
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    if (rfa::ReadLogSwitch(L"GuerrillaWorld")) rfa::Log("Log=1: routine lines and the diagnoses (\"[guerrilla_world:log]\") are on");
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
@@ -10536,7 +10855,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     // with the effects (GlassUpdate).
     g_bulletDecal = reinterpret_cast<BulletDecalFn>(rfa::HookFunction(kBulletDecal, kBulletDecalPrologue, reinterpret_cast<void*>(&BulletDecal)));
     if (!g_bulletDecal) rfa::Log("Could not hook the game's bullet marks; glass gets none, as in Armageddon");
-    g_roadLog =rfa::IniInt(L"GuerrillaWorld", L"RoadLog", 0) != 0;
+    g_roadLog = rfa::ReadLogSwitch(L"GuerrillaWorld", L"RoadLog");
     g_skyOn = rfa::IniInt(L"GuerrillaWorld", L"Sky", 1) != 0;
     g_cloudsOn = rfa::IniInt(L"GuerrillaWorld", L"Clouds", 1) != 0;
     g_worlds = SplitList(rfa::IniString(L"GuerrillaWorld", L"Worlds", L"rfg"));
@@ -10644,9 +10963,12 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         g_playEffect = reinterpret_cast<PlayEffectFn>(rfa::HookFunction(kPlayEffect, kPlayEffectPrologue, reinterpret_cast<void*>(&PlayEffect)));
         // What becomes of the effects' sounds: Wwise's own messages, and how long each sound played (see there).
         g_wwiseOutput = reinterpret_cast<WwiseOutputFn>(rfa::HookFunction(kWwiseOutput, kWwiseOutputPrologue, reinterpret_cast<void*>(&WwiseOutput)));
-        g_effectSound = reinterpret_cast<EffectSoundFn>(rfa::HookFunction(kEffectSound, kEffectSoundPrologue, reinterpret_cast<void*>(&EffectSound)));
-        if (!g_wwiseOutput || !g_effectSound) rfa::Log("Could not watch the effects' sounds (Wwise's messages %s, the sounds' lengths %s)",
-                                                       g_wwiseOutput ? "watched" : "not", g_effectSound ? "watched" : "not");
+        // The sounds' lengths, and Wwise's memory every 10 s, only for the log (Log=1): the watch runs on every effect's sound update.
+        if (rfa::DetailLog())
+            g_effectSound = reinterpret_cast<EffectSoundFn>(rfa::HookFunction(kEffectSound, kEffectSoundPrologue, reinterpret_cast<void*>(&EffectSound)));
+        if (!g_wwiseOutput || (rfa::DetailLog() && !g_effectSound))
+            rfa::Log("Could not watch the effects' sounds (Wwise's messages %s, the sounds' lengths %s)", g_wwiseOutput ? "watched" : "not",
+                     g_effectSound ? "watched" : "not");
         g_makeObject = reinterpret_cast<MakeObjectFn>(rfa::HookFunction(kMakeObject, kMakeObjectPrologue, reinterpret_cast<void*>(&MakeObject)));
         if (!g_playEffect || !g_makeObject) rfa::Log("Could not watch the game's effects playing (the log won't say why one doesn't)");
     }

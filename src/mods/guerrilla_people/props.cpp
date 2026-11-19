@@ -18,6 +18,7 @@
 // backpacks' effects) and stopped as the world's dust (0x4D4360, 0x4F7AA0). Only Guerrilla's: an effect or item that
 // isn't built is left out, and said once.
 
+#define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "props.h"
 #include <cctype>
@@ -131,7 +132,7 @@ unsigned long PropPutOn(unsigned char* human, const PropKind& kind) {
     setOwner(object, owner, 0);
     const int point = PointOn(human, kind.humanPoint), tag = TagOf(object, kind.itemPoint);
     if (!AttachToHuman(human, object, point, tag, false, true)) {
-        RFA_LOG_FIRST(8, "Props: %s made but not attached to NPC 0x%08lX (point %s %d, its own %s %d); taken away", name.c_str(), owner, kind.humanPoint.c_str(),
+        RFA_LOG_DETAIL_FIRST(8, "Props: %s made but not attached to NPC 0x%08lX (point %s %d, its own %s %d); taken away", name.c_str(), owner, kind.humanPoint.c_str(),
                       point, kind.itemPoint.c_str(), tag);
         DestroyObject(kWorld, object, true);
         return 0;
@@ -139,7 +140,7 @@ unsigned long PropPutOn(unsigned char* human, const PropKind& kind) {
     ++g_made;
     if (g_logs < 24) {
         ++g_logs;
-        rfa::Log("Props: NPC 0x%08lX holds %s (%s, point %d; its own %s, %d) (%d so far)", owner, name.c_str(), kind.humanPoint.c_str(), point,
+        rfa::LogDetail("Props: NPC 0x%08lX holds %s (%s, point %d; its own %s, %d) (%d so far)", owner, name.c_str(), kind.humanPoint.c_str(), point,
                  kind.itemPoint.c_str(), tag, g_made);
     }
     return HandleOf(object);

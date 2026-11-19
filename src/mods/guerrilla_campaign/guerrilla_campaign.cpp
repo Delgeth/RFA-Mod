@@ -60,6 +60,7 @@
 #include "guerrilla_squads.h"
 #include "alert_orders.h"
 #include "reinforcements.h"
+#include "difficulty.h"
 
 namespace campaign {
 namespace {
@@ -192,6 +193,7 @@ std::vector<std::string> SplitList(const std::wstring& text) {
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     using namespace campaign;
+    rfa::ReadLogSwitch(L"GuerrillaCampaign");
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;
@@ -202,6 +204,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     }
     g_worlds = SplitList(rfa::IniString(L"GuerrillaCampaign", L"Worlds", L"rfg"));
     liberation::Init();
+    difficulty::Init();
     restricted_areas::Init();
     undercover::Init();
     kill_regions::Init();

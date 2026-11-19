@@ -5,6 +5,8 @@
 //   rfg_district_set control <points>    sets the player's district's EDF control (0..its most;
 //                                        Guerrilla's gfm_set_edf_control: liberation is checked)
 //   rfg_district_set morale <points>     sets its morale (0..its most, 100)
+//   rfg_district_missions_done           testing: marks the player's district's story missions done (none are
+//                                        ported yet), so it liberates at EDF control 0, as Guerrilla's rule says
 // What they change is saved with the campaign, as the game's own changes are.
 //
 // The game's console (as the "scriptx" command, 0x915890): a command object is registered with
@@ -34,7 +36,7 @@ using ConsolePrintFn = void(__cdecl*)(const char* format, ...);
 auto const ConsolePrint = reinterpret_cast<ConsolePrintFn>(0xC7C440);
 
 constexpr int kNone = 1, kWord = 2, kWhole = 8, kFraction = 16;
-BYTE g_showCommand[32], g_setCommand[32];
+BYTE g_showCommand[32], g_setCommand[32], g_missionsCommand[32];
 
 const char* AlertName(int level) {
     static const char* const names[] = {"green", "yellow", "orange", "red"};
@@ -79,6 +81,22 @@ void Set() {
     PrintDistrict(here, "Now ");
 }
 
+// Testing only: Guerrilla liberates a district at EDF control 0 once its story missions are done, and no missions
+// are ported yet; this marks your district's done (saved with the campaign), so liberation can be tried.
+void MissionsDone() {
+    if (!g_commandRunning) return;
+    const int here = liberation::PlayerDistrict();
+    if (here < 0) {
+        ConsolePrint("You aren't in one of Guerrilla's districts\n");
+        return;
+    }
+    const int marked = liberation::MarkMissionsDone(here);
+    rfa::Log("rfg_district_missions_done in %s: %d story missions marked done (testing)", liberation::GetDistrict(here)->name.c_str(), marked);
+    ConsolePrint("%d story missions of %s marked done (testing); it liberates once its EDF control is 0 (rfg_district_set control 0)\n", marked,
+                 liberation::GetDistrict(here)->name.c_str());
+    PrintDistrict(here, "Now ");
+}
+
 }  // namespace
 
 void Enter() {
@@ -87,6 +105,8 @@ void Enter() {
     added = true;
     RegisterCommand(g_showCommand, nullptr, "rfg_district", "Shows Guerrilla's districts: EDF control and morale", 3, &Show);
     RegisterCommand(g_setCommand, nullptr, "rfg_district_set", "Sets the EDF control or morale of your district: rfg_district_set control|morale <points>", 3, &Set);
+    RegisterCommand(g_missionsCommand, nullptr, "rfg_district_missions_done",
+                    "Testing: marks your district's story missions done, so it liberates at 0 EDF control (no missions are ported yet)", 3, &MissionsDone);
 }
 
 }  // namespace campaign::district_commands

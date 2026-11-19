@@ -188,7 +188,7 @@ bool Ready(Persona& p, ULONGLONG now) {
     if (state == kBankLoaded) return true;
     if (state == kBankNotLoaded) {
         LoadBank(p.bankId);
-        if (g_log && !p.asked) rfa::Log("Voices: loading %s's bank %s", p.name.c_str(), p.bank.c_str());
+        if (g_log && !p.asked) rfa::LogDetail("Voices: loading %s's bank %s", p.name.c_str(), p.bank.c_str());
         p.asked = true;
     }
     return false;
@@ -245,7 +245,7 @@ int Play(const BYTE* human, const char* lineName, int priority) {
     speaker->playing = handle;
     speaker->priority = wanted;
     speaker->line = line;
-    if (g_log) rfa::Log("Voices: %s says %s (priority %d, in %d ms)", p.name.c_str(), lineName, wanted, delay);
+    if (g_log) rfa::LogDetail("Voices: %s says %s (priority %d, in %d ms)", p.name.c_str(), lineName, wanted, delay);
     return kPlayed;
 }
 
@@ -275,7 +275,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         rfa::Log("Off (Enabled=0 in [GuerrillaVoices])");
         return;
     }
-    g_log = rfa::IniInt(L"GuerrillaVoices", L"Log", 0) != 0;
+    g_log = rfa::ReadLogSwitch(L"GuerrillaVoices");
     srand(static_cast<unsigned>(time(nullptr)));
     if (!ReadTable()) {
         rfa::Log("No mods\\guerrilla_voices\\voices.txt (build the world with editor\\GuerrillaBuilder.exe): no voices");

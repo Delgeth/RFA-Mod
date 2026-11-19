@@ -4,8 +4,9 @@
 // As Guerrilla's: in the worlds named in [GuerrillaVehicles] TrafficWorlds=, from 20 s after the player is in
 // one, while no action runs, every 0.5 to 1 s one of four is tried at random (each 1 in 4): a fly-by (at most
 // every 2 to 4 min), a drive-by, dumping a civilian (not ported: it needs the civilians' own action), or
-// harassing the player (at most every 4 to 8 min). Guerrilla's other conditions (green alert, not in a
-// safehouse or a liberated district, no activity) wait for the campaign's systems.
+// harassing the player (at most every 4 to 8 min). As Guerrilla's ambient_edf_info::amb_do_spawn (RM 0x651E70), a new
+// action starts only at green alert, with the player outside the safehouses, no activity running and his district not
+// liberated (guerrilla_campaign's state); one already under way carries on.
 // - Drive-by: when the player is within 30 m of an ambient road (its point nearest the player: the meeting
 //   point), an EDF scout (Default EDF: EDF_Scout_1-4, a driver and a gunner) is made on an ambient road 150 to
 //   250 m away and drives along the roads at 9 m/s to the meeting point, then on. Its gunner keeps its own AI:
@@ -107,7 +108,7 @@ void TryDriveBy(const BYTE* player, int clock, bool harass) {
         g_now.spawning = true;
         g_now.meet = meet;
         g_now.crew.waiting = CrewNames(where, 2);  // basic_squad_2: a driver and a gunner
-        RFA_LOG_FIRST(40, "EDF: a %s (%s) from %.0f m away", ActionName(g_now.action), g_now.spawn.model.c_str(), Distance(where, at));
+        RFA_LOG_DETAIL_FIRST(40, "EDF: a %s (%s) from %.0f m away", ActionName(g_now.action), g_now.spawn.model.c_str(), Distance(where, at));
         return;
     }
 }
@@ -131,7 +132,7 @@ void TryFlyBy(const BYTE* player, int clock) {
     g_now.spawning = true;
     g_now.beyond = {start.x + dx / length * 1000.0f, at.y + 30.0f, start.z + dz / length * 1000.0f};
     g_now.crew.waiting = CrewNames(start, 1);  // basic_squad_1: the pilot
-    RFA_LOG_FIRST(40, "EDF: a fly-by (%s)", g_now.spawn.model.c_str());
+    RFA_LOG_DETAIL_FIRST(40, "EDF: a fly-by (%s)", g_now.spawn.model.c_str());
 }
 
 void ActionFrame(BYTE* player) {
@@ -159,7 +160,7 @@ void ActionFrame(BYTE* player) {
     g_now.closest = (std::min)(g_now.closest, away);
     if (g_now.started < 0) g_now.started = GameTime();
     if (!g_now.chasing && GameTime() - g_now.started > 120000) {  // stuck somewhere (a route that never works out): gone
-        RFA_LOG_FIRST(20, "EDF: a %s took over 2 minutes; it's taken away", ActionName(g_now.action));
+        RFA_LOG_DETAIL_FIRST(20, "EDF: a %s took over 2 minutes; it's taken away", ActionName(g_now.action));
         Retire();
         return;
     }
@@ -167,7 +168,7 @@ void ActionFrame(BYTE* player) {
     if (g_now.chasing) {
         const ChaseResult result = ChaseFrame(g_now.crew, g_now.chase, vehicle);
         if (result == ChaseResult::Chasing) return;
-        RFA_LOG_FIRST(40, "EDF: a %s's chase ended (%s)", ActionName(g_now.action),
+        RFA_LOG_DETAIL_FIRST(40, "EDF: a %s's chase ended (%s)", ActionName(g_now.action),
                       result == ChaseResult::OnFoot ? "its crew got out to fight" : result == ChaseResult::Lost ? "the player got away" : "its crew can't drive");
         if (result == ChaseResult::Lost) Retire();
         else {
@@ -184,7 +185,7 @@ void ActionFrame(BYTE* player) {
         return;
     }
     if (g_now.action != kFlyBy && NoticedPlayer(g_now.crew)) {
-        RFA_LOG_FIRST(40, "EDF: a %s's crew noticed the player and gives chase", ActionName(g_now.action));
+        RFA_LOG_DETAIL_FIRST(40, "EDF: a %s's crew noticed the player and gives chase", ActionName(g_now.action));
         g_now.chasing = true;
         g_now.chase = Chase{};
         g_now.chase.target = Handle(player);
@@ -257,6 +258,7 @@ void EdfFrame() {
     if (g_now.action != kNoAction) { ActionFrame(player); return; }
     if (clock < g_firstTry || clock < g_nextTry) return;
     g_nextTry = clock + RandomBetween(500, 1000);
+    if (CampaignAlert() > 0 || PlayerInSafehouse() || CampaignActivityRunning() || PlayerDistrictLiberated()) return;
     switch (RandomBetween(2, 5)) {
         case kFlyBy: TryFlyBy(player, clock); break;
         case kDriveBy: TryDriveBy(player, clock, false); break;

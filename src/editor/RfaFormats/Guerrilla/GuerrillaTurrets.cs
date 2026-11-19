@@ -17,6 +17,9 @@ public sealed class GuerrillaTurrets
 {
     public const string Table = "turrets.xtbl";
 
+    /// <summary>The turrets Guerrilla's activity layers place on turret spawn nodes, added whether or not a vehicle mounts them.</summary>
+    static readonly string[] PlacedTurrets = ["turret_rocket_guerrilla_inv"];
+
     readonly Dictionary<string, XtblElement> rfg;
     readonly XtblFile ours;
     readonly FieldDescription description;
@@ -160,6 +163,9 @@ public sealed class GuerrillaTurrets
     /// </summary>
     public void Write(string modFolder)
     {
+        // The turrets Guerrilla places on their own (a turret spawn node's turret_type), not on a vehicle: demolitions
+        // master's je_dm_11 layer places a turret_rocket_guerrilla_inv (GuerrillaActivityLayers).
+        foreach (string placed in PlacedTurrets) Ported(placed, out _);
         File.WriteAllBytes(Path.Combine(modFolder, Table), ours.ToBytes());
         File.WriteAllLines(Path.Combine(modFolder, ItemList),
             [.. neededItems.Select(i => "item " + i), .. gunsAsTops.Select(g => $"gun {g.Key} {g.Value}")]);

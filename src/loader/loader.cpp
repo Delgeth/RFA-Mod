@@ -37,13 +37,15 @@ bool CallModInit(void(__cdecl* init)()) {
 // thread of the loader's own writes them to logs\rfa_mods.log every 20 ms, so no game thread waits on
 // the disk. On a busy hard drive a write held the game's frame for seconds (the user's 18:53 run,
 // 2026-11-15). A crash writes what is queued at once, and every line after it goes straight to the
-// file (the process may end before the writer runs again). At exit, what is left is written.
+// file (the process may end before the writer runs again). At exit, what is queued is written as the
+// game calls ExitProcess (see WriteLogAsGameExits), and what is left at the loader's unloading.
 constexpr DWORD kLogWriteEveryMs = 20;
 CRITICAL_SECTION g_logQueueLock;  // the queue
 CRITICAL_SECTION g_logWriteLock;  // the file: one batch at a time, in order
 std::string g_logQueue;
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
-volatile LONG g_logDirect = 0;  // set by a crash: lines are written at once from then on
+volatile LONG g_logDirect = 0;   // set by a crash: lines are written at once from then on
+volatile LONG g_logExiting = 0;  // set as the game exits: lines are written at once, without the locks
 INIT_ONCE g_logOnce = INIT_ONCE_STATIC_INIT;
 
 void WriteLogText(const std::string& text) {
@@ -85,7 +87,29 @@ BOOL CALLBACK StartLog(PINIT_ONCE, PVOID, PVOID*) {
 void LogDirectFromNow() {
     InitOnceExecuteOnce(&g_logOnce, StartLog, nullptr, nullptr);
     InterlockedExchange(&g_logDirect, 1);
+    if (!g_logExiting) FlushLogQueue();  // once the game exits, the queue is written already and the locks aren't used
+}
+
+// The game exits by ExitProcess (its _exit). Windows then ends every other thread and unloads the DLLs, the mods
+// before the loader, so a mod that failed as it unloaded ended the game before the loader's DllMain wrote what was
+// queued: a fail-fast (0xC0000409) skips the crash report too, and the log lost its last lines (the 2026-11-19 runs
+// stopped at the game's scheduler_shutdown, a quarter of a second before its exit). So the queue is written here,
+// while the other threads still run, and every line after it straight to the file. Those lines are written without
+// the locks: a thread Windows ends next could be holding one (the writer, in the middle of a batch), and waiting for
+// a lock whose owner has ended would hang the exit.
+decltype(&ExitProcess) o_ExitProcess = ExitProcess;
+
+void WINAPI WriteLogAsGameExits(UINT code) {
+    InitOnceExecuteOnce(&g_logOnce, StartLog, nullptr, nullptr);
+    InterlockedExchange(&g_logExiting, 1);
     FlushLogQueue();
+    rfa::Log("The game exits (code %u)", code);
+    o_ExitProcess(code);
+}
+
+void InstallLogAtExit() {
+    if (!rfa::HookImport(GetModuleHandleW(nullptr), "KERNEL32.dll", "ExitProcess", &WriteLogAsGameExits, &o_ExitProcess))
+        rfa::Log("Could not hook the game's ExitProcess: if a mod fails as the game exits, the log may lose its last lines");
 }
 
 // The process is ending (DllMain): the other threads are gone, perhaps holding the locks, so what is
@@ -542,7 +566,7 @@ void AddOverride(const std::wstring& root, const std::wstring& relative) {
         NewFile added{path, ansiPath, shown};
         g_newFiles[Lower(shown)] = added;
         g_newFiles.try_emplace(Lower(name), added);  // also by its name alone, if no other new file has it
-        rfa::Log("New file: %s", shown.c_str());
+        rfa::LogDetail("New file: %s", shown.c_str());
         return;
     }
     std::vector<ArchiveFile> files;
@@ -578,7 +602,7 @@ void AddOverride(const std::wstring& root, const std::wstring& relative) {
     added.relative = shown;
     added.archiveSize = original->size;
     ++g_overrideCount;
-    rfa::Log("Override: %s", shown.c_str());
+    rfa::LogDetail("Override: %s", shown.c_str());
 }
 
 bool IsLuaScript(const std::string& name) {
@@ -721,7 +745,7 @@ int __cdecl LoadBufferHook(lua_State* L, const char* buffer, size_t size, const 
     WatchLuaErrors();
     const std::string name = ScriptFileName(chunkName);
     if (!name.empty()) {
-        RFA_LOG_FIRST(60, "Lua script loaded: %s", chunkName);
+        RFA_LOG_DETAIL_FIRST(60, "Lua script loaded: %s", chunkName);
         const Override* replacement = nullptr;
         {
             SharedFiles shared;
@@ -730,7 +754,7 @@ int __cdecl LoadBufferHook(lua_State* L, const char* buffer, size_t size, const 
         }
         std::string text;
         if (replacement && ReadWholeFile(replacement->path, text)) {
-            rfa::Log("Using override %s", replacement->relative.c_str());
+            rfa::LogDetail("Using override %s", replacement->relative.c_str());
             return g_loadBuffer(L, text.data(), text.size(), chunkName);
         }
     }
@@ -782,12 +806,12 @@ static const std::string kLayer0 = "_l0.vpp_pc";
         }
         if (found == g_newFiles.end()) {
             if (g_logLookups && IsLevelFile(name)) {
-                rfa::Log("Level load: file not found in new files: %s", name);
+                rfa::LogDetail("Level load: file not found in new files: %s", name);
             }
             for (const auto& [newKey, newFile] : g_newFiles) {
                 const std::string stem = newKey.substr(newKey.find_last_of('\\') + 1, newKey.find_last_of('.') - newKey.find_last_of('\\') - 1);
                 if (stem.size() >= 3 && key.find(stem) != std::string::npos) {
-                    RFA_LOG_FIRST(100, "The game looked for %s and found it nowhere (no new file is called that)", name);
+                    RFA_LOG_DETAIL_FIRST(100, "The game looked for %s and found it nowhere (no new file is called that)", name);
                     break;
                 }
             }
@@ -801,9 +825,10 @@ static const std::string kLayer0 = "_l0.vpp_pc";
     result->size = 0;
     result->archiveEntry = nullptr;
     const bool ok = rfa::game::FindLooseFile(result, file->ansiPath.c_str(), 0);
-    if (InterlockedExchange(&file->used, 1) == 0)
-        rfa::Log(ok ? "Using new file %s (the game asked for %s)" : "New file %s could not be opened (the game asked for %s)",
-                 file->relative.c_str(), name);
+    if (InterlockedExchange(&file->used, 1) == 0) {
+        if (ok) rfa::LogDetail("Using new file %s (the game asked for %s)", file->relative.c_str(), name);
+        else rfa::Log("New file %s could not be opened (the game asked for %s)", file->relative.c_str(), name);
+    }
     return ok;
 }
 
@@ -1075,13 +1100,13 @@ void __cdecl BeginRuinMatchHook() {
 
 bool __cdecl FindFileHook(FileFindResult* result, const char* name, bool flag) {
     const bool found = g_findFile(result, name, flag);
-if (g_logLookups && name && IsLevelFile(name)) {
+    if (g_logLookups && name && IsLevelFile(name)) {
         const char* sourceStr = !found                 ? "not found"
                       : result->source == 1 ? "in an archive"
                       : result->source == 2 ? "in a virtual folder"
                       : result->source == 0 ? "loose file"
                                              : "found";
-        rfa::Log("Level lookup: %s -> %s (%lu bytes)", name, sourceStr, found ? result->size : 0ul);
+        rfa::LogDetail("Level lookup: %s -> %s (%lu bytes)", name, sourceStr, found ? result->size : 0ul);
     }
     if (!found && name) return FindNewFile(result, name);
     if (!found || result->source != 1 || !name) return found;  // not found, or not inside an archive
@@ -1094,7 +1119,7 @@ if (g_logLookups && name && IsLevelFile(name)) {
         auto match = std::find_if(overrides->second.begin(), overrides->second.end(),
                                   [&](const Override& candidate) { return candidate.archiveSize == result->size; });
         if (match == overrides->second.end()) {
-            RFA_LOG_FIRST(20, "Override %s not used here: the game loaded another archive's %s (%lu bytes)",
+            RFA_LOG_DETAIL_FIRST(20, "Override %s not used here: the game loaded another archive's %s (%lu bytes)",
                           overrides->second.front().relative.c_str(), name, result->size);
             return found;
         }
@@ -1110,9 +1135,10 @@ if (g_logLookups && name && IsLevelFile(name)) {
     result->size = 0;
     result->archiveEntry = nullptr;
     const bool ok = rfa::game::FindLooseFile(result, o->ansiPath.c_str(), 0);
-    if (InterlockedExchange(&o->used, 1) == 0)
-        rfa::Log(ok ? "Using override %s" : "Override %s could not be opened; the game's own file is used",
-                 o->relative.c_str());
+    if (InterlockedExchange(&o->used, 1) == 0) {
+        if (ok) rfa::LogDetail("Using override %s", o->relative.c_str());
+        else rfa::Log("Override %s could not be opened; the game's own file is used", o->relative.c_str());
+    }
     if (!ok) *result = gameCopy;
     return true;
 }
@@ -1840,7 +1866,7 @@ void InstallOverrides() {
     g_overridesOn = true;
     FindOverrides(rfa::RootDir() + L"\\overrides", L"");
     FindEdits(rfa::RootDir() + L"\\edits", L"");  // changes to the archives the mod adds (the Guerrilla world's)
-    g_logLookups = rfa::IniInt(L"Loader", L"LogLookups", 0) != 0;
+    g_logLookups = rfa::ReadLogSwitch(L"Loader", L"LogLookups");
     if (g_logLookups) {
         rfa::Log("Logging lookups of level files ([Loader] LogLookups=1)");
         g_beginRuinMatch = reinterpret_cast<BeginRuinMatchFn>(
@@ -1902,8 +1928,11 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     rfa::Log("Loader running in %ls (pid %lu)", exe, GetCurrentProcessId());
     rfa::Log("Game build: %s", rfa::game::BuildDescription());
+    if (rfa::ReadLogSwitch(L"Loader"))
+        rfa::Log("[Loader] Log=1: the loader also logs each file it adds, replaces or is asked for (\"[loader:log]\" lines)");
     InstallInstalledExePath();
     InstallCrashReporter();
+    InstallLogAtExit();
     if (rfa::game::IsSupportedBuild()) {
         InstallOverrides();
         InstallRuinQuit();
@@ -1960,6 +1989,10 @@ extern "C" DWORD WINAPI RFALoader_Init(LPVOID) {
 // written at once after a crash (see "The log, written off the game's threads").
 extern "C" __declspec(dllexport) void __cdecl RFALoader_Log(const char* line, unsigned length) {
     InitOnceExecuteOnce(&g_logOnce, StartLog, nullptr, nullptr);
+    if (g_logExiting) {  // the game is exiting: at once, without the locks (see WriteLogAsGameExits)
+        WriteLogText(std::string(line, length));
+        return;
+    }
     if (g_logDirect) {
         EnterCriticalSection(&g_logWriteLock);
         FlushLogQueue();

@@ -68,6 +68,8 @@ public static class GuerrillaWeapons
         "turret_supergauss_burst", "turret_HeavyTank", "turret_MediumTank", "turret_arttank_single", "turret_harpoon",
         // the second weapons of three turrets (their SecondaryWeapon): the jetter's gun, the artillery tank's burst, the gauss tank's single shot
         "turret_jetter_mg", "turret_arttank_burst", "turret_supergauss_solo",
+        // the rocket turret demolitions master's je_dm_11 layer places on a turret spawn node (turret_rocket_guerrilla_inv)
+        "turret_rocket_standing",
     ];
 
     /// <summary>The weapons built when none are named.</summary>
@@ -184,7 +186,7 @@ public static class GuerrillaWeapons
         ["turret_jetter_rocket"] = 232, ["turret_edfrocket_flyer"] = 233, ["turret_missilepod"] = 234, ["turret_missilepod2"] = 235,
         ["turret_gauss_vehicle"] = 236, ["turret_gauss_flyer"] = 237, ["turret_gaussH2H"] = 238, ["turret_supergauss_burst"] = 239,
         ["turret_HeavyTank"] = 240, ["turret_MediumTank"] = 251, ["turret_arttank_single"] = 252, ["turret_harpoon"] = 253,
-        ["turret_arttank_burst"] = 213, ["turret_supergauss_solo"] = 214 };  // (213-221 and 223-226 are free too)
+        ["turret_arttank_burst"] = 213, ["turret_supergauss_solo"] = 214, ["turret_rocket_standing"] = 215 };  // (216-221 and 223-226 are free too)
 
     /// <summary>
     /// How many projectiles the game holds with the guerrilla_gear mod (which Guerrilla's weapons need): 256 (the
@@ -220,7 +222,7 @@ public static class GuerrillaWeapons
         ["turret_rocket_rover2"] = 173, ["turret_jetter_rocket"] = 174, ["turret_edfrocket_flyer"] = 175, ["turret_missilepod"] = 176,
         ["turret_missilepod2"] = 177, ["turret_gauss_vehicle"] = 178, ["turret_gauss_flyer"] = 179, ["turret_gaussH2H"] = 180,
         ["turret_supergauss_burst"] = 181, ["turret_HeavyTank"] = 182, ["turret_MediumTank"] = 183, ["turret_arttank_single"] = 184, ["turret_harpoon"] = 185,
-        ["turret_jetter_mg"] = 186, ["turret_arttank_burst"] = 187, ["turret_supergauss_solo"] = 188,
+        ["turret_jetter_mg"] = 186, ["turret_arttank_burst"] = 187, ["turret_supergauss_solo"] = 188, ["turret_rocket_standing"] = 189,
     };
 
     /// <summary>The files this writes (relative to the overrides folder, then to the mod's folder), for --remove.</summary>

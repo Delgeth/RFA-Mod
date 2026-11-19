@@ -39,11 +39,13 @@
 // the sounds and tooltip of a level change; what
 // lowers control and morale by itself (EDF buildings destroyed, civilians and guerrillas killed,
 // propaganda destroyed, the player's death); the control and morale meters and messages; the
-// liberation screen, radio lines and unlocks. Guerrilla's difficulty for control and morale is taken
-// as Normal.
+// liberation screen, radio lines and unlocks. Guerrilla's difficulty for the alert, control and morale
+// comes from its difficulty.xtbl at the game's level (difficulty::Level(): Armageddon's Custom reads as
+// Medium); its combat items are difficulty.cpp's.
 #define RFA_MOD_NAME "guerrilla_campaign"
 #include "rfa_mod.h"
 #include "liberation.h"
+#include "difficulty.h"
 #include "activities.h"
 #include "alert_sources.h"
 #include "restricted_areas.h"
@@ -150,13 +152,16 @@ void LoadSaved() {
     g_salvage = save::Int("progression", "salvage", 0);
 }
 
-// district::liberate_district: control 0 and none of its missions left.
+// district::liberate_district: control 0 and none of its missions left (the user, 2026-11-18: liberation
+// comes with the district's last campaign mission, as Guerrilla's). Guerrilla sets the levels to the
+// district's; in free roam a district can be liberated out of story order, so a level only goes up here
+// (the user's choice, 2026-11-18).
 void MaybeLiberate(DistrictState& district) {
     if (district.liberated || district.control > 0.0f || MissionsLeft(district) > 0) return;
     district.liberated = true;
-    if (district.liberatedEdf) SetEdfProgression(district.liberatedEdf);
-    if (district.liberatedMarauder) SetMarauderProgression(district.liberatedMarauder);
-    if (district.liberatedTech) SetTechLevel(district.liberatedTech);
+    if (district.liberatedEdf > g_edfProgression) SetEdfProgression(district.liberatedEdf);
+    if (district.liberatedMarauder > g_marauderProgression) SetMarauderProgression(district.liberatedMarauder);
+    if (district.liberatedTech > g_techLevel) SetTechLevel(district.liberatedTech);
     SaveDistrict(district);
     rfa::Log("%s is liberated", district.name.c_str());
 }
@@ -208,7 +213,6 @@ AlertValues g_vehicleValues = {{0.0f, 2.0f, 4.0f, 6.0f}, 80.0f, 2.0f};
 // difficulty.xtbl, MENU_ENEMY_ALERT_LEVEL_EVENTS: Easy, Medium, Hard, Insane, picked by the game's
 // own difficulty (0x10F7E98: 0 easy .. 3 insane).
 float g_alertDifficulty[4] = {0.75f, 1.0f, 1.1f, 1.2f};
-const auto& g_gameDifficulty = *reinterpret_cast<const int*>(0x10F7E98);
 
 float g_alertValue = 0.0f;
 int g_alertLevel = handles::AlertGreen;
@@ -292,15 +296,9 @@ void LoadAlertDifficulty() {
     LoadDifficultyItem(rows, "MENU_CONTROL_PARKER", g_controlMultiplier);
 }
 
-int DifficultyIndex() {
-    const int difficulty = g_gameDifficulty;
-    return difficulty < 0 ? 1 : difficulty > 3 ? 3 : difficulty;
-}
+int DifficultyIndex() { return difficulty::Level(); }
 
-float AlertDifficulty() {
-    const int difficulty = g_gameDifficulty;
-    return g_alertDifficulty[difficulty < 0 ? 1 : difficulty > 3 ? 3 : difficulty];
-}
+float AlertDifficulty() { return g_alertDifficulty[difficulty::Level()]; }
 
 const char* LevelName(int level) {
     static const char* const names[handles::kAlertLevels] = {"green", "yellow", "orange", "red"};
@@ -368,7 +366,7 @@ void AlertStep() {
         float change = g_nextDelta + growth - decay - away;
         if (change < 0.0f && (alert_sources::PlayerInTankOrWalker() || restricted_areas::PlayerInside())) change = 0.0f;
         if (g_log && (change != 0.0f || seeing > 0))
-            rfa::Log("Alert %.0f %+.0f (%s; reports %+.0f, %d of the EDF seeing the player %+.0f, decay -%.0f, away -%.0f)", g_alertValue, change,
+            rfa::LogDetail("Alert %.0f %+.0f (%s; reports %+.0f, %d of the EDF seeing the player %+.0f, decay -%.0f, away -%.0f)", g_alertValue, change,
                      LevelName(g_alertLevel), g_nextDelta, seeing, growth, decay, away);
         if (change != 0.0f) SetAlertValue(g_alertValue + change);
     }
@@ -402,7 +400,7 @@ void Count(DamageReport& report, float worth, const char* what) {
     g_lastReportKnown = true;
     report.reported = report.damage;
     // Always written, but for a vehicle's damage, which comes many times a second (Log=1 for that).
-    if (g_log || report.kind != ReportVehicle || report.damage >= 1.0f) rfa::Log("Alert: %s, +%.0f (%.0f now)", what, worth, g_alertValue);
+    if (g_log || report.kind != ReportVehicle || report.damage >= 1.0f) rfa::LogDetail("Alert: %s, +%.0f (%.0f now)", what, worth, g_alertValue);
 }
 
 }  // namespace
@@ -570,6 +568,37 @@ void ReloadState() {
     rfa::Log("The campaign's districts read again from its save");
 }
 
+// A story mission recorded done (Guerrilla's mission cleanup; the mission work will call this): its district is
+// liberated now if its EDF control is already 0 and it was the district's last (district::liberate_district).
+void RecordMissionDone(const char* mission) {
+    if (!mission || !*mission) return;
+    save::SetInt("missions", mission, 1);
+    for (const Mission& done : g_missions)
+        if (_stricmp(done.name.c_str(), mission) == 0)
+            if (const int index = DistrictNamed(done.district.c_str()); index >= 0) MaybeLiberate(g_districts[index]);
+}
+
+// For testing before missions exist (the console's rfg_district_missions_done): every story mission of the district
+// marked done, then liberation checked as the last one's end would. The number marked.
+int MarkMissionsDone(int which) {
+    const int index = Resolve(which);
+    if (index < 0 || index >= DistrictCount()) return 0;
+    DistrictState& district = g_districts[index];
+    int marked = 0;
+    for (const Mission& mission : g_missions)
+        if (_stricmp(mission.district.c_str(), district.name.c_str()) == 0 && !MissionDone(mission.name)) {
+            save::SetInt("missions", mission.name.c_str(), 1);
+            ++marked;
+        }
+    MaybeLiberate(district);
+    return marked;
+}
+
+int MissionsLeftIn(int which) {
+    const int index = Resolve(which);
+    return index >= 0 && index < DistrictCount() ? MissionsLeft(g_districts[index]) : 0;
+}
+
 void SetEdfControl(float control, int which) {
     const int index = Resolve(which);
     if (index < 0 || index >= DistrictCount()) return;
@@ -612,30 +641,35 @@ void ChangeMoraleOffset(float delta, bool set) { g_moraleOffset = set ? delta : 
 
 // ---- Progression and salvage
 
+// Held to Guerrilla's ranges, as district::liberate_district clamps them: the tech level 0..5 (its
+// Max_tech_level default), the EDF and Marauder progression 0..7.
+int Clamped(int level, int most) { return level < 0 ? 0 : level > most ? most : level; }
+
 int TechLevel() { return g_techLevel; }
 void SetTechLevel(int level) {
-    g_techLevel = level;
-    save::SetInt("progression", "tech_level", level);
+    g_techLevel = Clamped(level, 5);
+    save::SetInt("progression", "tech_level", g_techLevel);
 }
 void SetEdfProgression(int level) {
-    g_edfProgression = level;
-    save::SetInt("progression", "edf", level);
+    g_edfProgression = Clamped(level, 7);
+    save::SetInt("progression", "edf", g_edfProgression);
 }
 int EdfProgressionLevel() {
     const District* district = GetDistrict(PlayerDistrict());
     if (!district || district->minEdfProgression < 0 || district->minEdfProgression >= 8) return g_edfProgression;
     return district->minEdfProgression > g_edfProgression ? district->minEdfProgression : g_edfProgression;
 }
+int MarauderProgressionLevel() { return g_marauderProgression; }
 void SetMarauderProgression(int level) {
-    g_marauderProgression = level;
-    save::SetInt("progression", "marauder", level);
+    g_marauderProgression = Clamped(level, 7);
+    save::SetInt("progression", "marauder", g_marauderProgression);
 }
 
 int Salvage() { return g_salvage; }
 void AddSalvage(int amount) {
     g_salvage += amount;
     save::SetInt("progression", "salvage", g_salvage);
-    rfa::Log("Salvage +%d (%d); Armageddon's own salvage isn't fed yet", amount, g_salvage);
+    rfa::LogDetail("Salvage +%d (%d); Armageddon's own salvage isn't fed yet", amount, g_salvage);
 }
 
 // ---- The frame
@@ -645,7 +679,7 @@ void Init() {
     LoadAlertTable();
     LoadAlertValues();
     LoadAlertDifficulty();
-    g_log = rfa::IniInt(L"GuerrillaCampaign", L"Log", 0) != 0;
+    g_log = rfa::DetailLog();  // [GuerrillaCampaign] Log=, read as the mod starts
     rfa::Log("Alert: yellow at %.0f, orange at %.0f, red at %.0f; %.0f a second for each of the EDF seeing the player in green; decay after %.0f s",
              g_bands[handles::AlertYellow].min, g_bands[handles::AlertOrange].min, g_bands[handles::AlertRed].min, g_contactGrowth, g_decayDelay);
 }

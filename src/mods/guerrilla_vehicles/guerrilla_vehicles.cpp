@@ -514,7 +514,7 @@ constexpr int kDoorLogLines = 400;
     do {                                                             \
         if (g_doorLog && g_doorLogLines < kDoorLogLines) {           \
             ++g_doorLogLines;                                        \
-            rfa::Log(__VA_ARGS__);                                   \
+            rfa::LogDetail(__VA_ARGS__);                                   \
         }                                                            \
     } while (0)
 
@@ -570,7 +570,7 @@ bool __cdecl DoorOpenAction(BYTE* interaction, int person, const BYTE* transitio
                 for (int k = 0; k < 3; ++k)
                     if (static_cast<signed char>(people[h * kPersonSize + kPersonDoorRecords + k]) == i)
                         people[h * kPersonSize + kPersonDoorRecords + k] = 0xFF;
-            RFA_LOG_FIRST(20, "Doors: part %d is shut but was still recorded open; record cleared so it opens", part);
+            RFA_LOG_DETAIL_FIRST(20, "Doors: part %d is shut but was still recorded open; record cleared so it opens", part);
         }
     }
     const bool result = g_doorOpenAction(interaction, person, transition, seconds, door);
@@ -644,7 +644,7 @@ void HookDoors() {
         rfa::Log("Doors: could not wrap the door open action; a door left recorded open won't open again");
         return;
     }
-    g_doorLog = rfa::IniInt(L"GuerrillaVehicles", L"DoorLog", 0) != 0;
+    g_doorLog = rfa::ReadLogSwitch(L"GuerrillaVehicles", L"DoorLog");
     if (!g_doorLog) return;
     g_doorCloseAction = reinterpret_cast<DoorCloseActionFn>(rfa::HookFunction(kDoorCloseAction, kDoorCloseActionPrologue, reinterpret_cast<void*>(&DoorCloseAction)));
     g_updateDoor = reinterpret_cast<UpdateDoorFn>(rfa::HookFunction(kUpdateDoor, kUpdateDoorPrologue, reinterpret_cast<void*>(&UpdateDoor)));
@@ -902,6 +902,7 @@ constexpr int kAgeWindow = 10000;
 int Clock() { return *reinterpret_cast<const volatile int*>(0x1121300); }  // the game's clock (ms; it stops while paused)
 }  // namespace
 namespace gv { void NoteModelAge(DWORD vehicle, int ms); }  // game.cpp
+namespace gv { void BeginHandlingReset(BYTE* car); void EndHandlingReset(); }  // turrets.cpp: a car's tyre friction kept through a reset
 namespace {
 
 ModelWait* WaitFor(void* entry) {
@@ -1017,7 +1018,7 @@ bool FitsInMissionMemory(const char* vehicle) {
     const int now = Clock();
     const int freed = now - lastFreed >= 2000 || now < lastFreed ? FreeUnusedModels(kVehicleModelPool, nullptr, 1) : 0;
     if (freed > 0) lastFreed = now;
-    RFA_LOG_FIRST(40, "Spawning: %s waits: its model needs %lu KB and the mission memory has %lu KB left of 71 MB; %s",
+    RFA_LOG_DETAIL_FIRST(40, "Spawning: %s waits: its model needs %lu KB and the mission memory has %lu KB left of 71 MB; %s",
                   vehicle ? vehicle : "?", static_cast<unsigned long>(need / 1024), static_cast<unsigned long>(left / 1024),
                   freed > 0 ? "the game lets go of a model nothing uses" : "every model streamed in is in use");
     return false;
@@ -1046,7 +1047,7 @@ int __cdecl SpawnVehicle(void** parameters) {
         if (const ModelWait* wait = WaitFor(wanted); wait && wait->loadedAt >= 0 && made) {
             const DWORD handle = *reinterpret_cast<const DWORD*>(made + 0x68);
             gv::NoteModelAge(handle, now - wait->loadedAt);
-            RFA_LOG_FIRST(200, "Spawning: %s (0x%08lX) made %d ms after its model streamed in (the spawn waited for it)", name ? name : "?", handle,
+            RFA_LOG_DETAIL_FIRST(200, "Spawning: %s (0x%08lX) made %d ms after its model streamed in (the spawn waited for it)", name ? name : "?", handle,
                           now - wait->loadedAt);
         }
     }
@@ -1061,7 +1062,7 @@ int __cdecl SpawnVehicle(void** parameters) {
         RFA_LOG_FIRST(40, "Spawning: no room to stream %s in (16 models at once); it isn't made", name ? name : "?");
         return result;
     }
-    RFA_LOG_FIRST(200, "Spawning: %s reserved; it is made once it has streamed in", name ? name : "?");
+    RFA_LOG_DETAIL_FIRST(200, "Spawning: %s reserved; it is made once it has streamed in", name ? name : "?");
     return 1;  // not yet: the spot (or spawner) asks again
 }
 
@@ -1096,7 +1097,7 @@ BYTE* __cdecl PickFromGroup(BYTE* group) {
         if (void* record = vehicles[i] ? VehicleRecord(vehicles[i]) : nullptr; record && RecordReserved(record, nullptr)) asked.push_back(vehicles[i]);
     picked = !asked.empty() ? asked[std::rand() % asked.size()] : vehicles[std::rand() % count];
     const char* vehicle = picked ? *reinterpret_cast<const char* const*>(picked) : nullptr;
-    RFA_LOG_FIRST(60, "Spawning: none of %s's vehicles is streamed in; %s picked to stream (%s)", name, vehicle ? vehicle : "?",
+    RFA_LOG_DETAIL_FIRST(60, "Spawning: none of %s's vehicles is streamed in; %s picked to stream (%s)", name, vehicle ? vehicle : "?",
                   asked.empty() ? "none asked for yet" : "already asked for");
     return picked;
 }
@@ -1177,17 +1178,17 @@ void LogLoadedRecords(const char* kind, DWORD pool) {
         char name[64];
         ContainerName(container, name, sizeof(name));
         const DWORD flags = Field<DWORD>(record, kRecordFlags);
-        rfa::Log("  %s %d: %s, loaded (%d), %d reference(s)%s%s, handle %d, categories 0x%lX", kind, i, name, state,
+        rfa::LogDetail("  %s %d: %s, loaded (%d), %d reference(s)%s%s, handle %d, categories 0x%lX", kind, i, name, state,
                  Field<short>(container, kContainerReferences), (flags & kRecordKept) ? ", kept" : "",
                  (flags & kRecordOnItsWay) ? ", on its way" : "", Field<int>(record, kRecordHandle), Field<DWORD>(record, kRecordCategories));
     }
-    rfa::Log("  %s: %d of %d records have their container loaded%s", kind, loaded, count, loaded > kMaxListedRecords ? " (the first 24 above)" : "");
+    rfa::LogDetail("  %s: %d of %d records have their container loaded%s", kind, loaded, count, loaded > kMaxListedRecords ? " (the first 24 above)" : "");
 }
 
 void LogSpawnPools(const char* when, bool records) {
     const char* resource = g_spawnResource ? *static_cast<const char* const*>(g_spawnResource) : nullptr;
     const int state = g_spawnResourceState;
-    rfa::Log("Spawn resource (%s): state %d (%s)%s%s; streamed: people %d, vehicle models %d", when, state, resource ? resource : "none",
+    rfa::LogDetail("Spawn resource (%s): state %d (%s)%s%s; streamed: people %d, vehicle models %d", when, state, resource ? resource : "none",
              state == 1 ? (AllLetGo() ? ", state 1's check passes" : ", state 1's check fails") : "",
              InWreckingCrewMatch() ? "" : ", not a Wrecking Crew match", Field<int>(reinterpret_cast<const BYTE*>(kPeoplePool), kStreamedCount),
              Field<int>(reinterpret_cast<const BYTE*>(kVehicleResourcePool), kStreamedCount));
@@ -1264,7 +1265,7 @@ BYTE* __fastcall RouteMapFind(void* map, void* unused, BYTE* key) {
     const DWORD frame = reinterpret_cast<DWORD>(key) + kWalkKey;  // the walk's ebp
     BYTE* destination = *reinterpret_cast<BYTE**>(frame - kDestinationRoad);
     ++g_routesGivenUp;
-    RFA_LOG_FIRST(20, "Roads: a route %s at road 0x%08lX point %u (next road 0x%08lX point %u), %zu points in, bound for road 0x%08lX point %u: "
+    RFA_LOG_DETAIL_FIRST(20, "Roads: a route %s at road 0x%08lX point %u (next road 0x%08lX point %u), %zu points in, bound for road 0x%08lX point %u: "
                       "given up as a route that can't be found (%d so far)",
                   node ? "went round" : "lost its way", road ? HandleOf(road, nullptr) : 0UL, static_cast<unsigned>(point),
                   node ? *reinterpret_cast<const DWORD*>(node + kNodeRoadHandle) : 0UL,
@@ -1333,10 +1334,12 @@ auto const HandlingBlock = reinterpret_cast<BYTE*(__fastcall*)(BYTE* block, void
 
 void __cdecl ResetHandlingForAi(BYTE* car, DWORD forAi, DWORD keep) {
     if (car && !HandlingBlock(car + kHandlingBlock, nullptr)) {
-        RFA_LOG_FIRST(10, "Vehicles: a car's handling wasn't reset for the AI: it has none any more (it's being taken apart, its driver let go)");
+        RFA_LOG_DETAIL_FIRST(10, "Vehicles: a car's handling wasn't reset for the AI: it has none any more (it's being taken apart, its driver let go)");
         return;
     }
+    gv::BeginHandlingReset(car);
     g_resetHandling(car, forAi, keep);
+    gv::EndHandlingReset();
 }
 
 void StartHandlingResetGuard() {
@@ -1656,7 +1659,7 @@ void __cdecl SetEngineValues(int sound, float speed, float rpm, float load, floa
         }
         if (tellSet && g_engineSets) {
             SetSwitch(kEngineListenerId, g_playerInThisVehicle ? kListenerPlayerId : kListenerOtherId, object);
-            RFA_LOG_FIRST(300, "Engine sounds: sound %d (object 0x%08lX) plays %s", sound, object,
+            RFA_LOG_DETAIL_FIRST(300, "Engine sounds: sound %d (object 0x%08lX) plays %s", sound, object,
                           g_playerInThisVehicle ? "the player's set (2D, stereo)" : "the others' set (3D)");
         }
         SetGameParameter(*reinterpret_cast<const DWORD*>(kRpmId), rpm, object);
@@ -1671,7 +1674,7 @@ void __cdecl SetEngineValues(int sound, float speed, float rpm, float load, floa
         static LONGLONG lastLogged;
         if (now.QuadPart - lastLogged > frequency.QuadPart) {
             lastLogged = now.QuadPart;
-            RFA_LOG_FIRST(600, "Engine sounds: the player's vehicle: sound %d (object 0x%08lX), RPM %.0f, load %.2f (eased %.2f), speed %.1f, damage %.2f",
+            RFA_LOG_DETAIL_FIRST(600, "Engine sounds: the player's vehicle: sound %d (object 0x%08lX), RPM %.0f, load %.2f (eased %.2f), speed %.1f, damage %.2f",
                           sound, object, rpm, load, eased, speed, damage);
         }
     }
@@ -1723,7 +1726,7 @@ bool __cdecl MakeTurretPart(void* physics, BYTE* turret, int part, DWORD filter,
         const BYTE* weapon = *reinterpret_cast<const BYTE* const*>(info + 0x104);
         const BYTE* weaponItem = !item && part == 2 && weapon ? *reinterpret_cast<const BYTE* const*>(weapon + 0x14) : nullptr;
         const BYTE* shown = item ? item : weaponItem;
-        RFA_LOG_FIRST(300, "Turrets: %s's %s %s: item %s%s (static mesh %s, character mesh %s)", Text(info, 0), kParts[part],
+        RFA_LOG_DETAIL_FIRST(300, "Turrets: %s's %s %s: item %s%s (static mesh %s, character mesh %s)", Text(info, 0), kParts[part],
                       made ? "made" : "NOT made", Text(shown, 0), weaponItem ? " (the weapon's, the table names none)" : "", Text(shown, 4), Text(shown, 8));
     }
     return made;
@@ -1958,7 +1961,7 @@ void MoreSpawnGroups() {
 auto const FindAnimation = reinterpret_cast<int(__cdecl*)(const char* name)>(0xD8C2C0);
 auto const AnimationEntry = reinterpret_cast<const BYTE*(__cdecl*)(int index)>(0xD87850);
 void LogDoorAnimations() {
-    rfa::Log("Door check: the animation library holds %d of %lu, the game's animation entries %d of %lu; \"door start\" is trigger %d",
+    rfa::LogDetail("Door check: the animation library holds %d of %lu, the game's animation entries %d of %lu; \"door start\" is trigger %d",
              *reinterpret_cast<const int*>(0x34B2C10), rfa::CodeValue(kLibraryAnimationLimits[0]), *reinterpret_cast<const int*>(0x25CD738),
              rfa::CodeValue(kAnimationEntryLimits[0]), *reinterpret_cast<const int*>(0x25CFD88));
     for (const char* name : {"pc_enter_lav.anim", "hvy_wlkr_wlk.anim", "apc_dr_opn_htch.anim", "apc_dr_exit_cab.anim",
@@ -1970,7 +1973,7 @@ void LogDoorAnimations() {
         const int* triggers = *reinterpret_cast<const int* const*>(entry + 0x14);
         std::string list;
         for (int i = 0; i < count && i < 8 && triggers; ++i) list += " " + std::to_string(triggers[2 * i]) + "@" + std::to_string(triggers[2 * i + 1]);
-        rfa::Log("Door check: %s is library entry %d with %d triggers (trigger@time:%s)", name, index, count, list.c_str());
+        rfa::LogDetail("Door check: %s is library entry %d with %d triggers (trigger@time:%s)", name, index, count, list.c_str());
     }
 }
 
@@ -1978,7 +1981,7 @@ void __cdecl LoadSkeletons() {
     g_loadSkeletons();
     for (const std::string& skeleton : g_skeletons) {
         LoadSkeleton(skeleton.c_str());
-        if (FindSkeleton(skeleton.c_str()) >= 0) rfa::Log("Skeletons: %s loaded", skeleton.c_str());
+        if (FindSkeleton(skeleton.c_str()) >= 0) rfa::LogDetail("Skeletons: %s loaded", skeleton.c_str());
         else rfa::Log("Skeletons: %s could not be loaded (a vehicle that names it will stop the game)", skeleton.c_str());
     }
     LogDoorAnimations();
@@ -2007,6 +2010,7 @@ namespace gv { void StartEntering(); }  // entering.cpp
 namespace gv { void StartRiders(); }  // riders.cpp
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    if (rfa::ReadLogSwitch(L"GuerrillaVehicles")) rfa::Log("Log=1: routine lines and the diagnoses (\"[guerrilla_vehicles:log]\") are on");
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;

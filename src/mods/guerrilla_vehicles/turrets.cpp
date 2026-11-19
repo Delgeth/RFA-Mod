@@ -34,6 +34,8 @@
 #define RFA_MOD_NAME "guerrilla_vehicles"
 #include "rfa_mod.h"
 #include "game.h"
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 
@@ -287,7 +289,7 @@ void Watch(BYTE* turret, const char* rule) {
     g_lastHeading = heading;
     g_nextWatch = now + kWatchEvery;
     ++g_watchLines;
-    rfa::Log("Turrets: watch %d, %s: it aims %.1f m from the muzzle, %+.1f right %+.1f up of the car's nose%s; the gun points %+.1f right %+.1f up; the game has "
+    rfa::LogDetail("Turrets: watch %d, %s: it aims %.1f m from the muzzle, %+.1f right %+.1f up of the car's nose%s; the gun points %+.1f right %+.1f up; the game has "
              "its ring at %+.1f (asked for %+.1f) and its gun raised %+.1f; its mount faces %+.1f right %+.1f up; the muzzle is %+.2f right %+.2f up %+.2f ahead of "
              "the mount; the car does %.1f m/s, turning %+.0f a second; the driver's aim drift %+.2f %+.2f",
              g_watchLines, rule, std::sqrt(Dot(to, to)), aims.right, aims.up, (turret[kTurretFlags] & kHasOwnTarget) ? " (at an enemy)" : "", points.right, points.up,
@@ -344,7 +346,7 @@ void __cdecl WalkerPresim(BYTE* walker) {
     if (now - g_walkerSince < static_cast<DWORD>(kWalkerEvery)) return;
     const float seconds = (now - g_walkerSince) / 1000.0f, went = Apart(Pos(walker), g_walkerFrom);
     ++g_walkerLines;
-    rfa::Log("Walkers: watch %d, %s: %d legs; %d movement steps in %.2f s moved it %.2f m themselves; it went %.2f m (%.2f m/s), now at %.1f %.1f %.1f",
+    rfa::LogDetail("Walkers: watch %d, %s: %d legs; %d movement steps in %.2f s moved it %.2f m themselves; it went %.2f m (%.2f m/s), now at %.1f %.1f %.1f",
              g_walkerLines, VehicleName(walker), *reinterpret_cast<const int*>(walker + kWalkerLegCount), g_walkerSteps, seconds, g_walkerStepMoved,
              went, seconds > 0 ? went / seconds : 0.0f, Pos(walker).x, Pos(walker).y, Pos(walker).z);
     g_walkerSteps = 0;
@@ -354,7 +356,7 @@ void __cdecl WalkerPresim(BYTE* walker) {
 }
 
 void StartWalkerLog() {
-    if (!rfa::IniInt(L"GuerrillaVehicles", L"WalkerLog", 1)) return;
+    if (!rfa::ReadLogSwitch(L"GuerrillaVehicles", L"WalkerLog")) return;
     const BYTE opening[] = {0x55, 0x8B, 0xEC, 0xB8, 0x24, 0x1D, 0x00, 0x00};  // push ebp / mov ebp,esp / mov eax,1D24h
     if (memcmp(reinterpret_cast<const void*>(kWalkerPresim), opening, sizeof(opening)) != 0) {
         rfa::Log("Walkers: the walker's movement step (0x%08lX) isn't as expected; no walker log", kWalkerPresim);
@@ -362,6 +364,504 @@ void StartWalkerLog() {
     }
     g_walkerPresim = reinterpret_cast<WalkerPresimFn>(rfa::HookFunction(kWalkerPresim, sizeof(opening), reinterpret_cast<void*>(&WalkerPresim)));
     if (g_walkerPresim) rfa::Log("Walkers: the player's Guerrilla walker's movement is logged (four lines a second, its first 30 s)");
+}
+
+// ---- The log: how the player's car handles (the user, 2026-11-18: "very hard to turn/steer ... as if you are on a
+// boat and have a very wide turn radius", after Re-Mars-tered)
+// Our vehicles.xtbl holds Guerrilla's handling as it is, and both games read and apply the steering the same way (the
+// angle × pi/180, the full-steering speed × 0.44704, Havok's default steering). What's left is the car as
+// Havok has it, which this logs. Havok's main steering step (hkpVehicleDefaultSteering::calcMainSteeringAngle,
+// 0xB07C10, thiscall (steering, dt, the vehicle instance, its input, the output)) runs for every car each physics step;
+// for the player's car (its chassis within 3 m of the player's vehicle) the log gives, once, the car as built:
+//   - the steering: its max angle (+8, rad) and full-steering speed (+0xC, m/s);
+//   - the vehicle data (instance +0x1C): wheels (+0x20), the roll/pitch/yaw torque factors and extra torque (+0x60),
+//     the chassis' unit inertias yaw/roll/pitch (+0x74), the friction equalizer, the solver's mass ratio, and each
+//     wheel's params (+0x8C, 40 bytes: radius, mass, width, friction, viscosity, max friction, slip angle, axle);
+//   - the chassis body (instance +0x18): its mass (1 / +0x1AC), its inverse inertia (+0x1A0), its centre of mass
+//     against its origin (+0x140 against +0x120);
+// then four times a second for its first minute (240 lines): the steering input and the angle Havok gives, the speed
+// along the car and in all, the yaw rate, how far it rolls, the turning radius it drives (speed / yaw rate) against the
+// one its wheelbase and angle give (wheelbase / tan(angle)), and each wheel's contact friction, side and forward slip,
+// side force and skid. The layout is Havok 2010's, corrected for Armageddon's older Havok (see
+// kWheelsInfo); the wheel counts are checked first, and the raw numbers are given if they don't agree. [GuerrillaVehicles] DriveLog=1 turns it on (off unless set).
+constexpr DWORD kMainSteeringAngle = 0xB07C10;
+using MainSteeringFn = void(__fastcall*)(BYTE* steering, void* unused, float dt, BYTE* instance, BYTE* input, float* output);
+MainSteeringFn g_mainSteering;
+// Armageddon's Havok is older: its vehicle instance has no m_vehicleSimulation, so everything after the
+// velocity damper (+0x44) is 4 bytes earlier, and its WheelInfo (still 0xE0) has no m_noSlipIdealSpinVelocity (the live
+// session's read, 2026-11-18 22:28: each wheel's side force equals its axle's in the instance's friction status).
+constexpr DWORD kChassis = 0x18, kVehicleData = 0x1C, kSuspension = 0x34, kWheelsInfo = 0x48, kMainAngle = 0xBC, kWheelAngles = 0xC0;
+constexpr DWORD kWheelSkid = 0xC8, kWheelSideForce = 0xCC, kWheelForwardSlip = 0xD0, kWheelSideSlip = 0xD4;
+constexpr DWORD kWheelSuspensionLength = 0x70;  // the suspension's length now: its full length while the wheel's ray finds no ground
+constexpr DWORD kWheelInfoSize = 0xE0, kWheelParamSize = 0x28;
+constexpr DWORD kBodyPosition = 0x120, kBodyCentre = 0x140, kBodyInverseInertia = 0x1A0, kBodyVelocity = 0x1B0, kBodySpin = 0x1C0;
+constexpr DWORD kBodyAxisRight = 0xE0 + 0x10, kBodyAxisUp = 0xE0 + 0x20, kBodyAxisForward = 0xE0 + 0x30;  // the transform's columns
+constexpr int kDriveEvery = 250, kDriveLines = 240;
+bool g_driveLog = false;
+bool g_wheelRays = false;  // Guerrilla's wheel-ray rules on Guerrilla's cars (below: "A wheel's ray, as Guerrilla casts it")
+constexpr DWORD kWheelCollide = 0x3C, kCollideFilterInfo = 0xC;  // the instance's wheel collide; its rays' collision filter info
+constexpr DWORD kCollidableFilterInfo = 0x1C;                     // a collidable's collision filter info (its broadphase handle's)
+DWORD g_driveCar = kNone, g_driveNext;
+int g_driveLines;
+
+template <typename T> T At(const BYTE* p, DWORD offset) { return *reinterpret_cast<const T*>(p + offset); }
+float Dot3(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+void LogCarAsBuilt(BYTE* steering, BYTE* instance, const char* name) {
+    BYTE* data = At<BYTE*>(instance, kVehicleData);
+    BYTE* body = At<BYTE*>(instance, kChassis);
+    const int wheels = data ? At<signed char>(data, 0x20) : -1;
+    const int infos = At<int>(instance, kWheelsInfo + 4), params = data ? At<int>(data, 0x8C + 4) : -1;
+    rfa::LogDetail("Driving: %s as built: steering max %.3f rad (%.1f deg), full steering to %.1f m/s (%.1f mph); %d wheels (infos %d, params %d)", name,
+             At<float>(steering, 8), At<float>(steering, 8) * 57.29578f, At<float>(steering, 0xC), At<float>(steering, 0xC) / 0.44704f, wheels, infos,
+             params);
+    if (!data || !body || wheels < 2 || wheels > 8 || infos != wheels || params != wheels) {
+        rfa::Log("Driving: the vehicle's data doesn't read as Havok's layout here; data +0x60.. %08lX %08lX %08lX %08lX %08lX %08lX %08lX %08lX",
+                 data ? At<DWORD>(data, 0x60) : 0, data ? At<DWORD>(data, 0x64) : 0, data ? At<DWORD>(data, 0x68) : 0, data ? At<DWORD>(data, 0x6C) : 0,
+                 data ? At<DWORD>(data, 0x70) : 0, data ? At<DWORD>(data, 0x74) : 0, data ? At<DWORD>(data, 0x78) : 0, data ? At<DWORD>(data, 0x7C) : 0);
+        return;
+    }
+    const float inverseMass = At<float>(body, kBodyInverseInertia + 0xC);
+    const float* origin = reinterpret_cast<const float*>(body + kBodyPosition);
+    const float* centre = reinterpret_cast<const float*>(body + kBodyCentre);
+    const float offset[3] = {centre[0] - origin[0], centre[1] - origin[1], centre[2] - origin[2]};
+    const float* right = reinterpret_cast<const float*>(body + kBodyAxisRight);
+    const float* up = reinterpret_cast<const float*>(body + kBodyAxisUp);
+    const float* forward = reinterpret_cast<const float*>(body + kBodyAxisForward);
+    rfa::LogDetail("Driving: %s's torque factors roll %.2f pitch %.2f yaw %.2f extra %.2f; unit inertia yaw %.2f roll %.2f pitch %.2f; friction equalizer %.2f, "
+             "positional friction to %.1f m/s, solver mass ratio %.1f; chassis mass %.0f kg, inverse inertia %.5f %.5f %.5f; centre of mass %.2f right "
+             "%.2f up %.2f ahead of its origin",
+             name, At<float>(data, 0x60), At<float>(data, 0x64), At<float>(data, 0x68), At<float>(data, 0x6C), At<float>(data, 0x74), At<float>(data, 0x78),
+             At<float>(data, 0x7C), At<float>(data, 0x80), At<float>(data, 0x70), At<float>(data, 0x88), inverseMass > 0 ? 1.0f / inverseMass : 0.0f,
+             At<float>(body, kBodyInverseInertia), At<float>(body, kBodyInverseInertia + 4), At<float>(body, kBodyInverseInertia + 8),
+             Dot3(offset, right), Dot3(offset, up), Dot3(offset, forward));
+    const BYTE* param = At<BYTE*>(data, 0x8C);
+    for (int w = 0; param && w < wheels; ++w, param += kWheelParamSize)
+        rfa::LogDetail("Driving: %s wheel %d (axle %d): radius %.2f, mass %.0f, width %.2f, friction %.2f, viscosity %.2f, max friction %.2f, slip angle %.3f",
+                 name, w, At<signed char>(param, 0x24), At<float>(param, 0), At<float>(param, 4), At<float>(param, 8), At<float>(param, 0xC),
+                 At<float>(param, 0x10), At<float>(param, 0x14), At<float>(param, 0x18));
+    // The suspension as the game built it (0x5EFBC0, Guerrilla's automobile_create_havok_suspension RM 0xBA5110 line for
+    // line): per wheel its length (the lesser of compression + extension and the rest point), the rest point (gravity's
+    // share over the spring strength, plus the compression distance), Wheel_Spring_Pow, the spring and its two dampings.
+    const BYTE* suspension = At<BYTE*>(instance, kSuspension);
+    const int springs = suspension ? At<int>(suspension, 0x14 + 4) : 0;
+    for (int w = 0; suspension && w < wheels && w < springs && At<int>(suspension, 8 + 4) > w; ++w) {
+        const BYTE* wheel = At<BYTE*>(suspension, 8) + w * 0x30;
+        const BYTE* spring = At<BYTE*>(suspension, 0x14) + w * 0xC;
+        rfa::LogDetail("Driving: %s wheel %d suspension: length %.2f, rest %.2f, spring power %.2f; strength %.1f, damping %.2f compressing, %.2f relaxing",
+                 name, w, At<float>(wheel, 0x20), At<float>(At<BYTE*>(suspension, 0x20), w * 4), At<float>(At<BYTE*>(suspension, 0x6C), w * 4),
+                 At<float>(spring, 0), At<float>(spring, 4), At<float>(spring, 8));
+    }
+    const BYTE* collide = At<BYTE*>(instance, kWheelCollide);
+    if (collide)
+        rfa::LogDetail("Driving: %s's wheel rays: %s; their collision filter info %08lX, the chassis's %08lX", name,
+                 g_wheelRays ? "Guerrilla's rules (its own parts, non-solid things and surfaces steeper than 60 degrees skipped; grip x 0.25 + 0.75 x "
+                               "the ground's levelness)"
+                             : "Armageddon's",
+                 At<DWORD>(collide, kCollideFilterInfo), At<DWORD>(body + 0x10, kCollidableFilterInfo));
+}
+
+bool g_driveWheels = true;  // false once the wheels' state has faulted a read (Armageddon's wheel array isn't RM's layout)
+
+void DriveLogStep(BYTE* steering, BYTE* instance, BYTE* input, float* output) {
+    BYTE* player = Player();
+    BYTE* car = player && VehicleOf(player) != kNone ? VehicleByHandle(kWorld, nullptr, VehicleOf(player)) : nullptr;
+    BYTE* body = At<BYTE*>(instance, kChassis);
+    if (!car || !body || IsArmageddons(car)) return;
+    const float* place = reinterpret_cast<const float*>(body + kBodyPosition);
+    const V3 at = Pos(car);
+    if ((place[0] - at.x) * (place[0] - at.x) + (place[1] - at.y) * (place[1] - at.y) + (place[2] - at.z) * (place[2] - at.z) > 9.0f) return;
+    const DWORD now = GetTickCount();
+    if (g_driveCar != Handle(car)) {
+        g_driveCar = Handle(car);
+        g_driveLines = 0;
+        g_driveNext = now;
+        LogCarAsBuilt(steering, instance, VehicleName(car));
+    }
+    if (g_driveLines >= kDriveLines || static_cast<int>(now - g_driveNext) < 0) return;
+    g_driveNext = now + kDriveEvery;
+    ++g_driveLines;
+    const float* velocity = reinterpret_cast<const float*>(body + kBodyVelocity);
+    const float* spin = reinterpret_cast<const float*>(body + kBodySpin);
+    const float* up = reinterpret_cast<const float*>(body + kBodyAxisUp);
+    const float* forward = reinterpret_cast<const float*>(body + kBodyAxisForward);
+    const float* right = reinterpret_cast<const float*>(body + kBodyAxisRight);
+    const float speed = std::sqrt(Dot3(velocity, velocity)), ahead = Dot3(velocity, forward), yaw = Dot3(spin, up);
+    const float angle = output[0];
+    const int wheels = g_driveWheels ? At<int>(instance, kWheelsInfo + 4) : 0;
+    const BYTE* info = g_driveWheels ? At<BYTE*>(instance, kWheelsInfo) : nullptr;
+    float wheelbase = 0;
+    if (info && wheels >= 4) {  // the first wheel's hardpoint to the last's, along the car
+        const float* first = reinterpret_cast<const float*>(info + 0x50);
+        const float* last = reinterpret_cast<const float*>(info + (wheels - 1) * kWheelInfoSize + 0x50);
+        const float between[3] = {first[0] - last[0], first[1] - last[1], first[2] - last[2]};
+        wheelbase = std::fabs(Dot3(between, forward));
+    }
+    const float driven = std::fabs(yaw) > 0.01f ? std::fabs(ahead / yaw) : 0.0f;
+    const float geometric = std::fabs(angle) > 0.001f && wheelbase > 0 ? wheelbase / std::tan(std::fabs(angle)) : 0.0f;
+    char wheelText[480] = "";
+    for (int w = 0; info && w < wheels && w < 6; ++w) {
+        const BYTE* one = info + w * kWheelInfoSize;
+        char part[80];
+        snprintf(part, sizeof(part), "; w%d %s f%.2f len %.2f slip %.1f/%.1f side %.0f", w, At<BYTE*>(one, 0x24) || At<float>(one, 0x20) > 0 ? "on" : "off",
+                 At<float>(one, 0x20), At<float>(one, kWheelSuspensionLength), At<float>(one, kWheelSideSlip), At<float>(one, kWheelForwardSlip),
+                 At<float>(one, kWheelSideForce));
+        strncat_s(wheelText, part, _TRUNCATE);
+    }
+    // The handling it is on (the instance's +0x130 bit 1, set by 0x648B30 from the handling reset 0x5F2D39: the AI's) and
+    // the body's damping (its motion's +0xB4/+0xB6, half-floats: a float's top 16 bits), which the vehicle step 0xB04E10
+    // also puts on the tyre solver.
+    const bool aiHandling = (At<BYTE>(instance, 0x130) & 2) != 0;
+    auto half = [](WORD bits) { const DWORD whole = static_cast<DWORD>(bits) << 16; float value; memcpy(&value, &whole, 4); return value; };
+    rfa::LogDetail("Driving: watch %d, %s (%s handling, damping %.2f, spin %.2f): steer input %+.2f -> angle %+.1f deg; speed %.1f m/s (%.1f ahead); "
+             "yaw %+.2f rad/s; up %.2f, roll %+.2f; turning radius %.1f m driven, %.1f m by its wheelbase %.2f m and angle%s",
+             g_driveLines, VehicleName(car), aiHandling ? "the AI's" : "the player's", half(At<WORD>(body, 0x194)), half(At<WORD>(body, 0x196)),
+             input ? At<float>(input, 8) : 0.0f, angle * 57.29578f, speed, ahead, yaw, up[1], right[1], driven, geometric, wheelbase, wheelText);
+}
+
+// Every read of the car's Havok state is guarded: the layout is RM's, and Armageddon's wheel array isn't it (2026-11-18
+// 22:09:09, the first wheel's hardpoint read faulted, guerrilla_vehicles+0x2D3B5, the game went down after). A fault
+// gives a line; the wheels are left out after the first, and the car's log stops after a second.
+void __fastcall MainSteering(BYTE* steering, void* unused, float dt, BYTE* instance, BYTE* input, float* output) {
+    g_mainSteering(steering, unused, dt, instance, input, output);
+    if (!instance || !output) return;
+    __try {
+        DriveLogStep(steering, instance, input, output);
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        if (g_driveWheels) {
+            g_driveWheels = false;
+            rfa::Log("Driving: a read of the car's Havok state faulted; the wheels' state is left out from now on");
+        } else {
+            g_driveLines = kDriveLines;
+            rfa::Log("Driving: a read of the car's Havok state faulted again; this car's log stops");
+        }
+    }
+}
+
+// ---- A car's tyre friction, built once as Guerrilla builds it (the "boat" turning, 2026-11-18)
+// Both games give the car's body the same inertia (the table's unit inertias × the .ccar_pc's inertia tensor × mass), and
+// both build Havok's friction description (each axle's effective mass and the friction circle the solver uses) from the
+// vehicle data's unit inertias, while its yaw still holds the tensor-scaled value. Guerrilla builds it once
+// (hkpCustomVehicleSimulation::init RM 0xB89B80 → 0xD71510): its AI/driver reset (automobile_reset_handling_for_ai RM
+// 0xB733F0) writes the raw table yaw back into the data (+0x74) and re-inits only the data (0xB63B40), never the
+// description. Armageddon's data init (0xB02B70, from the reset 0x5F2CF0 through vtbl+0x40) rebuilds the description each
+// time (0xB409A0, cdecl (its cinfo, the description at data +0xA4)), so after the first reset ours came from the raw yaw:
+// 6.3× too little on the pickup, 1.8× on the scout. The solver took the chassis for that much easier to turn than its
+// body is, and let the front axle slide: understeer, wide circles past 30 km/h (the live session's read and measure,
+// 22:28-22:33: fronts side-slipping 8-12 m/s, rears 1-4). So for Guerrilla's cars the description built when the car
+// is made stays through a reset, as Guerrilla's. Armageddon's own cars keep Armageddon's. [GuerrillaVehicles]
+// FrictionAsGuerrilla=0 turns it off.
+constexpr DWORD kBuildFriction = 0xB409A0, kHandlingBlockOffset = 0x50F8, kFrictionDescription = 0xA4;
+using BuildFrictionFn = void(__cdecl*)(void* cinfo, BYTE* description);
+BuildFrictionFn g_buildFriction;
+auto const ActiveHandlingBlock = reinterpret_cast<BYTE*(__fastcall*)(BYTE* block, void* unused)>(0x5F7590);
+std::vector<BYTE*> g_frictionBuilt;  // descriptions built when their car was made
+BYTE* g_frictionKept = nullptr;      // the description a reset is to leave as it is
+
+void __cdecl BuildFriction(void* cinfo, BYTE* description) {
+    if (description && description == g_frictionKept) {
+        RFA_LOG_DETAIL_FIRST(10, "Driving: a Guerrilla car's tyre friction kept as built when it was made (Guerrilla's reset leaves it)");
+        return;
+    }
+    g_buildFriction(cinfo, description);
+    if (!description || g_frictionKept) return;
+    if (std::find(g_frictionBuilt.begin(), g_frictionBuilt.end(), description) == g_frictionBuilt.end()) {
+        if (g_frictionBuilt.size() >= 512) g_frictionBuilt.clear();
+        g_frictionBuilt.push_back(description);
+    }
+}
+
+void StartFrictionAsGuerrilla() {
+    if (!rfa::IniInt(L"GuerrillaVehicles", L"FrictionAsGuerrilla", 1)) return;
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};  // push ebp / mov ebp,esp / and esp,0FFFFFFF0h
+    if (memcmp(reinterpret_cast<const void*>(kBuildFriction), opening, sizeof(opening)) != 0) {
+        rfa::Log("Driving: the tyre friction's build (0x%08lX) isn't as expected; a reset rebuilds it as Armageddon's", kBuildFriction);
+        return;
+    }
+    g_buildFriction = reinterpret_cast<BuildFrictionFn>(rfa::HookFunction(kBuildFriction, sizeof(opening), reinterpret_cast<void*>(&BuildFriction)));
+    if (g_buildFriction) rfa::Log("Driving: Guerrilla's cars keep the tyre friction built when they're made through a reset, as Guerrilla's");
+}
+
+void StartDriveLog() {
+    g_driveLog = rfa::ReadLogSwitch(L"GuerrillaVehicles", L"DriveLog");
+    if (!g_driveLog) return;
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};  // push ebp / mov ebp,esp / and esp,0FFFFFFF0h
+    if (memcmp(reinterpret_cast<const void*>(kMainSteeringAngle), opening, sizeof(opening)) != 0) {
+        rfa::Log("Driving: Havok's steering step (0x%08lX) isn't as expected; no drive log", kMainSteeringAngle);
+        return;
+    }
+    g_mainSteering = reinterpret_cast<MainSteeringFn>(rfa::HookFunction(kMainSteeringAngle, sizeof(opening), reinterpret_cast<void*>(&MainSteering)));
+    if (g_mainSteering) rfa::Log("Driving: the player's Guerrilla car's handling is logged (as built once, then four lines a second for a minute)");
+}
+
+// ---- A wheel's ray, as Guerrilla casts it (2026-11-19, "steering still rough when turning at speed")
+// Both games cast one ray per wheel, from its hardpoint down the suspension to its full length plus the wheel's radius.
+// (Guerrilla's cars never sweep a shape instead: hk_custom_vehicle_raycast_wheel_collide's sweep is only for an
+// infinite-mass vehicle, which only "MarsRover1" is.) Two rules of Guerrilla's wheel loop (collideWheels RM 0xB8A390)
+// differ from the Havok 2010 loop Armageddon runs (0xB075E0):
+//  - Its ray collector (havok_closest_wheel_ray_hit_collector::addRayHit RM 0xB74AB0) skips the car's own chassis and
+//    anything with the chassis's collision filter info, anything that isn't an entity (a phantom) or has no owner, and
+//    any surface facing less than 60 degrees against the ray (ray . normal > -0.5); it keeps the closest of the rest.
+//    Armageddon's (0xB073D0 → the wheels' AABB phantom's 0xACBDA0) keeps the closest hit of whatever the phantom holds.
+//  - Its ground friction (calcSingleWheelGroundFriction RM 0xB63DF0) is the body's × (0.25 + 0.75 × the contact
+//    normal's up, at least 0); Armageddon's (0xB076B0) is the body's alone.
+// So on Guerrilla's cars the wheel's ray goes through the phantom's collidables as 0xACBDA0 sends it (into each one's
+// own space; its shape's ray cast, here the one with a collector, vtable +0x24) and through Guerrilla's rules, and the
+// friction gets Guerrilla's slope factor. Armageddon's own cars keep Armageddon's. [GuerrillaVehicles]
+// WheelRaysAsGuerrilla=0 turns it off.
+// With DriveLog, a line each time a wheel of the player's car loses the ground or finds it again: where (the hardpoint,
+// the zone), how fast, what its ray last stood on (the object, its shape type and key, the normal, the suspension), and
+// what this cast skipped.
+constexpr DWORD kCollideWheels = 0xB075E0, kCastWheel = 0xB073D0;
+constexpr DWORD kCollidePhantom = 0x10;   // the wheel collide's AABB phantom
+constexpr DWORD kPhantomOverlaps = 0xD0;  // its overlapping collidables: data, the count at +4
+constexpr DWORD kBodyParent = 0xC, kBodyMotion = 8, kCollidableOwner = 0x10, kCollidableKind = 0x18;  // hkpCdBody / hkpCollidable
+constexpr DWORD kWheelHardpoint = 0x50, kWheelRayEnd = 0x60, kWheelDown = 0x80;  // a wheel's hardpoint, ray end, suspension direction
+constexpr DWORD kOutSize = 0x60, kOutBody = 0x24, kOutNormal = 0x10, kOutFriction = 0x20, kOutKeys = 0x28, kOutLength = 0x48;  // a wheel's result
+using CollideWheelsFn = void(__fastcall*)(BYTE* collide, void* unused, float dt, BYTE* instance, BYTE* out);
+using CastWheelFn = void(__fastcall*)(BYTE* collide, void* unused, const BYTE* wheel, BYTE* out);
+CollideWheelsFn g_collideWheels;
+CastWheelFn g_castWheel;
+auto const ShapeKeysOf = reinterpret_cast<void(__cdecl*)(DWORD* keys, int most, const BYTE* body)>(0xA77D20);  // Havok's, as its closest-hit collector
+auto const ObjectOfBody = reinterpret_cast<BYTE*(__cdecl*)(const BYTE* body)>(0x779DB0);                      // a Havok body's game object
+auto& g_zoneSize = *reinterpret_cast<const float*>(0x18705A0);
+
+struct WheelSkips { int own, notSolid, steep; float steepUp; };
+
+// Havok 2010's hkpRayHitCollector: slot 0 addRayHit(the body hit, the hit: its normal in world space, fraction, extra
+// info), slot 1 the destructor, the early-out fraction at +4. Guerrilla's rules, then Havok's closest hit (0xA77CA0).
+class WheelRayCollector {
+public:
+    virtual void AddRayHit(const BYTE* body, const BYTE* hit);
+    virtual ~WheelRayCollector() {}
+    float earlyOut = 1.0f;
+    const BYTE* chassis = nullptr;  // the car's own collidable
+    float down[3] = {0, -1, 0};     // the ray's direction (unit)
+    float normal[4] = {};
+    DWORD hitInfo[4] = {0x3F800000};  // the fraction (1.0 to begin with), the extra info and two more words, as Havok's output has them
+    DWORD keys[8];
+    const BYTE* root = nullptr;
+    WheelSkips skips = {};
+};
+
+void WheelRayCollector::AddRayHit(const BYTE* body, const BYTE* hit) {
+    const BYTE* top = body;
+    while (At<const BYTE*>(top, kBodyParent)) top = At<const BYTE*>(top, kBodyParent);
+    if (chassis && (top == chassis || At<DWORD>(top, kCollidableFilterInfo) == At<DWORD>(chassis, kCollidableFilterInfo))) {
+        ++skips.own;
+        return;
+    }
+    if (At<BYTE>(top, kCollidableKind) != 1 || !(top + At<signed char>(top, kCollidableOwner))) {
+        ++skips.notSolid;
+        return;
+    }
+    const float* n = reinterpret_cast<const float*>(hit);
+    if (down[0] * n[0] + down[1] * n[1] + down[2] * n[2] > -0.5f) {
+        if (!skips.steep++) skips.steepUp = n[1];
+        return;
+    }
+    const float fraction = At<float>(hit, 0x10);
+    if (!(fraction < *reinterpret_cast<const float*>(&hitInfo[0]))) return;
+    memcpy(normal, n, sizeof(normal));
+    memcpy(hitInfo, hit + 0x10, sizeof(hitInfo));
+    memset(keys, 0xFF, sizeof(keys));
+    ShapeKeysOf(keys, 8, body);
+    root = top;
+    earlyOut = fraction;
+}
+
+struct WheelCar { BYTE* instance; BYTE* vehicle; bool guerrilla; bool player; };
+thread_local WheelCar t_wheelCar;       // the car whose wheels collideWheels is casting (castSingleWheel runs inside it)
+thread_local WheelSkips t_wheelSkips[8];  // the player's car: what each wheel's last cast skipped
+
+WheelCar WhoseWheels(BYTE* instance) {
+    WheelCar car = {instance, nullptr, false, false};
+    BYTE* chassis = instance ? At<BYTE*>(instance, kChassis) : nullptr;
+    BYTE* object = chassis ? ObjectOfBody(chassis) : nullptr;
+    BYTE* vehicle = object ? VehicleByHandle(kWorld, nullptr, Handle(object)) : nullptr;
+    if (!vehicle || IsArmageddons(vehicle)) return car;
+    car.vehicle = vehicle;
+    car.guerrilla = true;
+    BYTE* player = Player();
+    car.player = player && VehicleOf(player) == Handle(vehicle);
+    return car;
+}
+
+// Guerrilla's cast of one wheel's ray: Armageddon's phantom walk (0xACBDA0), Guerrilla's collector.
+void CastAsGuerrilla(BYTE* collide, const BYTE* wheel, BYTE* out, BYTE* instance, WheelSkips* skips) {
+    BYTE* phantom = At<BYTE*>(collide, kCollidePhantom);
+    BYTE* chassis = At<BYTE*>(instance, kChassis);
+    WheelRayCollector ray;
+    ray.chassis = chassis ? chassis + 0x10 : nullptr;
+    const float* down = reinterpret_cast<const float*>(wheel + kWheelDown);
+    const float length = std::sqrt(down[0] * down[0] + down[1] * down[1] + down[2] * down[2]);
+    if (length > 0) for (int i = 0; i < 3; ++i) ray.down[i] = down[i] / length;
+    BYTE* world = phantom ? At<BYTE*>(phantom, 8) : nullptr;
+    BYTE* filter = world ? At<BYTE*>(world, 0x7C) : nullptr;
+    alignas(16) float input[12] = {};  // hkpShapeRayCastInput: from, to, the filter info, the shape collection filter
+    reinterpret_cast<DWORD*>(input)[8] = At<DWORD>(collide, kCollideFilterInfo);
+    reinterpret_cast<BYTE**>(input)[9] = filter ? filter + 0x10 : nullptr;  // Armageddon's cast asks for it (0xB07400)
+    const float* from = reinterpret_cast<const float*>(wheel + kWheelHardpoint);
+    const float* to = reinterpret_cast<const float*>(wheel + kWheelRayEnd);
+    BYTE* const* list = phantom ? At<BYTE* const*>(phantom, kPhantomOverlaps) : nullptr;
+    const int count = phantom ? At<int>(phantom, kPhantomOverlaps + 4) : 0;
+    using CastFn = void(__fastcall*)(BYTE* shape, void* unused, const float* input, const BYTE* body, WheelRayCollector* collector);
+    for (int i = 0; list && i < count; ++i) {
+        const BYTE* collidable = list[i];
+        BYTE* shape = collidable ? At<BYTE*>(collidable, 0) : nullptr;
+        if (!shape) continue;
+        const float* t = At<const float*>(collidable, kBodyMotion);  // its transform: three rotation columns, then where
+        if (!t) continue;
+        for (int end = 0; end < 2; ++end) {
+            const float* p = end ? to : from;
+            const float d[3] = {p[0] - t[12], p[1] - t[13], p[2] - t[14]};
+            float* local = input + end * 4;
+            for (int c = 0; c < 3; ++c) local[c] = t[c * 4] * d[0] + t[c * 4 + 1] * d[1] + t[c * 4 + 2] * d[2];
+            local[3] = 0;
+        }
+        (*reinterpret_cast<CastFn**>(shape))[9](shape, nullptr, input, collidable, &ray);
+    }
+    if (ray.root) {
+        memcpy(out, ray.normal, sizeof(ray.normal));
+        memcpy(out + 0x10, ray.hitInfo, sizeof(ray.hitInfo));
+        memcpy(out + 0x20, ray.keys, sizeof(ray.keys));
+        *reinterpret_cast<const BYTE**>(out + 0x50) = ray.root;
+    }
+    if (skips) *skips = ray.skips;
+}
+
+void __fastcall CastWheel(BYTE* collide, void* unused, const BYTE* wheel, BYTE* out) {
+    const WheelCar& car = t_wheelCar;
+    if (!g_wheelRays || !car.guerrilla || !car.instance || !wheel || !out) {
+        g_castWheel(collide, unused, wheel, out);
+        return;
+    }
+    WheelSkips* skips = nullptr;
+    if (car.player) {
+        const BYTE* first = At<BYTE*>(car.instance, kWheelsInfo);
+        const int index = first ? static_cast<int>(wheel - first) / static_cast<int>(kWheelInfoSize) : -1;
+        if (index >= 0 && index < 8) skips = &t_wheelSkips[index];
+    }
+    CastAsGuerrilla(collide, wheel, out, car.instance, skips);
+}
+
+// The drop-out lines: the player's car's wheels against what they stood on.
+struct WheelGround { bool on; DWORD since; float point[3]; float normal[3]; float length; DWORD object; int type, subtype, shape; DWORD key; };
+WheelGround g_ground[8];
+DWORD g_groundCar = kNone;
+int g_groundLines = 0;
+constexpr int kGroundLines = 160;
+
+void NoteWheelGround(const WheelCar& car, BYTE* instance, const BYTE* out, int wheels) {
+    if (Handle(car.vehicle) != g_groundCar) {
+        g_groundCar = Handle(car.vehicle);
+        g_groundLines = 0;
+        memset(g_ground, 0, sizeof(g_ground));
+    }
+    const BYTE* info = At<BYTE*>(instance, kWheelsInfo);
+    BYTE* chassis = At<BYTE*>(instance, kChassis);
+    if (!info || !chassis) return;
+    const float* v = reinterpret_cast<const float*>(chassis + kBodyVelocity);
+    const float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const DWORD now = GetTickCount();
+    for (int w = 0; w < wheels; ++w) {
+        const BYTE* result = out + w * kOutSize;
+        WheelGround& ground = g_ground[w];
+        BYTE* body = At<BYTE*>(result, kOutBody);
+        if (body) {
+            if (!ground.on && ground.since && g_groundLines < kGroundLines) {
+                ++g_groundLines;
+                rfa::LogDetail("Driving: %s wheel %d back on the ground after %lu ms, %.1f m/s", VehicleName(car.vehicle), w, now - ground.since, speed);
+            }
+            ground.on = true;
+            ground.since = now;
+            memcpy(ground.point, result, sizeof(ground.point));
+            memcpy(ground.normal, result + kOutNormal, sizeof(ground.normal));
+            ground.length = At<float>(result, kOutLength);
+            BYTE* object = ObjectOfBody(body);
+            ground.object = object ? Handle(object) : kNone;
+            ground.type = object ? At<signed char>(object, 0x7A) : -1;
+            ground.subtype = object ? At<signed char>(object, 0x7B) : -1;
+            const BYTE* shape = At<BYTE*>(body + 0x10, 0);
+            ground.shape = shape ? At<int>(shape, 0xC) : -1;
+            ground.key = At<DWORD>(result, kOutKeys);
+            continue;
+        }
+        if (!ground.on) continue;
+        ground.on = false;
+        const DWORD before = now - ground.since;
+        ground.since = now;
+        if (g_groundLines >= kGroundLines) continue;
+        ++g_groundLines;
+        const BYTE* one = info + w * kWheelInfoSize;
+        const float* at = reinterpret_cast<const float*>(one + kWheelHardpoint);
+        const float* end = reinterpret_cast<const float*>(one + kWheelRayEnd);
+        const float reach = std::sqrt((end[0] - at[0]) * (end[0] - at[0]) + (end[1] - at[1]) * (end[1] - at[1]) + (end[2] - at[2]) * (end[2] - at[2]));
+        const int column = g_zoneSize > 0 ? static_cast<int>(std::floor((8 * g_zoneSize + at[0]) / g_zoneSize)) : -1;
+        const int row = g_zoneSize > 0 ? static_cast<int>(std::floor((8 * g_zoneSize - at[2]) / g_zoneSize)) : -1;
+        char skipped[96] = "";
+        const WheelSkips& s = t_wheelSkips[w];
+        if (g_wheelRays && (s.own || s.notSolid || s.steep))
+            snprintf(skipped, sizeof(skipped), " (it skipped %d own, %d not solid, %d steep, the first facing up %.2f)", s.own, s.notSolid, s.steep, s.steepUp);
+        rfa::LogDetail("Driving: %s wheel %d lost the ground at (%.1f, %.1f, %.1f), zone column %d row %d, %.1f m/s: its ray (%.2f m down) "
+                 "found nothing%s; %lu ms before it stood on object %08lX (type %d/%d), shape type %d key %08lX, at (%.1f, %.1f, %.1f), "
+                 "normal (%.2f, %.2f, %.2f), suspension %.2f m",
+                 VehicleName(car.vehicle), w, at[0], at[1], at[2], column, row, speed, reach, skipped, before, ground.object, ground.type,
+                 ground.subtype, ground.shape, ground.key, ground.point[0], ground.point[1], ground.point[2], ground.normal[0],
+                 ground.normal[1], ground.normal[2], ground.length);
+    }
+}
+
+bool g_groundLog = true;  // false once a read of the wheels' results has faulted
+
+void NoteWheelGroundGuarded(const WheelCar& car, BYTE* instance, const BYTE* out, int wheels) {
+    __try {
+        NoteWheelGround(car, instance, out, wheels);
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        g_groundLog = false;
+        rfa::Log("Driving: a read of a wheel's ground faulted; the drop-out lines stop");
+    }
+}
+
+void __fastcall CollideWheels(BYTE* collide, void* unused, float dt, BYTE* instance, BYTE* out) {
+    const WheelCar car = WhoseWheels(instance);
+    t_wheelCar = car;
+    if (car.player) memset(t_wheelSkips, 0, sizeof(t_wheelSkips));
+    g_collideWheels(collide, unused, dt, instance, out);
+    t_wheelCar = WheelCar{};
+    if (!car.guerrilla || !out) return;
+    const BYTE* data = At<BYTE*>(instance, kVehicleData);
+    const int wheels = data ? std::min<int>(At<signed char>(data, 0x20), 8) : 0;
+    if (g_wheelRays)
+        for (int w = 0; w < wheels; ++w) {
+            BYTE* result = out + w * kOutSize;
+            if (!At<BYTE*>(result, kOutBody)) continue;
+            const float up = At<float>(result, kOutNormal + 4);
+            *reinterpret_cast<float*>(result + kOutFriction) *= 0.25f + 0.75f * (up > 0 ? up : 0.0f);
+        }
+    if (car.player && g_driveLog && g_groundLog) NoteWheelGroundGuarded(car, instance, out, wheels);
+}
+
+void StartWheelRays() {
+    g_wheelRays = rfa::IniInt(L"GuerrillaVehicles", L"WheelRaysAsGuerrilla", 1) != 0;
+    if (!g_wheelRays && !g_driveLog) return;
+    const BYTE opening[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};  // push ebp / mov ebp,esp / and esp,0FFFFFFF0h
+    if (memcmp(reinterpret_cast<const void*>(kCollideWheels), opening, sizeof(opening)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kCastWheel), opening, sizeof(opening)) != 0) {
+        g_wheelRays = false;
+        rfa::Log("Driving: Havok's wheel rays (0x%08lX, 0x%08lX) aren't as expected; Guerrilla's cars cast them as Armageddon's", kCollideWheels, kCastWheel);
+        return;
+    }
+    g_collideWheels = reinterpret_cast<CollideWheelsFn>(rfa::HookFunction(kCollideWheels, sizeof(opening), reinterpret_cast<void*>(&CollideWheels)));
+    if (!g_collideWheels) {
+        g_wheelRays = false;
+        return;
+    }
+    if (g_wheelRays) g_castWheel = reinterpret_cast<CastWheelFn>(rfa::HookFunction(kCastWheel, sizeof(opening), reinterpret_cast<void*>(&CastWheel)));
+    if (!g_castWheel) g_wheelRays = false;
+    rfa::Log(g_wheelRays ? "Driving: Guerrilla's cars cast their wheels' rays by Guerrilla's rules (their own parts, non-solid things and surfaces "
+                           "steeper than 60 degrees skipped) and grip less on slopes, as Guerrilla's"
+                         : "Driving: Guerrilla's cars cast their wheels' rays as Armageddon's ([GuerrillaVehicles] WheelRaysAsGuerrilla=0)");
 }
 
 // ---- The log: a vehicle's gun getting and losing its gunner
@@ -382,9 +882,9 @@ void __fastcall AttachGunner(BYTE* turret, void* unused, BYTE* human) {
                                                                      : "it aims by itself: enemies ahead, else straight ahead (Guerrilla's rule for a driver)";
     // The player's lines always (a test's evidence), NPCs' only a few: traffic's gunners come and go all the time.
     if (player)
-        RFA_LOG_FIRST(200, "Turrets: %s on %s has a gunner: the player in seat %d (0 the driver's); %s", TurretName(turret), VehicleName(vehicle), seat, aims);
+        RFA_LOG_DETAIL_FIRST(200, "Turrets: %s on %s has a gunner: the player in seat %d (0 the driver's); %s", TurretName(turret), VehicleName(vehicle), seat, aims);
     else
-        RFA_LOG_FIRST(20, "Turrets: %s on %s has a gunner: an NPC in seat %d; %s", TurretName(turret), VehicleName(vehicle), seat, aims);
+        RFA_LOG_DETAIL_FIRST(20, "Turrets: %s on %s has a gunner: an NPC in seat %d; %s", TurretName(turret), VehicleName(vehicle), seat, aims);
 }
 
 void __fastcall DetachGunner(BYTE* turret, void* unused, BYTE* human) {
@@ -395,10 +895,10 @@ void __fastcall DetachGunner(BYTE* turret, void* unused, BYTE* human) {
     g_detachGunner(turret, unused, human);
     if (!vehicle || !gunner) return;
     if (player)
-        RFA_LOG_FIRST(200, "Turrets: %s on %s lost its gunner (the player); it goes back to its middle for 10 s, then holds where it is", TurretName(turret),
+        RFA_LOG_DETAIL_FIRST(200, "Turrets: %s on %s lost its gunner (the player); it goes back to its middle for 10 s, then holds where it is", TurretName(turret),
                       VehicleName(vehicle));
     else
-        RFA_LOG_FIRST(20, "Turrets: %s on %s lost its gunner (an NPC)", TurretName(turret), VehicleName(vehicle));
+        RFA_LOG_DETAIL_FIRST(20, "Turrets: %s on %s lost its gunner (an NPC)", TurretName(turret), VehicleName(vehicle));
 }
 
 // ---- The hinges' motors of a gun on one of Guerrilla's vehicles: Guerrilla's
@@ -443,7 +943,7 @@ void __cdecl PartBody(BYTE* body, BYTE* item, void* mesh, DWORD x, DWORD y, DWOR
     float& mass = *reinterpret_cast<float*>(body + kBodyMass);
     const float items = mass, guerrillas = entryMass > kLightestPart ? entryMass : kLightestPart;
     mass = guerrillas;
-    RFA_LOG_FIRST(40, "Turrets: %s: its part %s weighs %g kg as Guerrilla's (its entry's %g, at least %g), not the item's own %g", TurretName(g_assembling),
+    RFA_LOG_DETAIL_FIRST(40, "Turrets: %s: its part %s weighs %g kg as Guerrilla's (its entry's %g, at least %g), not the item's own %g", TurretName(g_assembling),
                   Name(item), guerrillas, entryMass, kLightestPart, items);
 }
 
@@ -467,7 +967,7 @@ bool __cdecl Assemble(BYTE* physics, BYTE* turret, BYTE* vehicle) {
         *reinterpret_cast<float*>(motor + kRecoveryConstant) = kGuerrillasRecoveryConstant;
         ++set;
     }
-    RFA_LOG_FIRST(30, "Turrets: %s on %s: %d hinge motors make up an error as Guerrilla's (%.2g of it a second and %.2g; the game's were %.2g and %.2g)",
+    RFA_LOG_DETAIL_FIRST(30, "Turrets: %s on %s: %d hinge motors make up an error as Guerrilla's (%.2g of it a second and %.2g; the game's were %.2g and %.2g)",
                   TurretName(turret), on, set, kGuerrillasRecoveryByError, kGuerrillasRecoveryConstant, was[0], was[1]);
     return made;
 }
@@ -565,7 +1065,7 @@ void __cdecl TurretCameraPost() {
     const int now = GameTime();
     if (now >= w.next && w.lines < 120) {
         if (w.next) {
-            rfa::Log("Turrets: the gunner's camera on %s: the view led the gun by up to %.1f degrees in the last second; held to the gun in %d of %d frames",
+            rfa::LogDetail("Turrets: the gunner's camera on %s: the view led the gun by up to %.1f degrees in the last second; held to the gun in %d of %d frames",
                      VehicleName(vehicle), w.most, w.held, w.frames);
             ++w.lines;
         }
@@ -593,7 +1093,10 @@ void StartTurrets() {
     StartHinges();
     StartGunnerCamera();
     StartWalkerLog();
-    g_watchLog = rfa::IniInt(L"GuerrillaVehicles", L"TurretWatchLog", 0) != 0;
+    StartDriveLog();
+    StartFrictionAsGuerrilla();
+    StartWheelRays();
+    g_watchLog = rfa::ReadLogSwitch(L"GuerrillaVehicles", L"TurretWatchLog");
     if (!rfa::IniInt(L"GuerrillaVehicles", L"DriverGunAsGuerrilla", 1)) {
         rfa::Log("Turrets: a driver's gun follows the player's aim point on every vehicle, as Armageddon's ([GuerrillaVehicles] DriverGunAsGuerrilla=0)");
         return;
@@ -618,5 +1121,17 @@ void StartTurrets() {
     }
     if (!g_attachGunner || !g_detachGunner) rfa::Log("Turrets: gunners coming and going aren't logged");
 }
+
+// Around the game's AI/driver handling reset (guerrilla_vehicles.cpp's hook on 0x5F2CF0): a Guerrilla car whose tyre
+// friction was built when it was made keeps it (see "A car's tyre friction" above).
+void BeginHandlingReset(BYTE* car) {
+    g_frictionKept = nullptr;
+    if (!g_buildFriction || !car || IsArmageddons(car)) return;
+    BYTE* block = ActiveHandlingBlock(car + kHandlingBlockOffset, nullptr);
+    BYTE* data = block ? *reinterpret_cast<BYTE**>(block) : nullptr;
+    BYTE* description = data ? data + kFrictionDescription : nullptr;
+    if (description && std::find(g_frictionBuilt.begin(), g_frictionBuilt.end(), description) != g_frictionBuilt.end()) g_frictionKept = description;
+}
+void EndHandlingReset() { g_frictionKept = nullptr; }
 
 }  // namespace gv

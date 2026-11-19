@@ -16,7 +16,7 @@ namespace RfaFormats.Guerrilla;
 /// the nearest road point within 60 m, and the roads between each two routed (the shortest way over the
 /// roads' points and connections); the road points in order, none closer than 1 m to the last, at most
 /// 512. The file:
-///   convoy &lt;name&gt; &lt;Destroy|Capture&gt; &lt;difficulty&gt; &lt;normal speed&gt; &lt;evade speed&gt; &lt;start hour&gt; &lt;end hour&gt; &lt;x&gt; &lt;y&gt; &lt;z&gt; &lt;district&gt;
+///   convoy &lt;name&gt; &lt;Destroy|Capture&gt; &lt;difficulty&gt; &lt;normal speed&gt; &lt;evade speed&gt; &lt;start hour&gt; &lt;end hour&gt; &lt;x&gt; &lt;y&gt; &lt;z&gt; &lt;district&gt; &lt;disabled: 1 held until a district is liberated&gt;
 ///   member &lt;name&gt; &lt;Target|Defender|Attack&gt; &lt;people&gt; &lt;its vehicles built, by commas&gt;   (in order: the first leads)
 ///   route &lt;name&gt; &lt;x,y,z&gt; &lt;x,y,z&gt; ...
 /// A convoy any of whose members' vehicle groups has none of the vehicles built is left out.
@@ -135,6 +135,7 @@ public static class GuerrillaConvoys
         var lines = new List<string> { "# Guerrilla's convoys, for the guerrilla_vehicles mod (written by editor\\GuerrillaBuilder.exe with the vehicles)" };
         var written = new List<string>();
         var problems = new List<string>();
+        int disabledEnds = 0;
         foreach (var end in ends.OrderBy(e => e.Text("convoy_type"), StringComparer.OrdinalIgnoreCase))
         {
             string name = end.Text("convoy_type")?.Trim() ?? "";
@@ -179,8 +180,12 @@ public static class GuerrillaConvoys
             float Speed(string field) => Math.Clamp(float.TryParse(row.ValueOf(field)?.Trim(), CultureInfo.InvariantCulture, out float s) ? s : 8, 1, 30);
             var at = end.Value("op") is { Length: >= 12 } op ? V(op) : (end.BoundsMin + end.BoundsMax) / 2;
             string type = row.ValueOf("Type")?.Trim().Equals("Capture", StringComparison.OrdinalIgnoreCase) == true ? "Capture" : "Destroy";
+            // Its convoy_disabled flag (object_convoy_end_point's convoy_node_flags bit 1): held until a district is
+            // liberated (district::liberate_district RM 0x7A5CE0 clears it on every end point).
+            bool disabled = end.Value("convoy_disabled") is { Length: >= 1 } flag && flag[0] != 0;
+            if (disabled) disabledEnds++;
             lines.Add($"convoy {name} {type} {row.ValueOf("difficulty")?.Trim() ?? "1"} {F(Speed("NormalSpeed"))} {F(Speed("EvadeSpeed"))} {Hour("spawn_start_time")} {Hour("spawn_end_time")} " +
-                      $"{F(at.X)} {F(at.Y)} {F(at.Z)} {(end.Text("home_district")?.Trim() is { Length: > 0 } district ? district.Replace(' ', '_') : "-")}");
+                      $"{F(at.X)} {F(at.Y)} {F(at.Z)} {(end.Text("home_district")?.Trim() is { Length: > 0 } district ? district.Replace(' ', '_') : "-")} {(disabled ? 1 : 0)}");
             lines.AddRange(members);
             lines.Add($"route {name} " + string.Join(" ", route.Select(p => $"{F(p.X)},{F(p.Y)},{F(p.Z)}")));
             float length = 0;
@@ -189,7 +194,8 @@ public static class GuerrillaConvoys
         }
         Directory.CreateDirectory(vehiclesModFolder);
         System.IO.File.WriteAllLines(Path.Combine(vehiclesModFolder, File), lines);
-        return $"Convoys: {written.Count} in mods\\guerrilla_vehicles\\{File} ({string.Join(", ", written)}; {roads.Count} roads)" +
+        return $"Convoys: {written.Count} in mods\\guerrilla_vehicles\\{File} ({string.Join(", ", written)}; {roads.Count} roads; " +
+               $"{disabledEnds} held until a district is liberated)" +
                (problems.Count > 0 ? $"; {string.Join("; ", problems)}" : "");
     }
 

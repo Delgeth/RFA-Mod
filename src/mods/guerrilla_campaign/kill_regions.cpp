@@ -179,10 +179,10 @@ void Kill(BYTE* human, const Region& region, bool entering) {
     }
     if (g_npcLines > kMostNpcLines) return;
     if (g_npcLines++ == kMostNpcLines) {
-        rfa::Log("Kill regions: more NPCs killed this level; no more are written to the log");
+        rfa::LogDetail("Kill regions: more NPCs killed this level; no more are written to the log");
         return;
     }
-    rfa::Log("Kill region 0x%08X (%s, %s of Guerrilla's): killed an NPC 0x%08X (team %d)%s at (%.0f, %.0f, %.0f)", region.handle, region.zone.c_str(), Kind(region),
+    rfa::LogDetail("Kill region 0x%08X (%s, %s of Guerrilla's): killed an NPC 0x%08X (team %d)%s at (%.0f, %.0f, %.0f)", region.handle, region.zone.c_str(), Kind(region),
              *reinterpret_cast<const DWORD*>(human + kHandle), *reinterpret_cast<const int*>(human + kTeam), inVehicle ? " in a vehicle" : "", at->x, at->y, at->z);
 }
 

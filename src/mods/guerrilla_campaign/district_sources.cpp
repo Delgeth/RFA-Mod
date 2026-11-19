@@ -189,12 +189,12 @@ void Destroyed(const BYTE* building, const Listed& listed) {
     MarkCounted(listed.handle);
     const Vector at = PositionOf(building);
     if (listed.propaganda) {
-        rfa::Log("District sources: propaganda %08X destroyed at (%.0f, %.0f, %.0f)", listed.handle, at.x, at.y, at.z);
+        rfa::LogDetail("District sources: propaganda %08X destroyed at (%.0f, %.0f, %.0f)", listed.handle, at.x, at.y, at.z);
         liberation::ChangeMorale(g_propaganda, -1, "HM_PROPAGANDA_DESTROYED", "ui_hud_diversion_icon_propaganda");
     }
     if (listed.points > 0.0f) {
         const int district = liberation::DistrictAt(at);
-        rfa::Log("District sources: EDF building %08X destroyed at (%.0f, %.0f, %.0f): %.0f points of control", listed.handle, at.x, at.y, at.z, listed.points);
+        rfa::LogDetail("District sources: EDF building %08X destroyed at (%.0f, %.0f, %.0f): %.0f points of control", listed.handle, at.x, at.y, at.z, listed.points);
         const bool low = listed.importance <= 1;
         liberation::ChangeEdfControl(-listed.points, district, low ? "HM_EDF_PROPERTY_DESTROYED" : nullptr, low ? "ui_hud_diversion_icon_edf_low" : nullptr);
     }
@@ -277,7 +277,7 @@ void HumanKilled(BYTE* victim, BYTE* attacker) {
     const bool attackerHuman = attacker && HumanByHandle(kWorld, nullptr, HandleOf(attacker)) == attacker;
     if (g_deathLines < kMostDeathLines) {
         ++g_deathLines;
-        rfa::Log("District sources: %08X (team %d) died, %.0f m from the player; the game names %s%s", HandleOf(victim), victimTeam,
+        rfa::LogDetail("District sources: %08X (team %d) died, %.0f m from the player; the game names %s%s", HandleOf(victim), victimTeam,
                  Distance(PositionOf(victim), PositionOf(player)), byPlayer ? "the player" : attackerHuman ? "a human of team " : attacker ? "something else" : "no one",
                  attackerHuman && !byPlayer ? std::to_string(*reinterpret_cast<const int*>(attacker + kTeam)).c_str() : "");
     }

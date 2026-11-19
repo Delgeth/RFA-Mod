@@ -21,6 +21,7 @@
 //     else amb_talkself_morale_*, by the district's morale) and a walker greeting the player near it.
 // [GuerrillaPeople] VoiceLog=1 writes a summary each minute (off by default).
 
+#define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "voices.h"
 #include <cmath>
@@ -45,7 +46,24 @@ constexpr float kHeard = 60.0f;  // people farther from the player aren't watche
 
 using PlayFn = int(__cdecl*)(const void* human, const char* line, int priority);
 PlayFn g_play = nullptr;
-bool g_log = false;
+bool g_log = false, g_told = false;
+DWORD g_nextLookup = 0;
+
+// guerrilla_voices' GuerrillaVoices_Play, looked up when first needed (the mods load one by one: it may come after us)
+// and again each second until it is there.
+PlayFn Play() {
+    if (g_play) return g_play;
+    const DWORD tick = GetTickCount();
+    if (tick < g_nextLookup) return nullptr;
+    g_nextLookup = tick + 1000;
+    if (HMODULE voices = GetModuleHandleW(L"guerrilla_voices.dll")) g_play = reinterpret_cast<PlayFn>(GetProcAddress(voices, "GuerrillaVoices_Play"));
+    if (g_play && !g_told) {
+        g_told = true;
+        rfa::Log("Voices: Guerrilla's people speak their free-roam lines through guerrilla_voices (pain, death, spotting, grenades, panic, joining, "
+                 "ambushes, everyday lines)");
+    }
+    return g_play;
+}
 struct Watched { float hp = -1; bool dead = false, hadTarget = false; int throwTimer = 0; int seen = 0; };
 std::unordered_map<DWORD, Watched> g_watched;
 int g_nextWatch = 0, g_nextReport = 0, g_lastClock = 0;
@@ -83,15 +101,11 @@ float Morale() {
 }  // namespace
 
 void StartVoices() {
-    g_log = rfa::IniInt(L"GuerrillaPeople", L"VoiceLog", 0) != 0;
-    if (HMODULE voices = GetModuleHandleW(L"guerrilla_voices.dll")) g_play = reinterpret_cast<PlayFn>(GetProcAddress(voices, "GuerrillaVoices_Play"));
-    rfa::Log(g_play ? "Voices: Guerrilla's people speak their free-roam lines through guerrilla_voices (pain, death, spotting, grenades, panic, joining, "
-                      "ambushes, everyday lines)"
-                    : "Voices: guerrilla_voices isn't loaded; Guerrilla's people stay silent");
+    g_log = rfa::ReadLogSwitch(L"GuerrillaPeople", L"VoiceLog");  // guerrilla_voices is looked up when first needed (Play)
 }
 
 void VoiceSay(unsigned char* human, const char* line) {
-    if (!g_play || !human || !line) return;
+    if (!human || !line || !Play()) return;
     const int status = g_play(human, line, -1);
     if (status == 0) {
         ++g_said;
@@ -111,7 +125,7 @@ const char* VoiceTalkToSelfLine() {
 }
 
 void VoicesFrame(bool ours) {
-    if (!g_play) return;
+    if (!Play()) return;
     const int now = GameTime();
     if (!ours || now < g_lastClock) {
         g_watched.clear();
@@ -156,6 +170,6 @@ void VoicesFrame(bool ours) {
         g_nextReport = now + 60000;
         std::string lines;
         for (const auto& [line, count] : g_byLine) lines += (lines.empty() ? "" : ", ") + line + " " + std::to_string(count);
-        rfa::Log("Voices: %d lines said, %d refused by their rules so far; %s", g_said, g_refused, lines.empty() ? "none yet" : lines.c_str());
+        rfa::LogDetail("Voices: %d lines said, %d refused by their rules so far; %s", g_said, g_refused, lines.empty() ? "none yet" : lines.c_str());
     }
 }

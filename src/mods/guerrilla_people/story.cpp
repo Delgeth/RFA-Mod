@@ -30,6 +30,7 @@
 // operator's and the VIP's lines while the player is in a safehouse (safehouse_vip_do_frame RM 0x7907B0: the
 // radio operator every 15-25 s over the radio persona, opr_amb_batch01; the VIP every 10-20 s; with the voices).
 
+#define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "story.h"
 #include <cctype>
@@ -171,7 +172,7 @@ void Hold(Slot& slot, const std::string& character) {
     slot.loggedLoaded = false;
     if (CharacterLoaded(info) || CharacterOnItsWay(info) || HoldCharacter(kLevelCategory, kLevelCategories, info)) {
         ++g_held;
-        RFA_LOG_FIRST(40, "Story people: %s held for the %s slot (Guerrilla's HUMAN_%s)", character.c_str(), slot.kind, &slot == &g_special ? "SPECIAL" : "SAFEHOUSE_VIP");
+        RFA_LOG_DETAIL_FIRST(40, "Story people: %s held for the %s slot (Guerrilla's HUMAN_%s)", character.c_str(), slot.kind, &slot == &g_special ? "SPECIAL" : "SAFEHOUSE_VIP");
     }
     else RFA_LOG_FIRST(8, "Story people: %s couldn't be held for the %s slot (the level's category is full?)", character.c_str(), slot.kind);
 }
@@ -182,7 +183,7 @@ void Let(Slot& slot) {
     slot.squad = kNone;
     if (!slot.character.empty()) {
         ++g_released;
-        RFA_LOG_FIRST(40, "Story people: the %s slot is free; %s kept until the district changes (the game lets it go then)", slot.kind,
+        RFA_LOG_DETAIL_FIRST(40, "Story people: the %s slot is free; %s kept until the district changes (the game lets it go then)", slot.kind,
                       slot.character.c_str());
     }
     slot.character.clear();
@@ -205,18 +206,18 @@ void SpawnWhenReady(Slot& slot) {
     if (!info || !CharacterLoaded(info)) return;
     if (!slot.loggedLoaded) {
         slot.loggedLoaded = true;
-        RFA_LOG_FIRST(40, "Story people: %s is loaded", slot.character.c_str());
+        RFA_LOG_DETAIL_FIRST(40, "Story people: %s is loaded", slot.character.c_str());
     }
     g_spawning = node;
     const DWORD squad = NodeSpawn(node, nullptr, kNone, 0);
     g_spawning = nullptr;
     if (squad == kNone) {
-        RFA_LOG_FIRST(8, "Story people: node 0x%08X (%s) made no squad", n.handle, n.squad.c_str());
+        RFA_LOG_DETAIL_FIRST(8, "Story people: node 0x%08X (%s) made no squad", n.handle, n.squad.c_str());
         return;
     }
     slot.squad = squad;
     ++g_spawned;
-    rfa::Log("Story people: %s (%s) spawned at (%.0f, %.0f, %.0f), node 0x%08X, as Guerrilla's %s", slot.character.c_str(), n.squad.c_str(), n.at.x, n.at.y, n.at.z,
+    rfa::LogDetail("Story people: %s (%s) spawned at (%.0f, %.0f, %.0f), node 0x%08X, as Guerrilla's %s", slot.character.c_str(), n.squad.c_str(), n.at.x, n.at.y, n.at.z,
              n.handle, &slot == &g_special ? "special NPC (the one nearest the player)" : "safehouse VIP (one a safehouse)");
 }
 
@@ -250,7 +251,7 @@ void LookVip(const V3& player) {
         for (const Node& n : g_nodes)
             if (!n.special && n.group == g_vip.group && WorldObject(kWorld, nullptr, n.handle)) about = true;
         if (!about) {  // the safehouse streamed out (stream_notify_unload)
-            RFA_LOG_FIRST(40, "Story people: the safehouse 0x%08X streamed out; its VIP slot is free", g_vip.group);
+            RFA_LOG_DETAIL_FIRST(40, "Story people: the safehouse 0x%08X streamed out; its VIP slot is free", g_vip.group);
             Let(g_vip);
         }
     }
@@ -270,12 +271,12 @@ void LookVip(const V3& player) {
         for (int i = 0; i < static_cast<int>(g_nodes.size()); ++i)
             if (!g_nodes[i].special && g_nodes[i].group == g_vip.group && !Disabled(g_nodes[i].character)) set.push_back(i);
         if (roll > kVipSpawnProbability || set.empty()) {
-            rfa::Log("Story people: no VIP at the safehouse 0x%08X this time (%s)", g_vip.group,
+            rfa::LogDetail("Story people: no VIP at the safehouse 0x%08X this time (%s)", g_vip.group,
                      set.empty() ? "all its VIPs disabled" : "Guerrilla's VIP_spawn_probability, 0.8");
             return;
         }
         g_vip.node = set[std::rand() % set.size()];
-        rfa::Log("Story people: %s picked as the safehouse 0x%08X's VIP (of %d)", g_nodes[g_vip.node].character.c_str(), g_vip.group, static_cast<int>(set.size()));
+        rfa::LogDetail("Story people: %s picked as the safehouse 0x%08X's VIP (of %d)", g_nodes[g_vip.node].character.c_str(), g_vip.group, static_cast<int>(set.size()));
         Hold(g_vip, g_nodes[g_vip.node].character);
     }
     SpawnWhenReady(g_vip);

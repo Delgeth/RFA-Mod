@@ -8,8 +8,8 @@
 // another is bought (the grinder opens its faster and explosive upgrades). Re-Mars-tered adds its nine
 // multiplayer backpacks to the shop, 250 salvage each. The weapons build (RfaFormats\Guerrilla\
 // GuerrillaUpgrades.cs) writes them all to mods\guerrilla_gear\upgrades.txt, with each level's chain
-// ("needs") and Guerrilla's other conditions as notes: the world has no districts to liberate or
-// activities yet, so those aren't held to.
+// ("needs"), the district whose liberation unlocks it, and Guerrilla's other conditions as notes. The chain
+// and the district are held to (the district asked of guerrilla_campaign); the activity counts aren't yet.
 //
 // Armageddon's salvage is the player's (+0x2C38): the game's own get (0x54C2B0, cdecl: the amount into
 // *out, false without a player) and add (0x54C4C0, cdecl: the amount, negative to spend, and two flags,
@@ -60,6 +60,7 @@ struct Level {
     std::string name, description;
     std::string needs;  // "" or "upgrade:level": that level bought first
     std::string note;   // Guerrilla's condition, or ""
+    std::string district;  // Guerrilla's district whose liberation unlocks it, or "" (upgrades.txt's 8th field)
 };
 
 struct Upgrade {
@@ -132,7 +133,8 @@ void ReadUpgrades() {
             g_upgrades.push_back({f[1], f[2], f[3], f[4] == "-" ? "" : f[4], f[5], {}});
         } else if (f[0] == "level" && f.size() >= 7 && !g_upgrades.empty()) {
             g_upgrades.back().levels.push_back({std::atoi(f[1].c_str()), std::atoi(f[2].c_str()), f[3], f[4],
-                                                f[5] == "-" ? "" : f[5], f[6] == "-" ? "" : f[6]});
+                                                f[5] == "-" ? "" : f[5], f[6] == "-" ? "" : f[6],
+                                                f.size() >= 8 && f[7] != "-" ? f[7] : ""});
         }
     }
     // RFA-Mod's own, after Guerrilla's (only with Guerrilla's: without its list there is no shop to sell in).
@@ -181,15 +183,47 @@ const Upgrade* Find(const std::string& name) {
     return nullptr;
 }
 
+// Easy 0 .. Insane 3; Armageddon's Custom (4), or anything out of range, as Medium (guerrilla_campaign's rule,
+// difficulty::Level()).
 int Difficulty() {
     const int level = *reinterpret_cast<const int*>(kDifficulty);
     return level < 0 || level > 3 ? 1 : level;
 }
 
+// A district's liberation (upgrade_unlock_from_liberation RM 0x790E20: each level whose District_Liberated names the
+// district is unlocked as it's liberated), asked of guerrilla_campaign (GuerrillaCampaign_DistrictLiberated: 1 yes,
+// 0 no, -1 no such district). Without the campaign, or for a name it doesn't know, the level isn't held (logged once).
+using DistrictLiberatedFn = int(__cdecl*)(const char* name);
+
+bool DistrictLiberated(const std::string& district) {
+    static DistrictLiberatedFn ask = nullptr;
+    static bool saidMissing = false;
+    if (!ask)
+        if (HMODULE campaign = GetModuleHandleW(L"guerrilla_campaign.dll"))
+            ask = reinterpret_cast<DistrictLiberatedFn>(GetProcAddress(campaign, "GuerrillaCampaign_DistrictLiberated"));
+    if (!ask) {
+        if (!saidMissing) {
+            saidMissing = true;
+            rfa::Log("Upgrades: guerrilla_campaign.dll gives no GuerrillaCampaign_DistrictLiberated; upgrades unlocked by a district's liberation are for sale");
+        }
+        return true;
+    }
+    const int liberated = ask(district.c_str());
+    if (liberated < 0) {
+        RFA_LOG_FIRST(8, "Upgrades: the campaign has no district \"%s\"; its upgrades are for sale", district.c_str());
+        return true;
+    }
+    return liberated != 0;
+}
+
 int Cost(const Level& level) { return static_cast<int>(std::floor(level.cost * g_costScale[Difficulty()] + 0.5f)); }
 
-// Whether a level's chain is met (under g_lock); why not, if not.
+// Whether a level can be bought (under g_lock): its district liberated and its chain met; why not, if not.
 bool NeedsMetLocked(const Level& level, std::string& why) {
+    if (!level.district.empty() && !DistrictLiberated(level.district)) {
+        why = "liberate " + level.district + " first";
+        return false;
+    }
     if (level.needs.empty()) return true;
     const size_t colon = level.needs.find(':');
     const std::string name = level.needs.substr(0, colon);
@@ -366,7 +400,9 @@ void DrawRow(int index, int salvage) {
             ImGui::Text("%s %s: %d salvage%s", i <= bought ? "[bought]" : "        ", l.name.empty() ? u.shown.c_str() : l.name.c_str(), Cost(l),
                         l.value != i ? (" (" + std::to_string(l.value) + ")").c_str() : "");
             if (!l.description.empty()) ImGui::TextDisabled("    %s", l.description.c_str());
-            if (!l.note.empty()) ImGui::TextDisabled("    %s (not held to: the world has no districts or activities yet)", l.note.c_str());
+            if (!l.district.empty()) ImGui::TextDisabled("    unlocked by liberating %s", l.district.c_str());
+            if (!l.note.empty() && (l.district.empty() || l.note.find("activities") != std::string::npos || l.note.find("story") != std::string::npos))
+                ImGui::TextDisabled("    %s (of Guerrilla's conditions only a district's liberation is held to yet)", l.note.c_str());
             if (u.ours) ImGui::TextDisabled("    RFA-Mod's own upgrade, not one of Guerrilla's");
             ImGui::TextDisabled("    %s", InEffect(u, i));
         }
@@ -529,6 +565,36 @@ extern "C" __declspec(dllexport) bool __cdecl GuerrillaGear_Upgrade(int index, G
         out->available = 0;
     }
     return true;
+}
+
+// For guerrilla_hud's district-liberated screen: what a district's liberation unlocked. Guerrilla's
+// upgrade_unlock_from_liberation (RM 0x790E20) lists, in upgrades.xtbl's order, each upgrade whose next level to buy
+// the liberation unlocks (is_next_upgrade_newly_unlocked), three at most; its screen shows each (the upgrade's icon
+// and blueprint, the level's name). Gives how many were written into out (most at most).
+struct GuerrillaGearUnlock {
+    int size;             // sizeof(GuerrillaGearUnlock), set by the caller
+    char name[64];        // upgrades.txt's name (Guerrilla's upgrades.xtbl Name: its pictures' key)
+    char levelName[96];   // the level unlocked, as Guerrilla shows it
+};
+
+extern "C" __declspec(dllexport) int __cdecl GuerrillaGear_LiberationUnlocks(const char* district, GuerrillaGearUnlock* out, int most) {
+    if (!district || !out || most <= 0 || out[0].size != sizeof(GuerrillaGearUnlock)) return 0;
+    constexpr int kGuerrillasMost = 3;
+    int count = 0;
+    std::lock_guard<std::mutex> hold(g_lock);
+    for (const Upgrade& u : g_upgrades) {
+        if (count >= most || count >= kGuerrillasMost) break;
+        const int next = BoughtLocked(u.name) + 1;
+        if (u.ours || next >= static_cast<int>(u.levels.size())) continue;
+        const Level& level = u.levels[next];
+        if (_stricmp(level.district.c_str(), district) != 0) continue;
+        out[count].size = sizeof(GuerrillaGearUnlock);
+        Copy(out[count].name, sizeof(out[count].name), u.name);
+        Copy(out[count].levelName, sizeof(out[count].levelName), level.name.empty() ? u.shown : level.name);
+        ++count;
+    }
+    if (count > 0) rfa::Log("Upgrades: liberating %s unlocked %d to buy", district, count);
+    return count;
 }
 
 // Buys the next level of an upgrade (on the game's thread, at the player's next step); GuerrillaGear_Status says how it went.

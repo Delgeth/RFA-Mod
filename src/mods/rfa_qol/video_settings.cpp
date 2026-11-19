@@ -38,11 +38,11 @@ int __cdecl ReadSetting(const char* section, const char* name, DWORD* out, DWORD
     GetPrivateProfileStringW(sectionW, nameW, L"", text, _countof(text), CfgPath().c_str());
     if (!text[0]) {
         *out = fallback;
-        RFA_LOG_FIRST(20, "%s not saved yet, using the game's default %lu", name, fallback);
+        RFA_LOG_DETAIL_FIRST(20, "%s not saved yet, using the game's default %lu", name, fallback);
         return -1;
     }
     *out = wcstoul(text, nullptr, 10);
-    RFA_LOG_FIRST(20, "Loaded %s=%lu", name, *out);
+    RFA_LOG_DETAIL_FIRST(20, "Loaded %s=%lu", name, *out);
     return 0;
 }
 
@@ -56,7 +56,7 @@ int __cdecl WriteSetting(const char* section, const char* name, DWORD value) {
         rfa::Log("Could not write %ls (error %lu)", CfgPath().c_str(), GetLastError());
         return -1;
     }
-    RFA_LOG_FIRST(40, "Saved %s=%lu", name, value);
+    RFA_LOG_DETAIL_FIRST(40, "Saved %s=%lu", name, value);
     return 0;
 }
 

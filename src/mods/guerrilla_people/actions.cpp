@@ -28,10 +28,12 @@
 // (drop_ambient_prop_action); here it is taken away then. Not here yet: the nodes' other flags (allow_edf, allow_guerrilla, ...: the squad
 // under a node is the one Guerrilla put there), and a type's other states (its first).
 
+#define RFA_MOD_NAME "guerrilla_people"
 #include "rfa_mod.h"
 #include "actions.h"
 #include "props.h"
 #include "voices.h"
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -85,7 +87,17 @@ struct Type {
     bool ambientLines = false;  // node_flags allow_ambient_lines: its people say Guerrilla's everyday lines
 };
 std::vector<PropKind> g_props;
-struct Node { int type = -1; V3 spot{}; float fx = 0, fz = 1; bool taken = false; int restUntil = 0; };
+struct Node {
+    int type = -1;
+    V3 spot{};
+    float fx = 0, fz = 1;
+    bool taken = false;
+    int restUntil = 0;
+    DWORD tagParent = 0xFFFFFFFF;  // script_point_enable, snapped to its parent: the spot from the parent's Action_Node tag
+    V3 offset{};
+    float heading = 0;
+    bool tagTried = false;
+};
 std::vector<Type> g_types;
 std::unordered_map<DWORD, Node> g_nodes;  // by the squad node's handle
 std::vector<Node> g_pedNodes;             // the walkers' nodes
@@ -173,6 +185,11 @@ void ReadNodes() {
             n.spot = {std::stof(f[3]), std::stof(f[4]), std::stof(f[5])};
             n.fx = std::stof(f[6]);
             n.fz = std::stof(f[7]);
+            if (f.size() >= 13) {  // its parent's Action_Node tag (Guerrilla's get_entry_point_int)
+                n.tagParent = std::stoul(f[8], nullptr, 16);
+                n.offset = {std::stof(f[9]), std::stof(f[10]), std::stof(f[11])};
+                n.heading = std::stof(f[12]);
+            }
             if (f[0] == "ped") g_pedNodes.push_back(n);
             else g_nodes[std::stoul(f[1], nullptr, 16)] = n;
         }
@@ -192,6 +209,47 @@ bool Resolve(Type& t) {
         if (t.stateIndex < 0) RFA_LOG_FIRST(16, "Actions: the game has no animation state \"%s\" (type %s); its people stand", t.state.c_str(), t.name.c_str());
     }
     return t.stateIndex >= 0;
+}
+
+// Guerrilla's get_entry_point_int (RM 0xA8CC70) and get_entry_rotation (RM 0xA8CDD0) for a type with node_flags
+// script_point_enable (bit 10) snapped to its parent: the target's model tag "Action_Node" (object::
+// get_tag_index_from_name, then get_tag_world_coords; Armageddon's object virtuals +0x2C and +0x30, Guerrilla's +0x34 and
+// +0x38: the tag's index by its lower-case name, then its world place and axes) and the type's offset in its axes, the
+// heading turned from its forward. Once a node, the first time its spot is wanted; without the parent or its tag
+// the builder's spot (its parent's own place) stays.
+using TagIndexFn = int(__thiscall*)(BYTE* object, const char* name);
+using TagWorldFn = bool(__thiscall*)(BYTE* object, int index, V3* place, M3* axes, const V3* basePlace, const M3* baseAxes);
+int g_tagSpots = 0, g_tagMissing = 0;
+
+void SpotFromTag(Node& n, const Type& t) {
+    if (n.tagTried || n.tagParent == kNone) return;
+    n.tagTried = true;
+    BYTE* parent = WorldObject(kWorld, nullptr, n.tagParent);
+    if (!parent) {
+        ++g_tagMissing;
+        RFA_LOG_DETAIL_FIRST(8, "Actions: a %s node's parent 0x%08X isn't in the world; its spot stays the builder's", t.name.c_str(), n.tagParent);
+        return;
+    }
+    BYTE* vtable = *reinterpret_cast<BYTE**>(parent);
+    const int index = (*reinterpret_cast<TagIndexFn*>(vtable + 0x2C))(parent, "action_node");
+    V3 place{};
+    M3 axes{};
+    if (index < 0 || !(*reinterpret_cast<TagWorldFn*>(vtable + 0x30))(parent, index, &place, &axes, nullptr, nullptr)) {
+        ++g_tagMissing;
+        RFA_LOG_DETAIL_FIRST(8, "Actions: a %s node's parent 0x%08X has no Action_Node tag; its spot stays the builder's", t.name.c_str(), n.tagParent);
+        return;
+    }
+    const V3 old = n.spot;
+    n.spot = {place.x + axes.r.x * n.offset.x + axes.u.x * n.offset.y + axes.f.x * n.offset.z,
+              place.y + axes.r.y * n.offset.x + axes.u.y * n.offset.y + axes.f.y * n.offset.z,
+              place.z + axes.r.z * n.offset.x + axes.u.z * n.offset.y + axes.f.z * n.offset.z};
+    const float h = n.heading * 3.14159265f / 180.0f;
+    float fx = axes.f.x * std::cos(h) + axes.r.x * std::sin(h), fz = axes.f.z * std::cos(h) + axes.r.z * std::sin(h);
+    const float length = std::sqrt(fx * fx + fz * fz);
+    if (length > 0.01f) n.fx = fx / length, n.fz = fz / length;
+    ++g_tagSpots;
+    RFA_LOG_DETAIL_FIRST(16, "Actions: a %s node's spot from its parent 0x%08X's Action_Node tag, as Guerrilla's: (%.1f, %.1f, %.1f), was (%.1f, %.1f, %.1f)",
+                  t.name.c_str(), n.tagParent, n.spot.x, n.spot.y, n.spot.z, old.x, old.y, old.z);
 }
 
 void Play(BYTE* human, int state, int action) {
@@ -232,12 +290,12 @@ void Release(BYTE* human, Actor& a, int now, int back, const char* why) {
     if (a.pedNode >= 0) {  // a walker: back to its walking (ambient.cpp), its node free
         g_pedNodes[a.pedNode].taken = false;
         a.done = true;
-        RFA_LOG_FIRST(24, "Actions: walker 0x%08X leaves its node (%s)", HandleOf(human), why);
+        RFA_LOG_DETAIL_FIRST(24, "Actions: walker 0x%08X leaves its node (%s)", HandleOf(human), why);
         return;
     }
     a.phase = kGivenBack;
     a.until = back < 0 ? INT_MAX : now + back;
-    RFA_LOG_FIRST(24, "Actions: NPC 0x%08X given back to the game's AI (%s)", HandleOf(human), why);
+    RFA_LOG_DETAIL_FIRST(24, "Actions: NPC 0x%08X given back to the game's AI (%s)", HandleOf(human), why);
 }
 
 void Step(BYTE* human, Actor& a, int now) {
@@ -262,6 +320,7 @@ void Step(BYTE* human, Actor& a, int now) {
     BYTE* ai = *reinterpret_cast<BYTE**>(human + kNpcAi);
     switch (a.phase) {
         case kGoing: {
+            SpotFromTag(n, t);
             const V3 at = Pos(human);
             const float dx = at.x - n.spot.x, dz = at.z - n.spot.z;
             if (dx * dx + dz * dz > kOnSpot * kOnSpot) {
@@ -294,7 +353,7 @@ void Step(BYTE* human, Actor& a, int now) {
             a.nextIdle.assign(t.idles.size(), 0);
             for (size_t k = 0; k < t.idles.size(); ++k) a.nextIdle[k] = now + Rand(t.idles[k].least, t.idles[k].most);
             ++g_started;
-            RFA_LOG_FIRST(24, "Actions: NPC 0x%08X does %s at (%.1f, %.1f, %.1f): %s for %s", HandleOf(human), t.name.c_str(), n.spot.x, n.spot.y, n.spot.z, t.state.c_str(),
+            RFA_LOG_DETAIL_FIRST(24, "Actions: NPC 0x%08X does %s at (%.1f, %.1f, %.1f): %s for %s", HandleOf(human), t.name.c_str(), n.spot.x, n.spot.y, n.spot.z, t.state.c_str(),
                           t.most >= kForGood ? "good" : "a while");
             return;
         }
@@ -390,12 +449,18 @@ void ActionsFrame(bool ours) {
             const DWORD handle = HandleOf(human);
             about.insert(handle);
             if (g_actors.count(handle)) continue;
+            // A node holds one person (Guerrilla's reservation, human::has_node_reserved): another of its squad's
+            // members already at it keeps it; this one is the game's.
+            if (std::any_of(g_actors.begin(), g_actors.end(), [&](const auto& other) { return other.second.pedNode < 0 && other.second.node == node; })) {
+                RFA_LOG_DETAIL_FIRST(8, "Actions: NPC 0x%08X of squad node 0x%08X stays with the game's AI: its node holds one person, as Guerrilla's", handle, node);
+                continue;
+            }
             Actor a;
             a.node = node;
             a.team = *reinterpret_cast<const int*>(human + kTeam);
             g_actors[handle] = a;
             ++g_taken;
-            RFA_LOG_FIRST(16, "Actions: NPC 0x%08X (spawned from squad node 0x%08X) goes to its %s spot", handle, node, g_types[g_nodes[node].type].name.c_str());
+            RFA_LOG_DETAIL_FIRST(16, "Actions: NPC 0x%08X (spawned from squad node 0x%08X) goes to its %s spot", handle, node, g_types[g_nodes[node].type].name.c_str());
         }
         for (auto it = g_actors.begin(); it != g_actors.end();) {
             if (it->second.pedNode >= 0 || about.count(it->first)) {
@@ -421,7 +486,7 @@ void ActionsFrame(bool ours) {
     if (now >= g_nextReport) {
         g_nextReport = now + 60000;
         if (g_taken > 0 || g_pedTaken > 0)
-            rfa::Log("Actions: %d people at Guerrilla's action nodes now; %d taken, %d walkers took a node, %d actions started, %d handed back for danger or a fight, "
+            rfa::LogDetail("Actions: %d people at Guerrilla's action nodes now; %d taken, %d walkers took a node, %d actions started, %d handed back for danger or a fight, "
                      "%d with no way to their spot, %d props held",
                      static_cast<int>(g_actors.size()), g_taken, g_pedTaken, g_started, g_dangers, g_noWay, g_propsHeld);
     }
@@ -452,7 +517,7 @@ bool ActionsWalkerStart(unsigned long human, const float* at) {
     a.team = person ? *reinterpret_cast<const int*>(person + kTeam) : -1;  // a convert leaves its node
     g_actors[human] = a;
     ++g_pedTaken;
-    RFA_LOG_FIRST(24, "Actions: walker 0x%08lX goes to a %s node %.0f m away, as Guerrilla's use_action_node_goal", human,
+    RFA_LOG_DETAIL_FIRST(24, "Actions: walker 0x%08lX goes to a %s node %.0f m away, as Guerrilla's use_action_node_goal", human,
                   g_types[g_pedNodes[nearest].type].name.c_str(), std::sqrt(best));
     return true;
 }

@@ -17,6 +17,7 @@
 // its handbook's tool tips page (each tip played opens its entry there); the tip's sound (its interface bank).
 // Guerrilla's texts name buttons as [BUTTON:<action>]: each is given its key's name here (ours from [GuerrillaKeys]
 // and [GuerrillaVehicles]; Armageddon's own actions by its PC defaults), two side by side joined by "/".
+#define RFA_MOD_NAME "guerrilla_hud"
 #include "rfa_mod.h"
 #include "rfa_game.h"
 #include "keys.h"
@@ -253,7 +254,7 @@ void Unpause() {
 // The first in the queue done with: off the screen (its handbook entry would open here).
 void Finish() {
     if (!g_queue.empty()) {
-        if (g_queue.front().running) RFA_LOG_FIRST(100, "Tool tip %s closed", g_queue.front().tip->name.c_str());
+        if (g_queue.front().running) RFA_LOG_DETAIL_FIRST(100, "Tool tip %s closed", g_queue.front().tip->name.c_str());
         g_queue.pop_front();
     }
     Unpause();
@@ -283,7 +284,7 @@ bool Add(const char* name, int delayMs, const char* icon) {
         if (i.tip == tip) return true;  // already waiting or up
     if (tip->plays >= 0 && tip->plays <= tip->played) return true;  // played as often as it plays (0: never)
     if (g_queue.size() >= kQueueSlots) {
-        RFA_LOG_FIRST(20, "Tool tip %s dropped: %u are waiting already (Guerrilla's most)", tip->name.c_str(), static_cast<unsigned>(kQueueSlots));
+        RFA_LOG_DETAIL_FIRST(20, "Tool tip %s dropped: %u are waiting already (Guerrilla's most)", tip->name.c_str(), static_cast<unsigned>(kQueueSlots));
         return true;
     }
     ++tip->played;
@@ -293,7 +294,7 @@ bool Add(const char* name, int delayMs, const char* icon) {
     instance.icon = icon ? icon : "";
     instance.showAt = GetTickCount64() + (tip->runPaused || delayMs <= 0 ? 0 : static_cast<ULONGLONG>(delayMs));
     g_queue.push_back(instance);
-    RFA_LOG_FIRST(100, "Tool tip %s queued (time %d of %d; shows after %d ms)", tip->name.c_str(), tip->played, tip->plays,
+    RFA_LOG_DETAIL_FIRST(100, "Tool tip %s queued (time %d of %d; shows after %d ms)", tip->name.c_str(), tip->played, tip->plays,
                   tip->runPaused || delayMs <= 0 ? 0 : delayMs);
     return true;
 }
@@ -344,7 +345,7 @@ void Step(double seconds, bool playerAlive) {
         }
         g_continueDown = false;
         ++g_version;
-        RFA_LOG_FIRST(100, "Tool tip %s shown%s", tip.name.c_str(), tip.pause ? " (the game paused until the continue key)" : "");
+        RFA_LOG_DETAIL_FIRST(100, "Tool tip %s shown%s", tip.name.c_str(), tip.pause ? " (the game paused until the continue key)" : "");
         return;
     }
     if (now.timeLeft > 0.0 && playerAlive) {

@@ -144,7 +144,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
         return;
     }
     g_worlds = SplitList(rfa::IniString(L"GuerrillaKiosks", L"Worlds", L"rfg"));
-    g_log = rfa::IniInt(L"GuerrillaKiosks", L"Log", 0) != 0;
+    g_log = rfa::ReadLogSwitch(L"GuerrillaKiosks");
     if (!tables::Load()) return;  // says why
     g_broadcast = rfa::IniInt(L"GuerrillaKiosks", L"Broadcast", 1) != 0;
     if (g_broadcast) broadcast::Init();

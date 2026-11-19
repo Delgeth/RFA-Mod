@@ -54,6 +54,27 @@ extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_District(int whic
     return 1;
 }
 
+// For guerrilla_people's squad levels: a team's progression level, Guerrilla's get_progression_level (RM 0x78CC70):
+// 0 guerrillas and 2 civilians the tech level (0-5), 1 the EDF's progression (0-7, at least the player's district's
+// min_progression_edf), 3 the Marauders' (0-7). Level n is squad_level_(n+1). -1 while the campaign's systems rest.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_ProgressionLevel(int team) {
+    using namespace campaign;
+    if (!Playing()) return -1;
+    switch (team) {
+        case 1: return liberation::EdfProgressionLevel();
+        case 3: return liberation::MarauderProgressionLevel();
+        default: return liberation::TechLevel();
+    }
+}
+
+// For guerrilla_gear: whether the district of that name (Guerrilla's, as upgrades.xtbl's District_Liberated names
+// it: "Parker", "Dust", ...) is liberated: 1 yes, 0 not yet, -1 no such district.
+extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_DistrictLiberated(const char* name) {
+    using namespace campaign;
+    const liberation::District* district = name ? liberation::GetDistrict(liberation::DistrictNamed(name)) : nullptr;
+    return !district ? -1 : district->liberated ? 1 : 0;
+}
+
 // For guerrilla_save, when it makes a save of one of our worlds: the campaign's state into buffer (room
 // bytes); the bytes written, or the bytes needed when buffer is null (or too small).
 extern "C" __declspec(dllexport) int __cdecl GuerrillaCampaign_SaveState(unsigned char* buffer, int room) {

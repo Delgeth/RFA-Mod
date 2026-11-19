@@ -279,7 +279,7 @@ void Frame() {
         bool alive = false;
         for (BYTE* member : members) alive |= !IsDead(member);
         if (!alive) {
-            rfa::Log("Guerrilla squads: the squad is gone; another may come in %d s", g_row ? g_row->delayMs / 1000 : 0);
+            rfa::LogDetail("Guerrilla squads: the squad is gone; another may come in %d s", g_row ? g_row->delayMs / 1000 : 0);
             g_squad = kNone;
             g_row = nullptr;
             return;
@@ -292,7 +292,7 @@ void Frame() {
                 if (!IsDead(member) && Distance2(PositionOf(member), here) < kToldWithin * kToldWithin) {
                     g_told = true;
                     messages::Minor("HM_GUERRILLA_REINFORCEMENTS", nullptr);
-                    rfa::Log("Guerrilla squads: the squad is here");
+                    rfa::LogDetail("Guerrilla squads: the squad is here");
                     break;
                 }
         }

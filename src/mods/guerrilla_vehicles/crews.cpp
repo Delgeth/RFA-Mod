@@ -57,7 +57,7 @@ int TrySpawn(VehicleSpawn& spawn, BYTE** made) {
     BYTE* vehicle = *reinterpret_cast<BYTE**>(spawn.parameters + 0x5C);
     if (result == 0 && vehicle) { *made = vehicle; return 0; }
     if (result == 1 && GameTime() - spawn.since < kSpawnPatience) return 1;
-    RFA_LOG_FIRST(20, "Crews: %s wasn't made (%s)", spawn.model.c_str(), result == 1 ? "not streamed in within 20 s" : "the game refused it");
+    RFA_LOG_DETAIL_FIRST(20, "Crews: %s wasn't made (%s)", spawn.model.c_str(), result == 1 ? "not streamed in within 20 s" : "the game refused it");
     return 2;
 }
 
@@ -247,7 +247,7 @@ ChaseResult ChaseFrame(Crew& crew, Chase& chase, BYTE* vehicle) {
     // Out, to fight on foot: the vehicle unusable, or (no gunner) the target on foot or stopped within 40 m.
     if (chase.state != 2 && (Unusable(vehicle) || (!gunner && !targetMoving && away < 40.0f))) {
         chase.state = 2;
-        RFA_LOG_FIRST(20, "Crews: a chasing crew gets out to fight on foot (%s)", Unusable(vehicle) ? "its vehicle is unusable" : "its target is close and on foot");
+        RFA_LOG_DETAIL_FIRST(20, "Crews: a chasing crew gets out to fight on foot (%s)", Unusable(vehicle) ? "its vehicle is unusable" : "its target is close and on foot");
     }
     if (chase.state == 2) {
         StopCar(vehicle);
@@ -350,7 +350,7 @@ extern "C" __declspec(dllexport) bool __cdecl GuerrillaVehicles_Chase(DWORD vehi
         if (BYTE* human = SeatOccupant(vehicle, seat)) handed.crew.people.push_back({Handle(human), *reinterpret_cast<const int*>(human + kManagement)});
     handed.chase.target = targetHandle;
     g_handed.push_back(handed);
-    RFA_LOG_FIRST(40, "Crews: a crew of %u was handed a chase", static_cast<unsigned>(handed.crew.people.size()));
+    RFA_LOG_DETAIL_FIRST(40, "Crews: a crew of %u was handed a chase", static_cast<unsigned>(handed.crew.people.size()));
     return true;
 }
 

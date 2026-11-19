@@ -153,14 +153,14 @@ void Send(Orders& orders, BYTE* player, bool first) {
     orders.sentAt = GameTime();
     if (first) {
         const BYTE* squad = static_cast<const BYTE*>(ObjectFromHandle(orders.squad));
-        RFA_LOG_FIRST(40, "Alert orders (%s): EDF squad %08X sent at the player (%d on their way to (%.0f, %.0f, %.0f), %.0f m from the player)",
+        RFA_LOG_DETAIL_FIRST(40, "Alert orders (%s): EDF squad %08X sent at the player (%d on their way to (%.0f, %.0f, %.0f), %.0f m from the player)",
                       orders.name, orders.squad, sent, g_lastSeen.x, g_lastSeen.y, g_lastSeen.z,
                       squad ? FlatDistance(PositionOf(squad), PositionOf(player)) : -1.0f);
     }
 }
 
 void Free(Orders& orders, const char* why) {
-    if (orders.squad != kNone) RFA_LOG_FIRST(40, "Alert orders (%s): EDF squad %08X let go (%s)", orders.name, orders.squad, why);
+    if (orders.squad != kNone) RFA_LOG_DETAIL_FIRST(40, "Alert orders (%s): EDF squad %08X let go (%s)", orders.name, orders.squad, why);
     orders.squad = kNone;
 }
 

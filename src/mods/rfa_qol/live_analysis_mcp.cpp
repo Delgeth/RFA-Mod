@@ -22,10 +22,10 @@ static HANDLE g_pipe = INVALID_HANDLE_VALUE;
 static std::mutex g_pipeMutex;
 static std::atomic<bool> g_connected(false);
 
-// Connect to the named pipe
-bool ConnectToPipe() {
-    std::lock_guard<std::mutex> lock(g_pipeMutex);
-
+// Connect to the named pipe. The caller holds g_pipeMutex (a std::mutex can't be locked twice by one thread:
+// SendCommand reconnecting through a locking version threw, and the server quit, whenever the game had been
+// closed or wasn't up yet at the first request).
+bool ConnectToPipeLocked() {
     if (g_pipe != INVALID_HANDLE_VALUE) {
         CloseHandle(g_pipe);
     }
@@ -42,13 +42,37 @@ bool ConnectToPipe() {
     return g_connected;
 }
 
-// Send command and get response
+bool ConnectToPipe() {
+    std::lock_guard<std::mutex> lock(g_pipeMutex);
+    return ConnectToPipeLocked();
+}
+
+// After a failed write or read the pipe's stream can't be trusted: drop it, so the next command connects again.
+void DropPipeLocked() {
+    g_connected = false;
+    if (g_pipe != INVALID_HANDLE_VALUE) CloseHandle(g_pipe);
+    g_pipe = INVALID_HANDLE_VALUE;
+}
+
+// Read exactly `size` bytes: the pipe is a byte stream, so a long answer can arrive in several pieces.
+bool ReadAllLocked(void* into, DWORD size) {
+    BYTE* at = static_cast<BYTE*>(into);
+    while (size > 0) {
+        DWORD read = 0;
+        if (!ReadFile(g_pipe, at, size, &read, NULL) || read == 0) return false;
+        at += read;
+        size -= read;
+    }
+    return true;
+}
+
+// Send command and get response. The answer is returned as it came, NUL bytes included (read gives raw memory).
 std::string SendCommand(const std::string& cmd) {
     std::lock_guard<std::mutex> lock(g_pipeMutex);
 
     if (!g_connected || g_pipe == INVALID_HANDLE_VALUE) {
-        if (!ConnectToPipe()) {
-            return "ERROR: Cannot connect to pipe";
+        if (!ConnectToPipeLocked()) {
+            return "ERROR: Cannot connect to pipe (is the game running with [Mcp] Enabled=1?)";
         }
     }
 
@@ -56,43 +80,72 @@ std::string SendCommand(const std::string& cmd) {
     DWORD written;
     std::string cmdWithNewline = cmd + "\n";
     if (!WriteFile(g_pipe, cmdWithNewline.c_str(), (DWORD)cmdWithNewline.size(), &written, NULL)) {
-        g_connected = false;
-        CloseHandle(g_pipe);
-        g_pipe = INVALID_HANDLE_VALUE;
-        return "ERROR: Write failed";
+        DropPipeLocked();
+        return "ERROR: Write failed (the game closed the pipe; the next command connects again)";
     }
 
     // Read response length (4 bytes)
-    DWORD length;
-    DWORD read;
-    if (!ReadFile(g_pipe, &length, 4, &read, NULL) || read != 4) {
-        g_connected = false;
-        CloseHandle(g_pipe);
-        g_pipe = INVALID_HANDLE_VALUE;
+    DWORD length = 0;
+    if (!ReadAllLocked(&length, 4)) {
+        DropPipeLocked();
         return "ERROR: Failed to read length";
+    }
+    if (length > 64u * 1024u * 1024u) {
+        DropPipeLocked();
+        return "ERROR: Answer too long; the connection was reset";
     }
 
     // Read response data
-    std::vector<char> buffer(length + 1);
-    if (!ReadFile(g_pipe, buffer.data(), length, &read, NULL) || read != length) {
+    std::string answer(length, '\0');
+    if (length > 0 && !ReadAllLocked(&answer[0], length)) {
+        DropPipeLocked();
         return "ERROR: Failed to read data";
     }
-    buffer[length] = '\0';
-
-    return std::string(buffer.data());
+    return answer;
 }
 
-// Escape JSON string
+// A 32-bit address as the game's pipe reads it (std::hex): "0x" and hex digits.
+std::string Hex(int value) {
+    char text[16];
+    snprintf(text, sizeof(text), "0x%X", static_cast<unsigned>(value));
+    return text;
+}
+
+// Bytes as hex digits, two a byte, a space every 16 bytes.
+std::string HexBytes(const std::string& bytes) {
+    static const char digits[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(bytes.size() * 3);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i > 0 && i % 16 == 0) out += ' ';
+        const unsigned char b = static_cast<unsigned char>(bytes[i]);
+        out += digits[b >> 4];
+        out += digits[b & 15];
+    }
+    return out;
+}
+
+// Escape JSON string. Control characters and bytes past 0x7F (the game's text isn't always UTF-8) are written as
+// \u00XX, so the answer is always valid JSON.
 std::string EscapeJson(const std::string& s) {
     std::ostringstream oss;
     for (char c : s) {
+        const unsigned char b = static_cast<unsigned char>(c);
         switch (c) {
             case '"': oss << "\\\""; break;
             case '\\': oss << "\\\\"; break;
             case '\n': oss << "\\n"; break;
             case '\r': oss << "\\r"; break;
             case '\t': oss << "\\t"; break;
-            default: oss << c; break;
+            default:
+                if (b < 0x20 || b >= 0x7F) {
+                    char code[8];
+                    snprintf(code, sizeof(code), "\\u%04X", b);
+                    oss << code;
+                } else {
+                    oss << c;
+                }
+                break;
         }
     }
     return oss.str();
@@ -118,10 +171,16 @@ std::string ExtractJsonString(const std::string& json, const std::string& key) {
     }
 }
 
+// A whole number (decimal, or 0x hex in a string). Addresses past 0x7FFFFFFF keep their bits (Hex() prints them
+// unsigned); a value that isn't a number gives 0 instead of an exception that would end the server.
 int ExtractJsonInt(const std::string& json, const std::string& key) {
     std::string val = ExtractJsonString(json, key);
     if (val.empty()) return 0;
-    return std::stoi(val, nullptr, 0);
+    try {
+        return static_cast<int>(static_cast<unsigned>(std::stoll(val, nullptr, 0)));
+    } catch (...) {
+        return 0;
+    }
 }
 
 // Build JSON-RPC response
@@ -129,7 +188,7 @@ std::string MakeResponse(const std::string& id, const std::string& result, bool 
     std::ostringstream oss;
     oss << "{\"jsonrpc\":\"2.0\",\"id\":";
     if (id.empty()) oss << "null";
-    else oss << "\"" << id << "\"";
+    else oss << id;  // as the request gave it: a number, or a string with its quotes
     if (isError) {
         oss << ",\"error\":{\"code\":-32603,\"message\":" << result << "}}";
     } else {
@@ -144,15 +203,8 @@ std::string MakeTextResult(const std::string& text) {
     return oss.str();
 }
 
-// Handle JSON-RPC request
-std::string HandleRequest(const std::string& request) {
-    // Extract method
-    std::string method = ExtractJsonString(request, "method");
-    if (method.empty()) {
-        return MakeResponse("", "\"Missing method\"", true);
-    }
-
-    // Extract id
+// The request's id as written in it (a number, or a string with its quotes); empty if it has none.
+std::string RequestId(const std::string& request) {
     std::string id;
     size_t idPos = request.find("\"id\"");
     if (idPos != std::string::npos) {
@@ -162,13 +214,30 @@ std::string HandleRequest(const std::string& request) {
             if (request[start] == '"') {
                 size_t end = request.find('"', start + 1);
                 if (end != std::string::npos) {
-                    id = request.substr(start + 1, end - start - 1);
+                    id = request.substr(start, end - start + 1);
                 }
             } else {
-                size_t end = request.find_first_of(",}", start);
+                size_t end = request.find_first_of(",} \t\r\n", start);
                 id = request.substr(start, end - start);
             }
         }
+    }
+    return id;
+}
+
+// Handle JSON-RPC request
+std::string HandleRequest(const std::string& request) {
+    // Extract method
+    std::string method = ExtractJsonString(request, "method");
+    if (method.empty()) {
+        return MakeResponse(RequestId(request), "\"Missing method\"", true);
+    }
+
+    const std::string id = RequestId(request);
+
+    // A notification (no id, e.g. notifications/initialized) gets no answer.
+    if (id.empty() && method.rfind("notifications/", 0) == 0) {
+        return "";
     }
 
     // Extract params
@@ -273,13 +342,19 @@ std::string HandleRequest(const std::string& request) {
         if (toolName == "read_memory") {
             int address = ExtractJsonInt(args, "address");
             int size = ExtractJsonInt(args, "size");
-            std::string response = SendCommand("read 0x" + std::to_string(address) + " " + std::to_string(size));
-            resultText = "{\"address\":" + std::to_string(address) + ",\"size\":" + std::to_string(size) + ",\"data\":\"" + EscapeJson(response) + "\"}";
+            std::string response = SendCommand("read " + Hex(address) + " " + std::to_string(size));
+            // The game answers with the raw bytes (nothing when the address isn't readable), or a line starting
+            // "ERROR:" from this server; the bytes are given as hex.
+            if (response.rfind("ERROR:", 0) == 0)
+                resultText = "{\"address\":\"" + Hex(address) + "\",\"error\":\"" + EscapeJson(response) + "\"}";
+            else
+                resultText = "{\"address\":\"" + Hex(address) + "\",\"size\":" + std::to_string(response.size()) + ",\"hex\":\"" + HexBytes(response) +
+                             "\"" + (response.empty() ? ",\"note\":\"not readable\"" : "") + "}";
         }
         else if (toolName == "write_memory") {
             int address = ExtractJsonInt(args, "address");
             std::string dataHex = ExtractJsonString(args, "data_hex");
-            std::string response = SendCommand("write 0x" + std::to_string(address) + " " + dataHex);
+            std::string response = SendCommand("write " + Hex(address) + " " + dataHex);
             bool success = (response.find("OK") != std::string::npos);
             resultText = "{\"success\":" + std::string(success ? "true" : "false") + ",\"response\":\"" + EscapeJson(response) + "\"}";
         }
@@ -295,7 +370,7 @@ std::string HandleRequest(const std::string& request) {
             int address = ExtractJsonInt(args, "address");
             int prologue = ExtractJsonInt(args, "prologue_size");
             std::string name = ExtractJsonString(args, "name");
-            std::string response = SendCommand("hook 0x" + std::to_string(address) + " " + std::to_string(prologue) + " " + name);
+            std::string response = SendCommand("hook " + Hex(address) + " " + std::to_string(prologue) + " " + name);
             bool success = (response.find("OK") != std::string::npos);
             resultText = "{\"success\":" + std::string(success ? "true" : "false") + ",\"response\":\"" + EscapeJson(response) + "\"}";
         }
@@ -311,7 +386,7 @@ std::string HandleRequest(const std::string& request) {
         }
         else if (toolName == "call_function") {
             int address = ExtractJsonInt(args, "address");
-            std::string response = SendCommand("call 0x" + std::to_string(address));
+            std::string response = SendCommand("call " + Hex(address));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "exec_command") {
@@ -324,7 +399,7 @@ std::string HandleRequest(const std::string& request) {
             int size = ExtractJsonInt(args, "size");
             std::string pattern = ExtractJsonString(args, "pattern_hex");
             std::string mask = ExtractJsonString(args, "mask");
-            std::string scanCmd = "scan 0x" + std::to_string(startAddr) + " " + std::to_string(size) + " " + pattern;
+            std::string scanCmd = "scan " + Hex(startAddr) + " " + std::to_string(size) + " " + pattern;
             if (!mask.empty()) scanCmd += " " + mask;
             std::string response = SendCommand(scanCmd);
             resultText = "{\"matches\":\"" + EscapeJson(response) + "\"}";
@@ -416,19 +491,19 @@ std::string HandleRequest(const std::string& request) {
         }
         else if (toolName == "set_breakpoint") {
             int address = ExtractJsonInt(args, "address");
-            std::string response = SendCommand("breakpoint set 0x" + std::to_string(address));
+            std::string response = SendCommand("breakpoint set " + Hex(address));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "clear_breakpoint") {
             int address = ExtractJsonInt(args, "address");
-            std::string response = SendCommand("breakpoint clear 0x" + std::to_string(address));
+            std::string response = SendCommand("breakpoint clear " + Hex(address));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "disassemble") {
             int address = ExtractJsonInt(args, "address");
             int count = ExtractJsonInt(args, "count");
             if (count <= 0) count = 20;
-            std::string response = SendCommand("disasm 0x" + std::to_string(address) + " " + std::to_string(count));
+            std::string response = SendCommand("disasm " + Hex(address) + " " + std::to_string(count));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "find_xrefs") {
@@ -444,7 +519,7 @@ std::string HandleRequest(const std::string& request) {
         }
         else if (toolName == "list_exports") {
             int base = ExtractJsonInt(args, "module_base");
-            std::string response = SendCommand("exports 0x" + std::to_string(base));
+            std::string response = SendCommand("exports " + Hex(base));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "list_threads") {
@@ -454,7 +529,7 @@ std::string HandleRequest(const std::string& request) {
         else if (toolName == "watch_memory") {
             int address = ExtractJsonInt(args, "address");
             int size = ExtractJsonInt(args, "size");
-            std::string response = SendCommand("watch 0x" + std::to_string(address) + " " + std::to_string(size) + " rw");
+            std::string response = SendCommand("watch " + Hex(address) + " " + std::to_string(size) + " rw");
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "teleport_player") {
@@ -620,25 +695,25 @@ std::string HandleRequest(const std::string& request) {
             int address = ExtractJsonInt(args, "address");
             int maxLogs = ExtractJsonInt(args, "max_logs");
             if (maxLogs <= 0) maxLogs = 100;
-            std::string response = SendCommand("trace_calls 0x" + std::to_string(address) + " " + std::to_string(maxLogs));
+            std::string response = SendCommand("trace_calls " + Hex(address) + " " + std::to_string(maxLogs));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "vtable") {
             int address = ExtractJsonInt(args, "address");
             int depth = ExtractJsonInt(args, "depth");
             if (depth <= 0) depth = 10;
-            std::string response = SendCommand("vtable 0x" + std::to_string(address) + " " + std::to_string(depth));
+            std::string response = SendCommand("vtable " + Hex(address) + " " + std::to_string(depth));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "find_vtables") {
             int start = ExtractJsonInt(args, "start");
             int end = ExtractJsonInt(args, "end");
-            std::string response = SendCommand("find_vtables 0x" + std::to_string(start) + " 0x" + std::to_string(end));
+            std::string response = SendCommand("find_vtables " + Hex(start) + " " + Hex(end));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "strings_ref") {
             int address = ExtractJsonInt(args, "address");
-            std::string response = SendCommand("strings_ref 0x" + std::to_string(address));
+            std::string response = SendCommand("strings_ref " + Hex(address));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "alloc_track") {
@@ -668,13 +743,13 @@ std::string HandleRequest(const std::string& request) {
             int address = ExtractJsonInt(args, "address");
             int size = ExtractJsonInt(args, "size");
             int snapId = ExtractJsonInt(args, "snapshot_id");
-            std::string response = SendCommand("mem_diff 0x" + std::to_string(address) + " " + std::to_string(size) + " " + std::to_string(snapId));
+            std::string response = SendCommand("mem_diff " + Hex(address) + " " + std::to_string(size) + " " + std::to_string(snapId));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else if (toolName == "signature") {
             int address = ExtractJsonInt(args, "address");
             int length = ExtractJsonInt(args, "length");
-            std::string response = SendCommand("signature 0x" + std::to_string(address) + " " + std::to_string(length));
+            std::string response = SendCommand("signature " + Hex(address) + " " + std::to_string(length));
             resultText = "{\"response\":\"" + EscapeJson(response) + "\"}";
         }
         else {
@@ -730,7 +805,16 @@ int main() {
         }
         if (request.empty()) continue;
 
-        std::string response = HandleRequest(request);
+        // Nothing a request holds may end the server: a bad number or similar becomes an error answer.
+        std::string response;
+        try {
+            response = HandleRequest(request);
+        } catch (const std::exception& e) {
+            response = MakeResponse(RequestId(request), "\"" + EscapeJson(std::string("Internal error: ") + e.what()) + "\"", true);
+        } catch (...) {
+            response = MakeResponse(RequestId(request), "\"Internal error\"", true);
+        }
+        if (response.empty()) continue;
         printf("%s\n", response.c_str());
         fflush(stdout);
     }

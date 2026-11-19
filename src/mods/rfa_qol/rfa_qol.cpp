@@ -60,6 +60,8 @@ bool g_graphicsRunning = false;
 }  // namespace
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    // The parts' routine lines (rfa::LogDetail) follow the loader's switch: [Loader] Log=.
+    rfa::ReadLogSwitch(L"Loader");
     StartPart(L"borderless", borderless::Init);
     g_consoleRunning = StartPart(L"console", console::Init);
     g_fovRunning = StartPart(L"fov", fov::Init);

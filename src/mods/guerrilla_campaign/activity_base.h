@@ -71,6 +71,7 @@ protected:
     float interfaceTime_ = 0.0f;
     bool cleanedUp_ = false;
     bool victoryRecorded_ = false;
+    bool layersRequested_ = false;  // its managed layers asked for (managed_layers.cpp)
     float shutdownTime_ = 0.0f;  // modal: the run stays in SHUTDOWN at least 1 s
     bool active_ = false;        // free: running
 };

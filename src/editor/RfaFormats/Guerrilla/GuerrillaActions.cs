@@ -58,7 +58,19 @@ public static class GuerrillaActions
             var objects = GuerrillaZones.Objects(zones.Read(entry)).GroupBy(o => o.Handle).ToDictionary(g => g.Key, g => g.First());
             // A node's spot: the node's (or, snapped to its parent, the parent's) place and axes, the state's offset in
             // them, its heading turned from their forward; null when its type has no state or it has no place.
-            (string Type, Vector3 Spot, Vector3 Facing, XtblElement Info)? SpotOf(GuerrillaZoneObject node)
+            // Guerrilla's get_entry_point_int (RM 0xA8CC70): with node_flags script_point_enable (bit 10) the offset is in
+            // the target's model tag "Action_Node" (object::get_tag_world_coords), not its own place: the builder can't
+            // read a model's tags, so such a node's line also gives its parent, the offset and the heading (Tagged), and
+            // guerrilla_people finds the tag on the placed parent (Samanya's weld spot is off the bench's origin).
+            string Tagged(GuerrillaZoneObject node, XtblElement info, XtblElement state, bool toParent)
+            {
+                bool scripted = (info.Element("node_flags")?.Elements ?? []).Any(f => f.Value.Trim().Equals("script_point_enable", StringComparison.OrdinalIgnoreCase));
+                if (!scripted || !toParent || node.Parent == 0xFFFFFFFF) return "";
+                var offset = state.Element("object_interaction_info")?.Element("anim_offset");
+                return string.Join('\t', "", node.Parent.ToString("X8"), F(Float(offset?.ValueOf("X"))), F(Float(offset?.ValueOf("Y"))), F(Float(offset?.ValueOf("Z"))),
+                                   F(Float(state.Element("object_interaction_info")?.ValueOf("anim_heading"))));
+            }
+            (string Type, Vector3 Spot, Vector3 Facing, XtblElement Info, string Tag)? SpotOf(GuerrillaZoneObject node)
             {
                 string type = node.Text("animation_type")?.Trim() ?? "";
                 if (!types.TryGetValue(type, out var info) || First(info) is not { } state) return null;
@@ -71,24 +83,26 @@ public static class GuerrillaActions
                 float heading = Float(state.Element("object_interaction_info")?.ValueOf("anim_heading")) * MathF.PI / 180;
                 var facing = Vector3.Normalize(new Vector3(frame.Forward.X, 0, frame.Forward.Z) * MathF.Cos(heading) + new Vector3(frame.Right.X, 0, frame.Right.Z) * MathF.Sin(heading));
                 if (float.IsNaN(facing.X)) facing = new Vector3(0, 0, 1);
-                return (type, spot, facing, info);
+                return (type, spot, facing, info, Tagged(node, info, state, toParent));
             }
             foreach (var squad in objects.Values.Where(o => o.ClassHash == squadNode))
             {
                 if (!objects.TryGetValue(squad.Parent, out var node) || node.ClassHash != actionNode) continue;
                 if (SpotOf(node) is not { } at) { noType++; continue; }
-                nodeLines.Add(string.Join('\t', "node", squad.Handle.ToString("X8"), at.Type, F(at.Spot.X), F(at.Spot.Y), F(at.Spot.Z), F(at.Facing.X), F(at.Facing.Z)));
+                nodeLines.Add(string.Join('\t', "node", squad.Handle.ToString("X8"), at.Type, F(at.Spot.X), F(at.Spot.Y), F(at.Spot.Z), F(at.Facing.X), F(at.Facing.Z)) + at.Tag);
                 used.Add(at.Type);
             }
             // The walkers' nodes (3b): those whose type allows ambient people (node_flags allow_ambient_peds), for
             // Guerrilla's use_action_node_goal (RM 0x67D420: an ambient person takes the nearest within 30 m,
             // find_nearest_action_node RM 0x637D10, above its wandering).
             string zoneName = Path.GetFileNameWithoutExtension(entry.Name);
-            foreach (var node in objects.Values.Where(o => o.ClassHash == actionNode))
+            // Not a node a squad's person uses: a node holds one person (Guerrilla's reservation, has_node_reserved).
+            var withSquad = objects.Values.Where(o => o.ClassHash == squadNode).Select(o => o.Parent).ToHashSet();
+            foreach (var node in objects.Values.Where(o => o.ClassHash == actionNode && !withSquad.Contains(o.Handle)))
             {
                 if (SpotOf(node) is not { } at) continue;
                 if (!(at.Info.Element("node_flags")?.Elements ?? []).Any(f => f.Value.Trim().Equals("allow_ambient_peds", StringComparison.OrdinalIgnoreCase))) continue;
-                pedLines.Add(string.Join('\t', "ped", node.Handle.ToString("X8"), at.Type, F(at.Spot.X), F(at.Spot.Y), F(at.Spot.Z), F(at.Facing.X), F(at.Facing.Z)));
+                pedLines.Add(string.Join('\t', "ped", node.Handle.ToString("X8"), at.Type, F(at.Spot.X), F(at.Spot.Y), F(at.Spot.Z), F(at.Facing.X), F(at.Facing.Z)) + at.Tag);
                 used.Add(at.Type);
                 pedsByZone[zoneName] = pedsByZone.GetValueOrDefault(zoneName) + 1;
             }
@@ -97,7 +111,7 @@ public static class GuerrillaActions
         {
             "# Guerrilla's action nodes for the people under them, for the guerrilla_people mod's actions.cpp (written by editor\\GuerrillaBuilder.exe with the people)",
             "# type<TAB>name<TAB>rest s<TAB>state<TAB>least s<TAB>most s<TAB>entry clip<TAB>exit clip[<TAB>idle clip<TAB>least s<TAB>most s]...  (- for none)",
-            "# node<TAB>squad node handle<TAB>type<TAB>spot x y z<TAB>facing x z",
+            "# node<TAB>squad node handle<TAB>type<TAB>spot x y z<TAB>facing x z[<TAB>parent<TAB>offset x y z<TAB>heading: the spot from the parent's Action_Node tag]",
             "# ped<TAB>action node handle<TAB>type<TAB>spot x y z<TAB>facing x z  (a node the walkers use)",
             "# prop<TAB>type<TAB>its prop (an item)<TAB>the wearer's point<TAB>the item's point<TAB>entry|after<TAB>exit|complete<TAB>always-on effect<TAB>its point[<TAB>action<TAB>effect<TAB>point]...",
         };

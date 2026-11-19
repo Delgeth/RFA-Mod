@@ -1,6 +1,6 @@
 -- Red Faction: Guerrilla's district-liberated screen in Armageddon's Guerrilla world: the district's name and LIBERATED,
 -- then (on Enter, Space or a click) the EDF's control of it counting down to nothing as its meter empties, then the
--- upgrades its liberation unlocked (none yet), then it closes. The game is paused while it's open.
+-- upgrades its liberation unlocked (up to three, one a press), then it closes. The game is paused while it's open.
 --
 -- Part of the guerrilla_hud mod. The document this drives, rfg_ui_district_liberated, is Guerrilla's own, and so is its
 -- script, both from your copy of Guerrilla: GuerrillaBuilder.exe packs our shims, Guerrilla's script (its init and
@@ -86,7 +86,8 @@ end
 
 local function follow()
 	while true do
-		local open, version, step, busy, district, label, most, missions, hint_key, hint_text = rfg_liberation()
+		local open, version, step, busy, district, label, most, missions, hint_key, hint_text,
+			upgrade, upgrade_title, upgrade_label, upgrade_info = rfg_liberation()
 		if open or Hud_hidden then
 			hide_armageddon_hud(open)
 		end
@@ -101,8 +102,16 @@ local function follow()
 				end
 				Step = step
 				if step == 2 then
-					-- An unlock (DistrictUpgrade): none yet, so the upgrade's parts stay hidden.
-					call(dl_upgrades, "dl_upgrades", { nil, nil, nil, nil, nil, n = 5 })
+					-- An unlock (DistrictUpgrade, as hud_ui_district_liberation_process_unlock_data filled it): the
+					-- upgrade's icon, the level's name, MENU_UNLOCKED, Guerrilla's unlock text and the upgrade's
+					-- blueprint. Guerrilla's script shows it only with a blueprint (Guerrilla left it out while the
+					-- picture wasn't streamed in), so without one the upgrade's parts stay hidden.
+					local pictures = {}
+					if upgrade ~= nil and Rfg_upgrade_pictures ~= nil then
+						pictures = Rfg_upgrade_pictures[upgrade] or {}
+					end
+					call(dl_upgrades, "dl_upgrades", { pictures[1], upgrade_title, upgrade_label, upgrade_info, pictures[2], n = 5 })
+					log("unlock: " .. tostring(upgrade) .. " (" .. tostring(upgrade_title) .. "), blueprint " .. tostring(pictures[2]))
 				end
 			end
 			if step == 1 then

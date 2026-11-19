@@ -118,6 +118,61 @@ inline void Log(const char* fmt, ...) {
         }                                        \
     } while (0)
 
+// ---- What is logged, and what only on request
+//
+// rfa::Log is for what a player or we need to see every time: what a mod found, read and hooked as it
+// started (a line or a few), real problems (errors, failed hooks, crashes, stuck frames) and rare
+// changes a player cares about (a district liberated, a level loaded). The console shows these too.
+//
+// rfa::LogDetail is for everything routine: reports every few seconds, a line for each spawn, sound,
+// prop, path or file. Those lines are written only while the mod's own switch is on (Log= in its
+// section of rfa_mods.ini, read as the mod starts with rfa::ReadLogSwitch), and are marked
+// "[module:log]" so the console leaves them out: they go to logs\rfa_mods.log only. A mod's narrower
+// switches (DriveLog=, PropLog=, ...) add their own detail lines and need Log=1 too.
+
+// This DLL's switch (one for all of a DLL's source files).
+inline bool& DetailLogSwitch() {
+    static bool on = false;
+    return on;
+}
+
+// Whether this DLL writes its detail lines. Code that does work only to log it checks this first.
+inline bool DetailLog() { return DetailLogSwitch(); }
+
+// Reads Log= in `section` (off when missing) as this DLL's switch, and returns it.
+inline bool ReadLogSwitch(const wchar_t* section) {
+    DetailLogSwitch() = IniInt(section, L"Log", 0) != 0;
+    return DetailLogSwitch();
+}
+
+// One of a mod's narrower switches (DriveLog=, PropLog=, ...): on only when it and the mod's Log= are.
+// Call after ReadLogSwitch.
+inline bool ReadLogSwitch(const wchar_t* section, const wchar_t* key) {
+    return DetailLog() && IniInt(section, key, 0) != 0;
+}
+
+namespace {
+// A routine line for logs\rfa_mods.log, starting with "[RFA_MOD_NAME:log]": written only while this
+// DLL's switch is on, never shown in the console.
+inline void LogDetail(const char* fmt, ...) {
+    if (!DetailLog()) return;
+    va_list ap;
+    va_start(ap, fmt);
+    LogAs(RFA_MOD_NAME ":log", fmt, ap);
+    va_end(ap);
+}
+}  // namespace
+
+// rfa::LogDetail only the first `limit` times this line is reached while the switch is on.
+#define RFA_LOG_DETAIL_FIRST(limit, ...)         \
+    do {                                         \
+        static int rfa_count_;                   \
+        if (rfa::DetailLog() && rfa_count_ < (limit)) { \
+            ++rfa_count_;                        \
+            rfa::LogDetail(__VA_ARGS__);         \
+        }                                        \
+    } while (0)
+
 // Overwrite one pointer-sized slot in protected memory (import tables, COM vtables).
 inline bool WritePointer(void** slot, void* value) {
     MEMORY_BASIC_INFORMATION mbi;

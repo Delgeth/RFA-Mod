@@ -194,7 +194,7 @@ void Convert(BYTE* npc, BYTE* enemy, const char* why) {
     g_converts.push_back(handle);
     if (g_converted) g_converted(handle);
     const Vector at = PositionOf(npc);
-    rfa::Log("Converts: civilian %08X at (%.0f, %.0f, %.0f) joins the guerrillas (%s)%s%s", handle, at.x, at.y, at.z, why, enemy ? ", against " : "",
+    rfa::LogDetail("Converts: civilian %08X at (%.0f, %.0f, %.0f) joins the guerrillas (%s)%s%s", handle, at.x, at.y, at.z, why, enemy ? ", against " : "",
              enemy ? (TeamOf(enemy) == kEdf ? "the EDF" : "an enemy") : "");
 }
 

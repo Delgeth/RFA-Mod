@@ -219,7 +219,7 @@ void* __fastcall DocumentListMake(void* list, void* unused) {
         (at - kDocumentLists) % kDocumentListStride == 0) {
         const int index = static_cast<int>((at - kDocumentLists) / kDocumentListStride);
         ArraySet(list, nullptr, g_documentListRoom[index], kDocumentListRoom, 0);
-        RFA_LOG_FIRST(kDocumentListCount, "Interface document list 0x%08lX: room for %d (the game's %d)", at,
+        RFA_LOG_DETAIL_FIRST(kDocumentListCount, "Interface document list 0x%08lX: room for %d (the game's %d)", at,
                       kDocumentListRoom, kGameDocumentListRoom);
     }
     return made;
@@ -663,7 +663,7 @@ bool OurScreenOpen() { return StationScreenOpen() || HandbookIsOpen() || Handboo
 void FollowMessages(ULONGLONG hudMs);  // Guerrilla's pickups, use action and saving icon (below)
 void FollowCampaignMessages();         // the campaign's minor messages and tool tips (below)
 void FollowDistricts();                // Guerrilla's control and morale meters' changes (below)
-void OpenLiberation(const std::string& district, float controlMax, int missions, const char* why);  // (below)
+void OpenLiberation(const std::string& district, const std::string& key, float controlMax, int missions, const char* why);  // (below)
 void FollowCampaignScreens();          // the district-liberated screen and the activities' screens (below)
 void AddCampaignScreenCommands();
 void StepCampaignScreens();
@@ -866,12 +866,12 @@ void OpenMap() {
         PauseGame(1, 1, 0, 0);
         g_full.paused = true;
     }
-    rfa::Log("World map opened; the game paused");
+    rfa::LogDetail("World map opened; the game paused");
 }
 
 void CloseMap(const char* why) {
     if (g_mapOpen)
-        rfa::Log("World map closed (%s); while it was open the HUD's update ran %d times, its script %d", why, g_full.hudSteps,
+        rfa::LogDetail("World map closed (%s); while it was open the HUD's update ran %d times, its script %d", why, g_full.hudSteps,
                  g_full.scriptSteps);
     g_full.hudSteps = g_full.scriptSteps = 0;
     g_mapOpen = false;
@@ -914,7 +914,7 @@ void FollowMinimapZoom(double seconds) {
     if (out && HeldDown(out)) g_minimapRadius += kMinimapZoomPerSecond * seconds;
     g_minimapRadius = (std::max)(kMinimapLeastRadius, (std::min)(kMinimapMostRadius, g_minimapRadius));
     if (g_minimapRadius != before && (g_minimapRadius == kMinimapLeastRadius || g_minimapRadius == kMinimapMostRadius))
-        RFA_LOG_FIRST(20, "Minimap: zoomed %s to %.0f m", g_minimapRadius == kMinimapLeastRadius ? "in" : "out", g_minimapRadius);
+        RFA_LOG_DETAIL_FIRST(20, "Minimap: zoomed %s to %.0f m", g_minimapRadius == kMinimapLeastRadius ? "in" : "out", g_minimapRadius);
 }
 
 // rfg_minimap_radius() -> metres: the minimap's reach before the vehicle's speed (Guerrilla's zoom, 40 to 80).
@@ -999,7 +999,7 @@ void SwallowPauseMenuRequest() {
     if (!g_pauseMenuRequest) return;
     if (g_mapOpen || OurScreenOpen() || (GetTickCount64() < g_full.swallowPauseUntil && HeldDown(VK_ESCAPE))) {
         g_pauseMenuRequest = 0;
-        RFA_LOG_FIRST(20, "The pause menu wasn't opened: the world map is open (or Esc just closed it)");
+        RFA_LOG_DETAIL_FIRST(20, "The pause menu wasn't opened: the world map is open (or Esc just closed it)");
     }
 }
 
@@ -1133,7 +1133,7 @@ void Unload(Document& doc, BYTE* open) {
     const unsigned short handle = *reinterpret_cast<unsigned short*>(open + 0x40);
     if (doc.listed) RemoveFromDrawList(g_drawList, nullptr, &handle);
     UnloadDocument(handle);
-    RFA_LOG_FIRST(200, "Unloaded %s", doc.name.c_str());
+    RFA_LOG_DETAIL_FIRST(200, "Unloaded %s", doc.name.c_str());
     doc.loaded = doc.seen = doc.listed = false;
     doc.readyAt = 0;
 }
@@ -1163,7 +1163,7 @@ void FollowTheWorld() {
     // update can run again in the frame the load starts, and once did (2026-11-07, the reload crash at
     // 04:05:37: it loaded all 20 documents again into the memory the load was freeing).
     if (LevelLoading()) {
-        RFA_LOG_FIRST(20, "A level load runs: Guerrilla's HUD documents wait for it to end");
+        RFA_LOG_DETAIL_FIRST(20, "A level load runs: Guerrilla's HUD documents wait for it to end");
         return;
     }
     if (ours) {
@@ -1190,7 +1190,7 @@ void FollowTheWorld() {
         if (!wanted && !doc.loaded) continue;  // most zone pictures, most of the time: nothing to ask the game
         BYTE* open = OpenDocument(doc.name.c_str());
         if (open && !doc.seen) {
-            if (doc.loaded) RFA_LOG_FIRST(200, "The game has %s open", doc.name.c_str());
+            if (doc.loaded) RFA_LOG_DETAIL_FIRST(200, "The game has %s open", doc.name.c_str());
             doc.seen = true;
             if (doc.whileHandbook || doc.handbookPicture) HandbookDocumentArrived();
         }
@@ -1220,7 +1220,7 @@ void FollowTheWorld() {
             doc.missing = true;
             continue;
         }
-        RFA_LOG_FIRST(200, "Loading %s", doc.name.c_str());  // before the game's call, so a log ending here points at it
+        RFA_LOG_DETAIL_FIRST(200, "Loading %s", doc.name.c_str());  // before the game's call, so a log ending here points at it
         const unsigned short handle = LoadWhilePlaying(doc.name.c_str());
         if (handle == kNoDocument) {
             // A zone's picture is asked for again a little later: the game refuses one when its room for
@@ -1240,7 +1240,7 @@ void FollowTheWorld() {
         doc.listed = ShouldDraw(doc, true);
         if (doc.listed) AddToDrawList(g_drawList, nullptr, &handle);
         if (doc.listed && !doc.onTop) KeepOnTop();
-        RFA_LOG_FIRST(200, "Loaded %s (handle %u)%s", doc.name.c_str(), handle, doc.listed ? ", and listed it to be drawn" : "");
+        RFA_LOG_DETAIL_FIRST(200, "Loaded %s (handle %u)%s", doc.name.c_str(), handle, doc.listed ? ", and listed it to be drawn" : "");
     }
 }
 
@@ -1259,7 +1259,14 @@ void LogVintHeap(DWORD step, const char* why) {
     const DWORD grown = *reinterpret_cast<const DWORD*>(kVintHeapGrown), size = *reinterpret_cast<const DWORD*>(kVintHeapSize);
     if (size == 0 || (step != 0 && logged != 0 && grown < logged + step)) return;
     logged = grown;
-    RFA_LOG_FIRST(300, "The interface's heap (Vint and its Lua, Dl_mempool): %lu KB of its %lu KB used at the most so far (world %s; %s)",
+    // Nearly full: the game shows "dlmalloc out of memory!" when it can't grow, and an interface then goes missing.
+    static bool warned = false;
+    if (!warned && grown > size / 10 * 9) {
+        warned = true;
+        rfa::Log("The interface's heap (Dl_mempool) is nine tenths full: %lu KB of its %lu KB used (world %s; %s)", grown / 1024,
+                 size / 1024, WorldName(), why);
+    }
+    RFA_LOG_DETAIL_FIRST(300, "The interface's heap (Vint and its Lua, Dl_mempool): %lu KB of its %lu KB used at the most so far (world %s; %s)",
                   grown / 1024, size / 1024, WorldName(), why);
 }
 
@@ -1297,6 +1304,7 @@ void __cdecl HudUpdate(void* hud) {
     FollowTheWorld();
     SwallowPauseMenuRequest();
     FollowPauseMenuBlock();
+    if (!rfa::DetailLog()) return;  // the rest is for the log, with Log=1
     // For the log: an element pool past the game's own size (each pool: +0x0C in use, +0x10 room).
     struct PoolWatch { const char* type; DWORD pool; DWORD game; DWORD logged; };
     static PoolWatch watched[] = {{"tween", 0x28EEB00, 0x334, 0}, {"document", 0x28F15CC, 0xC4, 0},
@@ -1306,7 +1314,7 @@ void __cdecl HudUpdate(void* hud) {
         const DWORD inUse = *reinterpret_cast<const DWORD*>(watch.pool + 0x0C);
         if (inUse > watch.game && inUse > watch.logged + 50) {
             watch.logged = inUse;
-            RFA_LOG_FIRST(30, "Interface elements: %lu %ss in use (the game had room for %lu, now %lu)", inUse, watch.type,
+            RFA_LOG_DETAIL_FIRST(30, "Interface elements: %lu %ss in use (the game had room for %lu, now %lu)", inUse, watch.type,
                           watch.game, *reinterpret_cast<const DWORD*>(watch.pool + 0x10));
         }
     }
@@ -1314,7 +1322,7 @@ void __cdecl HudUpdate(void* hud) {
     static int mostQueued = kGameDocumentListRoom / 2;
     if (const int queued = StreamingQueueCount(); queued > mostQueued) {
         mostQueued = queued;
-        RFA_LOG_FIRST(30, "Interface: %d documents waiting in the streaming queue (the game had room for %d)", queued,
+        RFA_LOG_DETAIL_FIRST(30, "Interface: %d documents waiting in the streaming queue (the game had room for %d)", queued,
                       kGameDocumentListRoom);
     }
 }
@@ -1344,7 +1352,7 @@ bool __cdecl DrawPass(bool flag) {
         else RemoveFromDrawList(g_drawList, nullptr, &handle);
         doc.listed = draw;
         if (draw && !doc.onTop) KeepOnTop();
-        RFA_LOG_FIRST(40, draw ? "%s shown" : "%s hidden", doc.name.c_str());
+        RFA_LOG_DETAIL_FIRST(40, draw ? "%s shown" : "%s hidden", doc.name.c_str());
     }
     return g_drawPass(flag);
 }
@@ -1389,7 +1397,7 @@ void __cdecl LoadStart() {
         }
     }
     if (unloaded || forgotten)
-        RFA_LOG_FIRST(40, "A load starts: unloaded %d of Guerrilla's HUD documents (and forgot %d still waiting)", unloaded, forgotten);
+        RFA_LOG_DETAIL_FIRST(40, "A load starts: unloaded %d of Guerrilla's HUD documents (and forgot %d still waiting)", unloaded, forgotten);
     g_loadStart();
 }
 
@@ -1663,11 +1671,11 @@ void OpenShop() {
         PauseGame(1, 1, 0, 0);
         g_shop.paused = true;
     }
-    rfa::Log("Upgrade shop opened (%u upgrades); the game paused", static_cast<unsigned>(g_shop.list.size()));
+    rfa::LogDetail("Upgrade shop opened (%u upgrades); the game paused", static_cast<unsigned>(g_shop.list.size()));
 }
 
 void CloseShop(const char* why) {
-    if (g_shop.open) rfa::Log("Upgrade shop closed (%s)", why);
+    if (g_shop.open) rfa::LogDetail("Upgrade shop closed (%s)", why);
     g_shop.open = false;
     g_shop.useDown = true;
     if (g_shop.paused) {
@@ -2147,7 +2155,7 @@ int CabinetRounds(int weapon) {
     if (district != g_districtMorale.end()) morale = district->second;
     const int step = (std::min)(10, (std::max)(0, morale / 10));
     const int level = *reinterpret_cast<const int*>(kGameDifficulty);
-    const float difficulty = level >= 0 && level < 4 ? g_crateDifficulty[level] : 1.0f;
+    const float difficulty = g_crateDifficulty[level >= 0 && level < 4 ? level : 1];  // Custom (4) as Medium (the campaign's rule)
     const int restock = static_cast<int>(static_cast<float>(w.restock) * kCrateMoraleShare[step] * difficulty);
     return (std::min)(most, before + restock);
 }
@@ -2212,7 +2220,7 @@ bool CabinetIsOpen() { return g_cabinet.open; }
 void UseUpAmmoCrate(DWORD handle) {
     BYTE* crate = handle != 0xFFFFFFFF ? ItemFromHandle(kCabinetWorld, nullptr, handle) : nullptr;
     if (!crate || !(crate[kItemSpecialFlags] & kItemIsAmmoBox)) {
-        rfa::Log("Weapon cabinet: the ammo crate it opened at is gone; nothing used up");
+        rfa::LogDetail("Weapon cabinet: the ammo crate it opened at is gone; nothing used up");
         return;
     }
     crate[kItemSpecialFlags] &= static_cast<BYTE>(~kItemUseEnabled);
@@ -2226,7 +2234,7 @@ void OpenCabinet(bool crate) {
     if (!player || g_cabinet.open || g_cabinetWeapons.empty()) return;
     CabinetLook(player, true);
     if (g_cabinet.list.empty()) {
-        rfa::Log("Weapon cabinet: nothing in it yet; it stays shut");
+        rfa::LogDetail("Weapon cabinet: nothing in it yet; it stays shut");
         return;
     }
     g_cabinet.roundsAtOpen.clear();
@@ -2257,7 +2265,7 @@ void OpenCabinet(bool crate) {
         PauseGame(1, 1, 0, 0);
         g_cabinet.paused = true;
     }
-    rfa::Log("Weapon cabinet opened at %s (%u weapons); the game paused", crate ? "an ammo crate (now used up)" : "a safehouse's locker",
+    rfa::LogDetail("Weapon cabinet opened at %s (%u weapons); the game paused", crate ? "an ammo crate (now used up)" : "a safehouse's locker",
              static_cast<unsigned>(g_cabinet.list.size()));
 }
 
@@ -2277,7 +2285,7 @@ void CloseCabinet(const char* why, bool giveAmmo) {
         }
         // hud_ui_weapon_cabinet_exit: a secondary message (ui_add_secondary_message).
         if (!g_cabinet.crate && g_cabinetTexts.count("full_ammo")) ShowMessage(g_cabinetTexts["full_ammo"], false);
-        rfa::Log("Weapon cabinet: ammo for %d guns (%s)", guns, g_cabinet.crate ? "the crate's restock" : "full, at a locker");
+        rfa::LogDetail("Weapon cabinet: ammo for %d guns (%s)", guns, g_cabinet.crate ? "the crate's restock" : "full, at a locker");
         tool_tips::Add(g_cabinet.crate ? "Ammo_Boxes" : "Locker_Ammo");  // hud_ui_weapon_cabinet_exit (0x85B1D9, 0x85B20C)
     }
     tool_tips::Remove(g_cabinet.crate ? "Ammo_Crate_Weapons" : "Locker");
@@ -2287,7 +2295,7 @@ void CloseCabinet(const char* why, bool giveAmmo) {
         UnpauseGame(1, 1);
         g_cabinet.paused = false;
     }
-    rfa::Log("Weapon cabinet closed (%s)", why);
+    rfa::LogDetail("Weapon cabinet closed (%s)", why);
 }
 
 // Guerrilla's process_input for a slot key: the weapon picked into slot 0-2 of the three, swapping places with
@@ -2299,7 +2307,7 @@ void CabinetPutInSlot(int slot) {
     CabinetWeapon& chosen = g_cabinetWeapons[item.weapon];
     const BYTE* entry = CabinetEntry(chosen);
     if (!item.unlocked || !entry) {
-        rfa::Log("Weapon cabinet: %s isn't bought yet", chosen.guerrilla.c_str());
+        rfa::LogDetail("Weapon cabinet: %s isn't bought yet", chosen.guerrilla.c_str());
         return;
     }
     int from = -1;
@@ -2310,7 +2318,7 @@ void CabinetPutInSlot(int slot) {
     const BYTE* oldEntry = RecordEntry(old);
     const int oldWeapon = CabinetWeaponOfEntry(oldEntry);
     if (oldWeapon >= 0 && g_cabinetWeapons[oldWeapon].sledgehammer) {
-        rfa::Log("Weapon cabinet: slot %d holds Mason's hammer, which stays", slot + 1);
+        rfa::LogDetail("Weapon cabinet: slot %d holds Mason's hammer, which stays", slot + 1);
         return;
     }
     const void* oldItem = oldEntry ? *reinterpret_cast<const void* const*>(oldEntry + kEntryInventoryItem) : nullptr;
@@ -2323,7 +2331,7 @@ void CabinetPutInSlot(int slot) {
     const BYTE* given = GiveIntoSlot(player, chosenItem, 0, slot, false, false, false);
     g_cabinet.shine = slot + 1;
     ++g_cabinet.version;
-    rfa::Log("Weapon cabinet: %s into slot %d%s%s", chosen.guerrilla.c_str(), slot + 1, from >= 0 ? " (swapped with the slot's)" : "",
+    rfa::LogDetail("Weapon cabinet: %s into slot %d%s%s", chosen.guerrilla.c_str(), slot + 1, from >= 0 ? " (swapped with the slot's)" : "",
              given ? "" : "; the game refused it");
 }
 
@@ -2667,7 +2675,7 @@ void OpenHandbook() {
             UnpauseGame(1, 1);
             g_handbook.paused = false;
         }
-        rfa::Log("Handbook: nothing open in it; it stays shut");
+        rfa::LogDetail("Handbook: nothing open in it; it stays shut");
         return;
     }
     g_handbook.open = true;
@@ -2680,7 +2688,7 @@ void OpenHandbook() {
         PauseGame(1, 1, 0, 0);
         g_handbook.paused = true;
     }
-    rfa::Log("Handbook opened (%u pages, %u entries open); the game paused", static_cast<unsigned>(pages.size()),
+    rfa::LogDetail("Handbook opened (%u pages, %u entries open); the game paused", static_cast<unsigned>(pages.size()),
              static_cast<unsigned>(std::count_if(g_handbookEntries.begin(), g_handbookEntries.end(), HandbookEntryOpen)));
 }
 
@@ -2699,7 +2707,7 @@ void CloseHandbook(const char* why, bool toPauseMenu) {
         g_handbook.paused = false;
     }
     if (!wasOpen) return;
-    rfa::Log("Handbook closed (%s)", why);
+    rfa::LogDetail("Handbook closed (%s)", why);
 }
 
 bool HandbookClosing() { return g_handbook.closing; }
@@ -3204,7 +3212,7 @@ void FollowCampaignMessages() {
         if (!tag) continue;
         if (kind == kCampaignMessageTip) {
             const bool queued = tool_tips::Add(tag, ms);
-            RFA_LOG_FIRST(40, "The campaign's messages: tool tip %s (wait %d ms)%s", tag, ms, queued ? "" : ", not queued");
+            RFA_LOG_DETAIL_FIRST(40, "The campaign's messages: tool tip %s (wait %d ms)%s", tag, ms, queued ? "" : ", not queued");
             continue;
         }
         const std::string text = GuerrillaText(tag);
@@ -3214,7 +3222,7 @@ void FollowCampaignMessages() {
         }
         const std::string shown = kind == kCampaignMessageCount ? WithNumber(text, ms) : text;
         ShowMessage(shown, false);
-        RFA_LOG_FIRST(40, "The campaign's messages: %s%s%s: \"%s\"%s%s", tag, kind == kCampaignMessageCount ? " with " : "",
+        RFA_LOG_DETAIL_FIRST(40, "The campaign's messages: %s%s%s: \"%s\"%s%s", tag, kind == kCampaignMessageCount ? " with " : "",
                       kind == kCampaignMessageCount ? std::to_string(ms).c_str() : "", shown.c_str(),
                       icon ? ", icon " : "", icon ? icon : "");
     }
@@ -3240,7 +3248,7 @@ void AddPickups(std::vector<Pickup> found, ULONGLONG now) {
     }
     g_pickups.shownAt = now;
     ++g_pickups.version;
-    for (const Pickup& p : found) RFA_LOG_FIRST(60, "Picked up: %s %+d%s", p.picture.c_str(), p.amount, p.salvage ? " (salvage)" : "");
+    for (const Pickup& p : found) RFA_LOG_DETAIL_FIRST(60, "Picked up: %s %+d%s", p.picture.c_str(), p.amount, p.salvage ? " (salvage)" : "");
 }
 
 // Each HUD update in our world: what was picked up since the last (salvage, weapons, rounds).
@@ -3366,7 +3374,7 @@ void LogUseAction() {
     BYTE* object = ObjectFromHandle(kCabinetWorld, nullptr, action->handle);
     char text[96] = {};
     WideCharToMultiByte(CP_UTF8, 0, action->text, -1, text, sizeof(text) - 1, nullptr, nullptr);
-    rfa::Log("Use action seen: type %d, icon %d, object type %d subtype %d, text \"%s\"", action->type, action->icon,
+    rfa::LogDetail("Use action seen: type %d, icon %d, object type %d subtype %d, text \"%s\"", action->type, action->icon,
              object ? static_cast<signed char>(object[0x7A]) : -1, object ? static_cast<signed char>(object[kObjectSubtype]) : -1, text);
 }
 
@@ -3996,7 +4004,7 @@ void FollowDistricts() {
             u.currentPct = info.control / info.controlMax;
             u.deltaPct = (info.control - info.controlBefore) / info.controlMax;
             u.district = name;
-            RFA_LOG_FIRST(40, "Guerrilla's meters: %s's control %d (%+d, %.0f%%)", name.c_str(), u.current, u.delta, u.currentPct * 100.0f);
+            RFA_LOG_DETAIL_FIRST(40, "Guerrilla's meters: %s's control %d (%+d, %.0f%%)", name.c_str(), u.current, u.delta, u.currentPct * 100.0f);
         }
         if (known && info.moraleChangedAt >= 0 && info.moraleChangedAt != seen.moraleAt && info.moraleMax > 0.0f) {
             const bool sameDistrict = i == g_moraleShownDistrict;
@@ -4012,15 +4020,15 @@ void FollowDistricts() {
                 u.moralePct = info.morale / info.moraleMax;
                 u.moraleChange = info.morale - info.moraleBefore;
                 u.district = name;
-                RFA_LOG_FIRST(40, "Guerrilla's meters: %s's morale %.0f%% (%+.0f)", name.c_str(), u.moralePct * 100.0f, u.moraleChange);
+                RFA_LOG_DETAIL_FIRST(40, "Guerrilla's meters: %s's morale %.0f%% (%+.0f)", name.c_str(), u.moralePct * 100.0f, u.moraleChange);
             } else {
-                RFA_LOG_FIRST(20, "Guerrilla's meters: %s's morale change not shown (another district's shown under 5 s ago)", name.c_str());
+                RFA_LOG_DETAIL_FIRST(20, "Guerrilla's meters: %s's morale change not shown (another district's shown under 5 s ago)", name.c_str());
             }
         }
         seen.controlAt = info.controlChangedAt;
         seen.moraleAt = info.moraleChangedAt;
         // district::liberate_district's screen (hud_ui_district_liberation_show, LUT_LIBERATION) as it's liberated.
-        if (known && info.liberated && !seen.liberated) OpenLiberation(name, info.controlMax, 0, "the campaign liberated it");
+        if (known && info.liberated && !seen.liberated) OpenLiberation(name, info.name ? info.name : "", info.controlMax, 0, "the campaign liberated it");
         seen.liberated = info.liberated != 0;
     }
     g_districtsKnown = true;
@@ -4068,9 +4076,10 @@ int __cdecl LuaDistrictChange(lua_State* L) {
 //   a press; then it closes (the document unloaded, the HUD's items back).
 // Here: opened when the campaign's district turns liberated (FollowDistricts), or by the console's rfg_liberated (to
 // see it); the game paused while it's open, as Guerrilla's state did; the continue keys Enter, Space and the left
-// button (Guerrilla's PC key picture for Enter, key_178, in its hint). Its unlocks: none yet (guerrilla_gear doesn't
-// hold Guerrilla's upgrades to their districts yet). An animation's end not heard of in kScreenStepMostMs: presses
-// are taken anyway, so a missing end can't hold the game.
+// button (Guerrilla's PC key picture for Enter, key_178, in its hint). Its unlocks: guerrilla_gear's
+// GuerrillaGear_LiberationUnlocks for the district, asked as the screen opens (the console's test shows what its
+// district would unlock). An animation's end not heard of in kScreenStepMostMs: presses are taken anyway, so a
+// missing end can't hold the game.
 //
 // An activity's screens: GuerrillaCampaign_Activity(&ActivityInfo) gives what shows (1 the briefing, waiting for
 // Accept or Cancel; 2 running: the corner panel; 3 the results, waiting for Close) with Guerrilla's string tags;
@@ -4128,14 +4137,24 @@ struct LiberationScreen {
     bool busy = true;          // a step's animation plays: presses wait for its end
     ULONGLONG busySince = 0;
     int unlocks = 0, unlock = 0;
+    std::string unlockName[3], unlockTitle[3];  // the upgrades unlocked: upgrades.xtbl's name, the level's name
     unsigned version = 0;
     bool enterDown = true, spaceDown = true, clickDown = true;
     ULONGLONG lastStep = 0;
 };
 LiberationScreen g_liberation;
+
+// guerrilla_gear's GuerrillaGearUnlock (upgrades.cpp): an upgrade whose next level a district's liberation unlocked.
+struct GearUnlock {
+    int size;
+    char name[64];
+    char levelName[96];
+};
+static_assert(sizeof(GearUnlock) == 164, "guerrilla_gear's GuerrillaGearUnlock is 164 bytes");
+using GearLiberationUnlocksFn = int(__cdecl*)(const char* district, GearUnlock* out, int most);
 struct PendingLiberation {
     bool wanted = false;
-    std::string district;
+    std::string district, key;  // as shown; Guerrilla's name
     float controlMax = 0.0f;
 } g_liberationPending;      // the console's: opened at the next HUD update
 
@@ -4164,7 +4183,7 @@ void CloseOtherScreens(const char* why) {
     CloseCabinet(why, false);
 }
 
-void OpenLiberation(const std::string& district, float controlMax, int missions, const char* why) {
+void OpenLiberation(const std::string& district, const std::string& key, float controlMax, int missions, const char* why) {
     LiberationScreen& s = g_liberation;
     if (s.open) return;
     CloseOtherScreens("the district-liberated screen");
@@ -4175,6 +4194,17 @@ void OpenLiberation(const std::string& district, float controlMax, int missions,
     s.district = district;
     s.controlMax = controlMax;
     s.missions = missions;
+    // What the liberation unlocked (upgrade_unlock_from_liberation's list, three at most), from guerrilla_gear.
+    if (auto unlocks = reinterpret_cast<GearLiberationUnlocksFn>(ModExport(L"guerrilla_gear.dll", "GuerrillaGear_LiberationUnlocks"))) {
+        GearUnlock list[3] = {};
+        for (GearUnlock& one : list) one.size = sizeof(GearUnlock);
+        s.unlocks = unlocks(key.c_str(), list, 3);
+        if (s.unlocks < 0 || s.unlocks > 3) s.unlocks = 0;
+        for (int i = 0; i < s.unlocks; ++i) {
+            s.unlockName[i] = list[i].name;
+            s.unlockTitle[i] = list[i].levelName;
+        }
+    }
     s.busySince = GetTickCount64();
     PauseGame(1, 1, 0, 0);
     s.paused = true;
@@ -4190,7 +4220,7 @@ void CloseLiberation(const char* why) {
         s.paused = false;
     }
     g_shop.useDown = true;
-    rfa::Log("District-liberated screen closed (%s)", why);
+    rfa::LogDetail("District-liberated screen closed (%s)", why);
 }
 
 // _process_input: the next step (LUT_LIBERATION: the header, the control's tally, each unlock), or the end.
@@ -4212,7 +4242,7 @@ void LiberationNext() {
     s.busy = true;
     s.busySince = GetTickCount64();
     ++s.version;
-    RFA_LOG_FIRST(20, "District-liberated screen: step %d", s.step);
+    RFA_LOG_DETAIL_FIRST(20, "District-liberated screen: step %d", s.step);
 }
 
 void StepLiberation() {
@@ -4272,7 +4302,7 @@ void CloseActivityScreen(const char* why) {
         s.paused = false;
     }
     g_shop.useDown = true;
-    rfa::Log("Activity screen closed (%s)", why);
+    rfa::LogDetail("Activity screen closed (%s)", why);
 }
 
 void AnswerActivity(int accept, const char* why) {
@@ -4280,7 +4310,7 @@ void AnswerActivity(int accept, const char* why) {
     ActivityScreen& s = g_activity;
     if (choose) choose(accept);
     s.answered = s.screen;
-    rfa::Log("Activity screen: %s (%s)", s.screen == kActivityBriefing ? (accept ? "Accept" : "Cancel") : "Close", why);
+    rfa::LogDetail("Activity screen: %s (%s)", s.screen == kActivityBriefing ? (accept ? "Accept" : "Cancel") : "Close", why);
     CloseActivityScreen(why);
 }
 
@@ -4317,7 +4347,7 @@ void StepActivityScreen() {
 void FollowCampaignScreens() {
     if (g_liberationPending.wanted) {
         g_liberationPending.wanted = false;
-        OpenLiberation(g_liberationPending.district, g_liberationPending.controlMax, 0, "the console's rfg_liberated");
+        OpenLiberation(g_liberationPending.district, g_liberationPending.key, g_liberationPending.controlMax, 0, "the console's rfg_liberated");
     }
     static auto activity = reinterpret_cast<CampaignActivityFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_Activity"));
     static auto choose = ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_ActivityChoose");
@@ -4328,7 +4358,7 @@ void FollowCampaignScreens() {
         const int screen = activity(&info) ? info.screen : 0;
         if (screen != 0) KeepActivity(info);
         if (screen != s.screen) {
-            RFA_LOG_FIRST(40, "Activity screen: the campaign shows %d (mode %d, %s)", screen, info.mode, info.title ? info.title : "-");
+            RFA_LOG_DETAIL_FIRST(40, "Activity screen: the campaign shows %d (mode %d, %s)", screen, info.mode, info.title ? info.title : "-");
             s.answered = 0;
             ++s.version;
         }
@@ -4381,15 +4411,16 @@ void LiberatedCommand() {
     if (!g_consoleCommandRunning) return;
     static auto district = reinterpret_cast<CampaignDistrictFn>(ModExport(L"guerrilla_campaign.dll", "GuerrillaCampaign_District"));
     CampaignDistrict info{};
-    std::string name = "DUST";
+    std::string name = "DUST", key = "Dust";
     float most = 380.0f;
     if (district && (district(-1, &info) || district(1, &info)) && info.name) {
-        name = info.name;
+        name = key = info.name;
         if (const auto shown = g_districtShownNames.find(name); shown != g_districtShownNames.end()) name = shown->second;
         most = info.controlMax;
     }
     g_liberationPending.wanted = true;
     g_liberationPending.district = name;
+    g_liberationPending.key = key;
     g_liberationPending.controlMax = most;
     ConsolePrint("Guerrilla's district-liberated screen for %s (close the console; Enter, Space or a click goes on)\n", name.c_str());
 }
@@ -4402,10 +4433,14 @@ void AddCampaignScreenCommands() {
                     &LiberatedCommand);
 }
 
-// rfg_liberation() -> open, version, step, busy, district, label, control_most, missions, hint_key, hint_text
+// rfg_liberation() -> open, version, step, busy, district, label, control_most, missions, hint_key, hint_text,
+//                     upgrade, upgrade_title, upgrade_label, upgrade_info
 //   The district-liberated screen: whether it's open; a number that changes with each step; its step (0 the header,
 //   1 the control's tally, 2 the unlocks); whether its animation still plays; the district's name; LIBERATED;
-//   the control's most (the tally starts there); the district's missions; the continue key's picture and CONTINUE.
+//   the control's most (the tally starts there); the district's missions; the continue key's picture and CONTINUE;
+//   in step 2 the upgrade shown (upgrades.xtbl's name, the key of its pictures), the level's name, the tag
+//   MENU_UNLOCKED and Guerrilla's TOOLTIP_UNLOCK_UPGRADES_DESC (hud_ui_district_liberation_process_unlock_data RM
+//   0x846DF0 outside the DLC); nil while no unlock is shown.
 int __cdecl LuaLiberation(lua_State* L) {
     using namespace rfa::game;
     const LiberationScreen& s = g_liberation;
@@ -4419,7 +4454,15 @@ int __cdecl LuaLiberation(lua_State* L) {
     lua_pushnumber(L, s.missions);
     lua_pushstring(L, kEnterKeyPicture);
     lua_pushstring(L, GuerrillaText("MENU_CONTINUE").c_str());
-    return 10;
+    if (s.open && s.step == 2 && s.unlock >= 0 && s.unlock < s.unlocks) {
+        lua_pushstring(L, s.unlockName[s.unlock].c_str());
+        lua_pushstring(L, s.unlockTitle[s.unlock].c_str());
+        lua_pushstring(L, "MENU_UNLOCKED");
+        lua_pushstring(L, GuerrillaText("TOOLTIP_UNLOCK_UPGRADES_DESC").c_str());
+    } else {
+        for (int i = 0; i < 4; ++i) lua_pushnil(L);
+    }
+    return 14;
 }
 
 // rfg_liberation_step_done(): the step's animation has ended (Guerrilla's rfg_dist_lib_tween_end).
@@ -4664,7 +4707,7 @@ int __cdecl LuaDataItemMake(lua_State* L) {
     if (!MakeItem(&item.handle, item.name.c_str(), codes.data(), static_cast<int>(codes.size()), nullptr, 0))
         rfa::Log("Could not make Guerrilla's data item %s: the engine's 128 data items may all be in use", name);
     else
-        rfa::Log("Made Guerrilla's data item %s (%u fields): handle 0x%08lX", name, static_cast<unsigned>(codes.size()), item.handle);
+        rfa::LogDetail("Made Guerrilla's data item %s (%u fields): handle 0x%08lX", name, static_cast<unsigned>(codes.size()), item.handle);
     return 0;
 }
 
@@ -5118,6 +5161,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_RegisterLua(lua_State* L) {
 }
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
+    // Log= also has Guerrilla's HUD scripts write what they find (rfg_ui_*.lua read it themselves).
+    if (rfa::ReadLogSwitch(L"GuerrillaHud")) rfa::Log("Log=1: routine lines (\"[guerrilla_hud:log]\") are on");
     if (!rfa::game::IsSupportedBuild()) {
         rfa::Log("Not the publicbeta build; nothing to do");
         return;

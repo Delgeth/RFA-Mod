@@ -60,7 +60,8 @@ using namespace gv;
 auto const HonkHorn = reinterpret_cast<void(__cdecl*)(DWORD vehicle)>(0x5FB030);     // automobile_honk_horn (a live automobile's handle)
 auto const ReleaseHorn = reinterpret_cast<void(__cdecl*)(DWORD vehicle)>(0x5FB110);  // automobile_release_horn
 constexpr float kSpeed = 9.0f, kMinSpawn = 60.0f, kMaxSpawn = 260.0f, kApart = 30.0f, kDespawn = 280.0f, kReached = 20.0f, kStopShort = 10.0f;
-constexpr int kCaps[4] = {0, 4, 6, 10};  // Guerrilla's at green alert (max_vehicle_count 0xB41110), by density
+// Guerrilla's caps by alert level and density (max_vehicle_count 0xB41110, its table 0x13360C8): green, yellow, orange, red.
+constexpr int kCaps[4][4] = {{0, 4, 6, 10}, {0, 4, 6, 8}, {0, 2, 3, 4}, {0, 1, 2, 3}};
 // The world's counts by kind (World +0x308 + kind × 12, the count at +8): people (2) and automobiles (5).
 constexpr DWORD kPeopleCount = 0x1870958, kCarCount = 0x187097C;
 // Guerrilla's 90 people (its NPC pool holds 100, as Armageddon's) and 28 cars: its pool's 32 less 4
@@ -104,14 +105,14 @@ BYTE* PickFromGroup(const std::string& group) {
 void TrySpawn(const BYTE* player, const Zone& zone) {
     const bool night = [] { const int hour = GameHour(); return hour >= 18 || hour < 6; }();
     const int density = std::clamp(night ? zone.night : zone.day, 0, 3);
-    if (static_cast<int>(g_cars.size() + g_pending.size()) >= kCaps[density]) return;
+    if (static_cast<int>(g_cars.size() + g_pending.size()) >= kCaps[CampaignAlert()][density]) return;
     // Guerrilla's caps on the whole world (do_frame_spawn_vehicle): more than 90 people or 28 cars (of its 32), no
     // new car; here kMostCars of kCarsAtOnce.
     const int people = *reinterpret_cast<const int*>(kPeopleCount), cars = *reinterpret_cast<const int*>(kCarCount);
     RFA_LOG_FIRST(1, "Traffic: the world has %d people and %d cars (no new car above %d or %d)", people, cars, kMostPeople, kMostCars);
     const bool counted = people >= 0 && people < 100000 && cars >= 0 && cars < 100000;
     if (counted && (people > kMostPeople || cars > kMostCars)) {
-        RFA_LOG_FIRST(5, "Traffic: no new car: the world has %d people and %d cars", people, cars);
+        RFA_LOG_DETAIL_FIRST(5, "Traffic: no new car: the world has %d people and %d cars", people, cars);
         return;
     }
     const V3 at = Pos(player);
@@ -153,11 +154,16 @@ void MadeCar(BYTE* vehicle, const std::string& resource, const std::string& mode
     car.since = GameTime();
     car.made = GameTime();
     if (const auto* people = People(resource, "Guerilla")) {  // the zone's civilians and guerrillas
+        // spawn_single_vehicle (RM 0xB5EE60): 1 to 3 aboard, at most its seats; 2 fewer at orange or red or while an
+        // activity runs (at least 1); only the driver while the world holds more than 75 people.
         const int seats = (std::max)(1, Seats(vehicle));
-        const int count = (std::min)(seats, 1 + std::rand() % 3);
+        int count = (std::min)(seats, 1 + std::rand() % 3);
+        if (CampaignAlert() >= 2 || CampaignActivityRunning()) count = (std::max)(1, count - 2);
+        const int inWorld = *reinterpret_cast<const int*>(kPeopleCount);
+        if (inWorld > 75 && inWorld < 100000) count = 1;
         for (int i = 0; i < count; ++i) car.waiting.push_back((*people)[std::rand() % people->size()]);
     }
-    RFA_LOG_FIRST(100, "Traffic: %s on the road, %u aboard (%s)", model.c_str(), static_cast<unsigned>(car.waiting.size()), resource.c_str());
+    RFA_LOG_DETAIL_FIRST(100, "Traffic: %s on the road, %u aboard (%s)", model.c_str(), static_cast<unsigned>(car.waiting.size()), resource.c_str());
     g_cars.push_back(car);
 }
 
@@ -203,7 +209,7 @@ void HornFrame(Car& car, BYTE* vehicle) {
         HonkHorn(car.vehicle);
         car.hornDown = true;
         TimerStart(&car.horn, nullptr, 500 + std::rand() % 1501);
-        RFA_LOG_FIRST(5, "Traffic: a car honks at what's in its way");
+        RFA_LOG_DETAIL_FIRST(5, "Traffic: a car honks at what's in its way");
     } else {
         TimerStart(&car.horn, nullptr, 10000 + std::rand() % 5001);
         LetGoOfHorn(car, vehicle);
@@ -267,7 +273,7 @@ void Despawn(Car& car) {
 bool BailOut(Car& car, BYTE* vehicle, const char* why) {
     if (!car.bailing) {
         car.bailing = true;
-        RFA_LOG_FIRST(20, "Traffic: a car's people get out (%s)", why);
+        RFA_LOG_DETAIL_FIRST(20, "Traffic: a car's people get out (%s)", why);
     }
     StopCar(vehicle);
     LetGoOfHorn(car, vehicle);
@@ -343,7 +349,7 @@ void NoteMostCars(int count) {
     MEMORYSTATUSEX memory{sizeof(memory)};
     const bool measured = GlobalMemoryStatusEx(&memory) != 0;
     const unsigned long inUse = measured ? static_cast<unsigned long>((memory.ullTotalVirtual - memory.ullAvailVirtual) >> 20) : 0;
-    RFA_LOG_FIRST(64, "Cars: %d in the world, the most this run (it holds %d; traffic stops at %d, the farthest empty car goes from %d on); the game's "
+    RFA_LOG_DETAIL_FIRST(64, "Cars: %d in the world, the most this run (it holds %d; traffic stops at %d, the farthest empty car goes from %d on); the game's "
                   "address space in use: %lu MB", count, kCarsAtOnce, kMostCars, kAggressiveCars, inUse);
 }
 
@@ -373,7 +379,7 @@ void AggressiveDespawn(BYTE* player) {
     }
     BYTE* gone = fading ? fading : farthest;
     if (!gone) return;
-    RFA_LOG_FIRST(40, "Cars: %d in the world (one taken away from %d on, of %d: Guerrilla's 30 of 32); %s taken away, %.0f m from the player, off screen",
+    RFA_LOG_DETAIL_FIRST(40, "Cars: %d in the world (one taken away from %d on, of %d: Guerrilla's 30 of 32); %s taken away, %.0f m from the player, off screen",
                   count, kAggressiveCars, kCarsAtOnce, fading ? "one fading out" : "the farthest empty one", Distance(Pos(gone), Pos(player)));
     DestroyObject(kWorld, nullptr, gone, false);
 }
@@ -444,7 +450,7 @@ void DescribeVisibility(const char* what, BYTE* vehicle, float distance) {
     if (age >= 0) sprintf_s(made, "; made %d ms after its model streamed in", age);
     else sprintf_s(made, "; its model was in before its spawn asked");
     strcat_s(streaming, made);
-    RFA_LOG_FIRST(120, "Vehicles: %s %s (0x%08lX, a %s, at %.0f %.0f %.0f, %.1f m from the player; made by %s): draws at alpha %.2f; fading in %d, "
+    RFA_LOG_DETAIL_FIRST(120, "Vehicles: %s %s (0x%08lX, a %s, at %.0f %.0f %.0f, %.1f m from the player; made by %s): draws at alpha %.2f; fading in %d, "
                        "fading out %d (from the nano %d), despawn after fade %d, hidden %d; its model: %s; object flags %02X %02X %02X %02X",
                   what, VehicleNameOf(vehicle), Handle(vehicle),
                   VehicleSubtype(vehicle, nullptr) == kAutomobile ? "car" : (VehicleSubtype(vehicle, nullptr) == kFlyer ? "flyer" : "walker or other"),
@@ -453,6 +459,7 @@ void DescribeVisibility(const char* what, BYTE* vehicle, float distance) {
 }
 
 void LookForUnseenVehicles(BYTE* player) {
+    if (!rfa::DetailLog()) return;  // a diagnosis for the log (Log=1)
     const int now = GameTime();
     if (now < g_nextLook) return;
     g_nextLook = now + 500;
@@ -500,7 +507,7 @@ void TrafficFrame() {
             g_nextSpawn = now + 2000 + std::rand() % 2000;
         }
         if (result == 1 && now - pending->since < 15000) { ++pending; continue; }
-        if (result != 0) RFA_LOG_FIRST(20, "Traffic: %s wasn't made (%s)", pending->model.c_str(), result == 1 ? "not streamed in within 15 s" : "the game refused it");
+        if (result != 0) RFA_LOG_DETAIL_FIRST(20, "Traffic: %s wasn't made (%s)", pending->model.c_str(), result == 1 ? "not streamed in within 15 s" : "the game refused it");
         pending = g_pending.erase(pending);
     }
     // The cars.
@@ -547,7 +554,7 @@ void TrafficFrame() {
         // RM 0x5EA660, the highest fitness while it's set), which it can't while he sits frames out. So the car is the
         // game's from now on, stopped, and he gets out with his exit, as in Guerrilla.
         if (AskedOut(*car)) {
-            RFA_LOG_FIRST(40, "Traffic: someone in %s is asked out of his seat (another takes it): the car is the game's from now on, and he gets out",
+            RFA_LOG_DETAIL_FIRST(40, "Traffic: someone in %s is asked out of his seat (another takes it): the car is the game's from now on, and he gets out",
                           VehicleNameOf(vehicle));
             StopCar(vehicle);
             HandBack(*car, vehicle);
@@ -558,7 +565,7 @@ void TrafficFrame() {
             if (BYTE* human = HumanByHandle(kWorld, nullptr, person.handle)) SitOut(human);
         if (!seated || !Driving(driver)) {
             if (now - car->since > 10000 && car->people.empty()) {  // nobody could be made for it
-                RFA_LOG_FIRST(20, "Traffic: nobody of its zone's people could be made for a car; it's taken away out of sight");
+                RFA_LOG_DETAIL_FIRST(20, "Traffic: nobody of its zone's people could be made for a car; it's taken away out of sight");
                 Crew empty;
                 empty.vehicle = car->vehicle;
                 RetireWhenUnseen(empty);
@@ -566,7 +573,7 @@ void TrafficFrame() {
                 continue;
             }
             if (now - car->since > 15000) {  // its people never sat down: left to the game, parked
-                RFA_LOG_FIRST(20, "Traffic: a car's driver didn't take the wheel in 15 s; the car is left to the game");
+                RFA_LOG_DETAIL_FIRST(20, "Traffic: a car's driver didn't take the wheel in 15 s; the car is left to the game");
                 HandBack(*car, vehicle);
                 car = g_cars.erase(car);
                 continue;
@@ -592,7 +599,7 @@ void TrafficFrame() {
             OverrideSpeed(vehicle, car->fleeing ? 0.0f : kSpeed);  // 0 clears the override: the car's own top speed
             if (car->fleeing) {
                 car->hasDestination = false;
-                RFA_LOG_FIRST(20, "Traffic: a driver flees%s", fromThreat ? " from what it saw" : "");
+                RFA_LOG_DETAIL_FIRST(20, "Traffic: a driver flees%s", fromThreat ? " from what it saw" : "");
             }
         }
         // Waiting (the game's avoidance set it): brake, maybe honk, and don't drive on this frame. A fleeing
@@ -602,7 +609,7 @@ void TrafficFrame() {
             const bool running = !TimerElapsed(wait, nullptr);
             const bool forPlayer = *reinterpret_cast<const DWORD*>(vehicle + kWaitBlocker) == Handle(player);
             if (running && (!car->fleeing || forPlayer)) {
-                RFA_LOG_FIRST(5, "Traffic: a car waits for %s in its way", forPlayer ? "the player" : "something");
+                RFA_LOG_DETAIL_FIRST(5, "Traffic: a car waits for %s in its way", forPlayer ? "the player" : "something");
                 StopCar(vehicle);
                 HornFrame(*car, vehicle);
                 ++car;
@@ -630,7 +637,7 @@ void TrafficFrame() {
             }
         } else ++car->failures;
         if (car->failures > 30) {  // lost its way 30 times in a row: taken away out of sight
-            RFA_LOG_FIRST(20, "Traffic: a car lost its way; it's taken away out of sight");
+            RFA_LOG_DETAIL_FIRST(20, "Traffic: a car lost its way; it's taken away out of sight");
             HandBack(*car, vehicle);
             Crew leaving;
             leaving.vehicle = car->vehicle;
@@ -662,6 +669,7 @@ void __cdecl SpawnNodeFrame() {
     gv::ChasesFrame();
     gv::SafehousesFrame();
     gv::RidersFrame();
+    gv::DropOffFrame();
 }
 
 }  // namespace
@@ -685,5 +693,6 @@ void StartTraffic() {
         gv::StartEdf();
         gv::StartChases();
         gv::StartSafehouses();
+        gv::StartDropOff();
     }
 }

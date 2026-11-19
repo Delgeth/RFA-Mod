@@ -374,7 +374,7 @@ void __cdecl Presim(BYTE* vehicle) {
     const DWORD flags = *reinterpret_cast<const DWORD*>(vehicle + kVehicleFlags);
     if (pilot && !(flags & kEngineRunning)) {
         FlyerEngineStart(vehicle, nullptr, false);  // its pilot takes off with it running
-        RFA_LOG_FIRST(10, "Flyers: an NPC's flyer's engine started");
+        RFA_LOG_DETAIL_FIRST(10, "Flyers: an NPC's flyer's engine started");
     }
     const float dt = *kFrameTime;
     if (dt <= 0.0f) return;

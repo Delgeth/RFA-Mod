@@ -19,6 +19,8 @@
 #include <atomic>
 #include <vector>
 #include <string>
+#include <cctype>
+#include <cstdlib>
 #include <sstream>
 #include <iomanip>
 #include <chrono>
@@ -151,7 +153,10 @@ static constexpr DWORD kLuaStatePtr = 0x028EB870;
 // Named pipe for communication with external analysis tools
 static constexpr const wchar_t* kPipeName = L"\\\\.\\pipe\\RFA_LiveAnalysis";
 static HANDLE g_pipe = INVALID_HANDLE_VALUE;
-static std::thread g_pipeThread;
+// The pipe's thread: a Windows thread, not a std::thread. It waits for a client for as long as the game runs and
+// Windows ends it as the game exits; a std::thread still running when rfa_qol unloads calls std::terminate, which
+// ended every exit with 0xC0000409 and no crash report (the 2026-11-19 runs, with [Mcp] Enabled=1).
+static HANDLE g_pipeThread = nullptr;
 static std::atomic<bool> g_pipeRunning{false};
 
 // Command queue for thread-safe pipe communication
@@ -264,6 +269,40 @@ void UpdateGameStateCache();
 GameState GetGameStateSnapshot();
 void HandleCommand(const PipeCommand& cmd);
 
+// The pipe's thread (a Windows thread: see g_pipeThread). A command the client got wrong is answered with an error
+// where it is handled; one that fails some other way (a C++ exception: no memory for a size asked, say) is answered
+// with an error here and logged, the client is let go, and the pipe waits for the next one. The game goes on.
+DWORD WINAPI RunPipeServer(void*) {
+    for (;;) {
+        std::string failure;
+        try {
+            PipeServerThread();
+            return 0;
+        } catch (const std::exception& error) {
+            failure = error.what();
+        } catch (...) {
+            failure = "not a standard exception";
+        }
+        rfa::Log("Pipe: a command failed (%s); the client is let go", failure.c_str());
+        if (g_pipe != INVALID_HANDLE_VALUE) {
+            SendPipeResponse(g_pipe, "ERROR: the command failed (" + failure + "); connect again");
+            CloseHandle(g_pipe);
+            g_pipe = INVALID_HANDLE_VALUE;
+        }
+        if (!g_pipeRunning) return 0;
+        Sleep(1000);  // a failure that comes back each time doesn't fill the log
+    }
+}
+
+// Two hex digits from `text` at `at` as a byte ("7f" is 0x7F); false if they aren't two hex digits. The bytes of
+// "write" and "scan" come from the client: a bad one is answered with an error (std::stoul threw on it).
+bool ParseHexByte(const std::string& text, size_t at, BYTE& value) {
+    if (at + 2 > text.size() || !isxdigit(static_cast<unsigned char>(text[at])) || !isxdigit(static_cast<unsigned char>(text[at + 1])))
+        return false;
+    value = static_cast<BYTE>(strtoul(text.substr(at, 2).c_str(), nullptr, 16));
+    return true;
+}
+
 // Helper to queue a Lua command for main thread execution
 // Returns the result string from the command
 static std::string QueueLuaCommand(const std::string& code, DWORD timeoutMs = 5000) {
@@ -307,7 +346,8 @@ void Init() {
     // Start the named pipe server thread
     g_pipeRunning = true;
     g_luaQueueRunning = true;
-    g_pipeThread = std::thread(PipeServerThread);
+    g_pipeThread = CreateThread(nullptr, 0, RunPipeServer, nullptr, 0, nullptr);
+    if (!g_pipeThread) rfa::Log("Could not start the pipe's thread (error %lu): no pipe", GetLastError());
 
     // Hook some key game functions for call tracing
     // These are example hooks - more can be added via the pipe interface
@@ -323,8 +363,13 @@ void Shutdown() {
     g_luaQueueRunning = false;
     g_queueCV.notify_all();
 
-    if (g_pipeThread.joinable()) {
-        g_pipeThread.join();
+    // The thread may be waiting for a client or a command: that wait is let go, then a moment to end (else it is
+    // left to Windows).
+    if (g_pipeThread) {
+        CancelSynchronousIo(g_pipeThread);
+        WaitForSingleObject(g_pipeThread, 1000);
+        CloseHandle(g_pipeThread);
+        g_pipeThread = nullptr;
     }
 
     // Unregister FrameUpdate callback
@@ -374,7 +419,9 @@ void PipeServerThread() {
         // Create the named pipe
         HANDLE pipe = CreateNamedPipeW(
             kPipeName,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            // Synchronous: its reads and writes are made without an OVERLAPPED. Opened overlapped, such a read could
+            // return before it was done, its byte count not yet set.
+            PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             65536,  // output buffer
@@ -458,11 +505,15 @@ void PipeServerThread() {
                 std::string hexData;
                 if (iss >> std::hex >> addr >> hexData) {
                     std::vector<BYTE> data;
-                    for (size_t i = 0; i < hexData.length(); i += 2) {
-                        std::string byteStr = hexData.substr(i, 2);
-                        data.push_back(static_cast<BYTE>(std::stoul(byteStr, nullptr, 16)));
+                    bool bytesOk = hexData.length() % 2 == 0;
+                    for (size_t i = 0; bytesOk && i < hexData.length(); i += 2) {
+                        BYTE value = 0;
+                        bytesOk = ParseHexByte(hexData, i, value);
+                        if (bytesOk) data.push_back(value);
                     }
-                    if (WriteGameMemory(addr, data.data(), data.size())) {
+                    if (!bytesOk) {
+                        SendPipeResponse(pipe, "ERROR: <hex_bytes> must be pairs of hex digits, e.g. 90 or 0F1E");
+                    } else if (WriteGameMemory(addr, data.data(), data.size())) {
                         SendPipeResponse(pipe, "OK");
                     } else {
                         SendPipeResponse(pipe, "ERROR: Write failed");
@@ -584,8 +635,15 @@ void PipeServerThread() {
                     if (mask.empty()) mask = std::string(pattern.length() / 2, 'x');
 
                     std::vector<BYTE> patternBytes;
-                    for (size_t i = 0; i + 1 < pattern.length(); i += 2) {
-                        patternBytes.push_back(static_cast<BYTE>(std::stoul(pattern.substr(i, 2), nullptr, 16)));
+                    bool bytesOk = pattern.length() % 2 == 0;
+                    for (size_t i = 0; bytesOk && i < pattern.length(); i += 2) {
+                        BYTE value = 0;
+                        bytesOk = ParseHexByte(pattern, i, value);
+                        if (bytesOk) patternBytes.push_back(value);
+                    }
+                    if (!bytesOk) {
+                        SendPipeResponse(pipe, "ERROR: <hex_pattern> must be pairs of hex digits (a wildcard is a ? in the mask)");
+                        continue;
                     }
 
                     std::ostringstream oss;
@@ -1062,7 +1120,11 @@ void PipeServerThread() {
                 std::string keyStr, action = "press";
                 if (iss >> keyStr >> action) {
                     int vk = 0;
-                    if (keyStr.rfind("0x", 0) == 0) vk = std::stoi(keyStr, nullptr, 16);
+                    if (keyStr.rfind("0x", 0) == 0) {  // a key code: 0x01 to 0xFE, else answered with an error below
+                        char* end = nullptr;
+                        const unsigned long code = strtoul(keyStr.c_str() + 2, &end, 16);
+                        vk = keyStr.length() > 2 && *end == '\0' && code >= 0x01 && code <= 0xFE ? static_cast<int>(code) : 0;
+                    }
                     else if (keyStr == "W") vk = 'W';
                     else if (keyStr == "A") vk = 'A';
                     else if (keyStr == "S") vk = 'S';
@@ -1090,6 +1152,10 @@ void PipeServerThread() {
                     else if (keyStr == "F11") vk = VK_F11;
                     else if (keyStr == "F12") vk = VK_F12;
                     else vk = keyStr[0];
+                    if (vk == 0) {
+                        SendPipeResponse(pipe, "ERROR: a key code is 0x01 to 0xFE, e.g. 0x41");
+                        continue;
+                    }
 
                     if (action == "down" || action == "press") {
                         keybd_event(static_cast<BYTE>(vk), 0, 0, 0);

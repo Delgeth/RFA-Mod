@@ -157,7 +157,7 @@ void RefillAll(const House& house, BYTE* player) {
         ++counts[static_cast<int>(node ? Refill(node, player) : Outcome::NoNode)];
     }
     auto n = [&counts](Outcome outcome) { return counts[static_cast<int>(outcome)]; };
-    RFA_LOG_FIRST(100, "Safehouses: the player came into %s (%s): its %zu spots: %d made, %d waiting for their model to stream in (made as soon as it has), "
+    RFA_LOG_DETAIL_FIRST(100, "Safehouses: the player came into %s (%s): its %zu spots: %d made, %d waiting for their model to stream in (made as soon as it has), "
                   "%d kept (its car still there), %d left (the player near the car), %d left (someone aboard), %d blocked (a vehicle or the player within 5 m), "
                   "%d held back by the game (the node not streamed in, or node spawning off), %d refused by the game's spawn, %d not loaded",
                   house.name.c_str(), house.handle.c_str(), house.spots.size(), n(Outcome::Made), n(Outcome::Waiting), n(Outcome::Kept), n(Outcome::LeftWithPlayer),
@@ -221,6 +221,9 @@ void StartSafehouses() {
         rfa::Log("Safehouses: %zu of Guerrilla's with %zu parked vehicles' spots; a safehouse's spots are filled again as the player walks into it, as Guerrilla's",
                  g_houses.size(), spots);
 }
+
+// Whether the player is in a safehouse's area (safehouse_contains_player), as of the last step.
+bool PlayerInSafehouse() { return g_inside >= 0; }
 
 // Guerrilla's safehouse_do_frame_postsim, its part for the parked vehicles. Each frame, in the traffic's worlds.
 void SafehousesFrame() {
