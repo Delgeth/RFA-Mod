@@ -1044,7 +1044,7 @@ function ui_main_menu_rfa_failed_level_check() -- [RFA]
 	if name == nil then return end -- [RFA]
 	local message -- [RFA]
 	if custom then -- [RFA]
-		message = "FAILED TO LOAD CUSTOM LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. A level deleted since the game started is still in its map list, and a level made since then needs the game restarted. logs\\rfa_mods.log says more." -- [RFA]
+		message = "FAILED TO LOAD CUSTOM LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. logs\\rfa_mods.log says more." -- [RFA] (the popup takes 256 characters at most)
 	else -- [RFA]
 		message = "FAILED TO LOAD LEVEL\n\n" .. name .. " couldn't be loaded: its files are missing or couldn't be read. logs\\rfa_mods.log says more." -- [RFA]
 	end -- [RFA]

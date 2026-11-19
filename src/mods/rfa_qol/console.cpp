@@ -1743,6 +1743,8 @@ void MakeEditorObject(DWORD handle) {
 // is gone or another while the level loads; once there is one again that has stayed put for 0.3
 // seconds, the level is taken to be up.
 auto const ThePlayer = reinterpret_cast<BYTE*(__cdecl*)()>(0x8B92D0);
+auto const RuinMode = reinterpret_cast<bool(__cdecl*)()>(0x50E1D0);   // ruin_is_ruin_mode's own test (a byte at 0x12F3A73)
+auto const RuinAction = reinterpret_cast<void(__cdecl*)(int)>(0x512720);  // the Ruin menu's actions; 2 restores the map
 struct ReloadReturn {
     bool waiting = false;
     float position[3]{};
@@ -1759,6 +1761,14 @@ void StartEditorReload() {
         memcpy(g_reloadReturn.position, player + 4, sizeof(g_reloadReturn.position));
         g_reloadReturn.playerThen = player;
         g_reloadReturn.waiting = true;
+    }
+    // A Ruin level is loaded again as the pause menu's RESTORE MAP does (rf4_wrecking_crew_restore_map:
+    // the Ruin action 2, 0x512720): the console's reload_level loads it as a campaign territory, which a
+    // Ruin level isn't ("Could not find territory", and the game fell back to the main menu).
+    if (RuinMode()) {
+        rfa::Log("Editor link: loading the Ruin level again (as Restore map)%s", player ? "; the player goes back to where they stand" : "");
+        RuinAction(2);
+        return;
     }
     rfa::Log("Editor link: loading the level again%s", player ? "; the player goes back to where they stand" : "");
     RunConsoleCommand("reload_level");
