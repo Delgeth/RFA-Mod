@@ -230,9 +230,9 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         var progress = new Progress<string>(text => StatusText.Text = text);
         var started = System.Diagnostics.Stopwatch.StartNew();
         // Reading the containers is disk work (a minute or so the first time; then only archives that changed
-        // are read again, see FileIndex). Done at Windows' background priority, so a game starting meanwhile (the
-        // Game panel) gets the disk first and doesn't stall; but not while the game's main menu waits for it
-        // (Create level: its processing screen is up), when it is wanted as soon as can be.
+        // are read again, see FileIndex). Done at the lowest processor priority (the disk as usual: Windows' background
+        // mode gave it away and, with the game loading beside it, the index took minutes); at normal priority while
+        // the game's main menu waits for it (Create level: its processing screen is up).
         bool menuWaits = NewLevelAtStart != null || NewLevelMadeAtStart != null;
         try
         {

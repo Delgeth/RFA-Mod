@@ -75,7 +75,7 @@ static class FileIndex
     /// decompressed) to get its name list and the headers of its texture files: the slow part of
     /// reading the game's files. So what each archive holds is kept (index_cache.bin, see <see cref="Cache"/>)
     /// and read again only when the archive has changed (its size or time); archives are read side by
-    /// side. With <paramref name="background"/>, at Windows' background priority (see <see cref="Native.InBackground"/>).
+    /// side. With <paramref name="background"/>, at the lowest processor priority (see <see cref="Native.AtLowPriority"/>).
     /// </summary>
     public static List<IndexedFile> ContainerFiles(IReadOnlyList<(string Archive, string Path, Func<Packfile> Open)> archives, IProgress<string> progress,
                                                    Dictionary<string, TextureRef> textures, bool background)
@@ -97,7 +97,7 @@ static class FileIndex
         var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 4) };
         Parallel.ForEach(toRead, options, i =>
         {
-            Contents read = background ? Native.InBackground(() => ReadArchive(archives[i].Open())) : ReadArchive(archives[i].Open());
+            Contents read = background ? Native.AtLowPriority(() => ReadArchive(archives[i].Open())) : ReadArchive(archives[i].Open());
             found[i] = read;
             int now = Interlocked.Increment(ref done);
             progress.Report($"Indexing containers for search: {now} of {left} archives read...");
