@@ -14,7 +14,9 @@ namespace RfaEditor;
 //   squad spawns: the squad's leader and members (squads.xtbl member_info: characters, civilians among them), and
 //     with squad_vehicle its vehicle set's vehicles (vehicle_type: spawn_group_vehicle.xtbl), with squad_exo its exo;
 //   vehicle spawns: their set's vehicles (spawn_set: spawn_group_vehicle.xtbl vehicle_type, vehicles.xtbl names);
-//   exo spawns: the exo (exo_type: exo.xtbl, the entry's exo_list).
+//   exo spawns: the exo (exo_type: exo.xtbl, the entry's exo_list);
+//   animated rigs with a body of their own (a monolith, the queen: anim_rig_objects.xtbl's Props > Prop > Stream_Human,
+//     a character the game streams as the rig's model; monolith_small / medium / large).
 // An entry other levels share is first split off into the level's own (its row then names that), as Spawn
 // resources' "Give this level its own" does, so no other level changes. A resource streams at most 16 characters
 // (GuerrillaSquads.HumanSlots: the game's 17 stream slots less the player): past that a character is left out, and
@@ -51,7 +53,8 @@ public partial class LevelEditor
     static bool IsSpawnNodeClass(string cls) =>
         cls.Equals("object_squad_spawn_node", StringComparison.OrdinalIgnoreCase) ||
         cls.Equals("object_vehicle_spawn_node", StringComparison.OrdinalIgnoreCase) ||
-        cls.Equals("object_exo_spawn_node", StringComparison.OrdinalIgnoreCase);
+        cls.Equals("object_exo_spawn_node", StringComparison.OrdinalIgnoreCase) ||
+        cls.Equals("object_anim_rig", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A table's entry by name, the DLCs' tables searched too (as <see cref="ObjectModels"/>); null if none.</summary>
     XtblElement? SpawnTableEntry(string tableName, string entryName)
@@ -95,6 +98,11 @@ public partial class LevelEditor
                 break;
             case "object_exo_spawn_node":
                 needs.Add(needs.Exos, SpawnText(obj, "exo_type"));
+                break;
+            case "object_anim_rig":
+                if (SpawnText(obj, "rig_name") is string rig && SpawnTableEntry("anim_rig_objects.xtbl", rig) is { } rigEntry)
+                    foreach (XtblElement props in rigEntry.ElementsNamed("Props"))
+                        foreach (XtblElement prop in props.ElementsNamed("Prop")) needs.Add(needs.Characters, prop.ValueOf("Stream_Human"));
                 break;
         }
     }

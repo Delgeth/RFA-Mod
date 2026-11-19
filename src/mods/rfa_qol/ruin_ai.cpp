@@ -11,6 +11,13 @@
 // fight: you are never their enemy. With the setting on, those three calls ask our function instead,
 // which answers "not Ruin" while Ruin's enemies are wanted and the game's own answer otherwise; every
 // other Ruin rule (the score, the timer, the menus) still sees Ruin.
+//
+// Monoliths, always (whatever the setting): a monolith copied into a level (an object_anim_rig set: monolith_medium's
+// rig, its claws' and root's collision movers, its rock rig, its gun and damage region, and its logic handler) emerges
+// when its handler's condition ec_mp_infestation_monolith_should_activate (0x92B720) says so, which asks Infestation's
+// wave records (0xA34470, cdecl: the mover; +0xC of the record naming it). Only Infestation has them, so anywhere else
+// the monolith stayed buried. Its call (0x92B795) asks us instead: in a Ruin level (where the game's own levels have no
+// monoliths) "yes", so a placed monolith emerges as the level starts; everywhere else the game's own answer.
 #define RFA_MOD_NAME "ruin_ai"
 #include "rfa_mod.h"
 #include "rfa_qol.h"
@@ -27,6 +34,23 @@ auto const RuinMode = reinterpret_cast<bool(__cdecl*)()>(kRuinMode);
 
 bool g_hostile = false;
 
+constexpr DWORD kMonolithActiveCall = 0x92B795, kMonolithActive = 0xA34470;
+auto const MonolithActive = reinterpret_cast<bool(__cdecl*)(void* mover)>(kMonolithActive);
+bool __cdecl MonolithShouldActivate(void* mover) { return RuinMode() || MonolithActive(mover); }
+
+// An E8 call at `at` to `from` made to call `to` instead; false (and said) if the bytes aren't that call.
+bool Redirect(DWORD at, DWORD from, const void* to) {
+    BYTE* call = reinterpret_cast<BYTE*>(at);
+    if (call[0] != 0xE8 || at + 5 + *reinterpret_cast<int32_t*>(call + 1) != from) {
+        rfa::Log("0x%08X isn't the call to 0x%08X it should be; left as it is", static_cast<unsigned>(at), static_cast<unsigned>(from));
+        return false;
+    }
+    BYTE bytes[5] = {0xE8};
+    const int32_t relative = static_cast<int32_t>(reinterpret_cast<DWORD>(to) - (at + 5));
+    memcpy(bytes + 1, &relative, 4);
+    return rfa::PatchCode(call, bytes, sizeof(bytes));
+}
+
 void ReadSetting() { g_hostile = rfa::IniInt(L"Ruin", L"HostileAI", 0) != 0; }
 
 // What the three calls ask now: Ruin, unless its enemies are to fight.
@@ -37,19 +61,11 @@ bool __cdecl RuinModeForAi() { return g_hostile ? false : RuinMode(); }
 void Init() {
     ReadSetting();
     int patched = 0;
-    for (DWORD at : kCalls) {
-        BYTE* call = reinterpret_cast<BYTE*>(at);
-        // Only the call we expect (E8 to 0x50E1D0); anything else is left alone.
-        if (call[0] != 0xE8 || at + 5 + *reinterpret_cast<int32_t*>(call + 1) != kRuinMode) {
-            rfa::Log("0x%08X isn't the call to 0x%08X it should be; left as it is", static_cast<unsigned>(at),
-                     static_cast<unsigned>(kRuinMode));
-            continue;
-        }
-        BYTE bytes[5] = {0xE8};
-        const int32_t relative = static_cast<int32_t>(reinterpret_cast<DWORD>(&RuinModeForAi) - (at + 5));
-        memcpy(bytes + 1, &relative, 4);
-        if (rfa::PatchCode(call, bytes, sizeof(bytes))) ++patched;
-    }
+    // Only the calls we expect (E8 to 0x50E1D0); anything else is left alone.
+    for (DWORD at : kCalls)
+        if (Redirect(at, kRuinMode, reinterpret_cast<const void*>(&RuinModeForAi))) ++patched;
+    if (Redirect(kMonolithActiveCall, kMonolithActive, reinterpret_cast<const void*>(&MonolithShouldActivate)))
+        rfa::Log("Monoliths placed in a Ruin level emerge as it starts (Infestation and the story keep the game's way)");
     rfa::Log("%d of %d of the AI's Ruin checks ask us; enemies %s in Ruin levels ([Ruin] HostileAI=%d)", patched,
              static_cast<int>(sizeof(kCalls) / sizeof(kCalls[0])), g_hostile ? "fight" : "don't fight (the game's way)", g_hostile ? 1 : 0);
 }

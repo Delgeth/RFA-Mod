@@ -2628,6 +2628,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
                                                    here.Select(p => p.Group).ToList()).TrimEnd('.') + ". ";
             }
             message += BringEffects();
+            message += BringRigAnimations();
             byte[] bytes = ZoneBytesWithoutGeometry();  // (the level geometry goes into the stitch list: SaveGeometry)
             message += "Saved: " + string.Join("; ", Copies().Select(p => Put(p.Archive, p.Container, bytes))) + ".";
             message += SaveGeometry();
