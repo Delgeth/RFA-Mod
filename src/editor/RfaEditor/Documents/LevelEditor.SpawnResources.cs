@@ -17,6 +17,11 @@ namespace RfaEditor;
 //   exo spawns: the exo (exo_type: exo.xtbl, the entry's exo_list);
 //   animated rigs with a body of their own (a monolith, the queen: anim_rig_objects.xtbl's Props > Prop > Stream_Human,
 //     a character the game streams as the rig's model; monolith_small / medium / large).
+// What the editor added this way, and only that, is taken out again once no spawn node needs it (a node's squad
+// changed, the node deleted): the editor keeps a record of what it added to which entry (spawn_resources_added.txt
+// next to it). What an entry had to begin with, and what you put in it with Spawn resources, stays. (An entry the
+// record doesn't know yet, of a Ruin level: the game's Ruin entries list no characters or vehicles, so those it lists
+// were added by the editor before it kept a record, and are taken to be its own.)
 // An entry other levels share is first split off into the level's own (its row then names that), as Spawn
 // resources' "Give this level its own" does, so no other level changes. A resource streams at most 16 characters
 // (GuerrillaSquads.HumanSlots: the game's 17 stream slots less the player): past that a character is left out, and
@@ -47,6 +52,44 @@ public partial class LevelEditor
     }
 
     bool spawnLevelUnknownSaid;
+    static readonly string AddedRecordPath = Path.Combine(AppContext.BaseDirectory, "spawn_resources_added.txt");
+
+    /// <summary>What the editor added to each entry, by entry: "character:x", "vehicle:x", "exo:x". Read afresh each time.</summary>
+    static Dictionary<string, HashSet<string>> ReadAddedRecord()
+    {
+        var record = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (!File.Exists(AddedRecordPath)) return record;
+            foreach (string line in File.ReadAllLines(AddedRecordPath))
+            {
+                string[] parts = line.Split('\t');
+                if (parts.Length < 2 || line.StartsWith('#')) continue;
+                if (!record.TryGetValue(parts[0], out var set)) record[parts[0]] = set = new(StringComparer.OrdinalIgnoreCase);
+                if (parts[1].Length > 0) set.Add(parts[1]);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return record;
+    }
+
+    static void WriteAddedRecord(Dictionary<string, HashSet<string>> record)
+    {
+        try
+        {
+            var lines = new List<string> { "# What the level editor added to each level's spawn resources (spawn_resource.xtbl), to take out again once no spawn node needs it." };
+            foreach (var (entryName, set) in record.OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                lines.Add(entryName + "\t");  // (the entry is known, even with nothing of the editor's in it)
+                lines.AddRange(set.Order(StringComparer.OrdinalIgnoreCase).Select(item => entryName + "\t" + item));
+            }
+            File.WriteAllLines(AddedRecordPath, lines);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            EditorLog.Write("The spawn resources' record couldn't be written: " + ex.Message);
+        }
+    }
     string? spawnNeedsChecked;  // the needs last checked against the entry: the same again needs no look
     readonly HashSet<string> spawnFullSaid = new(StringComparer.OrdinalIgnoreCase);
 
@@ -163,14 +206,13 @@ public partial class LevelEditor
                 if (IsSpawnNodeClass(names.Class(obj.ClassHash))) AddSpawnNeeds(needs, obj);
         }
         catch (InvalidOperationException) { return; }  // (the objects changed under us: next time)
-        if (!needs.Any) return;
         string signature = string.Join("|", new[] { needs.Characters, needs.Vehicles, needs.Exos }
             .Select(list => string.Join(",", list.Order(StringComparer.OrdinalIgnoreCase))));
         if (signature == spawnNeedsChecked) return;
         spawnNeedsChecked = signature;
         if (SpawnLevelRow() is not { } level)
         {
-            if (!spawnLevelUnknownSaid)
+            if (needs.Any && !spawnLevelUnknownSaid)
             {
                 spawnLevelUnknownSaid = true;
                 context.Log($"Spawn resources: no Ruin, multiplayer or mission row names {zoneName}'s spawn resources, so what its spawn nodes need isn't added to them " +
@@ -183,7 +225,32 @@ public partial class LevelEditor
             string resources = Encoding.Latin1.GetString(context.Workspace.Read(SpawnTablesArchive, "spawn_resource.xtbl"));
             SpawnResource entry = SpawnResource.Read(resources, level.Entry) ?? new SpawnResource { Name = level.Entry };
             var added = new List<string>();
+            var removed = new List<string>();
             var left = new List<string>();
+            var record = ReadAddedRecord();
+            if (!record.TryGetValue(level.Entry, out var ours))
+            {
+                record[level.Entry] = ours = new(StringComparer.OrdinalIgnoreCase);
+                if (level.Table.Equals("wrecking_crew_maps.xtbl", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (string c in entry.Characters) ours.Add("character:" + c);
+                    foreach (string v in entry.Vehicles) ours.Add("vehicle:" + v);
+                }
+            }
+            // The editor's own that no spawn node needs now: out first, so their room counts.
+            void Unneeded(List<string> have, List<string> want, string what)
+            {
+                foreach (string name in have.ToList())
+                {
+                    if (!ours.Contains(what + ":" + name) || want.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+                    have.RemoveAll(n => n.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    ours.Remove(what + ":" + name);
+                    removed.Add($"{name} ({what})");
+                }
+            }
+            Unneeded(entry.Characters, needs.Characters, "character");
+            Unneeded(entry.Vehicles, needs.Vehicles, "vehicle");
+            Unneeded(entry.Exos, needs.Exos, "exo");
             void Missing(List<string> have, List<string> want, string what, int most = int.MaxValue)
             {
                 foreach (string name in want)
@@ -195,6 +262,7 @@ public partial class LevelEditor
                         continue;
                     }
                     have.Add(name);
+                    ours.Add(what + ":" + name);
                     added.Add($"{name} ({what})");
                 }
             }
@@ -204,7 +272,11 @@ public partial class LevelEditor
             if (left.Count > 0)
                 context.Log($"Spawn resources: {level.Entry} already lists {MostResourceCharacters} characters, as many as the game streams; left out: {string.Join(", ", left)}. " +
                             "Take some out with Spawn resources, or use squads of fewer kinds of people.");
-            if (added.Count == 0) return;
+            if (added.Count == 0 && removed.Count == 0)
+            {
+                WriteAddedRecord(record);  // (an entry seen for the first time)
+                return;
+            }
 
             // An entry other levels name too is split off into this level's own first.
             int sharing = 0;
@@ -225,6 +297,8 @@ public partial class LevelEditor
                 string own = level.Key;
                 for (int n = 2; taken.Contains(own); n++) own = $"{level.Key}_{n}";
                 entry.Name = own;
+                record[own] = ours;  // (what the editor added is the level's own entry's now; the shared one is left as it was)
+                record.Remove(from);
                 string table = Encoding.Latin1.GetString(context.Workspace.Read(SpawnTablesArchive, level.Table));
                 string changed = LevelFiles.WithRowValue(table, level.Row, level.KeyTag, level.Key, "resource_reservation", own)
                                  ?? throw new InvalidDataException($"{level.Table}'s row for {level.Key} couldn't be changed");
@@ -233,14 +307,18 @@ public partial class LevelEditor
                 context.Log($"Spawn resources: {level.Key} shared {from} with {sharing - 1} other level(s); it has its own now, \"{own}\" ({level.Table} names it).");
             }
             else context.Workspace.WriteOverride(SpawnTablesArchive, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(entry.WriteTo(resources)));
-            context.Log($"Spawn resources: added to {entry.Name}, for the level's spawn nodes: {string.Join(", ", added)}. " +
-                        "The game reads its tables at start-up: restart it for a normal load to have them (Live spawns them now).");
+            WriteAddedRecord(record);
+            if (added.Count > 0)
+                context.Log($"Spawn resources: added to {entry.Name}, for the level's spawn nodes: {string.Join(", ", added)}.");
+            if (removed.Count > 0)
+                context.Log($"Spawn resources: taken out of {entry.Name}, as no spawn node needs them now: {string.Join(", ", removed)}.");
+            context.Log("  The game reads its tables at start-up: restart it for a normal load to have them" + (added.Count > 0 ? " (Live spawns new ones now)." : "."));
             context.OverridesChanged();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
         {
             spawnNeedsChecked = null;  // (tried again at the next change)
-            context.Log("Spawn resources: what the spawn nodes need couldn't be added: " + ex.Message);
+            context.Log("Spawn resources: couldn't be kept up to date with the spawn nodes: " + ex.Message);
         }
     }
 }
