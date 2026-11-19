@@ -19,9 +19,8 @@ namespace RfaEditor;
 //     a character the game streams as the rig's model; monolith_small / medium / large).
 // What the editor added this way, and only that, is taken out again once no spawn node needs it (a node's squad
 // changed, the node deleted): the editor keeps a record of what it added to which entry (spawn_resources_added.txt
-// next to it). What an entry had to begin with, and what you put in it with Spawn resources, stays. (An entry the
-// record doesn't know yet, of a Ruin level: the game's Ruin entries list no characters or vehicles, so those it lists
-// were added by the editor before it kept a record, and are taken to be its own.)
+// next to it). What an entry had to begin with, and what you put in it with Spawn resources, stays (saving a list there
+// makes all of it yours: MarkSpawnResourcesChosen).
 // An entry other levels share is first split off into the level's own (its row then names that), as Spawn
 // resources' "Give this level its own" does, so no other level changes. A resource streams at most 16 characters
 // (GuerrillaSquads.HumanSlots: the game's 17 stream slots less the player): past that a character is left out, and
@@ -55,7 +54,7 @@ public partial class LevelEditor
     static readonly string AddedRecordPath = Path.Combine(AppContext.BaseDirectory, "spawn_resources_added.txt");
 
     /// <summary>What the editor added to each entry, by entry: "character:x", "vehicle:x", "exo:x". Read afresh each time.</summary>
-    static Dictionary<string, HashSet<string>> ReadAddedRecord()
+    internal static Dictionary<string, HashSet<string>> ReadAddedRecord()
     {
         var record = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         try
@@ -73,7 +72,15 @@ public partial class LevelEditor
         return record;
     }
 
-    static void WriteAddedRecord(Dictionary<string, HashSet<string>> record)
+    /// <summary>A list saved in Spawn resources is the user's own, all of it: none of it is taken out for the nodes' sake.</summary>
+    internal static void MarkSpawnResourcesChosen(string entryName)
+    {
+        var record = ReadAddedRecord();
+        record[entryName] = new(StringComparer.OrdinalIgnoreCase);
+        WriteAddedRecord(record);
+    }
+
+    internal static void WriteAddedRecord(Dictionary<string, HashSet<string>> record)
     {
         try
         {
@@ -228,15 +235,7 @@ public partial class LevelEditor
             var removed = new List<string>();
             var left = new List<string>();
             var record = ReadAddedRecord();
-            if (!record.TryGetValue(level.Entry, out var ours))
-            {
-                record[level.Entry] = ours = new(StringComparer.OrdinalIgnoreCase);
-                if (level.Table.Equals("wrecking_crew_maps.xtbl", StringComparison.OrdinalIgnoreCase))
-                {
-                    foreach (string c in entry.Characters) ours.Add("character:" + c);
-                    foreach (string v in entry.Vehicles) ours.Add("vehicle:" + v);
-                }
-            }
+            if (!record.TryGetValue(level.Entry, out var ours)) record[level.Entry] = ours = new(StringComparer.OrdinalIgnoreCase);
             // The editor's own that no spawn node needs now: out first, so their room counts.
             void Unneeded(List<string> have, List<string> want, string what)
             {

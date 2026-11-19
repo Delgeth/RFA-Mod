@@ -531,6 +531,7 @@ public partial class MainWindow
                 workspace.WriteOverride(TablesArchive, "spawn_resource.xtbl", Encoding.Latin1.GetBytes(made.WriteTo(resources)));
                 Log($"Spawn resources: {chosen.Entry} saved.");
             }
+            LevelEditor.MarkSpawnResourcesChosen(made.Name);  // (the level editor won't take any of it out)
             Log($"  {made.Characters.Count} characters, {made.Vehicles.Count} vehicles, {made.Exos.Count} exos{(made.PlayerLook != null ? ", the player as " + made.PlayerLook : "")}. " +
                 "The game reads its tables at start-up: restart it for them to apply.");
             RefreshOverrideMarks();
