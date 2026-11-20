@@ -2008,6 +2008,7 @@ namespace gv { void StartFlyers(); }  // flyers.cpp
 namespace gv { void StartFlyerControls(); bool FlyersFly(); }  // flyer_controls.cpp; flyers.cpp
 namespace gv { void StartTurrets(); }  // turrets.cpp
 namespace gv { void StartEntering(); }  // entering.cpp
+namespace gv { void StartGamepad(); }  // gamepad.cpp
 namespace gv { void StartRiders(); }  // riders.cpp
 
 extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
@@ -2036,6 +2037,7 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     HookTurretParts();
     gv::StartTurrets();
     gv::StartEntering();
+    gv::StartGamepad();
     gv::StartRiders();
     HookLights();
     StartTraffic();
