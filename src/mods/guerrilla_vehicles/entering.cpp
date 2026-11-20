@@ -22,7 +22,8 @@
 // Adding bit 6 there offers nothing else: in a vehicle the use-target search stops before it looks for
 // vehicles (0x8BFA0F).
 //
-// So in the worlds Guerrilla's rules run in ([GuerrillaVehicles] TrafficWorlds=, rfg), single player:
+// So in the worlds Guerrilla's rules run in ([GuerrillaVehicles] TrafficWorlds=, rfg), and with
+// [GuerrillaVehicles] EnterVehiclesEverywhere=1 (the default) in Armageddon's own worlds too, single player:
 //   - on foot, when the game has given the player its on-foot permissions (those with kind 7, using things),
 //     kind 6 is added, as Guerrilla's standing player has it;
 //   - in a vehicle, bit 6 is added, so the vehicle action gets him out, as Guerrilla's.
@@ -63,22 +64,27 @@ PermissionsFn g_onFootPermissions, g_inVehiclePermissions, g_nearVehiclePermissi
 
 bool Multiplayer() { return *reinterpret_cast<const BYTE*>(0x2685118) != 0; }
 
+// Where the player may get in and out by himself: Guerrilla's world, and with [GuerrillaVehicles]
+// EnterVehiclesEverywhere=1 (the default) Armageddon's worlds too.
+bool g_everywhere = true;
+bool EnteringWorld() { return g_everywhere || InTrafficWorld(); }
+
 void __cdecl OnFootPermissions(BYTE* player) {
     g_onFootPermissions(player);
-    if (!player || Multiplayer() || !InTrafficWorld()) return;
+    if (!player || Multiplayer() || !EnteringWorld()) return;
     DWORD& kinds = *reinterpret_cast<DWORD*>(player + kUseKinds);
     if (!(kinds & kUseThings) || (kinds & kEnterVehicle)) return;
     kinds |= kEnterVehicle;
-    RFA_LOG_FIRST(1, "Entering: on foot in Guerrilla's world the player may get into a vehicle (use kind 6), as Guerrilla's standing player");
+    RFA_LOG_FIRST(1, "Entering: on foot the player may get into a vehicle (use kind 6), as Guerrilla's standing player");
 }
 
 // In a vehicle: the vehicle action gets him out, as Guerrilla's.
 void LetOut(BYTE* player) {
-    if (!player || Multiplayer() || !InTrafficWorld()) return;
+    if (!player || Multiplayer() || !EnteringWorld()) return;
     DWORD& kinds = *reinterpret_cast<DWORD*>(player + kUseKinds);
     if (kinds & kEnterVehicle) return;
     kinds |= kEnterVehicle;
-    RFA_LOG_FIRST(1, "Entering: in a vehicle in Guerrilla's world the vehicle action gets the player out, as Guerrilla's");
+    RFA_LOG_FIRST(1, "Entering: in a vehicle the vehicle action gets the player out, as Guerrilla's");
 }
 void __cdecl InVehiclePermissions(BYTE* player) {
     g_inVehiclePermissions(player);
@@ -94,7 +100,11 @@ constexpr DWORD kRequestEnter = 0x656410;      // cdecl bool (person, vehicle, r
 constexpr size_t kRequestEnterPrologue = 7;     // push ebp / mov ebp,esp / push ecx / mov eax,[ebp+10h]
 constexpr DWORD kVehicleInfo = 0x3DA8;          // a vehicle: its vehicles.xtbl entry
 constexpr DWORD kInfoInteraction = 0x3C;        // the entry: its interaction's record (the name first)
+constexpr DWORD kRequestSeat = 0;               // the request: the seat asked for (0 the driver's)
 constexpr DWORD kRequestFlags = 12;             // the request: its flags (1: teleport)
+constexpr DWORD kInfoFlags = 0x874;             // the entry: flags (bit 3: Player_Passenger_Only)
+constexpr BYTE kPassengerOnly = 1u << 3;
+constexpr DWORD kRecordSeats = 0x1C;            // the interaction's record: how many seats
 constexpr BYTE kTeleport = 1;
 using RequestEnterFn = bool(__cdecl*)(BYTE* person, BYTE* vehicle, BYTE* request);
 RequestEnterFn g_requestEnter;
@@ -108,7 +118,21 @@ const char* InteractionName(BYTE* vehicle) {
 }
 
 bool __cdecl RequestEnter(BYTE* person, BYTE* vehicle, BYTE* request) {
-    if (person && request && person == Player() && !Multiplayer() && InTrafficWorld() && !(request[kRequestFlags] & kTeleport)) {
+    if (person && request && vehicle && person == Player() && !Multiplayer() && EnteringWorld()) {
+        // Player_Passenger_Only (the entry's +0x874, bit 3): player_use_vehicle asks for seat 1 (passenger_1), and
+        // a vehicle whose interaction has no such seat (the LAVs: Dummy, the driver's alone) refused him ("xSeat NA").
+        // There he takes the seat it has, the driver's (the LAV's gun is on it).
+        const BYTE* info = *reinterpret_cast<BYTE* const*>(vehicle + kVehicleInfo);
+        const BYTE* record = info ? *reinterpret_cast<const BYTE* const*>(info + kInfoInteraction) : nullptr;
+        int& seat = *reinterpret_cast<int*>(request + kRequestSeat);
+        if (info && record && (info[kInfoFlags] & kPassengerOnly) && seat >= *reinterpret_cast<const int*>(record + kRecordSeats)) {
+            RFA_LOG_FIRST(2, "Entering: %s is for the player as a passenger only, and its interaction (%s) has no passenger's seat: "
+                             "he takes the driver's", *reinterpret_cast<const char* const*>(info) ? *reinterpret_cast<const char* const*>(info) : "?",
+                          InteractionName(vehicle) ? InteractionName(vehicle) : "?");
+            seat = 0;
+        }
+    }
+    if (person && request && person == Player() && !Multiplayer() && EnteringWorld() && !(request[kRequestFlags] & kTeleport)) {
         const char* name = InteractionName(vehicle);
         for (const std::string& teleport : g_teleportInteractions)
             if (name && _stricmp(name, teleport.c_str()) == 0) {
@@ -146,7 +170,7 @@ void StartTeleportEntering() {
         rfa::Log("Entering: the game's vehicle enter request isn't as expected; the player walks to Armageddon's own vehicles' enter point");
         return;
     }
-    rfa::Log("Entering: in Guerrilla's world the player gets into vehicles whose interaction is %ls at once ([GuerrillaVehicles] TeleportInteractions=)", list.c_str());
+    rfa::Log("Entering: the player gets into vehicles whose interaction is %ls at once ([GuerrillaVehicles] TeleportInteractions=)", list.c_str());
 }
 
 template <typename Fn>
@@ -158,6 +182,7 @@ Fn Hook(DWORD address, size_t prologue, const BYTE* opening, size_t size, void* 
 }  // namespace
 
 void StartEntering() {
+    g_everywhere = rfa::IniInt(L"GuerrillaVehicles", L"EnterVehiclesEverywhere", 1) != 0;
     if (!rfa::IniInt(L"GuerrillaVehicles", L"EnterVehicles", 1)) {
         rfa::Log("Entering: the player gets into and out of a vehicle only as Armageddon's allows ([GuerrillaVehicles] EnterVehicles=0)");
         return;
@@ -169,10 +194,11 @@ void StartEntering() {
     g_inVehiclePermissions = Hook<PermissionsFn>(kInVehiclePermissions, kInVehiclePrologue, inVehicle, sizeof(inVehicle), reinterpret_cast<void*>(&InVehiclePermissions));
     g_nearVehiclePermissions =
         Hook<PermissionsFn>(kNearVehiclePermissions, kNearVehiclePrologue, nearVehicle, sizeof(nearVehicle), reinterpret_cast<void*>(&NearVehiclePermissions));
-    rfa::Log(g_onFootPermissions ? "Entering: in Guerrilla's world the player may get into a vehicle on foot, as Guerrilla's"
+    rfa::Log(g_onFootPermissions ? (g_everywhere ? "Entering: in every world the player may get into a vehicle on foot, as Guerrilla's ([GuerrillaVehicles] EnterVehiclesEverywhere=1)"
+                                                 : "Entering: in Guerrilla's world the player may get into a vehicle on foot, as Guerrilla's")
                                  : "Entering: the game's on-foot permissions aren't as expected; getting into a vehicle needs the console's Controls_use_vehicle_enabled");
     rfa::Log(g_inVehiclePermissions && g_nearVehiclePermissions
-                 ? "Entering: in Guerrilla's world the vehicle action gets the player out, as Guerrilla's"
+                 ? "Entering: the vehicle action gets the player out, as Guerrilla's"
                  : "Entering: the game's in-vehicle permissions aren't as expected; getting out may need the console's Controls_use_vehicle_enabled");
     StartTeleportEntering();
 }
