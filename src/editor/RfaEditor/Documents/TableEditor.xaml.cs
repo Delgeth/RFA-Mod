@@ -43,6 +43,10 @@ public partial class TableEditor : UserControl, IEditorDocument
             if (e.Key == Key.D && Keyboard.Modifiers == ModifierKeys.Control && CopyEntryButton.IsEnabled) { CopyEntry(); e.Handled = true; }
         };
         NewEntryButton.IsEnabled = table.Table != null && (table.Description != null || table.Entries.Any());
+        LiveBox.IsChecked = liveTables;
+        LiveBox.ToolTip = ReloadCommandFor(fileName) is { } command
+            ? $"While the game runs, each change is saved and the game reads {fileName} again ({command}) as you edit."
+            : $"While the game runs, each change is saved as you edit. The game reads {fileName} only when it starts, so it shows after a restart.";
         ShowSource();
         BuildEntryTree("");
     }
@@ -348,27 +352,98 @@ public partial class TableEditor : UserControl, IEditorDocument
         }
         if (EntryTree.SelectedItem is TreeViewItem { Tag: XtblElement entry } selected && entry != table.Root)
             selected.Header = XtblFile.EntryName(entry);  // in case the Name field was edited
+        QueueLive();
     }
 
     void OnSave(object sender, RoutedEventArgs e) => Save();
 
     /// <summary>
-    /// The game's console commands that read a table again while it runs. Other tables are read once,
-    /// when the game starts or a level loads.
+    /// What has the running game read a table again: its own console command for the table (the game's
+    /// reload_ commands, each found in RedFactionArmageddon_DX11.exe with the tables its loader reads),
+    /// or the console mod's editor_reload_table for a table the game has no command for but whose loader
+    /// can run again (see console.cpp). A DLC copy (dlc01_vehicles.xtbl) is read by the same command.
+    /// Tables not here are read only when the game starts.
     /// </summary>
     static readonly Dictionary<string, string> ReloadCommands = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["ai_properties.xtbl"] = "reload_ai_properties", ["leap_properties.xtbl"] = "reload_leap_properties",
-        ["explosions.xtbl"] = "reload_explosions", ["camera_shake.xtbl"] = "reload_camera_shakes", ["camera.xtbl"] = "reload_camera_view",
-        ["effects.xtbl"] = "reload_effects_table", ["difficulty.xtbl"] = "reload_difficulty", ["squads.xtbl"] = "reload_squads",
-        ["game_audio.xtbl"] = "reload_game_audio", ["game_audio_constants.xtbl"] = "reload_game_audio_constants",
-        ["audio_bink_volumes.xtbl"] = "reload_audio_bink_volumes", ["tweak_table.xtbl"] = "reload_tweak_table",
+        ["ai_properties.xtbl"] = "reload_ai_properties",
+        ["aim_drift.xtbl"] = "reload_aim_drift",
+        ["ambient_spawn_behavior.xtbl"] = "reload_ambient_spawn_behavior",
+        ["ambient_spawn_info.xtbl"] = "reload_ambient_spawn_info",
+        ["ammo.xtbl"] = "reload_ammo",
+        ["audio_bink_volumes.xtbl"] = "reload_audio_bink_volumes",
+        ["audio_bink_master_volumes.xtbl"] = "reload_audio_bink_volumes",
+        ["camera.xtbl"] = "reload_camera_view",
+        ["camera_shake.xtbl"] = "reload_camera_shakes",
+        ["character.xtbl"] = "reload_character",
+        ["character_patch.xtbl"] = "reload_character",
+        ["decal_info.xtbl"] = "decal_info_reload",
+        ["difficulty.xtbl"] = "reload_difficulty",
+        ["mp_difficulty_overrides.xtbl"] = "reload_difficulty",
+        ["effects.xtbl"] = "reload_effects_table",
+        ["effect_heartbeat.xtbl"] = "reload_heartbeat",
+        ["exo.xtbl"] = "reload_exos",
+        ["explosions.xtbl"] = "reload_explosions",
+        ["game_audio.xtbl"] = "reload_game_audio",
+        ["game_audio_constants.xtbl"] = "reload_game_audio_constants",
+        ["game_music_combat.xtbl"] = "gamemusic_tables_reload",
+        ["game_music_constants.xtbl"] = "gamemusic_tables_reload",
+        ["game_music_triggers.xtbl"] = "gamemusic_tables_reload",
+        ["gameplay_properties.xtbl"] = "reload_gameplay_properties",
+        ["glass.xtbl"] = "reload_glass_table",
+        ["leap_properties.xtbl"] = "reload_leap_properties",
+        ["lod_properties.xtbl"] = "reload_lod_properties",
+        ["matfx.xtbl"] = "material_effects_reload",
+        ["matfx_fades.xtbl"] = "material_effects_reload",
+        ["melee.xtbl"] = "reload_melee",
+        ["mp_badges.xtbl"] = "mp_badge_reload_table",
+        ["mp_character.xtbl"] = "reload_mp_character_table",
+        ["nanoforge_abilities.xtbl"] = "reload_nanoforge_abilities",
+        ["player_autoaim.xtbl"] = "reload_player_autoaim",
+        ["player_upgrades.xtbl"] = "reload_player_upgrades",
+        ["projectiles.xtbl"] = "reload_projectiles",
+        ["rfg_materials.xtbl"] = "reload_materials",
+        ["rfg_effect_materials.xtbl"] = "reload_materials",
+        ["rfg_bullet_groups.xtbl"] = "reload_materials",
+        ["rfg_melee_groups.xtbl"] = "reload_materials",
+        ["rfg_stress_controls.xtbl"] = "stress_evaluation_reload_table",
+        ["situational_lut.xtbl"] = "reload_situational_lut_table",
+        ["spawn_resource.xtbl"] = "editor_reload_table spawn_resource.xtbl",
+        ["squads.xtbl"] = "reload_squads",
+        ["turrets.xtbl"] = "reload_turrets",
+        ["tweak_table.xtbl"] = "reload_tweak_table",
+        ["vehicle_interactions.xtbl"] = "reload_vehicle_interactions",
+        ["vehicles.xtbl"] = "reload_vehicles",
+        ["weapon_firing_patterns.xtbl"] = "reload_weapon_firing_patterns",
+        ["weapons.xtbl"] = "reload_weapons",
+        ["wrecking_crew.xtbl"] = "reload_total_chaos_multipliers",
     };
 
-    /// <summary>Has the running game read the saved table again, if it has a command for this table. The command, or null.</summary>
+    /// <summary>The command that has the running game read a table again; null if it only reads it at its start.</summary>
+    static string? ReloadCommandFor(string fileName)
+    {
+        if (ReloadCommands.TryGetValue(fileName, out string? command)) return command;
+        Match dlc = Regex.Match(fileName, @"^dlc\d\d_(.+)$", RegexOptions.IgnoreCase);
+        if (dlc.Success && ReloadCommands.TryGetValue(dlc.Groups[1].Value, out command)) return command;
+        if (fileName.Contains("ragdoll", StringComparison.OrdinalIgnoreCase)) return "reload_ragdolls";
+        return null;
+    }
+
+    /// <summary>Whether the game is running with the console mod (and so reads what the editor sends it).</summary>
+    bool GameRunning()
+    {
+        try
+        {
+            using var link = new GameLink(context.Workspace.ModFolder);
+            return GameLink.IsRecent(link.Read());
+        }
+        catch (IOException) { return false; }
+    }
+
+    /// <summary>Has the running game read the saved table again, if it can. The command, or null.</summary>
     string? ReloadInGame()
     {
-        if (!ReloadCommands.TryGetValue(fileName, out string? command)) return null;
+        if (ReloadCommandFor(fileName) is not { } command) return null;
         try
         {
             using var link = new GameLink(context.Workspace.ModFolder);
@@ -379,7 +454,47 @@ public partial class TableEditor : UserControl, IEditorDocument
         catch (IOException) { return null; }
     }
 
-    bool Save()
+    // ---- Live: each change saved and read by the running game -------------------------------------
+
+    /// <summary>Whether changes go to the running game as they are made (shared by the table tabs, remembered).</summary>
+    static bool liveTables = LoadLiveSetting();
+    System.Windows.Threading.DispatcherTimer? liveTimer;
+
+    static string LiveSettingPath => Path.Combine(AppContext.BaseDirectory, "tables_live.txt");
+
+    static bool LoadLiveSetting()
+    {
+        try { return !File.Exists(LiveSettingPath) || File.ReadAllText(LiveSettingPath).Trim() != "0"; }
+        catch (IOException) { return true; }
+    }
+
+    void OnLiveChanged(object sender, RoutedEventArgs e)
+    {
+        liveTables = LiveBox.IsChecked == true;
+        try { File.WriteAllText(LiveSettingPath, liveTables ? "1" : "0"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        if (liveTables && unsaved) QueueLive();
+    }
+
+    /// <summary>A change was made: with Live on and the game running, it is saved and sent to the game once typing pauses.</summary>
+    void QueueLive()
+    {
+        if (!liveTables) return;
+        if (liveTimer == null)
+        {
+            liveTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+            liveTimer.Tick += (_, _) =>
+            {
+                liveTimer.Stop();
+                if (unsaved && liveTables && GameRunning()) Save(live: true);
+            };
+        }
+        liveTimer.Stop();
+        liveTimer.Start();
+    }
+
+    bool Save() => Save(live: false);
+
+    bool Save(bool live)
     {
         if (!unsaved) return true;
         try
@@ -394,11 +509,13 @@ public partial class TableEditor : UserControl, IEditorDocument
             Workspace.RefreshOverrides();
             ShowSource();
             string? reloaded = ReloadInGame();
-            context.Log((first
+            string how = reloaded != null ? $" The running game was told to read it again ({reloaded})."
+                : ReloadCommandFor(fileName) == null && GameRunning()
+                    ? $" The game reads {fileName} only when it starts, so restart it to see this change."
+                    : first ? " The game uses it from its next start through RFAModLauncher." : "";
+            context.Log((live ? $"Live: {fileName} saved." : first
                 ? $"Saved {fileName} as a new override, {Workspace.RelativeToMod(target)}."
-                : $"Saved {Workspace.RelativeToMod(target)}.") +
-                (reloaded != null ? $" The running game was told to read it again ({reloaded})."
-                    : first ? " The game uses it from its next start through RFAModLauncher." : ""));
+                : $"Saved {Workspace.RelativeToMod(target)}.") + how);
             context.OverridesChanged();
             return true;
         }

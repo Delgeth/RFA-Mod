@@ -1734,6 +1734,8 @@ struct GameObject {
 //   editor_chunk <asset list> <container>      loads a chunk the level hasn't (below);
 //   editor_reload                              loads the level again and puts the player back (below);
 //   editor_rescan                              has the loader look for new files in overrides\ and edits\;
+//   editor_reload_table <file.xtbl>            reads a table again that the game has no reload_ command
+//       for (below);
 //   editor_remove <handle>                     removes it (0x6D56A0, thiscall on the world: the handle, 0).
 //   editor_create <handle>                     makes an object the game hasn't, from its block as a
 //       zone file holds it (header, then properties), which the editor put in
@@ -3052,7 +3054,44 @@ void EditorTerrain(const std::string& line) {
     AnswerTerrain(name, patch.kind == 0 ? GuardedPatchTerrain(name, patch) : GuardedPatchSubzone(name, patch));
 }
 
+// Tables the game has no reload_ console command for, read again with the game's own loader for the
+// table, whose existing entries it parses again in place by name (and adds the new ones):
+//   spawn_resource.xtbl  0x75EA90 (cdecl: the DLC number, -1 for the game's own file): finds each
+//       spawn_resource_entry by name (0x75EC70) and reads it again (0x75ED30); new names get a new
+//       entry. A level reserves its spawn resources as it loads, so a changed list is used from the
+//       next load of the level (the editor's Save and reload), without restarting the game.
+struct TableReload { const char* file; DWORD loader; };
+constexpr TableReload kTableReloads[] = {
+    {"spawn_resource.xtbl", 0x75EA90},
+};
+
+int GuardedTableReload(DWORD loader) {
+    __try {
+        reinterpret_cast<void(__cdecl*)(int)>(loader)(-1);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode() & 0x7FFFFFFF);
+    }
+}
+
+void EditorReloadTable(const std::string& line) {
+    std::string file = line.substr(strlen("editor_reload_table "));
+    while (!file.empty() && (file.back() == ' ' || file.back() == '\r')) file.pop_back();
+    for (const TableReload& reload : kTableReloads) {
+        if (_stricmp(reload.file, file.c_str()) != 0) continue;
+        const int result = GuardedTableReload(reload.loader);
+        if (result == 1) rfa::Log("Editor link: %s read again", reload.file);
+        else rfa::Log("Editor link: reading %s again faulted (0x%08X); the game keeps what it had", reload.file, static_cast<unsigned>(-result) | 0x80000000u);
+        return;
+    }
+    rfa::Log("Editor link: the game can't read %s again while it runs; it is read when the game starts", file.c_str());
+}
+
 bool RunEditorEdit(const std::string& line) {
+    if (line.rfind("editor_reload_table ", 0) == 0) {
+        EditorReloadTable(line);
+        return true;
+    }
     if (line.rfind("editor_terrain ", 0) == 0) {
         EditorTerrain(line);
         return true;
