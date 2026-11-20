@@ -35,13 +35,18 @@ sealed class ZonePropertyRows
     readonly Func<SchemaPopulate, IReadOnlyList<string>> choicesOf;
     readonly Func<LogicFunctions?>? logicFunctions;
     readonly Func<uint, string?>? objectName;
+    readonly Action<ZoneObject>? editScript;
+    readonly Action<ZoneObject>? addLogicHandler;
 
     /// <param name="choicesOf">An enum's choices from the table it names (see <see cref="SchemaPopulate"/>).</param>
     /// <param name="logicFunctions">The game's script functions, for showing logic handlers' scripts with their names.</param>
     /// <param name="objectName">What an object in the zone is, by its handle (null if it isn't in the zone).</param>
     public ZonePropertyRows(ZoneNames names, ZoneSchema? schema, Func<SchemaPopulate, IReadOnlyList<string>> choicesOf,
-                            Func<LogicFunctions?>? logicFunctions = null, Func<uint, string?>? objectName = null)
+                            Func<LogicFunctions?>? logicFunctions = null, Func<uint, string?>? objectName = null,
+                            Action<ZoneObject>? editScript = null, Action<ZoneObject>? addLogicHandler = null)
     {
+        this.editScript = editScript;
+        this.addLogicHandler = addLogicHandler;
         this.names = names;
         this.schema = schema;
         this.choicesOf = choicesOf;
@@ -80,6 +85,18 @@ sealed class ZonePropertyRows
         foreach (var (property, value) in described.Where(d => !listed.Contains(d.Key)))
             if (showAll || !property.Hidden) yield return row.Described(property, value, showAll || !(property.ReadOnly || property.Hidden));
         foreach (ZoneProperty property in undescribed) yield return row.Undescribed(property);
+
+        if (addLogicHandler != null && names.Class(obj.ClassHash) != "object_logic_handler")
+        {
+            var add = new Button
+            {
+                Content = "Add logic handler...", HorizontalAlignment = HorizontalAlignment.Left, Padding = new Thickness(10, 2, 10, 2),
+                Margin = new Thickness(0, 8, 0, 0),
+                ToolTip = "A script attached to this object (its \"self\"): spawn squads when the player walks in, objectives, checkpoints...",
+            };
+            add.Click += (_, _) => addLogicHandler(obj);
+            yield return add;
+        }
 
         if (showAll && type != null && type.Properties.Where(p => p.EditorOnly).Select(p => p.Name).ToList() is { Count: > 0 } editorOnly)
             yield return new TextBlock
@@ -903,23 +920,8 @@ sealed class ZonePropertyRows
                     Content = "Edit script...", HorizontalAlignment = HorizontalAlignment.Left, Padding = new Thickness(10, 2, 10, 2), Margin = new Thickness(0, 0, 0, 4),
                     ToolTip = "Change its state machines, states, calls, edges and variables.",
                 };
-                edit.Click += (_, _) =>
-                {
-                    // Edited from the bytes as they are now, so Cancel leaves them untouched.
-                    if (LogicScript.Read(property.Value) is not { } editing) return;
-                    if (!ScriptEditor.Edit(Window.GetWindow(edit), editing, rows.logicFunctions?.Invoke(), rows.objectName)) return;
-                    byte[] written = editing.Write();
-                    if (written.Length > 0xFFFF)
-                    {
-                        MessageBox.Show(Window.GetWindow(edit), $"The script came to {written.Length} bytes; a zone property holds at most 65535 (and the game reads at most 64 KB). It wasn't changed.",
-                                        "Logic handler script", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
-                    }
-                    property.SetValue(written);
-                    changed();
-                    committed();
-                    relaidOut();
-                };
+                edit.Click += (_, _) => rows.editScript?.Invoke(obj);
+                edit.IsEnabled = rows.editScript != null;
                 panel.Children.Add(edit);
                 int states = script.Objects.Sum(o => o.States.Count);
                 panel.Children.Add(new TextBlock

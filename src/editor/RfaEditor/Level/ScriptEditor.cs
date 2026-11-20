@@ -7,19 +7,37 @@ using RfaFormats.Zones;
 
 namespace RfaEditor;
 
+/// <summary>An object a script can name: its handle, class and outliner label.</summary>
+sealed record ScriptObject(uint Handle, string Class, string Label)
+{
+    public string Text => Label.Length > 0 ? $"{Label}  ·  {Class}  ·  {Handle:X8}" : $"{Class}  ·  {Handle:X8}";
+    public override string ToString() => Text;
+}
+
+/// <summary>
+/// What a script editor works with: the function tables, the objects of the level a script can name,
+/// the level's picked object (for "use the picked object"), the handler's own object (self), and how the
+/// script is written back to its handler (null when it was, else why not).
+/// </summary>
+sealed record ScriptContext(LogicFunctions? Functions, IReadOnlyList<ScriptObject> Objects, Func<uint?> Picked, uint Self,
+                            Func<LogicScript, string?> Apply);
+
 /// <summary>
 /// Edits a logic handler's script (<see cref="LogicScript"/>): its state machines, their states, the calls
 /// each state makes on enter, each frame and on exit, the edges that move it on (where to, how long to wait,
 /// the condition), and the handler's variables and arrays. The tree on the left is the script; the panel on
 /// the right edits what is chosen in it. Calls are picked from the game's function tables, with each
-/// parameter's own editor. Timelines are shown, not edited. The script is changed in place; the caller
-/// writes it back when the window says OK.
+/// parameter's own editor; objects are picked from the level's (those that fit first), or the level's picked
+/// object is used. Recipes add ready-made state machines. Timelines are shown, not edited. The window stays
+/// open beside the level (so objects can be picked there); OK and Apply write the script back.
 /// </summary>
 sealed class ScriptEditor : Window
 {
     readonly LogicScript script;
     readonly LogicFunctions? functions;
     readonly Func<uint, string?>? objectName;
+    readonly ScriptContext context;
+    readonly Dictionary<uint, ScriptObject> objectsByHandle;
     readonly LogicText text;
     readonly TreeView tree = new();
     readonly StackPanel details = new() { Margin = new Thickness(10, 6, 10, 6) };
@@ -35,17 +53,40 @@ sealed class ScriptEditor : Window
     sealed record TimelineNode(LogicObject Timeline);
     sealed record GroupNode(string Name);
 
-    public static bool Edit(Window? owner, LogicScript script, LogicFunctions? functions, Func<uint, string?>? objectName)
+    /// <summary>Opens an editor for a script beside the level (not blocking it).</summary>
+    /// <param name="offerRecipes">A new handler's: the recipes are offered first (an empty state machine if none is taken).</param>
+    public static ScriptEditor Open(Window? owner, string title, LogicScript script, ScriptContext context, bool offerRecipes = false)
     {
-        var window = new ScriptEditor(script, functions, objectName) { Owner = owner };
-        return window.ShowDialog() == true;
+        var window = new ScriptEditor(script, context) { Owner = owner, Title = title };
+        window.Show();
+        if (offerRecipes)
+            window.Dispatcher.InvokeAsync(() =>
+            {
+                // A new handler has an empty state machine (one with none doesn't load); a recipe takes its place.
+                LogicObject? placeholder = script.Objects.Count == 1 && IsEmpty(script.Objects[0]) ? script.Objects[0] : null;
+                LogicObject? made = RecipeDialog.Choose(window, script, context);
+                if (made != null && placeholder != null) script.Objects.Remove(placeholder);
+                if (made == null && script.Objects.Count == 0)
+                {
+                    made = LogicObject.NewStateMachine("Statemachine1");
+                    script.Objects.Add(made);
+                }
+                window.Rebuild(made == null ? null : new MachineNode(made, script.Objects));
+            });
+        return window;
     }
 
-    ScriptEditor(LogicScript script, LogicFunctions? functions, Func<uint, string?>? objectName)
+    static bool IsEmpty(LogicObject o) =>
+        o.Kind == LogicObjectKind.StateMachine && o.States.Count == 1 && o.States[0] is var s &&
+        s.OnEnter.Count + s.EachFrame.Count + s.OnExit.Count + s.Edges.Count + s.Inner.Count == 0;
+
+    ScriptEditor(LogicScript script, ScriptContext context)
     {
         this.script = script;
-        this.functions = functions;
-        this.objectName = objectName;
+        this.context = context;
+        functions = context.Functions;
+        objectsByHandle = context.Objects.GroupBy(o => o.Handle).ToDictionary(g => g.Key, g => g.First());
+        objectName = h => objectsByHandle.TryGetValue(h, out ScriptObject? o) ? (o.Label.Length > 0 ? $"{o.Class} \"{o.Label}\"" : o.Class) : null;
         text = new LogicText(script, functions, objectName);
 
         Title = "Logic handler script";
@@ -86,14 +127,14 @@ sealed class ScriptEditor : Window
         grid.Children.Add(scroller);
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(6) };
-        var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 80, Margin = new Thickness(0, 0, 6, 0) };
-        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 80 };
-        ok.Click += (_, _) =>
-        {
-            if (Problem() is { } problem) { MessageBox.Show(this, problem, Title, MessageBoxButton.OK, MessageBoxImage.Warning); return; }
-            DialogResult = true;
-        };
+        var ok = new Button { Content = "OK", MinWidth = 80, Margin = new Thickness(0, 0, 6, 0), ToolTip = "Write the script to its handler and close." };
+        var apply = new Button { Content = "Apply", MinWidth = 80, Margin = new Thickness(0, 0, 6, 0), ToolTip = "Write the script to its handler (one undo step) and keep editing." };
+        var cancel = new Button { Content = "Close", IsCancel = true, MinWidth = 80, ToolTip = "Close without writing what wasn't applied." };
+        ok.Click += (_, _) => { if (WriteBack()) Close(); };
+        apply.Click += (_, _) => WriteBack();
+        cancel.Click += (_, _) => Close();
         buttons.Children.Add(ok);
+        buttons.Children.Add(apply);
         buttons.Children.Add(cancel);
         Grid.SetRow(buttons, 2);
         Grid.SetColumnSpan(buttons, 3);
@@ -101,6 +142,14 @@ sealed class ScriptEditor : Window
 
         Content = grid;
         Rebuild(null);
+    }
+
+    bool WriteBack()
+    {
+        string? problem = Problem() ?? context.Apply(script);
+        if (problem == null) return true;
+        MessageBox.Show(this, problem, Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+        return false;
     }
 
     // ---- The tree ------------------------------------------------------------------------------
@@ -247,6 +296,7 @@ sealed class ScriptEditor : Window
             script.Variables.Add(made);
             return new VariableNode(script.Variables.Count - 1);
         });
+        Tool("+ From recipe...", () => RecipeDialog.Choose(this, script, context) is { } made ? new MachineNode(made, script.Objects) : null);
         Tool("+ Array", () =>
         {
             var made = new LogicArray { Most = 16, Name = new FixedText(UniqueName("Array", script.Arrays.Select(a => a.Name.Text), 15)) };
@@ -371,6 +421,7 @@ sealed class ScriptEditor : Window
     /// <summary>What would stop the game reading the script; null if nothing.</summary>
     string? Problem()
     {
+        if (script.Objects.Count == 0) return "The script has no state machine: the game won't load a handler without one.";
         foreach (LogicObject m in AllMachines())
         {
             if (m.States.Count == 0) return $"State machine \"{m.Name}\" has no states.";
@@ -556,25 +607,20 @@ sealed class ScriptEditor : Window
         LogicFunctions.Function? function = functions?.Find(call.Function);
         if (functions != null)
         {
-            var choices = functions.All.Where(f => f.IsTest == call.IsTest).OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
-            var pick = new ComboBox
+            var pick = new Button
             {
-                ItemsSource = choices, DisplayMemberPath = nameof(LogicFunctions.Function.Name), SelectedItem = function,
-                IsEditable = true, IsTextSearchEnabled = true, StaysOpenOnEdit = true,
+                Content = (function?.Name ?? call.Function) + "   \u25BE", HorizontalContentAlignment = HorizontalAlignment.Left,
+                Padding = new Thickness(6, 2, 6, 2), ToolTip = "Choose the function from the list, by searching or by category.",
             };
-            if (function == null) pick.Text = call.Function;
-            TextSearch.SetTextPath(pick, nameof(LogicFunctions.Function.Name));
-            // Taken once the list closes or the box is left, not while typing (typing picks the nearest match as it goes).
-            void Apply()
+            pick.Click += (_, _) =>
             {
-                if (pick.SelectedItem is not LogicFunctions.Function chosen || chosen.Code == call.Function) return;
+                if (FunctionPicker.Choose(this, functions, call.IsTest, function) is not { } chosen || chosen.Code == call.Function) return;
                 call.Function = chosen.Code;
                 call.Arguments.Clear();
                 foreach (LogicFunctions.Parameter p in chosen.Parameters) call.Arguments.Add(LogicValue.DefaultFor(p.Type));
-                Dispatcher.InvokeAsync(() => { ShowDetails(); Refresh(); });
-            }
-            pick.DropDownClosed += (_, _) => Apply();
-            pick.LostKeyboardFocus += (_, _) => Apply();
+                ShowDetails();
+                Refresh();
+            };
             Row(call.IsTest ? "Test" : "Function", pick, function?.Comments, panel);
             if (function?.Comments is { Length: > 0 } comments)
                 panel.Children.Add(new TextBlock { Text = comments, Foreground = Theme.Brush("DimTextBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(130, 0, 0, 4) });
@@ -600,7 +646,8 @@ sealed class ScriptEditor : Window
             LogicFunctions.Parameter? p = function != null && i < function.Parameters.Count ? function.Parameters[i] : null;
             int at = i;
             Row(p?.Name is { Length: > 0 } label ? label : $"Argument {i + 1}",
-                ValueEditor(call.Arguments[i], p?.Type, v => call.Arguments[at] = v, references: true),
+                ValueEditor(call.Arguments[i], p?.Type, v => call.Arguments[at] = v, references: true,
+                            classes: p == null ? null : LogicHints.ClassesFor(call.Function, p.Name)),
                 p == null ? null : $"{p.Type}: {p.Description}", panel);
         }
         if (function != null && call.Arguments.Count != function.Parameters.Count)
@@ -680,7 +727,7 @@ sealed class ScriptEditor : Window
     /// A value's editor: what kind of value it is (by the parameter's type: an object, the player, a variable, ...)
     /// and the value itself. <paramref name="set"/> puts a new value in its place when the kind changes.
     /// </summary>
-    FrameworkElement ValueEditor(LogicValue value, string? parameterType, Action<LogicValue> set, bool references)
+    FrameworkElement ValueEditor(LogicValue value, string? parameterType, Action<LogicValue> set, bool references, IReadOnlyList<string>? classes = null)
     {
         string type = (parameterType ?? "").Trim().ToLowerInvariant() switch
         {
@@ -724,7 +771,7 @@ sealed class ScriptEditor : Window
 
         void Body()
         {
-            body.Content = BodyFor(live, KindOf(live), v => { live = v; set(v); });
+            body.Content = BodyFor(live, KindOf(live), v => { live = v; set(v); }, classes ?? []);
         }
         kind.SelectionChanged += (_, _) =>
         {
@@ -773,7 +820,7 @@ sealed class ScriptEditor : Window
         _ => v.Player ? "the player" : v.Owner ? "self (the handler's object)" : v.Handle == 0xFFFFFFFF ? "none" : "object",
     };
 
-    FrameworkElement BodyFor(LogicValue v, string kind, Action<LogicValue> set)
+    FrameworkElement BodyFor(LogicValue v, string kind, Action<LogicValue> set, IReadOnlyList<string> classes)
     {
         switch (kind)
         {
@@ -802,15 +849,7 @@ sealed class ScriptEditor : Window
                 });
             case "object":
             case "position of an object":
-                var handle = TextEditor(v.Handle == 0xFFFFFFFF ? "" : v.Handle.ToString("X8"), t =>
-                {
-                    if (!uint.TryParse(t.Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint h)) return "an object's handle in hex (as the outliner shows them)";
-                    if (h != v.Handle) { v.Handle = h; v.HandleNumber = -1; }
-                    return null;
-                });
-                handle.ToolTip = objectName?.Invoke(v.Handle) ?? "An object's handle in hex, as the outliner shows them.";
-                handle.TextChanged += (_, _) => { if (objectName?.Invoke(v.Handle) is { } name) handle.ToolTip = name; };
-                return handle;
+                return ObjectPicker(v.Handle, classes, h => { if (h != v.Handle) { v.Handle = h; v.HandleNumber = -1; } Refresh(); });
             case "variable":
                 var names = Enumerable.Range(0, script.Variables.Count).Select(i => $"{script.VariableName(i)} ({TypeName(script.Variables[i]).ToLowerInvariant()})").ToList();
                 var pick = new ComboBox { ItemsSource = names, SelectedIndex = v.Reference < names.Count ? v.Reference : -1 };
@@ -830,6 +869,72 @@ sealed class ScriptEditor : Window
             default:  // the player, self, none: nothing more to say
                 return new TextBlock();
         }
+    }
+
+    /// <summary>
+    /// An object of the level, picked from a list (the objects of the classes that fit first, by the game's own
+    /// scripts' use, see <see cref="LogicHints"/>), typed as a handle in hex, or the level's picked object.
+    /// </summary>
+    internal FrameworkElement ObjectPicker(uint handle, IReadOnlyList<string> classes, Action<uint> set)
+    {
+        var rank = classes.Select((c, i) => (c, i)).ToDictionary(x => x.c, x => x.i, StringComparer.OrdinalIgnoreCase);
+        List<ScriptObject> fitting = context.Objects.Where(o => rank.ContainsKey(o.Class))
+            .OrderBy(o => rank[o.Class]).ThenBy(o => o.Label, StringComparer.OrdinalIgnoreCase).ToList();
+        List<ScriptObject> all = context.Objects.OrderBy(o => o.Class).ThenBy(o => o.Label, StringComparer.OrdinalIgnoreCase).ToList();
+
+        var box = new ComboBox
+        {
+            IsEditable = true, IsTextSearchEnabled = true, StaysOpenOnEdit = true,
+            ItemsSource = fitting.Count > 0 ? fitting : all,
+            ToolTip = "Pick an object (those that fit first), or type its handle in hex.",
+        };
+        TextSearch.SetTextPath(box, nameof(ScriptObject.Text));
+        void Show(uint h)
+        {
+            ScriptObject? known = objectsByHandle.GetValueOrDefault(h);
+            if (known != null && !((IEnumerable<ScriptObject>)box.ItemsSource).Contains(known)) box.ItemsSource = all;
+            box.SelectedItem = known;
+            box.Text = known?.Text ?? (h == 0xFFFFFFFF ? "" : h.ToString("X8"));
+        }
+        Show(handle);
+        void Take()
+        {
+            if (box.SelectedItem is ScriptObject chosen) { set(chosen.Handle); return; }
+            string typed = box.Text.Trim();
+            int dot = typed.LastIndexOf('·');
+            if (dot >= 0) typed = typed[(dot + 1)..].Trim();
+            if (uint.TryParse(typed, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint h)) { set(h); box.ClearValue(Control.BorderBrushProperty); }
+            else if (typed.Length > 0) box.BorderBrush = Theme.Brush("ErrorBrush");
+        }
+        box.DropDownClosed += (_, _) => Take();
+        box.LostKeyboardFocus += (_, _) => Take();
+
+        var everything = new CheckBox
+        {
+            Content = "all", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0), IsChecked = fitting.Count == 0,
+            IsEnabled = fitting.Count > 0, ToolTip = "List every object of the level, not only those that fit.",
+        };
+        everything.Checked += (_, _) => box.ItemsSource = all;
+        everything.Unchecked += (_, _) => box.ItemsSource = fitting;
+        var picked = new Button { Content = "\u25CE", Padding = new Thickness(6, 0, 6, 0), Margin = new Thickness(4, 0, 0, 0), ToolTip = "Use the object picked in the level." };
+        picked.Click += (_, _) =>
+        {
+            if (context.Picked() is not uint h) { MessageBox.Show(this, "Pick an object in the level (its view or outliner) first.", Title); return; }
+            set(h);
+            Show(h);
+        };
+        var self = new Button { Content = "self", Padding = new Thickness(6, 0, 6, 0), Margin = new Thickness(4, 0, 0, 0), ToolTip = "The object this handler is attached to." };
+        self.Click += (_, _) => { set(context.Self); Show(context.Self); };
+
+        var row = new DockPanel();
+        DockPanel.SetDock(self, Dock.Right);
+        DockPanel.SetDock(picked, Dock.Right);
+        DockPanel.SetDock(everything, Dock.Right);
+        row.Children.Add(self);
+        row.Children.Add(picked);
+        row.Children.Add(everything);
+        row.Children.Add(box);
+        return row;
     }
 
     static string? Float(string t, out float f) =>

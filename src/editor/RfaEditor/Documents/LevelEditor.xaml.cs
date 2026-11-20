@@ -126,7 +126,7 @@ public partial class LevelEditor : UserControl, IEditorDocument
         DetachWindowParts();  // its menus, status and Show chips, which the window shows (see LevelEditor.Layout.cs)
         names = context.Assets.ZoneNames;
         propertyRows = new ZonePropertyRows(names, context.Assets.ZoneSchema, context.Assets.Choices,
-                                            () => context.Assets.LogicFunctions, ScriptObjectName);
+                                            () => context.Assets.LogicFunctions, ScriptObjectName, h => EditScript(h), AddLogicHandler);
         zone = ZoneFile.Read(ReadZone());
         NotePlacements();
         gameLink = new GameLink(Workspace.ModFolder);
