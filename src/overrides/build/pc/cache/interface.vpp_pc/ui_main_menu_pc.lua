@@ -3,7 +3,7 @@
 --
 -- Groups the top menu by game: Red Faction: Armageddon (Continue, New Game, New Game+, Load Game, the
 -- downloadable content, Infestation and Ruin) and Red Faction: Guerrilla (the Guerrilla world, and its
--- builder), then Level editor, Options, Extras and Quit; Options > Main Menu sets how ([MainMenu] in
+-- builder), then Level editor (Launch editor, Create level, Delete custom level), Options, Extras and Quit; Options > Main Menu sets how ([MainMenu] in
 -- rfa_mods.ini: the layout by game or the game's classic one, Continue at the top, which entries show,
 -- the descriptions, the decorations, opening where you left off, the style: Classic or Modern, a flat,
 -- sharp look in one accent colour, see rfa_modern_style). Adds Level editor (Create level: starts the editor; Delete custom level: deletes a Ruin level made
@@ -59,6 +59,7 @@ local DLC_SHOW_STORE_ID			= 303
 -- Level editor sub-menu -- [RFA]
 local LEVEL_CREATE_ID			= 501 -- [RFA]
 local LEVEL_DELETE_ID			= 502 -- [RFA]
+local LEVEL_LAUNCH_ID			= 503 -- [RFA]
 
 -- Extras sub-menu
 local EXTRAS_PLAYER_STATS_ID	= 401
@@ -169,6 +170,7 @@ local MENU_DATA = {
 	},
 	
 	LEVEL_EDITOR_SUB_MENU = { -- [RFA]
+		{label = "LAUNCH EDITOR",			id = LEVEL_LAUNCH_ID}, -- [RFA]
 		{label = "CREATE LEVEL",			id = LEVEL_CREATE_ID}, -- [RFA]
 		{label = "DELETE CUSTOM LEVEL",		id = LEVEL_DELETE_ID}, -- [RFA]
 	}, -- [RFA]
@@ -694,6 +696,9 @@ function ui_main_menu_set_screen_hint(new_tier)
 	elseif current_id == LEVEL_EDITOR_ID then -- [RFA]
 		Hint_bar:set_value("Make your own Ruin levels in RFA-Mod's level editor, or delete the ones you made") -- [RFA]
 
+	elseif current_id == LEVEL_LAUNCH_ID then -- [RFA]
+		Hint_bar:set_value("Open RFA-Mod's level editor with the game docked in it, to edit any level or table") -- [RFA]
+
 	elseif current_id == QUIT_GAME_ID then
 		Hint_bar:set_value("MENU_DESC_QUIT")
 	end
@@ -768,6 +773,9 @@ function ui_main_menu_button_a(event, acceleration)
 
 	elseif current_id == LEVEL_DELETE_ID then -- [RFA]
 		ui_main_menu_rfa_delete_level(1) -- [RFA]
+
+	elseif current_id == LEVEL_LAUNCH_ID then -- [RFA]
+		ui_main_menu_rfa_launch_editor() -- [RFA]
 
 	elseif current_id == NEW_GAME_ID then
 		-- Don't animate out, just start a new game
@@ -1068,6 +1076,18 @@ end -- [RFA]
 function ui_main_menu_rfa_create_failed() -- [RFA]
 	for i = 1, 10 do thread_yield() end -- [RFA]
 	rfa_popup(_GetAnyGlobalSilent("Rfa_create_message"), "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+end -- [RFA]
+
+-- [RFA] Level editor > Launch editor: starts the level editor (or brings the open one forward) with this game docked
+-- [RFA] in its Game panel, on no level in particular: open one there, or make one with its New level.
+function ui_main_menu_rfa_launch_editor() -- [RFA]
+	if rfa_open_level_editor == nil then -- [RFA]
+		rfa_popup("The level editor needs RFA-Mod's loader (rfa_loader.dll).", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	elseif rfa_open_level_editor() then -- [RFA]
+		rfa_popup("The level editor is starting. It docks the game in its Game panel; open a level there, or make one with its New level.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	else -- [RFA]
+		rfa_popup("The level editor couldn't be started: editor\\RfaEditor.exe wasn't found next to the mod. logs\\rfa_mods.log says more.", "ui_main_menu_rfa_popup_done", {"MENU_OK"}) -- [RFA]
+	end -- [RFA]
 end -- [RFA]
 
 function ui_main_menu_rfa_create_level() -- [RFA] asks which mode the new level is for
