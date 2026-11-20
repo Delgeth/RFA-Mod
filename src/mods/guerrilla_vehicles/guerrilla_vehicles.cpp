@@ -2005,7 +2005,7 @@ void ReadSkeletonList() {
 
 void StartTraffic();  // traffic.cpp (with convoys.cpp, edf.cpp, crews.cpp on its frame)
 namespace gv { void StartFlyers(); }  // flyers.cpp
-namespace gv { void StartFlyerControls(); }  // flyer_controls.cpp
+namespace gv { void StartFlyerControls(); bool FlyersFly(); }  // flyer_controls.cpp; flyers.cpp
 namespace gv { void StartTurrets(); }  // turrets.cpp
 namespace gv { void StartEntering(); }  // entering.cpp
 namespace gv { void StartRiders(); }  // riders.cpp
