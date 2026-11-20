@@ -91,7 +91,8 @@ cl %CFLAGS% "%ROOT%src\mods\rfa_qol\live_analysis_mcp.cpp" /Fe"%OUT%\live_analys
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_world\guerrilla_world.cpp" /Fe"%OUT%\mods\guerrilla_world.dll" /link /IMPLIB:guerrilla_world.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_hud.dll: Guerrilla's HUD, and its keys' F7 window (ImGui).
 cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_hud\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_hud.dll" /link /IMPLIB:guerrilla_hud.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
-cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_vehicles\*.cpp" /Fe"%OUT%\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib >> "%LOG%" 2>&1 || goto :fail
+rem guerrilla_vehicles.dll: Guerrilla's vehicles, and the flyer controls' F7 menu item (ImGui).
+cl %CFLAGS% /DNDEBUG /I"%IMGUI%" /LD "%ROOT%src\mods\guerrilla_vehicles\*.cpp" %IMGUI_CORE% /Fe"%OUT%\mods\guerrilla_vehicles.dll" /link /IMPLIB:guerrilla_vehicles.lib user32.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_people\*.cpp" /Fe"%OUT%\mods\guerrilla_people.dll" /link /IMPLIB:guerrilla_people.lib >> "%LOG%" 2>&1 || goto :fail
 cl %CFLAGS% /LD "%ROOT%src\mods\guerrilla_save\guerrilla_save.cpp" /Fe"%OUT%\mods\guerrilla_save.dll" /link /IMPLIB:guerrilla_save.lib >> "%LOG%" 2>&1 || goto :fail
 rem guerrilla_campaign.dll: Guerrilla's alert level (and, being made, the rest of its campaign's systems).

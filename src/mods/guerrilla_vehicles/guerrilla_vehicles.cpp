@@ -2005,6 +2005,7 @@ void ReadSkeletonList() {
 
 void StartTraffic();  // traffic.cpp (with convoys.cpp, edf.cpp, crews.cpp on its frame)
 namespace gv { void StartFlyers(); }  // flyers.cpp
+namespace gv { void StartFlyerControls(); }  // flyer_controls.cpp
 namespace gv { void StartTurrets(); }  // turrets.cpp
 namespace gv { void StartEntering(); }  // entering.cpp
 namespace gv { void StartRiders(); }  // riders.cpp
@@ -2039,6 +2040,8 @@ extern "C" __declspec(dllexport) void __cdecl RFAMod_Init() {
     HookLights();
     StartTraffic();
     gv::StartFlyers();
+    if (gv::FlyersFly()) gv::StartFlyerControls();  // made in the vehicles' presim, which flyers.cpp hooks
+    else rfa::Log("Flyer controls: Guerrilla's flyers keep their own (the vehicles' presim isn't hooked: [GuerrillaVehicles] NpcFlight=0 or no flyers.txt)");
     if (rfa::IniInt(L"GuerrillaVehicles", L"Dents", 1) != 0) TurnOnDents();
     else rfa::Log("Dents: off ([GuerrillaVehicles] Dents=0)");
     HookDoors();
