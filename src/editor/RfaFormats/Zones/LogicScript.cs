@@ -79,12 +79,48 @@ public sealed class LogicScript
     /// <summary>Every call and condition test in the script, nested ones too.</summary>
     public IEnumerable<LogicCall> Calls() => Objects.SelectMany(o => o.Calls());
 
-    /// <summary>The script written out for people to read.</summary>
-    public string ToText(LogicFunctions? functions = null, Func<uint, string?>? objectName = null)
+    /// <summary>Every value that can refer to a variable or an array: calls' arguments and arrays' contents.</summary>
+    public IEnumerable<LogicValue> ReferringValues() =>
+        Calls().SelectMany(c => c.Arguments)
+            .Concat(Arrays.SelectMany(a => a.Elements.Concat(a.ListA.SelectMany(l => l.Values)).Concat(a.ListB.SelectMany(l => l.Values))));
+
+    /// <summary>Whether a call reads or sets a variable.</summary>
+    public bool VariableUsed(int index) =>
+        Calls().Any(c => c.Result == index) || ReferringValues().Any(v => v.Type == LogicValueType.Reference && v.Reference == index);
+
+    /// <summary>Whether a call names an array.</summary>
+    public bool ArrayUsed(LogicArray array)
     {
-        var text = new LogicText(this, functions, objectName);
-        return text.Write();
+        int hash = (int)NameHashes.PropertyHash(array.Name.Text);
+        return ReferringValues().Any(v => v.Type == LogicValueType.Reference && v.Reference == -1 && v.ReferenceExtra == hash);
     }
+
+    /// <summary>Takes a variable out and renumbers the references to those after it (it should be unused, see <see cref="VariableUsed"/>).</summary>
+    public void RemoveVariable(int index)
+    {
+        Variables.RemoveAt(index);
+        foreach (LogicCall c in Calls()) if (c.Result > index) c.Result--;
+        foreach (LogicValue v in ReferringValues())
+            if (v.Type == LogicValueType.Reference && v.Reference > index) v.Reference--;
+    }
+
+    /// <summary>Renames an array, and the references to it (they name it by a hash of its name).</summary>
+    public void RenameArray(LogicArray array, string name)
+    {
+        int old = (int)NameHashes.PropertyHash(array.Name.Text);
+        array.Name.Text = name;
+        int now = (int)NameHashes.PropertyHash(name);
+        foreach (LogicValue v in ReferringValues())
+            if (v.Type == LogicValueType.Reference && v.Reference == -1 && v.ReferenceExtra == old) v.ReferenceExtra = now;
+    }
+
+    /// <summary>The script written out for people to read.</summary>
+    public string ToText(LogicFunctions? functions = null, Func<uint, string?>? objectName = null) =>
+        new LogicText(this, functions, objectName).Write();
+
+    /// <summary>A variable's name for people: its own, or var and its number.</summary>
+    public string VariableName(int index) =>
+        index >= 0 && index < Variables.Count && Variables[index].Name is { Length: > 0 } name ? name : $"var{index}";
 }
 
 /// <summary>A name in a fixed-length field: its text, and the field's bytes as read (kept while the text is unchanged).</summary>
@@ -204,6 +240,63 @@ public sealed class LogicObject
             w.U32(TimelineTail);
         }
     }
+
+    /// <summary>A new state machine with one state, "Start".</summary>
+    public static LogicObject NewStateMachine(string name)
+    {
+        var machine = new LogicObject { Kind = LogicObjectKind.StateMachine, Name = new FixedText(name) };
+        machine.States.Add(new LogicState { Name = new FixedText("Start"), Flag = 1, X = 70, Y = 80 });
+        return machine;
+    }
+
+    /// <summary>Which state is first: the index, and each state's flag (the game's files set it on the first one only).</summary>
+    public void SetFirstState(int index)
+    {
+        FirstState = index;
+        for (int i = 0; i < States.Count; i++) States[i].Flag = (byte)(i == index ? 1 : 0);
+    }
+
+    /// <summary>Renames a state, and every edge that names it (the game joins edges to states by name).</summary>
+    public void RenameState(LogicState state, string name)
+    {
+        string old = state.Name.Text;
+        state.Name.Text = name;
+        foreach (LogicState s in States)
+            foreach (LogicEdge e in s.Edges)
+            {
+                if (e.From.Text == old) e.From.Text = name;
+                if (e.To.Text == old) e.To.Text = name;
+            }
+    }
+
+    /// <summary>Takes a state out, and the edges into it; keeps the first state where it was if it can.</summary>
+    public void RemoveState(LogicState state)
+    {
+        int index = States.IndexOf(state);
+        if (index < 0) return;
+        States.RemoveAt(index);
+        foreach (LogicState s in States) s.Edges.RemoveAll(e => e.To.Text == state.Name.Text);
+        int first = FirstState == index ? 0 : FirstState > index ? FirstState - 1 : FirstState;
+        SetFirstState(States.Count == 0 ? 0 : Math.Min(first, States.Count - 1));
+    }
+
+    /// <summary>A new state, placed to the right of the others on Volition's graph.</summary>
+    public LogicState AddState(string name)
+    {
+        var state = new LogicState
+        {
+            Name = new FixedText(name),
+            X = States.Count == 0 ? 70 : States.Max(s => s.X) + 160,
+            Y = States.Count == 0 ? 80 : States[^1].Y,
+        };
+        States.Add(state);
+        if (States.Count == 1) SetFirstState(0);
+        return state;
+    }
+
+    /// <summary>A new edge from one state to another, taken when its condition holds (always, to start with).</summary>
+    public static LogicEdge NewEdge(LogicState from, LogicState to) =>
+        new() { From = new FixedText(from.Name.Text), To = new FixedText(to.Name.Text) };
 
     public IEnumerable<LogicCall> Calls()
     {
@@ -368,6 +461,15 @@ public sealed class LogicCall
     public List<LogicValue> Arguments { get; } = [];
 
     public static LogicCall NewTest(string function) => new() { Function = function, IsTest = true };
+    public static LogicCall NewAction(string function) => new() { Function = function };
+
+    /// <summary>A call of a function with each of its parameters at a starting value (see <see cref="LogicValue.DefaultFor"/>).</summary>
+    public static LogicCall Of(LogicFunctions.Function function)
+    {
+        LogicCall call = function.IsTest ? NewTest(function.Code) : NewAction(function.Code);
+        foreach (LogicFunctions.Parameter p in function.Parameters) call.Arguments.Add(LogicValue.DefaultFor(p.Type));
+        return call;
+    }
 
     internal static LogicCall Read(LogicReader r, bool test)
     {
@@ -428,7 +530,22 @@ public sealed class LogicValue
     public int Reference { get; set; }
     public int ReferenceExtra { get; set; }
 
-    public string Name => Encoding.Latin1.GetString(NameBytes).TrimEnd('\0');
+    /// <summary>A handler variable's name (the values in calls have none).</summary>
+    public string Name
+    {
+        get => Encoding.Latin1.GetString(NameBytes).TrimEnd('\0');
+        set => NameBytes = Encoding.Latin1.GetBytes(value.Length > 31 ? value[..31] : value);
+    }
+
+    /// <summary>A starting value for a parameter of a type the function tables name (ObjHandle, Number, Boolean, String, Vector).</summary>
+    public static LogicValue DefaultFor(string parameterType) => parameterType.Trim().ToLowerInvariant() switch
+    {
+        "number" => OfNumber(0),
+        "boolean" => OfBoolean(false),
+        "string" => OfText(""),
+        "vector" => new() { Type = LogicValueType.Vector, Form = 0 },
+        _ => OfObject(0xFFFFFFFF),
+    };
 
     public static LogicValue OfWhole(int value) => new() { Type = LogicValueType.Number, Form = 0, Whole = value };
     public static LogicValue OfNumber(float value) => new() { Type = LogicValueType.Number, Form = 1, Number = value };
@@ -672,15 +789,15 @@ public sealed class LogicFunctions
     }
 }
 
-/// <summary>Writes a script out for people to read.</summary>
-sealed class LogicText(LogicScript script, LogicFunctions? functions, Func<uint, string?>? objectName)
+/// <summary>Writes a script, or a part of one, out for people to read.</summary>
+public sealed class LogicText(LogicScript script, LogicFunctions? functions, Func<uint, string?>? objectName)
 {
     readonly StringBuilder text = new();
     readonly Dictionary<int, string> arrays = script.Arrays.GroupBy(a => (int)NameHashes.PropertyHash(a.Name.Text)).ToDictionary(g => g.Key, g => g.First().Name.Text);
 
     public string Write()
     {
-        for (int i = 0; i < script.Variables.Count; i++) Line(0, $"var{i} = {Value(script.Variables[i])}");
+        for (int i = 0; i < script.Variables.Count; i++) Line(0, $"{script.VariableName(i)} = {Value(script.Variables[i])}");
         foreach (LogicArray a in script.Arrays)
             Line(0, $"array \"{a.Name}\" (up to {a.Most}): " + string.Join(", ", a.Elements.Select(Value)));
         if (script.Variables.Count > 0 || script.Arrays.Count > 0) text.AppendLine();
@@ -734,14 +851,14 @@ sealed class LogicText(LogicScript script, LogicFunctions? functions, Func<uint,
         }
     }
 
-    string Condition(LogicCondition c) => c.Kind switch
+    public string Condition(LogicCondition c) => c.Kind switch
     {
         LogicConditionKind.Test => Call(c.Call!),
         LogicConditionKind.NotTest => "not " + Call(c.Call!),
         _ => $"({Condition(c.Left!)} {c.Kind.ToString().ToLowerInvariant()} {Condition(c.Right!)})",
     };
 
-    string Call(LogicCall c)
+    public string Call(LogicCall c)
     {
         LogicFunctions.Function? f = functions?.Find(c.Function);
         var args = new List<string>();
@@ -751,10 +868,10 @@ sealed class LogicText(LogicScript script, LogicFunctions? functions, Func<uint,
             args.Add(label is { Length: > 0 } ? $"{label}: {Value(c.Arguments[i])}" : Value(c.Arguments[i]));
         }
         string call = $"{f?.Name ?? c.Function}({string.Join(", ", args)})";
-        return c.Result >= 0 ? $"var{c.Result} <- {call}" : call;
+        return c.Result >= 0 ? $"{script.VariableName(c.Result)} <- {call}" : call;
     }
 
-    string Value(LogicValue v) => v.Type switch
+    public string Value(LogicValue v) => v.Type switch
     {
         LogicValueType.Number => v.Form switch
         {
@@ -773,14 +890,14 @@ sealed class LogicText(LogicScript script, LogicFunctions? functions, Func<uint,
         LogicValueType.Boolean => v.Boolean ? "true" : "false",
         LogicValueType.Reference => v.Reference switch
         {
-            >= 0 => $"var{v.Reference}",
+            >= 0 => script.VariableName(v.Reference),
             -1 => arrays.TryGetValue(v.ReferenceExtra, out string? name) ? $"array \"{name}\"" : $"array {(uint)v.ReferenceExtra:X8}",
             _ => $"ref({v.Reference}, {(uint)v.ReferenceExtra:X8})",
         },
         _ => "?",
     };
 
-    string Handle(LogicValue v)
+    public string Handle(LogicValue v)
     {
         if (v.Player) return "player";
         if (v.Owner) return "self";

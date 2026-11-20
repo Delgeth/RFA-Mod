@@ -898,6 +898,29 @@ sealed class ZonePropertyRows
 
             if (LogicScript.Read(value) is { } script)
             {
+                var edit = new Button
+                {
+                    Content = "Edit script...", HorizontalAlignment = HorizontalAlignment.Left, Padding = new Thickness(10, 2, 10, 2), Margin = new Thickness(0, 0, 0, 4),
+                    ToolTip = "Change its state machines, states, calls, edges and variables.",
+                };
+                edit.Click += (_, _) =>
+                {
+                    // Edited from the bytes as they are now, so Cancel leaves them untouched.
+                    if (LogicScript.Read(property.Value) is not { } editing) return;
+                    if (!ScriptEditor.Edit(Window.GetWindow(edit), editing, rows.logicFunctions?.Invoke(), rows.objectName)) return;
+                    byte[] written = editing.Write();
+                    if (written.Length > 0xFFFF)
+                    {
+                        MessageBox.Show(Window.GetWindow(edit), $"The script came to {written.Length} bytes; a zone property holds at most 65535 (and the game reads at most 64 KB). It wasn't changed.",
+                                        "Logic handler script", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    property.SetValue(written);
+                    changed();
+                    committed();
+                    relaidOut();
+                };
+                panel.Children.Add(edit);
                 int states = script.Objects.Sum(o => o.States.Count);
                 panel.Children.Add(new TextBlock
                 {
