@@ -20,7 +20,13 @@ sealed record ScriptObject(uint Handle, string Class, string Label)
 /// script is written back to its handler (null when it was, else why not).
 /// </summary>
 sealed record ScriptContext(LogicFunctions? Functions, IReadOnlyList<ScriptObject> Objects, Func<uint?> Picked, uint Self,
-                            Func<LogicScript, string?> Apply);
+                            Func<LogicScript, string?> Apply)
+{
+    /// <summary>Texts a function's text parameter takes (function, its number, its name): a table's names, the game's own.</summary>
+    public Func<string, int, string, IReadOnlyList<string>>? TextChoices { get; init; }
+    /// <summary>Every state machine of the game's scripts, as recipes (read in the background the first time).</summary>
+    public Func<Task<IReadOnlyList<LogicRecipe>>>? GameRecipes { get; init; }
+}
 
 /// <summary>
 /// Edits a logic handler's script (<see cref="LogicScript"/>): its state machines, their states, the calls
@@ -647,7 +653,8 @@ sealed class ScriptEditor : Window
             int at = i;
             Row(p?.Name is { Length: > 0 } label ? label : $"Argument {i + 1}",
                 ValueEditor(call.Arguments[i], p?.Type, v => call.Arguments[at] = v, references: true,
-                            classes: p == null ? null : LogicHints.ClassesFor(call.Function, p.Name)),
+                            classes: p == null ? null : LogicHints.ClassesFor(call.Function, p.Name),
+                            texts: () => TextChoices(call.Function, at, p?.Name ?? "")),
                 p == null ? null : $"{p.Type}: {p.Description}", panel);
         }
         if (function != null && call.Arguments.Count != function.Parameters.Count)
@@ -727,7 +734,8 @@ sealed class ScriptEditor : Window
     /// A value's editor: what kind of value it is (by the parameter's type: an object, the player, a variable, ...)
     /// and the value itself. <paramref name="set"/> puts a new value in its place when the kind changes.
     /// </summary>
-    FrameworkElement ValueEditor(LogicValue value, string? parameterType, Action<LogicValue> set, bool references, IReadOnlyList<string>? classes = null)
+    FrameworkElement ValueEditor(LogicValue value, string? parameterType, Action<LogicValue> set, bool references, IReadOnlyList<string>? classes = null,
+                                 Func<IReadOnlyList<string>>? texts = null)
     {
         string type = (parameterType ?? "").Trim().ToLowerInvariant() switch
         {
@@ -751,7 +759,7 @@ sealed class ScriptEditor : Window
             "boolean" => new List<string> { "true or false" },
             "string" => new List<string> { "text" },
             "vector" => new List<string> { "x, y, z", "position of an object" },
-            _ => new List<string> { "object", "the player", "self (the handler's object)", "none" },
+            _ => new List<string> { "object", "the player", "self (the handler's object)" },
         };
         if (references)
         {
@@ -771,7 +779,7 @@ sealed class ScriptEditor : Window
 
         void Body()
         {
-            body.Content = BodyFor(live, KindOf(live), v => { live = v; set(v); }, classes ?? []);
+            body.Content = BodyFor(live, KindOf(live), v => { live = v; set(v); }, classes ?? [], texts);
         }
         kind.SelectionChanged += (_, _) =>
         {
@@ -787,7 +795,6 @@ sealed class ScriptEditor : Window
                 "object" => LogicValue.OfObject(0xFFFFFFFF),
                 "the player" => LogicValue.OfPlayer(),
                 "self (the handler's object)" => LogicValue.OfSelf(),
-                "none" => LogicValue.OfObject(0xFFFFFFFF),
                 "variable" => LogicValue.OfVariable(Math.Max(0, Enumerable.Range(0, script.Variables.Count).FirstOrDefault(i => Fits(script.Variables[i], type), 0))),
                 "array" => script.Arrays.Count > 0 ? LogicValue.OfArray(script.Arrays[0].Name.Text) : LogicValue.OfVariable(0),
                 _ => live,
@@ -817,10 +824,10 @@ sealed class ScriptEditor : Window
         LogicValueType.Boolean => "true or false",
         LogicValueType.String => "text",
         LogicValueType.Vector => v.Form == 0 ? "x, y, z" : v.Form == 1 ? "position of an object" : "as read",
-        _ => v.Player ? "the player" : v.Owner ? "self (the handler's object)" : v.Handle == 0xFFFFFFFF ? "none" : "object",
+        _ => v.Player ? "the player" : v.Owner ? "self (the handler's object)" : "object",  // (an object not chosen yet: none)
     };
 
-    FrameworkElement BodyFor(LogicValue v, string kind, Action<LogicValue> set, IReadOnlyList<string> classes)
+    FrameworkElement BodyFor(LogicValue v, string kind, Action<LogicValue> set, IReadOnlyList<string> classes, Func<IReadOnlyList<string>>? texts)
     {
         switch (kind)
         {
@@ -835,6 +842,22 @@ sealed class ScriptEditor : Window
                 box.Unchecked += (_, _) => { v.Boolean = false; Refresh(); };
                 return box;
             case "text":
+                if (texts?.Invoke() is { Count: > 0 } choices)
+                {
+                    // A name from the table the parameter names (an explosion, an objective, a persona...) or the game's scripts, or typed.
+                    var combo = new ComboBox { IsEditable = true, IsTextSearchEnabled = true, ItemsSource = choices, Text = v.Text.Text, ToolTip = $"{choices.Count} names to choose from, or type one" };
+                    void TakeText()
+                    {
+                        string typed = combo.Text ?? "";
+                        if (typed.Length > 31) { combo.BorderBrush = Theme.Brush("ErrorBrush"); combo.ToolTip = "at most 31 letters"; return; }
+                        combo.ClearValue(Control.BorderBrushProperty);
+                        if (typed != v.Text.Text) { v.Text.Text = typed; Refresh(); }
+                    }
+                    combo.DropDownClosed += (_, _) => TakeText();
+                    combo.LostKeyboardFocus += (_, _) => TakeText();
+                    combo.SelectionChanged += (_, _) => { if (combo.SelectedItem is string s) { combo.Text = s; TakeText(); } };
+                    return combo;
+                }
                 return TextEditor(v.Text.Text, t => t.Length > 31 ? "at most 31 letters" : Do(() => v.Text.Text = t));
             case "x, y, z":
                 return TextEditor($"{N(v.X)}, {N(v.Y)}, {N(v.Z)}", t =>
@@ -903,7 +926,8 @@ sealed class ScriptEditor : Window
             string typed = box.Text.Trim();
             int dot = typed.LastIndexOf('·');
             if (dot >= 0) typed = typed[(dot + 1)..].Trim();
-            if (uint.TryParse(typed, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint h)) { set(h); box.ClearValue(Control.BorderBrushProperty); }
+            if (typed.Length == 0) { set(0xFFFFFFFF); box.ClearValue(Control.BorderBrushProperty); }
+            else if (uint.TryParse(typed, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint h)) { set(h); box.ClearValue(Control.BorderBrushProperty); }
             else if (typed.Length > 0) box.BorderBrush = Theme.Brush("ErrorBrush");
         }
         box.DropDownClosed += (_, _) => Take();
@@ -935,6 +959,14 @@ sealed class ScriptEditor : Window
         row.Children.Add(everything);
         row.Children.Add(box);
         return row;
+    }
+
+    /// <summary>Texts for a parameter: the script's own arrays for an array's name, else the context's (tables, the game's scripts).</summary>
+    IReadOnlyList<string> TextChoices(string function, int parameter, string name)
+    {
+        if (name.Contains("array", StringComparison.OrdinalIgnoreCase))
+            return script.Arrays.Select(a => a.Name.Text).ToList();
+        return context.TextChoices?.Invoke(function, parameter, name) ?? [];
     }
 
     static string? Float(string t, out float f) =>

@@ -241,6 +241,14 @@ public sealed class LogicObject
         }
     }
 
+    /// <summary>A copy of it, made by writing it and reading it back (nothing shared with this one).</summary>
+    public LogicObject Clone()
+    {
+        var w = new LogicWriter();
+        Write(w);
+        return Read(new LogicReader(w.ToArray()));
+    }
+
     /// <summary>A new state machine with one state, "Start".</summary>
     public static LogicObject NewStateMachine(string name)
     {
@@ -547,6 +555,17 @@ public sealed class LogicValue
         _ => OfObject(0xFFFFFFFF),
     };
 
+    public LogicValue Clone()
+    {
+        var w = new LogicWriter();
+        Write(w);
+        return Read(new LogicReader(w.ToArray()));
+    }
+
+    /// <summary>Whether it names an object by its handle (an object, or an object's number or position).</summary>
+    public bool NamesObject =>
+        Type == LogicValueType.Object || Type == LogicValueType.Number && Form >= 2 || Type == LogicValueType.Vector && Form is 1 or 2;
+
     public static LogicValue OfWhole(int value) => new() { Type = LogicValueType.Number, Form = 0, Whole = value };
     public static LogicValue OfNumber(float value) => new() { Type = LogicValueType.Number, Form = 1, Number = value };
     public static LogicValue OfBoolean(bool value) => new() { Type = LogicValueType.Boolean, Boolean = value };
@@ -716,6 +735,13 @@ public sealed class LogicArray
     public List<(uint Id, List<LogicValue> Values)> ListA { get; } = [];
     public List<(uint Id, List<LogicValue> Values)> ListB { get; } = [];
 
+    public LogicArray Clone()
+    {
+        var w = new LogicWriter();
+        Write(w);
+        return Read(new LogicReader(w.ToArray()));
+    }
+
     internal static LogicArray Read(LogicReader r)
     {
         var a = new LogicArray { Most = r.I32(), Name = FixedText.Read(r, 16), Unknown = r.I32() };
@@ -795,8 +821,17 @@ public sealed class LogicText(LogicScript script, LogicFunctions? functions, Fun
     readonly StringBuilder text = new();
     readonly Dictionary<int, string> arrays = script.Arrays.GroupBy(a => (int)NameHashes.PropertyHash(a.Name.Text)).ToDictionary(g => g.Key, g => g.First().Name.Text);
 
+    /// <summary>One state machine or timeline of the script, written out.</summary>
+    public string Describe(LogicObject o)
+    {
+        text.Clear();
+        Object(0, o);
+        return text.ToString().TrimEnd();
+    }
+
     public string Write()
     {
+        text.Clear();
         for (int i = 0; i < script.Variables.Count; i++) Line(0, $"{script.VariableName(i)} = {Value(script.Variables[i])}");
         foreach (LogicArray a in script.Arrays)
             Line(0, $"array \"{a.Name}\" (up to {a.Most}): " + string.Join(", ", a.Elements.Select(Value)));

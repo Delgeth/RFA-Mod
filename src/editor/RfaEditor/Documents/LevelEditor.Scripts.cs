@@ -30,7 +30,11 @@ public partial class LevelEditor
         }
         ZoneObject? owner = zone.Objects.FirstOrDefault(o => o.Handle == handler.Parent);
         var scriptContext = new ScriptContext(context.Assets.LogicFunctions, ScriptObjects(), () => selected?.Handle,
-                                              handler.Parent, s => ApplyScript(handler, s));
+                                              handler.Parent, s => ApplyScript(handler, s))
+        {
+            TextChoices = context.Assets.ScriptTextChoices,
+            GameRecipes = context.Assets.GameRecipes,
+        };
         string title = $"Script of {(owner != null ? $"{names.Class(owner.ClassHash)} \"{Label(owner)}\"" : $"handler {handler.Handle:X8}")}";
         ScriptEditor editor = ScriptEditor.Open(Window.GetWindow(this), title, script, scriptContext, offerRecipes: isNew);
         scriptEditors[handler] = editor;

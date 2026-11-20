@@ -1,9 +1,10 @@
 namespace RfaFormats.Zones;
 
 /// <summary>
-/// Ready-made state machines for the things missions do most (made from the game's own functions,
-/// as the game's scripts use them): the blanks are filled in, and the state machine is added to a
-/// script. "Self" in a recipe is the handler's object (the one it is attached to).
+/// Ready-made state machines: a few for the things missions do most (<see cref="All"/>), and every state
+/// machine of the game's own levels (<see cref="FromGame"/>), its objects made blanks to fill in.
+/// The blanks are filled in, and the state machine is added to a script. "Self" in a recipe is the
+/// handler's object (the one it is attached to).
 /// </summary>
 public sealed class LogicRecipe
 {
@@ -15,6 +16,11 @@ public sealed class LogicRecipe
     public string Name { get; }
     public string Description { get; }
     public IReadOnlyList<Blank> Blanks { get; }
+    /// <summary>Where in the game it comes from ("Mission_01A / world_08_03_128"); empty for the editor's own.</summary>
+    public string Source { get; private init; } = "";
+    /// <summary>The state machine written out, to show before it is added; empty for the editor's own.</summary>
+    public string Preview { get; private init; } = "";
+    public override string ToString() => Source.Length > 0 ? $"{Name}   ({Source})" : Name;
     readonly Func<LogicScript, Filled, LogicObject> make;
 
     LogicRecipe(string name, string description, IReadOnlyList<Blank> blanks, Func<LogicScript, Filled, LogicObject> make)
@@ -55,6 +61,114 @@ public sealed class LogicRecipe
             string made = (name.Length + tail.Length > 31 ? name[..(31 - tail.Length)] : name) + tail;
             if (!taken.Contains(made)) return made;
         }
+    }
+
+    // ---- The game's own -------------------------------------------------------------------------
+
+    /// <summary>
+    /// A state machine (or timeline) of one of the game's scripts as a recipe: each object it names, besides its
+    /// handler's own (which becomes the new handler's: self), is a blank, labelled by what the game's scripts pass
+    /// it as and its class there. The variables it uses are added to the script it goes into (or the ones there
+    /// of the same name and type used), and the arrays it names copied (their objects blanks too).
+    /// </summary>
+    /// <param name="classOf">An object's class in the game's level the script is in (null if it isn't there).</param>
+    public static LogicRecipe FromGame(LogicScript source, LogicObject machine, string where, LogicFunctions? functions, Func<uint, string?> classOf)
+    {
+        var blanks = new List<Blank>();
+        var seen = new HashSet<uint>();
+        var arrayHashes = new HashSet<int>();
+        void Note(uint handle, string what)
+        {
+            if (handle == 0xFFFFFFFF || handle == source.Owner || !seen.Add(handle)) return;
+            string? cls = classOf(handle);
+            var classes = new List<string>();
+            if (cls != null) classes.Add(cls);
+            classes.AddRange(LogicHints.ClassesFor("", what).Where(c => c != cls));
+            blanks.Add(new Blank(handle.ToString("X8"), what.Length > 0 ? what : cls ?? "Object", BlankKind.Object, classes,
+                                 Tip: $"In the game: {(cls != null ? cls + " " : "")}{handle:X8}"));
+        }
+        foreach (LogicCall call in machine.Calls())
+        {
+            LogicFunctions.Function? f = functions?.Find(call.Function);
+            for (int i = 0; i < call.Arguments.Count; i++)
+            {
+                LogicValue v = call.Arguments[i];
+                string what = f != null && i < f.Parameters.Count ? f.Parameters[i].Name : "";
+                if (v.NamesObject && !v.Player && !v.Owner) Note(v.Handle, what);
+                if (v.Type == LogicValueType.Reference && v.Reference == -1) arrayHashes.Add(v.ReferenceExtra);
+                if (v.Type == LogicValueType.Reference && v.Reference >= 0 && v.Reference < source.Variables.Count &&
+                    source.Variables[v.Reference] is { NamesObject: true, Player: false, Owner: false } held)
+                    Note(held.Handle, $"{source.VariableName(v.Reference)} (variable)");
+            }
+        }
+        List<LogicArray> arrays = source.Arrays.Where(a => arrayHashes.Contains((int)NameHashes.PropertyHash(a.Name.Text))).ToList();
+        foreach (LogicArray a in arrays)
+            foreach (LogicValue e in a.Elements)
+                if (e.NamesObject && !e.Player && !e.Owner) Note(e.Handle, $"{a.Name} (array)");
+
+        string preview = new LogicText(source, functions, null).Describe(machine);
+        int states = machine.States.Count;
+        string description = machine.Kind == LogicObjectKind.StateMachine
+            ? $"{states} state(s): {string.Join(", ", machine.States.Take(8).Select(s => s.Name.Text))}{(states > 8 ? ", ..." : "")}. " +
+              $"{blanks.Count} object(s) to choose."
+            : $"A timeline. {blanks.Count} object(s) to choose (timelines are shown in the editor, not edited).";
+
+        return new LogicRecipe(machine.Name.Text, description, blanks, (target, filled) => MadeFromGame(source, machine, arrays, target, filled))
+        {
+            Source = where,
+            Preview = preview,
+        };
+    }
+
+    static LogicObject MadeFromGame(LogicScript source, LogicObject machine, List<LogicArray> arrays, LogicScript target, Filled filled)
+    {
+        LogicObject made = machine.Clone();
+
+        void Fix(LogicValue v)
+        {
+            if (!v.NamesObject || v.Player || v.Owner || v.Handle == 0xFFFFFFFF) return;
+            if (v.Handle == source.Owner) { v.Owner = true; v.Handle = 0xFFFFFFFF; v.HandleNumber = -1; return; }
+            v.Handle = filled.Objects.TryGetValue(v.Handle.ToString("X8"), out uint chosen) ? chosen : 0xFFFFFFFF;
+            v.HandleNumber = -1;
+        }
+
+        // Its variables: the target's of the same name and type, else copies.
+        var map = new Dictionary<int, int>();
+        int Map(int index)
+        {
+            if (map.TryGetValue(index, out int mapped)) return mapped;
+            LogicValue variable = source.Variables[index];
+            int at = variable.Name.Length == 0 ? -1
+                : target.Variables.FindIndex(v => v.Name == variable.Name && v.Type == variable.Type);
+            if (at < 0)
+            {
+                LogicValue copy = variable.Clone();
+                Fix(copy);
+                target.Variables.Add(copy);
+                at = target.Variables.Count - 1;
+            }
+            return map[index] = at;
+        }
+        foreach (LogicCall call in made.Calls())
+        {
+            if (call.Result >= 0 && call.Result < source.Variables.Count) call.Result = Map(call.Result);
+            foreach (LogicValue v in call.Arguments)
+            {
+                if (v.Type == LogicValueType.Reference && v.Reference >= 0 && v.Reference < source.Variables.Count) v.Reference = Map(v.Reference);
+                Fix(v);
+            }
+        }
+
+        // Its arrays, where the target has none of the name.
+        foreach (LogicArray a in arrays)
+        {
+            if (target.Arrays.Any(t => t.Name.Text.Equals(a.Name.Text, StringComparison.OrdinalIgnoreCase))) continue;
+            LogicArray copy = a.Clone();
+            foreach (LogicValue e in copy.Elements.Concat(copy.ListA.SelectMany(l => l.Values)).Concat(copy.ListB.SelectMany(l => l.Values))) Fix(e);
+            copy.Elements.RemoveAll(e => e.NamesObject && !e.Player && !e.Owner && e.Handle == 0xFFFFFFFF);  // those not chosen
+            target.Arrays.Add(copy);
+        }
+        return made;
     }
 
     // ---- Building blocks ------------------------------------------------------------------------
