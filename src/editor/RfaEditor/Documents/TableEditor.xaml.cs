@@ -24,6 +24,7 @@ public partial class TableEditor : UserControl, IEditorDocument
     readonly FieldEditors editors;
     readonly Dictionary<string, IReadOnlyList<string>> referenceTargets = new(StringComparer.OrdinalIgnoreCase);
     string? overridePath;       // the override being edited; null until the first save if it came from the game
+    readonly string? guerrillaPath;  // the Guerrilla world's copy, which the game reads in its place while it starts (see GuerrillaTables)
     bool unsaved;
 
     internal TableEditor(EditorContext context, string archive, string fileName)
@@ -35,7 +36,19 @@ public partial class TableEditor : UserControl, IEditorDocument
         Outliner = DocumentParts.Detach(OutlinerPart);
         Inspector = DocumentParts.Detach(InspectorPart);
         overridePath = Workspace.OverrideFor(archive, fileName);
-        table = XtblFile.FromBytes(Workspace.Read(archive, fileName));
+        guerrillaPath = GuerrillaTables.CopyFor(Workspace, archive, fileName);
+        List<string> carried = [];
+        if (guerrillaPath == null) table = XtblFile.FromBytes(Workspace.Read(archive, fileName));
+        else
+        {
+            // The game starts with the Guerrilla world's table and reads the override only when told to read the
+            // table again: edit the Guerrilla world's, with any changes the override has made to Armageddon's.
+            byte[] theirs = File.ReadAllBytes(guerrillaPath);
+            table = XtblFile.FromBytes(theirs);
+            if (overridePath != null && !File.ReadAllBytes(overridePath).AsSpan().SequenceEqual(theirs))
+                carried = GuerrillaTables.CarryOver(table, XtblFile.FromBytes(Workspace.ReadOriginal(archive, fileName)),
+                                                    XtblFile.FromBytes(File.ReadAllBytes(overridePath)));
+        }
         editors = new FieldEditors(ReferenceTargets, OnChanged);
         PreviewKeyDown += (_, e) =>
         {
@@ -47,6 +60,16 @@ public partial class TableEditor : UserControl, IEditorDocument
         LiveBox.ToolTip = ReloadCommandFor(fileName) is { } command
             ? $"While the game runs, each change is saved and the game reads {fileName} again ({command}) as you edit."
             : $"While the game runs, each change is saved as you edit. The game reads {fileName} only when it starts, so it shows after a restart.";
+        if (guerrillaPath != null && overridePath != null && !File.ReadAllBytes(overridePath).AsSpan().SequenceEqual(File.ReadAllBytes(guerrillaPath)))
+        {
+            // The override differs from what the game starts with: saving makes them one (Save writes both).
+            unsaved = true;
+            SaveButton.IsEnabled = true;
+            context.Log($"{fileName}: your override isn't the table the game starts with (mods\\guerrilla_world\\{fileName}, the Guerrilla world's); " +
+                        "read again in the running game, it took out what that one has and it hasn't (made from Armageddon's own table, it lacks the Guerrilla world's entries). " +
+                        (carried.Count > 0 ? $"Its changes are carried into the Guerrilla world's table ({string.Join(", ", carried.Take(12))}{(carried.Count > 12 ? ", ..." : "")}). " : "") +
+                        "Save to write that table to both.");
+        }
         ShowSource();
         BuildEntryTree("");
     }
@@ -63,7 +86,10 @@ public partial class TableEditor : UserControl, IEditorDocument
     void ShowSource()
     {
         TitleChanged?.Invoke();
-        SourceText.Text = overridePath != null
+        SourceText.Text = guerrillaPath != null
+            ? $"The Guerrilla world's {fileName} (mods\\guerrilla_world\\), which the game reads in place of its own while it starts. " +
+              $"Saving writes it there and to overrides\\ (which the game reads when it reads the table again), the same in both; the game's file is never changed."
+            : overridePath != null
             ? $"Editing your override {Workspace.RelativeToMod(overridePath)}. The game uses it instead of its own {fileName}."
             : $"The game's own {fileName} (from {archive}). Saving puts your changes in overrides\\; the game's file is never changed.";
         TableTitle.Text = fileName;
@@ -502,7 +528,9 @@ public partial class TableEditor : UserControl, IEditorDocument
             bool first = overridePath == null;
             string target = overridePath ?? Workspace.OverridePath(archive, fileName);
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.WriteAllBytes(target, table.ToBytes());
+            byte[] bytes = table.ToBytes();
+            File.WriteAllBytes(target, bytes);
+            if (guerrillaPath != null) File.WriteAllBytes(guerrillaPath, bytes);  // what the game starts with
             overridePath = target;
             unsaved = false;
             SaveButton.IsEnabled = false;
