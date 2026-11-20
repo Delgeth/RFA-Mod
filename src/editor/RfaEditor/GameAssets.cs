@@ -103,6 +103,26 @@ public sealed class GameAssets
         return found;
     }
 
+    /// <summary>
+    /// The game's script functions (statemachine_functions.xtbl and edge_conditions.xtbl, as the game sees
+    /// them), for showing logic handlers' scripts; read once. Null if neither table can be found.
+    /// </summary>
+    public LogicFunctions? LogicFunctions
+    {
+        get
+        {
+            if (logicFunctionsRead) return logicFunctions;
+            byte[]? actions = workspace.ReadAsGameSeesIt("statemachine_functions.xtbl");
+            byte[]? tests = workspace.ReadAsGameSeesIt("edge_conditions.xtbl");
+            logicFunctions = actions == null && tests == null ? null
+                : new LogicFunctions(actions == null ? null : XtblFile.FromBytes(actions), tests == null ? null : XtblFile.FromBytes(tests));
+            logicFunctionsRead = true;
+            return logicFunctions;
+        }
+    }
+    LogicFunctions? logicFunctions;
+    bool logicFunctionsRead;
+
     /// <summary>Every place a file name is: archives, and containers in them. Empty until the index is ready.</summary>
     public IEnumerable<(string Archive, string? Container)> PlacesOf(string name) =>
         places == null ? [] : places[name].Select(f => (f.Archive, f.Container));

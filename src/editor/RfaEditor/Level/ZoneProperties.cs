@@ -33,13 +33,20 @@ sealed class ZonePropertyRows
     readonly ZoneNames names;
     readonly ZoneSchema? schema;
     readonly Func<SchemaPopulate, IReadOnlyList<string>> choicesOf;
+    readonly Func<LogicFunctions?>? logicFunctions;
+    readonly Func<uint, string?>? objectName;
 
     /// <param name="choicesOf">An enum's choices from the table it names (see <see cref="SchemaPopulate"/>).</param>
-    public ZonePropertyRows(ZoneNames names, ZoneSchema? schema, Func<SchemaPopulate, IReadOnlyList<string>> choicesOf)
+    /// <param name="logicFunctions">The game's script functions, for showing logic handlers' scripts with their names.</param>
+    /// <param name="objectName">What an object in the zone is, by its handle (null if it isn't in the zone).</param>
+    public ZonePropertyRows(ZoneNames names, ZoneSchema? schema, Func<SchemaPopulate, IReadOnlyList<string>> choicesOf,
+                            Func<LogicFunctions?>? logicFunctions = null, Func<uint, string?>? objectName = null)
     {
         this.names = names;
         this.schema = schema;
         this.choicesOf = choicesOf;
+        this.logicFunctions = logicFunctions;
+        this.objectName = objectName;
     }
 
     /// <param name="showAll">Show HIDDEN properties too, and let HIDDEN and READ_ONLY ones be changed.</param>
@@ -880,59 +887,54 @@ sealed class ZonePropertyRows
         }
 
         /// <summary>
-        /// A logic handler's script buffer (logic_handler_buffer): shows extracted script text and allows editing.
-        /// From RFG.exe cross-decompilation - the buffer contains compiled script bytecode with embedded strings.
+        /// A logic handler's script (logic_handler_buffer, see <see cref="LogicScript"/>): its state machines,
+        /// the calls each state makes and the conditions that move it on, written out with the function
+        /// tables' names. The raw bytes are under it, editable as before.
         /// </summary>
         FrameworkElement LogicHandlerEditor(ZoneProperty property)
         {
             byte[] value = property.Value;
             var panel = new StackPanel();
 
-            // Extract readable strings from the buffer
-            string bufferText = System.Text.Encoding.Latin1.GetString(value);
-            var strings = System.Text.RegularExpressions.Regex.Matches(bufferText, "[ -~]{4,}")
-                .Select(m => m.Value)
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .ToList();
-
-            // Show extracted strings
-            if (strings.Count > 0)
+            if (LogicScript.Read(value) is { } script)
             {
+                int states = script.Objects.Sum(o => o.States.Count);
                 panel.Children.Add(new TextBlock
                 {
-                    Text = "Extracted strings from script buffer:",
+                    Text = $"{script.Objects.Count} state machine(s), {states} state(s), {script.Variables.Count} variable(s), {script.Arrays.Count} array(s)",
                     Foreground = Theme.Brush("DimTextBrush"),
-                    FontWeight = FontWeights.Bold,
-                    Margin = new Thickness(0, 0, 0, 4)
+                    Margin = new Thickness(0, 0, 0, 4),
                 });
-                var stringsBox = new TextBox
+                panel.Children.Add(new TextBox
                 {
-                    Text = string.Join("\n", strings.Take(50)),
+                    Text = script.ToText(rows.logicFunctions?.Invoke(), rows.objectName),
                     FontFamily = new FontFamily("Consolas"),
                     FontSize = 11,
                     IsReadOnly = true,
-                    TextWrapping = TextWrapping.Wrap,
+                    TextWrapping = TextWrapping.NoWrap,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    MaxHeight = 200,
+                    MaxHeight = 420,
                     Background = Theme.Brush("InputBrush"),
+                    Foreground = Theme.Brush("TextBrush"),
                     BorderBrush = Theme.Brush("StrongBorderBrush"),
-                    BorderThickness = new Thickness(1)
-                };
-                panel.Children.Add(stringsBox);
-                panel.Children.Add(new TextBlock { Text = "", Height = 4 }); // spacer
+                    BorderThickness = new Thickness(1),
+                    ToolTip = "The handler's script as the game reads it (read-only for now). Handles are objects' handles in hex.",
+                });
+            }
+            else
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "This script isn't in a form the editor can read; its bytes are below.",
+                    Foreground = Theme.Brush("DimTextBrush"),
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 0, 0, 4),
+                });
             }
 
-            // Hex editor for the raw buffer
-            panel.Children.Add(new TextBlock
-            {
-                Text = $"Raw buffer ({value.Length} bytes, hex):",
-                Foreground = Theme.Brush("DimTextBrush"),
-                FontWeight = FontWeights.Bold,
-                Margin = new Thickness(0, 0, 0, 4)
-            });
-
             TextBox hexBox = TextBoxEditor(Convert.ToHexString(value),
-                "The logic handler's compiled script buffer. Edit the hex directly; Volition's tools made this.",
+                "The logic handler's compiled script, in hex. Edit the hex directly (the size has to stay the same).",
                 entered =>
                 {
                     string hex = new(entered.Where(Uri.IsHexDigit).ToArray());
@@ -945,7 +947,7 @@ sealed class ZonePropertyRows
             hexBox.TextWrapping = TextWrapping.Wrap;
             hexBox.MaxHeight = 120;
             hexBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            panel.Children.Add(hexBox);
+            panel.Children.Add(new Expander { Header = $"Bytes ({value.Length})", Content = hexBox, Margin = new Thickness(0, 4, 0, 0) });
 
             return panel;
         }

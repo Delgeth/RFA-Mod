@@ -125,7 +125,8 @@ public partial class LevelEditor : UserControl, IEditorDocument
         Inspector = DocumentParts.Detach(InspectorPart);
         DetachWindowParts();  // its menus, status and Show chips, which the window shows (see LevelEditor.Layout.cs)
         names = context.Assets.ZoneNames;
-        propertyRows = new ZonePropertyRows(names, context.Assets.ZoneSchema, context.Assets.Choices);
+        propertyRows = new ZonePropertyRows(names, context.Assets.ZoneSchema, context.Assets.Choices,
+                                            () => context.Assets.LogicFunctions, ScriptObjectName);
         zone = ZoneFile.Read(ReadZone());
         NotePlacements();
         gameLink = new GameLink(Workspace.ModFolder);
@@ -317,6 +318,12 @@ public partial class LevelEditor : UserControl, IEditorDocument
                 return text.Text;
         return $"#{obj.Index} (handle {obj.Handle:X8})";
     }
+
+    /// <summary>An object of this zone named in a logic handler's script: its class and outliner label; null if it isn't here.</summary>
+    string? ScriptObjectName(uint handle) =>
+        zone?.Objects.FirstOrDefault(o => o.Handle == handle) is { } obj
+            ? Label(obj) is var label && !label.StartsWith('#') ? $"{names.Class(obj.ClassHash)} \"{label}\"" : names.Class(obj.ClassHash)
+            : null;
 
     ObjectKind KindOf(ZoneObject obj) => ObjectKind.Of(names.Class(obj.ClassHash), LevelScene.ModelOf(obj) != null);
 
